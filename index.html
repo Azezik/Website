@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>You're {extraordinary}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <h1><span class="hash">#</span> You’re <span class="braces">{</span><span class="accent">extraordinary</span><span class="braces">}</span></h1>
+      <p class="sub">A focused, minimal application page—built to mirror the vibe of Shopify’s “You’re extraordinary”.</p>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Application</h2>
+        <form id="appForm" action="#" method="post" novalidate>
+          <div class="field">
+            <label for="name">Name <span class="req">*</span></label>
+            <input id="name" name="name" type="text" required placeholder="Your name">
+          </div>
+
+          <div class="field">
+            <label for="email">Email <span class="req">*</span></label>
+            <input id="email" name="email" type="email" required placeholder="you@example.com">
+          </div>
+
+          <div class="field">
+            <label for="location">Location <span class="req">*</span></label>
+            <input id="location" name="location" type="text" required placeholder="Ottawa, ON, Canada">
+          </div>
+
+          <div class="field">
+            <label for="descriptor">Select the one that best describes you <span class="req">*</span></label>
+            <select id="descriptor" name="descriptor" required>
+              <option value="">— Choose one —</option>
+              <option>Sales Development / Account Executive</option>
+              <option>Business Development / Partnerships</option>
+              <option>Solutions / Product Specialist</option>
+              <option>Customer Success / Program</option>
+              <option>Other</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="portfolio">Portfolio / Website</label>
+            <input id="portfolio" name="portfolio" type="url" placeholder="https://yourdomain.com">
+          </div>
+
+          <div class="field">
+            <label for="resume">Resume Link</label>
+            <input id="resume" name="resume" type="url" placeholder="https://link-to-resume.pdf">
+          </div>
+
+          <div class="field">
+            <label for="message">Message</label>
+            <textarea id="message" name="message" rows="6" placeholder="Tell us what makes you extraordinary."></textarea>
+          </div>
+
+          <div class="actions">
+            <button type="submit" class="btn">Submit</button>
+            <span id="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel minimal">
+        <h3>Notes</h3>
+        <ul>
+          <li>Pure static HTML/CSS. Easy to host on Render or GitHub Pages.</li>
+          <li>Fonts, colors, spacing, and required indicators match the feel of the Shopify page.</li>
+          <li>Hook the form to Formspree, Netlify Forms, or a tiny backend if you want real submissions.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Built for an “I’m Extraordinary” submission. Edit this copy to personalize.</p>
+    </footer>
+  </div>
+
+  <script>
+    // Minimal client-side UX: prevent empty submit and show a fake success message.
+    const form = document.getElementById('appForm');
+    const statusEl = document.getElementById('status');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!form.checkValidity()) {
+        statusEl.textContent = "Please fill the required fields.";
+        statusEl.className = "status error";
+        return;
+      }
+      statusEl.textContent = "Form captured locally. Wire this up to your preferred endpoint.";
+      statusEl.className = "status ok";
+    });
+  </script>
+</body>
+</html>
