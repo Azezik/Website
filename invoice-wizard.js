@@ -158,106 +158,57 @@ wizardFile.addEventListener('change', async (e) => {
 });
 
 async function renderDocument(file) {
-  // Ensure viewer has a measurable width
+  // Ensure viewer is measurable
   viewer.style.position = 'relative';
   viewer.style.width = '100%';
-  // Give it a minimum height so layout engines compute rects properly
-  if (!viewer.style.minHeight) viewer.style.minHeight = '300px';
+  if (!viewer.style.minHeight) viewer.style.minHeight = '320px';
 
   const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
   pdfCanvas.style.display = isPdf ? '' : 'none';
   imgCanvas.style.display = isPdf ? 'none' : '';
 
   if (isPdf) {
-
-    try {
-      const arrayBuf = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
-      const page = await pdf.getPage(1);
-
-      // Compute scale to fit the viewer width
-      const vw = Math.max(viewer.clientWidth, 640); // fallback if 0
-      const viewport1 = page.getViewport({ scale: 1 });
-      const scale = vw / viewport1.width;
-      const viewport = page.getViewport({ scale });
-
-      const ctx = pdfCanvas.getContext('2d');
-      pdfCanvas.width  = Math.floor(viewport.width);
-      pdfCanvas.height = Math.floor(viewport.height);
-
-      await page.render({ canvasContext: ctx, viewport }).promise;
-
-      syncOverlaySize(pdfCanvas);
-    } catch (err) {
-      console.error('PDF render error:', err);
-      alert('Could not render PDF. Try a JPG/PNG to confirm the viewer works.');
-    }
-  } else {
-    await new Promise((resolve) => { imgCanvas.onload = resolve; imgCanvas.src = URL.createObjectURL(file); });
-
     const arrayBuf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
     const page = await pdf.getPage(1);
-    const containerWidth = Math.min(1000, viewer.clientWidth || 1000);
-    const viewport = page.getViewport({ scale: 1 });
-    const scale = containerWidth / viewport.width;
-    const scaled = page.getViewport({ scale });
 
-    pdfCanvas.width = Math.floor(scaled.width);
-    pdfCanvas.height = Math.floor(scaled.height);
+    // Fit page to viewer width (fallback if clientWidth is 0)
+    const vw = Math.max(viewer.clientWidth, 640);
+    const v1 = page.getViewport({ scale: 1 });
+    const scale = vw / v1.width;
+    const vp = page.getViewport({ scale });
+
     const ctx = pdfCanvas.getContext('2d');
-    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+    pdfCanvas.width  = Math.round(vp.width);
+    pdfCanvas.height = Math.round(vp.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
 
-    syncOverlaySize(pdfCanvas);
+    // Wait one frame so layout settles, then size overlay
+    requestAnimationFrame(() => syncOverlaySize(pdfCanvas));
   } else {
-    await new Promise((r) => { imgCanvas.onload = r; imgCanvas.src = URL.createObjectURL(file); });
-
+    await new Promise((res) => { imgCanvas.onload = res; imgCanvas.src = URL.createObjectURL(file); });
     imgCanvas.style.maxWidth = '100%';
     imgCanvas.style.height = 'auto';
-    // Make sure the image is in the DOM and has computed size before syncing overlay
     requestAnimationFrame(() => syncOverlaySize(imgCanvas));
   }
 }
 
-
 function syncOverlaySize(baseEl) {
-  // Use getBoundingClientRect to handle scaled elements
+  // Match overlay to displayed size
   const rect = baseEl.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
 
-  // Match overlay pixel buffer to the displayed size
-  overlay.width  = Math.max(1, Math.round(rect.width));
-  overlay.height = Math.max(1, Math.round(rect.height));
-
-  // Position overlay over the base element
-  const baseOffsetLeft = baseEl.offsetLeft;
-  const baseOffsetTop  = baseEl.offsetTop;
-
-function syncOverlaySize(base) {
-  const rect = base.getBoundingClientRect();
-  const w = base.clientWidth || rect.width;
-  const h = base.clientHeight || rect.height;
-
-
-  overlay.width = w; overlay.height = h;
+  overlay.width  = w;
+  overlay.height = h;
   overlay.style.position = 'absolute';
-
-  overlay.style.left = baseOffsetLeft + 'px';
-  overlay.style.top  = baseOffsetTop  + 'px';
-
-  // Record display size for normalization
-  docState.displayWidth  = overlay.width;
-  docState.displayHeight = overlay.height;
-
-  // Clear any stale drawing
-  clearOverlay();
-
-  overlay.style.left = base.offsetLeft + 'px';
-  overlay.style.top  = base.offsetTop  + 'px';
+  overlay.style.left = baseEl.offsetLeft + 'px';
+  overlay.style.top  = baseEl.offsetTop  + 'px';
 
   viewer.style.position = 'relative';
-  docState.displayWidth = w;
+  docState.displayWidth  = w;
   docState.displayHeight = h;
-
+  clearOverlay();
 }
 
 const octx = overlay.getContext('2d');
