@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice Wizard - WROKIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <nav class="tabs">
+      <a href="index.html">Home</a>
+      <a href="portfolio.html">Portfolio Preview</a>
+      <a href="invoice-wizard.html" class="active">Invoice Wizard</a>
+    </nav>
+
+    <header class="header">
+      <h1><span class="hash">#</span> Invoice <span class="braces">{</span><span class="accent">Wizard</span><span class="braces">}</span></h1>
+      <p class="sub">Upload scanned documents and extract key data.</p>
+    </header>
+
+    <main>
+      <section id="login-section" class="panel">
+        <h2>Login</h2>
+        <form id="login-form">
+          <div class="field">
+            <label for="username">Username <span class="req">*</span></label>
+            <input id="username" autocomplete="username" required>
+          </div>
+          <div class="field">
+            <label for="password">Password <span class="req">*</span></label>
+            <input id="password" type="password" autocomplete="current-password" required>
+          </div>
+          <p class="sub italic">Currently in demo mode. You may use any username and password to log in. No email or personal information is required, though creating a login will let you return to your saved information later.</p>
+          <button type="submit" class="btn">Login</button>
+        </form>
+      </section>
+
+      <section id="dashboard" class="panel" style="display:none">
+        <h2>Dashboard</h2>
+        <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
+        <input id="file-input" type="file" multiple style="display:none" accept="image/png,image/jpeg,application/pdf">
+        <div class="actions">
+          <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
+          <button id="configure-btn" class="btn" style="display:none">Configure Wizard</button>
+          <button id="demo-btn" class="btn" style="display:none">Demo Wizard</button>
+          <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
+          <button id="logout-btn" class="btn" type="button">Logout</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Built as a client-side demo.</p>
+    </footer>
+  </div>
+  <script src="invoice-wizard.js"></script>
+</body>
+</html>
