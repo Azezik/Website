@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Invoice Wizard — WROKIT</title>
-
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -15,12 +14,12 @@
     <nav class="tabs">
       <a href="index.html">Home</a>
       <a href="portfolio.html">Portfolio Preview</a>
-      <a href="invoice-wizard.html" class="active">Invoice Wizard</a>
+      <a class="active" href="invoice-wizard.html">Invoice Wizard</a>
     </nav>
 
     <header class="header">
       <h1><span class="hash">#</span> Invoice <span class="braces">{</span><span class="accent">Wizard</span><span class="braces">}</span></h1>
-      <p class="sub">Configure where your data lives by highlighting fields on your uploaded invoice — step by step.</p>
+      <p class="sub">Highlight fields on your uploaded invoice. We’ll save the positions to a per-user schema.</p>
     </header>
 
     <main>
@@ -30,11 +29,11 @@
         <form id="login-form">
           <div class="field">
             <label for="username">Username <span class="req">*</span></label>
-            <input id="username" autocomplete="username" required>
+            <input id="username" autocomplete="username" required />
           </div>
           <div class="field">
             <label for="password">Password <span class="req">*</span></label>
-            <input id="password" type="password" autocomplete="current-password" required>
+            <input id="password" type="password" autocomplete="current-password" required />
           </div>
           <p class="sub italic">
             Currently in demo mode. You may use any username and password to log in.
@@ -48,37 +47,39 @@
       <!-- Dashboard -->
       <section id="dashboard" class="panel" style="display:none">
         <h2>Dashboard</h2>
-
-        <div class="field">
-          <label for="doc-type">Document Type</label>
-          <select id="doc-type">
-            <option value="invoice" selected>Invoice</option>
-            <option value="product_inventory_sheet">Product Inventory Sheet</option>
-          </select>
+        <div class="grid">
+          <div class="field">
+            <label for="doc-type">Document Type</label>
+            <select id="doc-type">
+              <option value="invoice" selected>Invoice</option>
+              <option value="product_inventory_sheet">Product Inventory Sheet</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Quick Actions</label>
+            <div class="actions">
+              <button id="configure-btn" class="btn">Configure Wizard</button>
+              <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
+              <button id="demo-btn" class="btn">Demo Wizard</button>
+              <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
+              <button id="logout-btn" class="btn" type="button">Logout</button>
+            </div>
+          </div>
         </div>
 
         <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
-        <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none">
-
-        <div class="actions">
-          <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
-          <button id="configure-btn" class="btn">Configure Wizard</button>
-          <button id="demo-btn" class="btn">Demo Wizard</button>
-          <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
-          <button id="logout-btn" class="btn" type="button">Logout</button>
-        </div>
+        <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
       </section>
 
-      <!-- Wizard (highlighter) -->
+      <!-- Wizard: upload + highlighter -->
       <section id="wizard-section" class="panel" style="display:none">
         <h2>Wizard Configuration</h2>
         <p class="sub">
           Upload a standardized invoice page, then highlight each requested field.
-          We’ll save the locations to a per-user schema for future auto-extraction.
         </p>
 
         <div class="field">
-          <input id="wizard-file" type="file" accept="application/pdf,image/png,image/jpeg">
+          <input id="wizard-file" type="file" accept="application/pdf,image/png,image/jpeg" />
         </div>
 
         <div id="promptBar" class="prompt">
@@ -87,10 +88,8 @@
         </div>
 
         <div id="viewer" class="viewer">
-          <!-- One of these will be visible depending on file type -->
           <canvas id="pdfCanvas" class="docCanvas"></canvas>
           <img id="imgCanvas" class="docCanvas" style="display:none" />
-          <!-- Overlay for drawing selections -->
           <canvas id="overlayCanvas" class="overlay"></canvas>
         </div>
 
@@ -102,11 +101,13 @@
           <button id="confirmBtn" class="btn primary">Confirm</button>
         </div>
 
-        <details id="savedMap" class="panel minimal">
+        <details class="panel minimal">
           <summary>Saved fields</summary>
           <pre id="savedJson" class="code"></pre>
-          <button id="exportBtn" class="btn">Export JSON</button>
-          <button id="finishWizardBtn" class="btn">Finish &amp; Return to Dashboard</button>
+          <div class="actions">
+            <button id="exportBtn" class="btn">Export JSON</button>
+            <button id="finishWizardBtn" class="btn">Finish &amp; Return to Dashboard</button>
+          </div>
         </details>
       </section>
     </main>
@@ -116,7 +117,7 @@
     </footer>
   </div>
 
-  <!-- pdf.js for in-browser PDF rendering -->
+  <!-- pdf.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
