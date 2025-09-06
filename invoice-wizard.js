@@ -34,11 +34,14 @@ const savedJsonEl  = document.getElementById('savedJson');
 const exportBtn    = document.getElementById('exportBtn');
 const finishWizardBtn = document.getElementById('finishWizardBtn');
 
+
 // pdf.js worker (required for rendering)
 if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js';
 }
+
+
 
 let session = { username: null };
 let stepIndex = 0;
@@ -166,6 +169,7 @@ async function renderDocument(file) {
   imgCanvas.style.display = isPdf ? 'none' : '';
 
   if (isPdf) {
+
     try {
       const arrayBuf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
@@ -190,12 +194,31 @@ async function renderDocument(file) {
     }
   } else {
     await new Promise((resolve) => { imgCanvas.onload = resolve; imgCanvas.src = URL.createObjectURL(file); });
+
+    const arrayBuf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
+    const page = await pdf.getPage(1);
+    const containerWidth = Math.min(1000, viewer.clientWidth || 1000);
+    const viewport = page.getViewport({ scale: 1 });
+    const scale = containerWidth / viewport.width;
+    const scaled = page.getViewport({ scale });
+
+    pdfCanvas.width = Math.floor(scaled.width);
+    pdfCanvas.height = Math.floor(scaled.height);
+    const ctx = pdfCanvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+
+    syncOverlaySize(pdfCanvas);
+  } else {
+    await new Promise((r) => { imgCanvas.onload = r; imgCanvas.src = URL.createObjectURL(file); });
+
     imgCanvas.style.maxWidth = '100%';
     imgCanvas.style.height = 'auto';
     // Make sure the image is in the DOM and has computed size before syncing overlay
     requestAnimationFrame(() => syncOverlaySize(imgCanvas));
   }
 }
+
 
 function syncOverlaySize(baseEl) {
   // Use getBoundingClientRect to handle scaled elements
@@ -209,7 +232,15 @@ function syncOverlaySize(baseEl) {
   const baseOffsetLeft = baseEl.offsetLeft;
   const baseOffsetTop  = baseEl.offsetTop;
 
+function syncOverlaySize(base) {
+  const rect = base.getBoundingClientRect();
+  const w = base.clientWidth || rect.width;
+  const h = base.clientHeight || rect.height;
+
+
+  overlay.width = w; overlay.height = h;
   overlay.style.position = 'absolute';
+
   overlay.style.left = baseOffsetLeft + 'px';
   overlay.style.top  = baseOffsetTop  + 'px';
 
@@ -219,6 +250,14 @@ function syncOverlaySize(baseEl) {
 
   // Clear any stale drawing
   clearOverlay();
+
+  overlay.style.left = base.offsetLeft + 'px';
+  overlay.style.top  = base.offsetTop  + 'px';
+
+  viewer.style.position = 'relative';
+  docState.displayWidth = w;
+  docState.displayHeight = h;
+
 }
 
 const octx = overlay.getContext('2d');
