@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice Wizard Demo - WROKIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <nav class="tabs">
+      <a href="index.html">Home</a>
+      <a href="portfolio.html">Portfolio Preview</a>
+      <a href="invoice-wizard.html" class="active">Invoice Wizard</a>
+    </nav>
+
+    <header class="header">
+      <h1><span class="hash">#</span> Invoice <span class="braces">{</span><span class="accent">Wizard</span><span class="braces">}</span></h1>
+      <p class="sub">Upload an invoice image and extract text using OCR.</p>
+    </header>
+
+    <main>
+      <section id="login-section" class="panel">
+        <h2>Login</h2>
+        <p class="sub">Currently in demo mode. Use any username and password to log in. No email required.</p>
+        <form id="login-form">
+          <div class="field">
+            <label for="username">Username <span class="req">*</span></label>
+            <input id="username" autocomplete="username" required>
+          </div>
+          <div class="field">
+            <label for="password">Password <span class="req">*</span></label>
+            <input id="password" type="password" autocomplete="current-password" required>
+          </div>
+          <button type="submit" class="btn">Login</button>
+        </form>
+      </section>
+
+      <section id="app-section" class="panel" style="display:none">
+        <h2>Upload Invoice</h2>
+        <p class="sub">Select a JPG or PNG file to run OCR in your browser.</p>
+        <input id="file-input" type="file" accept="image/png,image/jpeg">
+        <div class="actions">
+          <button id="logout-btn" class="btn" type="button">Logout</button>
+        </div>
+        <p id="status" class="status"></p>
+        <pre id="extracted"></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Built as a client-side demo.</p>
+    </footer>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@2/dist/tesseract.min.js"></script>
+  <script src="invoice-wizard.js"></script>
+</body>
+</html>
