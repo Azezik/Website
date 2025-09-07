@@ -73,6 +73,16 @@ const els = {
 })();
 
 const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
+
+// Explicitly configure the PDF.js worker source so that PDFs render correctly
+// when using the library from a CDN. Without this, pdf.js will attempt to load
+// the worker from a relative path which fails on static hosting setups and the
+// document will never be rendered.
+if (pdfjsLibRef?.GlobalWorkerOptions) {
+  pdfjsLibRef.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js';
+}
+
 const TesseractRef = window.Tesseract;
 
 let state = {
