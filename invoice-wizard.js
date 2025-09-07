@@ -13,11 +13,23 @@
      #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
      #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
      #wizard-file  (single-file open), #file-input + #dropzone (batch)
-   Tesseract.js is already included by the page; pdf.js is loaded via a local script.
+   Tesseract.js is already included by the page; pdf.js is loaded from a CDN pair.
 */
 
-const pdfjsLibRef = window.pdfjsLib;
+const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
 const TesseractRef = window.Tesseract;
+
+try {
+  if (pdfjsLibRef?.version && pdfjsLibRef?.GlobalWorkerOptions) {
+    const v = pdfjsLibRef.version;
+    if (!pdfjsLibRef.GlobalWorkerOptions.workerSrc) {
+      pdfjsLibRef.GlobalWorkerOptions.workerSrc =
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${v}/pdf.worker.min.js`;
+    }
+  }
+} catch (e) {
+  console.warn('Unable to set pdf.js workerSrc dynamically:', e);
+}
 
 (function sanityLog(){
   console.log('[pdf.js] version:', pdfjsLibRef?.version,
