@@ -425,6 +425,7 @@ async function openFile(file){
   }
 
   cleanupDoc();
+  state.pdf = null;
   state.currentFileName = file.name || 'untitled';
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
@@ -443,15 +444,20 @@ async function openFile(file){
   // PDF branch — pdf.js must be present (set in <head>)
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+    state.pdf = await loadingTask.promise;
 
-  const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
-  state.pdf = await loadingTask.promise;
-
-  state.pageNum = 1;
-  state.numPages = state.pdf.numPages;
-  updatePageIndicator();
-  await renderPage(state.pageNum);
+    state.pageNum = 1;
+    state.numPages = state.pdf.numPages;
+    updatePageIndicator();
+    await renderPage(state.pageNum);
+  } catch (err) {
+    console.error('Failed to load PDF:', err);
+    state.pdf = null;
+    alert('Failed to load PDF. Please try another file.');
+  }
 }
 function cleanupDoc(){
   state.tokensByPage = {};
