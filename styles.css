@@ -41,3 +41,8 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 .code{ white-space:pre-wrap; font-size:12px; color:#cde; }
 
 .footer{ color:var(--muted); text-align:center; margin-top:24px; }
+
+/* Wizard viewer layering */
+.viewer   { position: relative; }
+.docCanvas{ position: relative; z-index: 1; background: #ffffff; }
+.overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: auto; }

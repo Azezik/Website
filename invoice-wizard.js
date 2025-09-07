@@ -1,4 +1,4 @@
-/* Invoice Wizard — client-side MVP */
+/* Invoice Wizard — multipage + OCR extraction */
 
 const loginSection = document.getElementById('login-section');
 const dashboard    = document.getElementById('dashboard');
@@ -25,15 +25,24 @@ const viewer       = document.getElementById('viewer');
 const pdfCanvas    = document.getElementById('pdfCanvas');
 const imgCanvas    = document.getElementById('imgCanvas');
 const overlay      = document.getElementById('overlayCanvas');
+
 const boxModeBtn   = document.getElementById('boxModeBtn');
 const clearSelectionBtn = document.getElementById('clearSelectionBtn');
 const backBtn      = document.getElementById('backBtn');
 const skipBtn      = document.getElementById('skipBtn');
 const confirmBtn   = document.getElementById('confirmBtn');
+
+const fieldsTable  = document.getElementById('fieldsTable');
+const fieldsTbody  = document.getElementById('fieldsTbody');
 const savedJsonEl  = document.getElementById('savedJson');
 const exportBtn    = document.getElementById('exportBtn');
 const finishWizardBtn = document.getElementById('finishWizardBtn');
 
+const pageControls = document.getElementById('pageControls');
+const prevPageBtn  = document.getElementById('prevPageBtn');
+const nextPageBtn  = document.getElementById('nextPageBtn');
+const pageIndicator= document.getElementById('pageIndicator');
+const ocrToggle    = document.getElementById('ocrToggle');
 
 // pdf.js worker (required for rendering)
 if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
@@ -41,11 +50,25 @@ if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js';
 }
 
-
-
 let session = { username: null };
 let stepIndex = 0;
 let currentMap = null;
+
+// PDF state
+let pdfDoc = null;
+let totalPages = 1;
+let currentPage = 1;
+
+// doc render state
+let docState = {
+  pageIndex: 0,
+  displayWidth: 0,
+  displayHeight: 0,
+  drawing: false,
+  start: null,
+  box: null,
+  isPdf: false
+};
 
 const STEPS = [
   { key: 'order_number',       prompt: 'Please highlight the order/invoice number.' },
@@ -63,31 +86,21 @@ const STEPS = [
   { key: 'vendor_info',        prompt: 'Highlight VENDOR NAME & ADDRESS (optional).' }
 ];
 
-// doc render state
-let docState = {
-  pageIndex: 0,
-  displayWidth: 0,
-  displayHeight: 0,
-  drawing: false,
-  start: null,
-  box: null
-};
-
 const storageKey = (u, dt) => `wiz:${u}:${dt}:schema`;
 const getDocType = () => (docTypeSel?.value || 'invoice');
 
-function show(el) { el.style.display = ''; }
-function hide(el) { el.style.display = 'none'; }
+function show(el){ el.style.display=''; }
+function hide(el){ el.style.display='none'; }
 
 function loadSchema(username, docType) {
   const raw = localStorage.getItem(storageKey(username, docType));
   return raw ? JSON.parse(raw) : null;
 }
-
 function saveSchema() {
   if (!currentMap) return;
   localStorage.setItem(storageKey(session.username, currentMap.docType), JSON.stringify(currentMap, null, 2));
   savedJsonEl.textContent = JSON.stringify(currentMap, null, 2);
+  renderFieldsTable();
 }
 
 function enterDashboard() {
@@ -97,8 +110,7 @@ function enterDashboard() {
   else { hide(uploadBtn); hide(newWizardBtn); show(configureBtn); }
   show(demoBtn);
 }
-
-function enterWizard(startFresh = false) {
+function enterWizard(startFresh=false) {
   hide(loginSection); hide(dashboard); show(wizardSec);
   const dt = getDocType();
   currentMap = startFresh ? null : loadSchema(session.username, dt);
@@ -106,9 +118,11 @@ function enterWizard(startFresh = false) {
   stepIndex = Math.min(currentMap.fields.length, STEPS.length - 1);
   updatePrompt();
   savedJsonEl.textContent = JSON.stringify(currentMap, null, 2);
+  renderFieldsTable();
   clearOverlay();
   pdfCanvas.width = pdfCanvas.height = 0;
   imgCanvas.style.display = 'none';
+  pageControls.style.display = 'none';
 }
 
 function updatePrompt() {
@@ -116,6 +130,7 @@ function updatePrompt() {
   questionText.textContent = stepIndex >= STEPS.length ? 'Wizard complete. Export or finish.' : STEPS[stepIndex].prompt;
 }
 
+/* Login */
 loginForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const u = document.getElementById('username').value.trim();
@@ -125,18 +140,17 @@ loginForm.addEventListener('submit', (e) => {
   localStorage.setItem('iwUser', u);
   enterDashboard();
 });
-
 logoutBtn.addEventListener('click', () => {
   localStorage.removeItem('iwUser');
   session.username = null;
   show(loginSection); hide(dashboard); hide(wizardSec);
 });
 
+/* Dashboard actions */
 configureBtn.addEventListener('click', () => enterWizard(false));
 newWizardBtn.addEventListener('click', () => enterWizard(true));
 demoBtn.addEventListener('click', () => { enterWizard(false); alert('Load a PDF/JPG/PNG and start highlighting.'); });
 uploadBtn.addEventListener('click', () => alert('Upload/extraction will use your saved schema in a later iteration.'));
-
 docTypeSel?.addEventListener('change', () => { if (session.username) enterDashboard(); });
 
 ['dragover','dragleave','drop'].forEach(evt => {
@@ -151,50 +165,75 @@ docTypeSel?.addEventListener('change', () => { if (session.username) enterDashbo
   });
 });
 
+/* Wizard: file load */
 wizardFile.addEventListener('change', async (e) => {
   const file = e.target.files?.[0]; if (!file) return;
   await renderDocument(file);
   docState.box = null; clearOverlay();
 });
 
+/* Multipage PDF + image render */
 async function renderDocument(file) {
-  // Ensure viewer is measurable
   viewer.style.position = 'relative';
   viewer.style.width = '100%';
   if (!viewer.style.minHeight) viewer.style.minHeight = '320px';
 
   const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
+  docState.isPdf = isPdf;
+
   pdfCanvas.style.display = isPdf ? '' : 'none';
   imgCanvas.style.display = isPdf ? 'none' : '';
 
   if (isPdf) {
     const arrayBuf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
-    const page = await pdf.getPage(1);
-
-    // Fit page to viewer width (fallback if clientWidth is 0)
-    const vw = Math.max(viewer.clientWidth, 640);
-    const v1 = page.getViewport({ scale: 1 });
-    const scale = vw / v1.width;
-    const vp = page.getViewport({ scale });
-
-    const ctx = pdfCanvas.getContext('2d');
-    pdfCanvas.width  = Math.round(vp.width);
-    pdfCanvas.height = Math.round(vp.height);
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
-
-    // Wait one frame so layout settles, then size overlay
-    requestAnimationFrame(() => syncOverlaySize(pdfCanvas));
+    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
+    totalPages = pdfDoc.numPages || 1;
+    currentPage = 1;
+    pageControls.style.display = totalPages > 1 ? '' : 'none';
+    await renderPdfPage(currentPage);
   } else {
-    await new Promise((res) => { imgCanvas.onload = res; imgCanvas.src = URL.createObjectURL(file); });
+    pdfDoc = null; totalPages = 1; currentPage = 1;
+    pageControls.style.display = 'none';
+    await new Promise((r) => { imgCanvas.onload = r; imgCanvas.src = URL.createObjectURL(file); });
     imgCanvas.style.maxWidth = '100%';
     imgCanvas.style.height = 'auto';
     requestAnimationFrame(() => syncOverlaySize(imgCanvas));
   }
 }
 
+async function renderPdfPage(n) {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(n);
+  const vw = Math.max(viewer.clientWidth, 640);
+  const v1 = page.getViewport({ scale: 1 });
+  const scale = vw / v1.width;
+  const vp = page.getViewport({ scale });
+
+  pdfCanvas.width  = Math.round(vp.width);
+  pdfCanvas.height = Math.round(vp.height);
+
+  const ctx = pdfCanvas.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+  docState.pageIndex = n - 1;
+  pageIndicator.textContent = `Page ${n}/${totalPages}`;
+  requestAnimationFrame(() => syncOverlaySize(pdfCanvas));
+}
+
+prevPageBtn?.addEventListener('click', async () => {
+  if (!pdfDoc) return;
+  currentPage = Math.max(1, currentPage - 1);
+  await renderPdfPage(currentPage);
+});
+nextPageBtn?.addEventListener('click', async () => {
+  if (!pdfDoc) return;
+  currentPage = Math.min(totalPages, currentPage + 1);
+  await renderPdfPage(currentPage);
+});
+
 function syncOverlaySize(baseEl) {
-  // Match overlay to displayed size
   const rect = baseEl.getBoundingClientRect();
   const w = Math.max(1, Math.round(rect.width));
   const h = Math.max(1, Math.round(rect.height));
@@ -204,15 +243,15 @@ function syncOverlaySize(baseEl) {
   overlay.style.position = 'absolute';
   overlay.style.left = baseEl.offsetLeft + 'px';
   overlay.style.top  = baseEl.offsetTop  + 'px';
-
   viewer.style.position = 'relative';
+
   docState.displayWidth  = w;
   docState.displayHeight = h;
   clearOverlay();
 }
 
+/* Overlay drawing */
 const octx = overlay.getContext('2d');
-
 overlay.addEventListener('mousedown', (e) => {
   const p = rel(e); docState.drawing = true; docState.start = p; docState.box = null; drawBox();
 });
@@ -229,34 +268,122 @@ function normBox(x,y,w,h){ if(w<0){x+=w;w=-w;} if(h<0){y+=h;h=-h;} x=Math.max(0,
 function drawBox(){ octx.clearRect(0,0,overlay.width,overlay.height); if(!docState.box) return; octx.save(); octx.globalAlpha=.2; octx.fillStyle='#00ff00'; octx.fillRect(docState.box.x,docState.box.y,docState.box.w,docState.box.h); octx.globalAlpha=1; octx.lineWidth=2; octx.strokeStyle='#00ff00'; octx.strokeRect(docState.box.x,docState.box.y,docState.box.w,docState.box.h); octx.restore(); }
 function clearOverlay(){ octx.clearRect(0,0,overlay.width,overlay.height); }
 
+/* Confirm / Skip / Back */
 clearSelectionBtn.addEventListener('click', () => { docState.box = null; drawBox(); });
 backBtn.addEventListener('click', () => {
   if (!currentMap?.fields?.length) return;
-  currentMap.fields.pop(); stepIndex = Math.max(0, stepIndex - 1); saveSchema(); updatePrompt();
-  const last = currentMap.fields[currentMap.fields.length - 1];
-  if (last?.bbox){ const b = denorm(last.bbox); docState.box = b; drawBox(); } else { docState.box = null; drawBox(); }
+  currentMap.fields.pop();
+  stepIndex = Math.max(0, stepIndex - 1);
+  saveSchema();
+  updatePrompt();
 });
 skipBtn.addEventListener('click', () => { stepIndex++; updatePrompt(); docState.box = null; drawBox(); });
-confirmBtn.addEventListener('click', () => {
+
+confirmBtn.addEventListener('click', async () => {
   if (stepIndex >= STEPS.length) return;
   if (!docState.box) { alert('Draw a box first.'); return; }
+
   const bbox = norm(docState.box);
-  currentMap.fields.push({ fieldKey: STEPS[stepIndex].key, page: docState.pageIndex, selectorType: 'bbox', bbox });
+  const record = {
+    fieldKey: STEPS[stepIndex].key,
+    page: docState.pageIndex,
+    selectorType: 'bbox',
+    bbox,
+    value: null
+  };
+
+  if (ocrToggle?.checked) {
+    try {
+      const crop = cropCurrentBoxToCanvas();
+      if (crop) {
+        const { data: { text } } = await Tesseract.recognize(crop, 'eng');
+        record.value = (text || '').trim().replace(/\s+/g, ' ');
+      }
+    } catch (e) {
+      console.warn('OCR error:', e);
+    }
+  }
+
+  currentMap.fields.push(record);
   saveSchema();
-  stepIndex++; updatePrompt(); docState.box = null; drawBox();
+
+  stepIndex++;
+  updatePrompt();
+  docState.box = null; drawBox();
 });
 
+/* Crop helper for OCR */
+function cropCurrentBoxToCanvas() {
+  if (!docState.box) return null;
+
+  const pxBox = {
+    x: Math.round(docState.box.x),
+    y: Math.round(docState.box.y),
+    w: Math.round(docState.box.w),
+    h: Math.round(docState.box.h)
+  };
+  if (pxBox.w < 2 || pxBox.h < 2) return null;
+
+  let srcCanvas;
+  if (docState.isPdf) {
+    srcCanvas = pdfCanvas;
+  } else {
+    const tmp = document.createElement('canvas');
+    tmp.width = imgCanvas.clientWidth;
+    tmp.height = imgCanvas.clientHeight;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(imgCanvas, 0, 0, tmp.width, tmp.height);
+    srcCanvas = tmp;
+  }
+
+  const out = document.createElement('canvas');
+  out.width = pxBox.w;
+  out.height = pxBox.h;
+  const octx2 = out.getContext('2d');
+  octx2.drawImage(
+    srcCanvas,
+    pxBox.x, pxBox.y, pxBox.w, pxBox.h,
+    0, 0, pxBox.w, pxBox.h
+  );
+  return out;
+}
+
+/* Table + JSON view */
+function renderFieldsTable() {
+  if (!fieldsTbody) return;
+  fieldsTbody.innerHTML = '';
+  (currentMap?.fields || []).forEach((f) => {
+    const tr = document.createElement('tr');
+    const td = (txt) => {
+      const el = document.createElement('td');
+      el.style.padding = '6px';
+      el.style.borderBottom = '1px solid var(--border)';
+      el.textContent = txt;
+      return el;
+    };
+    tr.appendChild(td(f.fieldKey));
+    tr.appendChild(td(String((f.page ?? 0)+1)));
+    tr.appendChild(td(`[${f.bbox.map(n=>Number(n.toFixed(6))).join(', ')}]`));
+    tr.appendChild(td(f.value ?? '—'));
+    fieldsTbody.appendChild(tr);
+  });
+}
+
+/* Export / Finish */
 exportBtn.addEventListener('click', () => {
   const blob = new Blob([JSON.stringify(currentMap, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = `invoice-schema-${session.username}-${currentMap.docType}.json`; a.click();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `invoice-schema-${session.username}-${currentMap.docType}.json`;
+  a.click();
 });
 finishWizardBtn.addEventListener('click', () => enterDashboard());
-boxModeBtn.addEventListener('click', () => alert('Box mode active: click and drag to draw a rectangle.'));
 
+/* Helpers */
 function norm(b){ return [b.x/docState.displayWidth,b.y/docState.displayHeight,b.w/docState.displayWidth,b.h/docState.displayHeight]; }
 function denorm(a){ return {x:a[0]*docState.displayWidth,y:a[1]*docState.displayHeight,w:a[2]*docState.displayWidth,h:a[3]*docState.displayHeight}; }
 
+/* Init */
 (function init(){
   const u = localStorage.getItem('iwUser');
   if (u){ session.username = u; enterDashboard(); }
