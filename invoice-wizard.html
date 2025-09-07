@@ -8,6 +8,17 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <!-- Local, same-origin pdf.js -->
+  <script src="/vendor/pdfjs/3.10.111/pdf.min.js"></script>
+  <script>
+    // Match the worker to the same version & origin
+    if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/3.10.111/pdf.worker.min.js';
+    }
+  </script>
+
+  <!-- Tesseract -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@v5.0.4/dist/tesseract.min.js"></script>
 </head>
 <body>
   <div class="page">
@@ -147,9 +158,6 @@
     </footer>
   </div>
 
-  <!-- Script order matters -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>

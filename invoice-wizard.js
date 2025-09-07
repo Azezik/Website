@@ -14,8 +14,16 @@
      #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
      #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
      #wizard-file  (single-file open), #file-input + #dropzone (batch)
-   pdf.js & tesseract.js are already included by the page.
+   Tesseract.js is already included by the page; pdf.js is loaded via a local script.
 ====================================================================== */
+
+const pdfjsLibRef = window.pdfjsLib;
+const TesseractRef = window.Tesseract;
+
+(function sanityLog(){
+  console.log('[pdf.js] version:', pdfjsLibRef?.version,
+              'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
+})();
 
 /* ------------------------ Globals / State ------------------------- */
 const els = {
@@ -72,15 +80,11 @@ const els = {
   }
 })();
 
-const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
-const TesseractRef = window.Tesseract;
-
 let state = {
   username: null,
   docType: 'invoice',
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
-  fileBlobUrl: null,
   isImage: false,
   pageNum: 1,
   numPages: 1,
@@ -402,7 +406,6 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
 }
 
 /* ---------------------- PDF/Image Loading ------------------------ */
-const pdfCtx = els.pdfCanvas.getContext('2d');
 const overlayCtx = els.overlayCanvas.getContext('2d');
 
 function sizeOverlayTo(w,h){
@@ -414,33 +417,44 @@ function sizeOverlayTo(w,h){
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
 async function openFile(file){
-  cleanupDoc();
-  state.currentFileName = file.name;
-  const type = file.type || '';
-  state.isImage = /^image\//.test(type);
-  state.fileBlobUrl = URL.createObjectURL(file);
+  if (!(file instanceof Blob)) {
+    console.error('openFile called with a non-Blob:', file);
+    alert('Could not open file (unexpected type). Try selecting the file again.');
+    return;
+  }
 
-  if(state.isImage){
+  cleanupDoc();
+  state.currentFileName = file.name || 'untitled';
+  const isImage = /^image\//.test(file.type || '');
+  state.isImage = isImage;
+
+  if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
-    await renderImage(state.fileBlobUrl);
+    const blobUrl = URL.createObjectURL(file);
+    await renderImage(blobUrl);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     document.getElementById('pageControls').style.display = 'flex';
     await ensureTokensForPage(1);
-  } else {
-    els.imgCanvas.style.display = 'none';
-    els.pdfCanvas.style.display = 'block';
-    const loadingTask = pdfjsLibRef.getDocument({ url: state.fileBlobUrl });
-    state.pdf = await loadingTask.promise;
-    state.pageNum = 1; state.numPages = state.pdf.numPages;
-    updatePageIndicator();
-    document.getElementById('pageControls').style.display = 'flex';
-    await renderPage(state.pageNum);
+    return;
   }
+
+  // PDF branch
+  els.imgCanvas.style.display = 'none';
+  els.pdfCanvas.style.display = 'block';
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+  state.pdf = await loadingTask.promise;
+
+  state.pageNum = 1;
+  state.numPages = state.pdf.numPages;
+  updatePageIndicator();
+  document.getElementById('pageControls').style.display = 'flex';
+  await renderPage(state.pageNum);
 }
 function cleanupDoc(){
-  if(state.fileBlobUrl){ URL.revokeObjectURL(state.fileBlobUrl); }
   state.tokensByPage = {};
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
@@ -453,19 +467,28 @@ async function renderImage(url){
     img.height = img.naturalHeight * scale;
     sizeOverlayTo(img.width, img.height);
     state.viewport = { w: img.width, h: img.height, scale };
+    URL.revokeObjectURL(url);
   };
   img.src = url;
 }
 async function renderPage(num){
+  if (!state.pdf) return;
   const page = await state.pdf.getPage(num);
   const scale = 1.5;
-  const vp = page.getViewport({ scale });
-  els.pdfCanvas.width = vp.width;
-  els.pdfCanvas.height = vp.height;
-  sizeOverlayTo(vp.width, vp.height);
-  state.viewport = { w: vp.width, h: vp.height, scale };
-  await page.render({ canvasContext: pdfCtx, viewport: vp }).promise;
-  await ensureTokensForPage(num, page, vp);
+  const viewport = page.getViewport({ scale });
+  els.pdfCanvas.width = viewport.width;
+  els.pdfCanvas.height = viewport.height;
+
+  // Make sure CSS doesn’t override the canvas size
+  els.pdfCanvas.style.width = viewport.width + 'px';
+  els.pdfCanvas.style.height = viewport.height + 'px';
+
+  sizeOverlayTo(viewport.width, viewport.height);
+  state.viewport = { w: viewport.width, h: viewport.height, scale };
+  const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  await ensureTokensForPage(num, page, viewport);
 }
 
 /* ----------------------- Text Extraction ------------------------- */
@@ -642,19 +665,38 @@ if(modelSelect){
 }
 
 // Batch dropzone (dashboard)
-;['dragover','dragleave','drop'].forEach(evt=>{
-  els.dropzone?.addEventListener(evt,(e)=>{
+function toFilesList(evt) {
+  const files = [];
+  if (evt.dataTransfer?.items?.length) {
+    for (const it of evt.dataTransfer.items) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+  } else if (evt.dataTransfer?.files?.length) {
+    return Array.from(evt.dataTransfer.files);
+  }
+  return files;
+}
+
+['dragover','dragleave','drop'].forEach(evtName => {
+  els.dropzone?.addEventListener(evtName, (e) => {
     e.preventDefault();
-    if(evt==='dragover') els.dropzone.classList.add('dragover');
-    if(evt==='dragleave') els.dropzone.classList.remove('dragover');
-    if(evt==='drop'){
+    if (evtName === 'dragover') els.dropzone.classList.add('dragover');
+    if (evtName === 'dragleave') els.dropzone.classList.remove('dragover');
+    if (evtName === 'drop') {
       els.dropzone.classList.remove('dragover');
-      const files = Array.from(e.dataTransfer.files||[]);
-      processBatch(files);
+      const files = toFilesList(e);
+      if (files.length) processBatch(files);
     }
   });
 });
-els.fileInput?.addEventListener('change', e=> processBatch(Array.from(e.target.files||[])));
+
+els.fileInput?.addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  if (files.length) processBatch(files);
+});
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
