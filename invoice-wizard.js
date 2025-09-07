@@ -1,11 +1,10 @@
-/* ========= Invoice Wizard (vanilla JS, pdf.js + tesseract.js) =========
+/* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
    - Snap-to-line + landmarks + anchor offsets
    - Saves vendor profiles (normalized bbox + page), exports JSON
-   - Simple local “DB” + live results table (union of keys)
+   - Simple local "DB" + live results table (union of keys)
    - Batch drag/drop (dashboard) and single-file (wizard) flows
-   - No merge-conflict markers. Clean console.
    --------------------------------------------------------------------
    HTML it expects (all present in your page):
      #login-section, #dashboard, #wizard-section
@@ -15,7 +14,7 @@
      #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
      #wizard-file  (single-file open), #file-input + #dropzone (batch)
    Tesseract.js is already included by the page; pdf.js is loaded via a local script.
-====================================================================== */
+*/
 
 const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
