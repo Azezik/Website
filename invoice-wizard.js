@@ -45,6 +45,7 @@ const els = {
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
   wizardFile:      document.getElementById('wizard-file'),
+  viewer:          document.getElementById('viewer'),
 
   pageControls:    document.getElementById('pageControls'),
   prevPageBtn:     document.getElementById('prevPageBtn'),
@@ -90,6 +91,8 @@ let state = {
   pageNum: 1,
   numPages: 1,
   viewport: { w: 0, h: 0, scale: 1 },
+  pageViewports: [],       // viewport per page
+  pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: {},          // {page:number: Token[] in px}
   selectionPx: null,         // current user-drawn selection (px)
   snappedPx: null,           // snapped line box (px)
@@ -453,9 +456,12 @@ async function openFile(file){
 
     state.pageNum = 1;
     state.numPages = state.pdf.numPages;
+    await renderAllPages();
+    state.viewport = state.pageViewports[0] || { w: 0, h: 0, scale: 1 };
+    els.viewer.scrollTop = 0;
     updatePageIndicator();
-    if(els.pageControls) els.pageControls.style.display = state.numPages > 1 ? 'flex' : 'none';
-    await renderPage(state.pageNum);
+    if(els.pageControls) els.pageControls.style.display = 'none';
+    await ensureTokensForPage(1);
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
@@ -465,6 +471,8 @@ async function openFile(file){
 }
 function cleanupDoc(){
   state.tokensByPage = {};
+  state.pageViewports = [];
+  state.pageOffsets = [];
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
@@ -480,61 +488,95 @@ async function renderImage(url){
   };
   img.src = url;
 }
-// ===== Render a PDF page to the canvas safely =====
-async function renderPage(num){
-  if (!state.pdf) return;
-  const page = await state.pdf.getPage(num);
+// ===== Render all PDF pages vertically =====
+async function renderAllPages(){
+  if(!state.pdf) return;
   const scale = 1.5;
-  const vp = page.getViewport({ scale });
-
-  // Element size (not just CSS)
-  els.pdfCanvas.width = vp.width;
-  els.pdfCanvas.height = vp.height;
-  els.pdfCanvas.style.width = vp.width + 'px';
-  els.pdfCanvas.style.height = vp.height + 'px';
-
-  sizeOverlayTo(vp.width, vp.height);
-  state.viewport = { w: vp.width, h: vp.height, scale };
-
   const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
-  await page.render({ canvasContext: ctx, viewport: vp }).promise;
-  await ensureTokensForPage(num, page, vp);
+  state.pageViewports = [];
+  state.pageOffsets = [];
+
+  let maxW = 0, totalH = 0;
+  const pageCanvases = [];
+  for(let i=1; i<=state.pdf.numPages; i++){
+    const page = await state.pdf.getPage(i);
+    const vp = page.getViewport({ scale });
+    state.pageViewports[i-1] = vp;
+    state.pageOffsets[i-1] = totalH;
+    maxW = Math.max(maxW, vp.width);
+
+    const tmp = document.createElement('canvas');
+    tmp.width = vp.width; tmp.height = vp.height;
+    await page.render({ canvasContext: tmp.getContext('2d'), viewport: vp }).promise;
+    pageCanvases.push({ canvas: tmp, page, vp });
+    totalH += vp.height;
+  }
+
+  els.pdfCanvas.width = maxW;
+  els.pdfCanvas.height = totalH;
+  els.pdfCanvas.style.width = maxW + 'px';
+  els.pdfCanvas.style.height = totalH + 'px';
+  sizeOverlayTo(maxW, totalH);
+
+  let y = 0;
+  for(let i=0; i<pageCanvases.length; i++){
+    const p = pageCanvases[i];
+    ctx.drawImage(p.canvas, 0, y);
+    await ensureTokensForPage(i+1, p.page, p.vp, p.canvas);
+    y += p.canvas.height;
+  }
 }
 
 /* ----------------------- Text Extraction ------------------------- */
-async function ensureTokensForPage(pageNum, pageObj=null, vp=null){
+async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
-
   let tokens = [];
+  if(state.isImage){
+    const { data: { words } } = await TesseractRef.recognize(els.imgCanvas, 'eng');
+    tokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
+    state.tokensByPage[pageNum] = tokens;
+    return tokens;
+  }
+
+  if(!pageObj) pageObj = await state.pdf.getPage(pageNum);
+  if(!vp) vp = state.pageViewports[pageNum-1];
 
   // Always attempt to use embedded PDF text first
-  if(pageObj){
-    try {
-      const content = await pageObj.getTextContent();
-      for(const item of content.items){
-        const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
-        const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
-        tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
-      }
-      if(tokens.length && !els.ocrToggle.checked){
-        state.tokensByPage[pageNum] = tokens;
-        return tokens;
-      }
-    } catch(err){
-      console.warn('PDF textContent failed, falling back to OCR', err);
+  try {
+    const content = await pageObj.getTextContent();
+    for(const item of content.items){
+      const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
+      const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
+      tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
     }
+    if(tokens.length && !els.ocrToggle.checked){
+      state.tokensByPage[pageNum] = tokens;
+      return tokens;
+    }
+  } catch(err){
+    console.warn('PDF textContent failed, falling back to OCR', err);
   }
 
   // OCR fallback or supplement
-  const pageCanvas = document.createElement('canvas');
-  pageCanvas.width = state.viewport.w; pageCanvas.height = state.viewport.h;
-  const ctx = pageCanvas.getContext('2d');
-  ctx.drawImage(state.isImage ? els.imgCanvas : els.pdfCanvas, 0, 0);
+  let pageCanvas = canvasEl;
+  if(!pageCanvas){
+    pageCanvas = document.createElement('canvas');
+    pageCanvas.width = vp.width; pageCanvas.height = vp.height;
+    const cctx = pageCanvas.getContext('2d');
+    cctx.drawImage(els.pdfCanvas, 0, state.pageOffsets[pageNum-1], vp.width, vp.height, 0, 0, vp.width, vp.height);
+  }
   const { data: { words } } = await TesseractRef.recognize(pageCanvas, 'eng');
   const ocrTokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
   tokens = tokens.length ? tokens.concat(ocrTokens) : ocrTokens;
   state.tokensByPage[pageNum] = tokens;
   return tokens;
+}
+
+function pageFromY(y){
+  for(let i=state.pageOffsets.length-1; i>=0; i--){
+    if(y >= state.pageOffsets[i]) return i+1;
+  }
+  return 1;
 }
 
 /* --------------------- Overlay / Drawing Box --------------------- */
@@ -549,26 +591,46 @@ els.overlayCanvas.addEventListener('mousemove', e=>{
   if(!drawing) return;
   const rect = els.overlayCanvas.getBoundingClientRect();
   const cur = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  const box = { x: Math.min(start.x,cur.x), y: Math.min(start.y,cur.y), w: Math.abs(cur.x-start.x), h: Math.abs(cur.y-start.y), page: state.pageNum };
+  const page = pageFromY(start.y);
+  const offset = state.pageOffsets[page-1] || 0;
+  const box = { x: Math.min(start.x,cur.x), y: Math.min(start.y,cur.y) - offset, w: Math.abs(cur.x-start.x), h: Math.abs(cur.y-start.y), page };
   state.selectionPx = box; drawOverlay();
 });
 els.overlayCanvas.addEventListener('mouseup', async ()=>{
   drawing = false;
   if(!state.selectionPx) return;
+  state.pageNum = state.selectionPx.page;
+  state.viewport = state.pageViewports[state.pageNum-1];
+  updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
   const snap = snapToLine(tokens, state.selectionPx);
   state.snappedPx = snap.box; state.snappedText = snap.text;
   drawOverlay();
 });
+
+els.viewer.addEventListener('scroll', ()=>{
+  const y = els.viewer.scrollTop;
+  let p = 1;
+  for(let i=0; i<state.pageOffsets.length; i++){
+    if(y >= state.pageOffsets[i]) p = i+1;
+  }
+  if(p !== state.pageNum){
+    state.pageNum = p;
+    if(state.pageViewports[p-1]) state.viewport = state.pageViewports[p-1];
+    updatePageIndicator();
+  }
+});
 function drawOverlay(){
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   if(state.selectionPx){
     overlayCtx.strokeStyle = '#2ee6a6'; overlayCtx.lineWidth = 1.5;
-    const b = state.selectionPx; overlayCtx.strokeRect(b.x,b.y,b.w,b.h);
+    const b = state.selectionPx; const off = state.pageOffsets[b.page-1] || 0;
+    overlayCtx.strokeRect(b.x, b.y + off, b.w, b.h);
   }
   if(state.snappedPx){
     overlayCtx.strokeStyle = '#44ccff'; overlayCtx.lineWidth = 2;
-    const s = state.snappedPx; overlayCtx.strokeRect(s.x,s.y,s.w,s.h);
+    const s = state.snappedPx; const off2 = state.pageOffsets[s.page-1] || 0;
+    overlayCtx.strokeRect(s.x, s.y + off2, s.w, s.h);
   }
 }
 
@@ -726,13 +788,19 @@ els.wizardFile?.addEventListener('change', async e=>{
 });
 
 // Paging
-els.prevPageBtn?.addEventListener('click', async ()=>{
+els.prevPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum<=1) return;
-  state.pageNum--; updatePageIndicator(); await renderPage(state.pageNum); drawOverlay();
+  state.pageNum--; state.viewport = state.pageViewports[state.pageNum-1];
+  updatePageIndicator();
+  els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
+  drawOverlay();
 });
-els.nextPageBtn?.addEventListener('click', async ()=>{
+els.nextPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum>=state.numPages) return;
-  state.pageNum++; updatePageIndicator(); await renderPage(state.pageNum); drawOverlay();
+  state.pageNum++; state.viewport = state.pageViewports[state.pageNum-1];
+  updatePageIndicator();
+  els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
+  drawOverlay();
 });
 
 // Clear selection
@@ -805,15 +873,16 @@ async function autoExtractFileWithProfile(file, profile){
   for(const spec of (profile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
       state.pageNum = clamp(spec.page+1, 1, state.numPages);
+      state.viewport = state.pageViewports[state.pageNum-1];
       updatePageIndicator();
-      await renderPage(state.pageNum);
+      els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
     }
     const tokens = await ensureTokensForPage(state.pageNum);
     const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, page: spec.page };
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx } = extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){ fieldsObj[spec.fieldKey] = value; }
-    if(boxPx){ state.snappedPx = boxPx; drawOverlay(); }
+    if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
   insertRecord(fieldsObj);
 }
