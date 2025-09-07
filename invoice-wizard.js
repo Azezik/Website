@@ -451,7 +451,7 @@ async function openFile(file){
     return;
   }
 
-  // PDF branch
+  // PDF
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
 
@@ -459,8 +459,7 @@ async function openFile(file){
   const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
   state.pdf = await loadingTask.promise;
 
-  state.pageNum = 1;
-  state.numPages = state.pdf.numPages;
+  state.pageNum = 1; state.numPages = state.pdf.numPages;
   updatePageIndicator();
   document.getElementById('pageControls').style.display = 'flex';
   await renderPage(state.pageNum);
