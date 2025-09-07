@@ -1,147 +1,84 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Invoice Wizard — WROKIT</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Invoice Wizard</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- pdf.js + tesseract.js already included here -->
 </head>
 <body>
-  <div class="page">
-    <nav class="tabs">
-      <a href="index.html">Home</a>
-      <a href="portfolio.html">Portfolio Preview</a>
-      <a class="active" href="invoice-wizard.html">Invoice Wizard</a>
-    </nav>
+  <section id="login-section">
+    <form id="login-form" class="panel">
+      <div class="field"><label>Username</label><input id="username" /></div>
+      <div class="field"><label>Password</label><input id="password" type="password" /></div>
+      <div class="field"><label>Doc Type</label><input id="doc-type" value="invoice" /></div>
+      <button class="btn" type="submit">Login</button>
+    </form>
+  </section>
 
-    <header class="header">
-      <h1><span class="hash">#</span> Invoice <span class="braces">{</span><span class="accent">Wizard</span><span class="braces">}</span></h1>
-      <p class="sub">Highlight fields on your uploaded invoice. We’ll save the positions to a per-user schema.</p>
-    </header>
+  <section id="dashboard" style="display:none">
+    <div class="panel">
+      <h2>Welcome</h2>
+      <div class="actions">
+        <button id="configure-btn" class="btn">Configure Wizard</button>
+        <button id="demo-btn" class="btn">Run Demo</button>
+        <button id="upload-btn" class="btn">Upload</button>
+        <button id="logout-btn" class="btn">Logout</button>
+      </div>
 
-    <main>
-      <!-- Login -->
-      <section id="login-section" class="panel">
-        <h2>Login</h2>
-        <form id="login-form">
-          <div class="field">
-            <label for="username">Username <span class="req">*</span></label>
-            <input id="username" autocomplete="username" required />
-          </div>
-          <div class="field">
-            <label for="password">Password <span class="req">*</span></label>
-            <input id="password" type="password" autocomplete="current-password" required />
-          </div>
-          <p class="sub italic">
-            Currently in demo mode. You may use any username and password to log in.
-            No email or personal information is required, though creating a login will
-            let you return to your saved information later.
-          </p>
-          <button type="submit" class="btn">Login</button>
-        </form>
-      </section>
+      <!-- NEW: Saved Wizard Models -->
+      <div class="field">
+        <label for="model-select">Saved Wizard Models</label>
+        <select id="model-select">
+          <option value="">— Select a saved model —</option>
+        </select>
+        <p class="sub">Pick a model and then drop files below to auto-extract.</p>
+      </div>
 
-      <!-- Dashboard -->
-      <section id="dashboard" class="panel" style="display:none">
-        <h2>Dashboard</h2>
-        <div class="grid">
-          <div class="field">
-            <label for="doc-type">Document Type</label>
-            <select id="doc-type">
-              <option value="invoice" selected>Invoice</option>
-              <option value="product_inventory_sheet">Product Inventory Sheet</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Quick Actions</label>
-            <div class="actions">
-              <button id="configure-btn" class="btn">Configure Wizard</button>
-              <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
-              <button id="demo-btn" class="btn">Demo Wizard</button>
-              <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
-              <button id="logout-btn" class="btn" type="button">Logout</button>
-            </div>
-          </div>
-        </div>
+      <div id="dropzone" class="dropzone">
+        <p>Drop PDFs or images here</p>
+        <input id="file-input" type="file" multiple hidden />
+      </div>
+    </div>
+  </section>
 
-        <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
-        <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
-      </section>
+  <section id="wizard-section" style="display:none">
+    <div class="panel">
+      <h2>Invoice Wizard</h2>
+      <div id="promptBar">
+        <span id="stepLabel"></span>
+        <strong id="questionText"></strong>
+      </div>
 
-      <!-- Wizard -->
-      <section id="wizard-section" class="panel" style="display:none">
-        <h2>Wizard Configuration</h2>
-        <p class="sub">Upload a standardized invoice page, then highlight each requested field.</p>
+      <div id="pageControls">
+        <button id="prevPageBtn" class="btn">Prev</button>
+        <span id="pageIndicator"></span>
+        <button id="nextPageBtn" class="btn">Next</button>
+        <label><input type="checkbox" id="ocrToggle" /> Use OCR</label>
+      </div>
 
-        <div class="field">
-          <input id="wizard-file" type="file" accept="application/pdf,image/png,image/jpeg" />
-        </div>
+      <canvas id="pdfCanvas"></canvas>
+      <canvas id="imgCanvas"></canvas>
+      <canvas id="overlayCanvas"></canvas>
 
-        <!-- Page controls + OCR toggle -->
-        <div class="actions" id="pageControls" style="display:none">
-          <button id="prevPageBtn" class="btn">Prev Page</button>
-          <span id="pageIndicator" class="sub">Page 1/1</span>
-          <button id="nextPageBtn" class="btn">Next Page</button>
-          <label style="margin-left:12px; display:flex; align-items:center; gap:6px;">
-            <input type="checkbox" id="ocrToggle" checked>
-            Run OCR on confirm
-          </label>
-        </div>
+      <div class="actions">
+        <button id="boxModeBtn" class="btn">Box Mode</button>
+        <button id="clearSelectionBtn" class="btn">Clear</button>
+        <button id="backBtn" class="btn">Back</button>
+        <button id="skipBtn" class="btn">Skip</button>
+        <button id="confirmBtn" class="btn">Confirm</button>
+        <button id="finishWizardBtn" class="btn">Save & Return</button>
+      </div>
 
-        <div id="promptBar" class="prompt">
-          <span id="stepLabel">Step 1/13</span>
-          <strong id="questionText">Please highlight the order/invoice number.</strong>
-        </div>
+      <h3>Saved Fields</h3>
+      <table><tbody id="fieldsTbody"></tbody></table>
+      <pre id="savedJson"></pre>
+      <button id="exportBtn" class="btn">Export JSON</button>
+    </div>
+  </section>
 
-        <div id="viewer" class="viewer">
-          <canvas id="pdfCanvas" class="docCanvas"></canvas>
-          <img id="imgCanvas" class="docCanvas" style="display:none" />
-          <canvas id="overlayCanvas" class="overlay"></canvas>
-        </div>
-
-        <div class="actions">
-          <button id="boxModeBtn" class="btn">Box Mode</button>
-          <button id="clearSelectionBtn" class="btn">Clear Selection</button>
-          <button id="backBtn" class="btn">Back</button>
-          <button id="skipBtn" class="btn">Skip</button>
-          <button id="confirmBtn" class="btn primary">Confirm</button>
-        </div>
-
-        <details class="panel minimal">
-          <summary>Saved fields</summary>
-          <div style="overflow:auto;">
-            <table id="fieldsTable" style="width:100%; border-collapse:collapse; font-size:12px;">
-              <thead>
-                <tr>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Field</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Page</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">BBox [x,y,w,h]</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Value</th>
-                </tr>
-              </thead>
-              <tbody id="fieldsTbody"></tbody>
-            </table>
-          </div>
-          <pre id="savedJson" class="code"></pre>
-          <div class="actions">
-            <button id="exportBtn" class="btn">Export JSON</button>
-            <button id="finishWizardBtn" class="btn">Finish &amp; Return to Dashboard</button>
-          </div>
-        </details>
-      </section>
-    </main>
-
-    <footer class="footer">
-      <p>Built as a client-side demo.</p>
-    </footer>
-  </div>
-
-  <!-- Script order matters -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <input id="wizard-file" type="file" hidden />
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
