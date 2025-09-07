@@ -1,3 +1,12 @@
+// ===== pdf.js & tesseract bindings (must appear before any getDocument call) =====
+const pdfjsLibRef = window.pdfjsLib;
+const TesseractRef = window.Tesseract;
+
+(function sanityLog(){
+  console.log('[pdf.js] version:', pdfjsLibRef?.version,
+              'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
+})();
+
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
@@ -12,29 +21,9 @@
      #prevPageBtn, #nextPageBtn, #pageIndicator, #ocrToggle
      #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
      #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
-     #wizard-file  (single-file open), #file-input + #dropzone (batch)
-   Tesseract.js is already included by the page; pdf.js is loaded from a CDN pair.
+    #wizard-file  (single-file open), #file-input + #dropzone (batch)
+   Tesseract.js is already included by the page.
 */
-
-const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
-const TesseractRef = window.Tesseract;
-
-try {
-  if (pdfjsLibRef?.version && pdfjsLibRef?.GlobalWorkerOptions) {
-    const v = pdfjsLibRef.version;
-    if (!pdfjsLibRef.GlobalWorkerOptions.workerSrc) {
-      pdfjsLibRef.GlobalWorkerOptions.workerSrc =
-        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${v}/pdf.worker.min.js`;
-    }
-  }
-} catch (e) {
-  console.warn('Unable to set pdf.js workerSrc dynamically:', e);
-}
-
-(function sanityLog(){
-  console.log('[pdf.js] version:', pdfjsLibRef?.version,
-              'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
-})();
 
 /* ------------------------ Globals / State ------------------------- */
 const els = {
@@ -427,6 +416,7 @@ function sizeOverlayTo(w,h){
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
+// ===== Open file (image or PDF), robust across browsers =====
 async function openFile(file){
   if (!(file instanceof Blob)) {
     console.error('openFile called with a non-Blob:', file);
@@ -442,16 +432,15 @@ async function openFile(file){
   if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
-    const blobUrl = URL.createObjectURL(file);
-    await renderImage(blobUrl);
+    const url = URL.createObjectURL(file);
+    await renderImage(url);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
-    document.getElementById('pageControls').style.display = 'flex';
     await ensureTokensForPage(1);
     return;
   }
 
-  // PDF
+  // PDF branch — pdf.js must be present (set in <head>)
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
 
@@ -459,9 +448,9 @@ async function openFile(file){
   const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
   state.pdf = await loadingTask.promise;
 
-  state.pageNum = 1; state.numPages = state.pdf.numPages;
+  state.pageNum = 1;
+  state.numPages = state.pdf.numPages;
   updatePageIndicator();
-  document.getElementById('pageControls').style.display = 'flex';
   await renderPage(state.pageNum);
 }
 function cleanupDoc(){
@@ -481,24 +470,25 @@ async function renderImage(url){
   };
   img.src = url;
 }
+// ===== Render a PDF page to the canvas safely =====
 async function renderPage(num){
   if (!state.pdf) return;
   const page = await state.pdf.getPage(num);
   const scale = 1.5;
-  const viewport = page.getViewport({ scale });
-  els.pdfCanvas.width = viewport.width;
-  els.pdfCanvas.height = viewport.height;
+  const vp = page.getViewport({ scale });
 
-  // Make sure CSS doesn’t override the canvas size
-  els.pdfCanvas.style.width = viewport.width + 'px';
-  els.pdfCanvas.style.height = viewport.height + 'px';
+  // Element size (not just CSS)
+  els.pdfCanvas.width = vp.width;
+  els.pdfCanvas.height = vp.height;
+  els.pdfCanvas.style.width = vp.width + 'px';
+  els.pdfCanvas.style.height = vp.height + 'px';
 
-  sizeOverlayTo(viewport.width, viewport.height);
-  state.viewport = { w: viewport.width, h: viewport.height, scale };
+  sizeOverlayTo(vp.width, vp.height);
+  state.viewport = { w: vp.width, h: vp.height, scale };
+
   const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
-
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  await ensureTokensForPage(num, page, viewport);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  await ensureTokensForPage(num, page, vp);
 }
 
 /* ----------------------- Text Extraction ------------------------- */
@@ -675,27 +665,29 @@ if(modelSelect){
 }
 
 // Batch dropzone (dashboard)
+// ===== File normalization for drag/drop and input =====
 function toFilesList(evt) {
   const files = [];
-  if (evt.dataTransfer?.items?.length) {
+  if (evt?.dataTransfer?.items?.length) {
     for (const it of evt.dataTransfer.items) {
       if (it.kind === 'file') {
         const f = it.getAsFile();
         if (f) files.push(f);
       }
     }
-  } else if (evt.dataTransfer?.files?.length) {
+  } else if (evt?.dataTransfer?.files?.length) {
     return Array.from(evt.dataTransfer.files);
   }
   return files;
 }
 
+// Dropzone
 ['dragover','dragleave','drop'].forEach(evtName => {
-  els.dropzone?.addEventListener(evtName, (e) => {
+  els.dropzone.addEventListener(evtName, (e)=>{
     e.preventDefault();
-    if (evtName === 'dragover') els.dropzone.classList.add('dragover');
-    if (evtName === 'dragleave') els.dropzone.classList.remove('dragover');
-    if (evtName === 'drop') {
+    if (evtName==='dragover') els.dropzone.classList.add('dragover');
+    if (evtName==='dragleave') els.dropzone.classList.remove('dragover');
+    if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
       if (files.length) processBatch(files);
@@ -703,7 +695,8 @@ function toFilesList(evt) {
   });
 });
 
-els.fileInput?.addEventListener('change', e => {
+// File input
+els.fileInput.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
   if (files.length) processBatch(files);
 });
