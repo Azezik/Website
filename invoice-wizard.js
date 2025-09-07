@@ -46,6 +46,7 @@ const els = {
   wizardSection:   document.getElementById('wizard-section'),
   wizardFile:      document.getElementById('wizard-file'),
 
+  pageControls:    document.getElementById('pageControls'),
   prevPageBtn:     document.getElementById('prevPageBtn'),
   nextPageBtn:     document.getElementById('nextPageBtn'),
   pageIndicator:   document.getElementById('pageIndicator'),
@@ -437,6 +438,7 @@ async function openFile(file){
     await renderImage(url);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
+    if(els.pageControls) els.pageControls.style.display = 'none';
     await ensureTokensForPage(1);
     return;
   }
@@ -452,10 +454,12 @@ async function openFile(file){
     state.pageNum = 1;
     state.numPages = state.pdf.numPages;
     updatePageIndicator();
+    if(els.pageControls) els.pageControls.style.display = state.numPages > 1 ? 'flex' : 'none';
     await renderPage(state.pageNum);
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
+    if(els.pageControls) els.pageControls.style.display = 'none';
     alert('Failed to load PDF. Please try another file.');
   }
 }
