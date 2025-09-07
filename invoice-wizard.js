@@ -501,26 +501,34 @@ async function renderPage(num){
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
 
-  // Prefer embedded text unless user forces OCR
-  if(!els.ocrToggle.checked && pageObj){
-    const content = await pageObj.getTextContent();
-    const tokens = [];
-    for(const item of content.items){
-      const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
-      const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
-      tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
+  let tokens = [];
+
+  // Always attempt to use embedded PDF text first
+  if(pageObj){
+    try {
+      const content = await pageObj.getTextContent();
+      for(const item of content.items){
+        const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
+        const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
+        tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
+      }
+      if(tokens.length && !els.ocrToggle.checked){
+        state.tokensByPage[pageNum] = tokens;
+        return tokens;
+      }
+    } catch(err){
+      console.warn('PDF textContent failed, falling back to OCR', err);
     }
-    state.tokensByPage[pageNum] = tokens;
-    return tokens;
   }
 
-  // OCR fallback (or forced)
+  // OCR fallback or supplement
   const pageCanvas = document.createElement('canvas');
   pageCanvas.width = state.viewport.w; pageCanvas.height = state.viewport.h;
   const ctx = pageCanvas.getContext('2d');
   ctx.drawImage(state.isImage ? els.imgCanvas : els.pdfCanvas, 0, 0);
   const { data: { words } } = await TesseractRef.recognize(pageCanvas, 'eng');
-  const tokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
+  const ocrTokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
+  tokens = tokens.length ? tokens.concat(ocrTokens) : ocrTokens;
   state.tokensByPage[pageNum] = tokens;
   return tokens;
 }
