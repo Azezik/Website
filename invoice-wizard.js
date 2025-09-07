@@ -1,11 +1,10 @@
-/* ========= Invoice Wizard (vanilla JS, pdf.js + tesseract.js) =========
+/* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
    - Snap-to-line + landmarks + anchor offsets
    - Saves vendor profiles (normalized bbox + page), exports JSON
-   - Simple local “DB” + live results table (union of keys)
+   - Simple local "DB" + live results table (union of keys)
    - Batch drag/drop (dashboard) and single-file (wizard) flows
-   - No merge-conflict markers. Clean console.
    --------------------------------------------------------------------
    HTML it expects (all present in your page):
      #login-section, #dashboard, #wizard-section
@@ -14,8 +13,28 @@
      #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
      #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
      #wizard-file  (single-file open), #file-input + #dropzone (batch)
-   pdf.js & tesseract.js are already included by the page.
-====================================================================== */
+   Tesseract.js is already included by the page; pdf.js is loaded from a CDN pair.
+*/
+
+const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
+const TesseractRef = window.Tesseract;
+
+try {
+  if (pdfjsLibRef?.version && pdfjsLibRef?.GlobalWorkerOptions) {
+    const v = pdfjsLibRef.version;
+    if (!pdfjsLibRef.GlobalWorkerOptions.workerSrc) {
+      pdfjsLibRef.GlobalWorkerOptions.workerSrc =
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${v}/pdf.worker.min.js`;
+    }
+  }
+} catch (e) {
+  console.warn('Unable to set pdf.js workerSrc dynamically:', e);
+}
+
+(function sanityLog(){
+  console.log('[pdf.js] version:', pdfjsLibRef?.version,
+              'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
+})();
 
 /* ------------------------ Globals / State ------------------------- */
 const els = {
@@ -71,32 +90,6 @@ const els = {
     els.wizardSection?.appendChild(details);
   }
 })();
-
-const pdfjsLibRef = window['pdfjs-dist/build/pdf'] || window['pdfjsLib'];
-
-// Explicitly configure the PDF.js worker source so that PDFs render correctly
-// when using the library from a CDN. Without this, pdf.js will attempt to load
-// the worker from a relative path which fails on static hosting setups and the
-// document will never be rendered.
-if (pdfjsLibRef?.GlobalWorkerOptions) {
-  pdfjsLibRef.GlobalWorkerOptions.workerSrc =
-    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js';
-}
-
-const TesseractRef = window.Tesseract;
-
-// Safety net: ensure the worker script matches the loaded pdf.js version.
-try {
-  if (pdfjsLibRef?.version && pdfjsLibRef?.GlobalWorkerOptions) {
-    const v = pdfjsLibRef.version;
-    if (!pdfjsLibRef.GlobalWorkerOptions.workerSrc) {
-      pdfjsLibRef.GlobalWorkerOptions.workerSrc =
-        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${v}/pdf.worker.min.js`;
-    }
-  }
-} catch (e) {
-  console.warn('Unable to set pdf.js workerSrc dynamically:', e);
-}
 
 let state = {
   username: null,
@@ -435,8 +428,14 @@ function sizeOverlayTo(w,h){
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
 async function openFile(file){
+  if (!(file instanceof Blob)) {
+    console.error('openFile called with a non-Blob:', file);
+    alert('Could not open file (unexpected type). Try selecting the file again.');
+    return;
+  }
+
   cleanupDoc();
-  state.currentFileName = file.name || 'untitled.pdf';
+  state.currentFileName = file.name || 'untitled';
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
 
@@ -459,6 +458,7 @@ async function openFile(file){
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
   state.pdf = await loadingTask.promise;
+
   state.pageNum = 1; state.numPages = state.pdf.numPages;
   updatePageIndicator();
   document.getElementById('pageControls').style.display = 'flex';
@@ -675,19 +675,38 @@ if(modelSelect){
 }
 
 // Batch dropzone (dashboard)
-;['dragover','dragleave','drop'].forEach(evt=>{
-  els.dropzone?.addEventListener(evt,(e)=>{
+function toFilesList(evt) {
+  const files = [];
+  if (evt.dataTransfer?.items?.length) {
+    for (const it of evt.dataTransfer.items) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+  } else if (evt.dataTransfer?.files?.length) {
+    return Array.from(evt.dataTransfer.files);
+  }
+  return files;
+}
+
+['dragover','dragleave','drop'].forEach(evtName => {
+  els.dropzone?.addEventListener(evtName, (e) => {
     e.preventDefault();
-    if(evt==='dragover') els.dropzone.classList.add('dragover');
-    if(evt==='dragleave') els.dropzone.classList.remove('dragover');
-    if(evt==='drop'){
+    if (evtName === 'dragover') els.dropzone.classList.add('dragover');
+    if (evtName === 'dragleave') els.dropzone.classList.remove('dragover');
+    if (evtName === 'drop') {
       els.dropzone.classList.remove('dragover');
-      const files = Array.from(e.dataTransfer.files||[]);
-      processBatch(files);
+      const files = toFilesList(e);
+      if (files.length) processBatch(files);
     }
   });
 });
-els.fileInput?.addEventListener('change', e=> processBatch(Array.from(e.target.files||[])));
+
+els.fileInput?.addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  if (files.length) processBatch(files);
+});
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
