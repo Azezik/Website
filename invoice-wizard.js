@@ -85,12 +85,24 @@ if (pdfjsLibRef?.GlobalWorkerOptions) {
 
 const TesseractRef = window.Tesseract;
 
+// Safety net: ensure the worker script matches the loaded pdf.js version.
+try {
+  if (pdfjsLibRef?.version && pdfjsLibRef?.GlobalWorkerOptions) {
+    const v = pdfjsLibRef.version;
+    if (!pdfjsLibRef.GlobalWorkerOptions.workerSrc) {
+      pdfjsLibRef.GlobalWorkerOptions.workerSrc =
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${v}/pdf.worker.min.js`;
+    }
+  }
+} catch (e) {
+  console.warn('Unable to set pdf.js workerSrc dynamically:', e);
+}
+
 let state = {
   username: null,
   docType: 'invoice',
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
-  fileBlobUrl: null,
   isImage: false,
   pageNum: 1,
   numPages: 1,
@@ -412,7 +424,6 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
 }
 
 /* ---------------------- PDF/Image Loading ------------------------ */
-const pdfCtx = els.pdfCanvas.getContext('2d');
 const overlayCtx = els.overlayCanvas.getContext('2d');
 
 function sizeOverlayTo(w,h){
@@ -425,32 +436,35 @@ function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pa
 
 async function openFile(file){
   cleanupDoc();
-  state.currentFileName = file.name;
-  const type = file.type || '';
-  state.isImage = /^image\//.test(type);
-  state.fileBlobUrl = URL.createObjectURL(file);
+  state.currentFileName = file.name || 'untitled.pdf';
+  const isImage = /^image\//.test(file.type || '');
+  state.isImage = isImage;
 
-  if(state.isImage){
+  if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
-    await renderImage(state.fileBlobUrl);
+    const blobUrl = URL.createObjectURL(file);
+    await renderImage(blobUrl);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     document.getElementById('pageControls').style.display = 'flex';
     await ensureTokensForPage(1);
-  } else {
-    els.imgCanvas.style.display = 'none';
-    els.pdfCanvas.style.display = 'block';
-    const loadingTask = pdfjsLibRef.getDocument({ url: state.fileBlobUrl });
-    state.pdf = await loadingTask.promise;
-    state.pageNum = 1; state.numPages = state.pdf.numPages;
-    updatePageIndicator();
-    document.getElementById('pageControls').style.display = 'flex';
-    await renderPage(state.pageNum);
+    return;
   }
+
+  // PDF
+  els.imgCanvas.style.display = 'none';
+  els.pdfCanvas.style.display = 'block';
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+  state.pdf = await loadingTask.promise;
+  state.pageNum = 1; state.numPages = state.pdf.numPages;
+  updatePageIndicator();
+  document.getElementById('pageControls').style.display = 'flex';
+  await renderPage(state.pageNum);
 }
 function cleanupDoc(){
-  if(state.fileBlobUrl){ URL.revokeObjectURL(state.fileBlobUrl); }
   state.tokensByPage = {};
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
@@ -463,19 +477,28 @@ async function renderImage(url){
     img.height = img.naturalHeight * scale;
     sizeOverlayTo(img.width, img.height);
     state.viewport = { w: img.width, h: img.height, scale };
+    URL.revokeObjectURL(url);
   };
   img.src = url;
 }
 async function renderPage(num){
+  if (!state.pdf) return;
   const page = await state.pdf.getPage(num);
   const scale = 1.5;
-  const vp = page.getViewport({ scale });
-  els.pdfCanvas.width = vp.width;
-  els.pdfCanvas.height = vp.height;
-  sizeOverlayTo(vp.width, vp.height);
-  state.viewport = { w: vp.width, h: vp.height, scale };
-  await page.render({ canvasContext: pdfCtx, viewport: vp }).promise;
-  await ensureTokensForPage(num, page, vp);
+  const viewport = page.getViewport({ scale });
+  els.pdfCanvas.width = viewport.width;
+  els.pdfCanvas.height = viewport.height;
+
+  // Make sure CSS doesn’t override the canvas size
+  els.pdfCanvas.style.width = viewport.width + 'px';
+  els.pdfCanvas.style.height = viewport.height + 'px';
+
+  sizeOverlayTo(viewport.width, viewport.height);
+  state.viewport = { w: viewport.width, h: viewport.height, scale };
+  const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  await ensureTokensForPage(num, page, viewport);
 }
 
 /* ----------------------- Text Extraction ------------------------- */
