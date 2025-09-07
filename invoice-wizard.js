@@ -146,8 +146,16 @@ function loadModelById(id){
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
-const toPx   = (norm, vp)=> ({ x:norm.x*vp.w, y:norm.y*vp.h, w:norm.w*vp.w, h:norm.h*vp.h, page:norm.page });
-const toNorm = (px,   vp)=> ({ x:px.x/vp.w,   y:px.y/vp.h,   w:px.w/vp.w,   h:px.h/vp.h,   page:px.page });
+const toPx   = (norm, vp)=> {
+  const w = vp.w ?? vp.width;
+  const h = vp.h ?? vp.height;
+  return { x:norm.x*w, y:norm.y*h, w:norm.w*w, h:norm.h*h, page:norm.page };
+};
+const toNorm = (px, vp)=> {
+  const w = vp.w ?? vp.width || 1;
+  const h = vp.h ?? vp.height || 1;
+  return { x:px.x/w, y:px.y/h, w:px.w/w, h:px.h/h, page:px.page };
+};
 function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 function bboxOfTokens(tokens){
   const x1 = Math.min(...tokens.map(t=>t.x)), y1 = Math.min(...tokens.map(t=>t.y));
@@ -501,6 +509,8 @@ async function renderAllPages(){
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
     const vp = page.getViewport({ scale });
+    vp.w = vp.width; // ensure width/height aliases for downstream calcs
+    vp.h = vp.height;
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     maxW = Math.max(maxW, vp.width);
