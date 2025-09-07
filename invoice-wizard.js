@@ -343,3 +343,4 @@ function toast(msg){
   const u = localStorage.getItem('iwUser');
   if (u){ session.username = u; enterDashboard(); } else { show(loginSection); hide(dashboard); hide(wizardSec); }
 })();
+
