@@ -71,15 +71,24 @@
         <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
       </section>
 
-      <!-- Wizard: upload + highlighter -->
+      <!-- Wizard -->
       <section id="wizard-section" class="panel" style="display:none">
         <h2>Wizard Configuration</h2>
-        <p class="sub">
-          Upload a standardized invoice page, then highlight each requested field.
-        </p>
+        <p class="sub">Upload a standardized invoice page, then highlight each requested field.</p>
 
         <div class="field">
           <input id="wizard-file" type="file" accept="application/pdf,image/png,image/jpeg" />
+        </div>
+
+        <!-- Page controls + OCR toggle -->
+        <div class="actions" id="pageControls" style="display:none">
+          <button id="prevPageBtn" class="btn">Prev Page</button>
+          <span id="pageIndicator" class="sub">Page 1/1</span>
+          <button id="nextPageBtn" class="btn">Next Page</button>
+          <label style="margin-left:12px; display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="ocrToggle" checked>
+            Run OCR on confirm
+          </label>
         </div>
 
         <div id="promptBar" class="prompt">
@@ -103,6 +112,19 @@
 
         <details class="panel minimal">
           <summary>Saved fields</summary>
+          <div style="overflow:auto;">
+            <table id="fieldsTable" style="width:100%; border-collapse:collapse; font-size:12px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Field</th>
+                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Page</th>
+                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">BBox [x,y,w,h]</th>
+                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Value</th>
+                </tr>
+              </thead>
+              <tbody id="fieldsTbody"></tbody>
+            </table>
+          </div>
           <pre id="savedJson" class="code"></pre>
           <div class="actions">
             <button id="exportBtn" class="btn">Export JSON</button>
@@ -117,8 +139,9 @@
     </footer>
   </div>
 
-  <!-- pdf.js -->
+  <!-- Script order matters -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
