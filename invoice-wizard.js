@@ -168,23 +168,35 @@ async function renderDocument(file) {
   imgCanvas.style.display = isPdf ? 'none' : '';
 
   if (isPdf) {
-    const arrayBuf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
-    const page = await pdf.getPage(1);
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
+      const page = await pdf.getPage(1);
 
-    // Fit page to viewer width (fallback if clientWidth is 0)
-    const vw = Math.max(viewer.clientWidth, 640);
-    const v1 = page.getViewport({ scale: 1 });
-    const scale = vw / v1.width;
-    const vp = page.getViewport({ scale });
+      // Fit page to viewer width (fallback if clientWidth is 0)
+      const vw = Math.max(viewer.clientWidth, 640);
+      const v1 = page.getViewport({ scale: 1 });
+      const scale = vw / v1.width;
+      const vp = page.getViewport({ scale });
 
-    const ctx = pdfCanvas.getContext('2d');
-    pdfCanvas.width  = Math.round(vp.width);
-    pdfCanvas.height = Math.round(vp.height);
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const ctx = pdfCanvas.getContext('2d');
+      pdfCanvas.width  = Math.round(vp.width);
+      pdfCanvas.height = Math.round(vp.height);
 
-    // Wait one frame so layout settles, then size overlay
-    requestAnimationFrame(() => syncOverlaySize(pdfCanvas));
+      // Force a white background so transparent PDFs show on dark theme
+      ctx.save();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+      ctx.restore();
+
+      await page.render({ canvasContext: ctx, viewport: vp, background: 'rgba(255,255,255,1)' }).promise;
+
+      // Size the overlay after layout settles
+      requestAnimationFrame(() => syncOverlaySize(pdfCanvas));
+    } catch (err) {
+      console.error('PDF render error:', err);
+      alert('Could not render PDF. Try a JPG/PNG to confirm the viewer works.');
+    }
   } else {
     await new Promise((res) => { imgCanvas.onload = res; imgCanvas.src = URL.createObjectURL(file); });
     imgCanvas.style.maxWidth = '100%';
@@ -194,20 +206,28 @@ async function renderDocument(file) {
 }
 
 function syncOverlaySize(baseEl) {
-  // Match overlay to displayed size
   const rect = baseEl.getBoundingClientRect();
+
+  // Match overlay pixel buffer to the displayed size
   const w = Math.max(1, Math.round(rect.width));
   const h = Math.max(1, Math.round(rect.height));
 
   overlay.width  = w;
   overlay.height = h;
+
+  // Position overlay directly above the base element
   overlay.style.position = 'absolute';
   overlay.style.left = baseEl.offsetLeft + 'px';
   overlay.style.top  = baseEl.offsetTop  + 'px';
 
+  // Ensure stacking context
   viewer.style.position = 'relative';
+
+  // Record display size for normalization
   docState.displayWidth  = w;
   docState.displayHeight = h;
+
+  // Clear any stale drawing
   clearOverlay();
 }
 
