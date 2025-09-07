@@ -249,6 +249,7 @@ overlay.addEventListener('mouseup', () => { docState.drawing = false; });
 
 function rel(e){ const r = overlay.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function normBox(x,y,w,h){ if(w<0){x+=w;w=-w;} if(h<0){y+=h;h=-h;} x=Math.max(0,Math.min(x,overlay.width)); y=Math.max(0,Math.min(y,overlay.height)); w=Math.max(0,Math.min(w,overlay.width-x)); h=Math.max(0,Math.min(h,overlay.height-y)); return {x,y,w,h}; }
+function norm(b){ return [b.x/overlay.width, b.y/overlay.height, b.w/overlay.width, b.h/overlay.height]; }
 function drawBox(){ octx.clearRect(0,0,overlay.width,overlay.height); if(!docState.box) return; octx.save(); octx.globalAlpha=.2; octx.fillStyle='#00ff00'; octx.fillRect(docState.box.x,docState.box.y,docState.box.w,docState.box.h); octx.globalAlpha=1; octx.lineWidth=2; octx.strokeStyle='#00ff00'; octx.strokeRect(docState.box.x,docState.box.y,docState.box.w,docState.box.h); octx.restore(); }
 function clearOverlay(){ octx.clearRect(0,0,overlay.width,overlay.height); }
 
