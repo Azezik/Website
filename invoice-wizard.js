@@ -104,6 +104,38 @@ const LS = {
   setDb(arr){ localStorage.setItem(this.dbKey(), JSON.stringify(arr)); },
 };
 
+const MODELS_KEY = 'wiz.models';
+function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]'); } catch{ return []; } }
+function setModels(m){ localStorage.setItem(MODELS_KEY, JSON.stringify(m)); }
+
+function saveCurrentProfileAsModel(){
+  ensureProfile();
+  const id = `${state.username}:${state.docType}:${Date.now()}`;
+  const models = getModels();
+  models.push({ id, username: state.username, docType: state.docType, profile: state.profile });
+  setModels(models);
+  populateModelSelect();
+  alert('Wizard model saved.');
+}
+
+function populateModelSelect(){
+  const sel = document.getElementById('model-select');
+  if(!sel) return;
+  const models = getModels().filter(m => m.username === state.username && m.docType === state.docType);
+  const current = sel.value;
+  sel.innerHTML = `<option value="">— Select a saved model —</option>` +
+    models.map(m => `<option value="${m.id}">${new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString()}</option>`).join('');
+  if(current) sel.value = current;
+}
+
+function loadModelById(id){
+  const m = getModels().find(x => x.id === id);
+  if(!m) return null;
+  state.profile = m.profile;
+  LS.setProfile(state.username, state.docType, state.profile);
+  return m.profile;
+}
+
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 const toPx   = (norm, vp)=> ({ x:norm.x*vp.w, y:norm.y*vp.h, w:norm.w*vp.w, h:norm.h*vp.h, page:norm.page });
@@ -216,35 +248,35 @@ function ensureProfile(){
 
 /* ------------------------ Wizard Steps --------------------------- */
 const DEFAULT_FIELDS = [
-  // Identifiers
-  { fieldKey: 'order_number',    prompt: 'Highlight the order/invoice number.', regex: RE.orderLike.source },
-  { fieldKey: 'invoice_title',   prompt: 'Highlight the “Invoice / Sales Bill” title (for landmarking only).' },
-  { fieldKey: 'salesperson',     prompt: 'Highlight the salesperson’s name.' },
-  { fieldKey: 'sales_date',      prompt: 'Highlight the sales date.',           regex: RE.date.source },
-  { fieldKey: 'delivery_date',   prompt: 'Highlight the delivery date (if present).', regex: RE.date.source },
-  { fieldKey: 'term',            prompt: 'Highlight the payment term (e.g., Net 30).' },
-  { fieldKey: 'customer_name',   prompt: 'Highlight the customer name.' },
-  { fieldKey: 'store',           prompt: 'Highlight the store/location (if present).' },
+  // Identifiers (one "landmark" title; the rest are value fields)
+  { fieldKey: 'invoice_title',   kind:'landmark', prompt: 'Highlight the “Invoice / Sales Bill” title.', landmarkKey:'invoice_title' },
+  { fieldKey: 'order_number',    kind:'value',    prompt: 'Highlight the order/invoice number.', regex: RE.orderLike.source },
+  { fieldKey: 'salesperson',     kind:'value',    prompt: 'Highlight the salesperson’s name.' },
+  { fieldKey: 'sales_date',      kind:'value',    prompt: 'Highlight the sales date.',           regex: RE.date.source },
+  { fieldKey: 'delivery_date',   kind:'value',    prompt: 'Highlight the delivery date (if present).', regex: RE.date.source },
+  { fieldKey: 'term',            kind:'value',    prompt: 'Highlight the payment term (e.g., Net 30).' },
+  { fieldKey: 'customer_name',   kind:'value',    prompt: 'Highlight the customer name.' },
+  { fieldKey: 'store',           kind:'value',    prompt: 'Highlight the store/location (if present).' },
 
-  // Address / info
-  { fieldKey: 'sold_to_block',   prompt: 'Draw a box over the “Sold To” address block.' },
-  { fieldKey: 'ship_to_block',   prompt: 'Draw a box over the “Ship To” address block.' },
-  { fieldKey: 'information_blk', prompt: 'Highlight the “Information” block if present.' },
+  // Address / info blocks (store the box; value is the snapped text)
+  { fieldKey: 'sold_to_block',   kind:'block',    prompt: 'Draw a box over the “Sold To” address block.' },
+  { fieldKey: 'ship_to_block',   kind:'block',    prompt: 'Draw a box over the “Ship To” address block.' },
+  { fieldKey: 'information_blk', kind:'block',    prompt: 'Highlight the “Information” block if present.' },
 
-  // Totals
-  { fieldKey: 'subtotal',        prompt: 'Highlight the Sub-Total amount.',     regex: RE.currency.source },
-  { fieldKey: 'hst',             prompt: 'Highlight the HST amount (if present).', regex: RE.currency.source },
-  { fieldKey: 'hst_number',      prompt: 'Highlight the HST/QST registration number, if shown.', regex: RE.taxCode.source },
-  { fieldKey: 'qst',             prompt: 'Highlight the QST amount (if present).', regex: RE.currency.source },
-  { fieldKey: 'total',           prompt: 'Highlight the grand Total.',          regex: RE.currency.source },
-  { fieldKey: 'deposit',         prompt: 'Highlight any Deposit recorded.',     regex: RE.currency.source },
-  { fieldKey: 'balance',         prompt: 'Highlight the Balance due.',          regex: RE.currency.source },
+  // Totals (values)
+  { fieldKey: 'subtotal',        kind:'value',    prompt: 'Highlight the Sub-Total amount.',     regex: RE.currency.source },
+  { fieldKey: 'hst',             kind:'value',    prompt: 'Highlight the HST amount (if present).', regex: RE.currency.source },
+  { fieldKey: 'hst_number',      kind:'value',    prompt: 'Highlight the HST/QST registration number, if shown.', regex: RE.taxCode.source },
+  { fieldKey: 'qst',             kind:'value',    prompt: 'Highlight the QST amount (if present).', regex: RE.currency.source },
+  { fieldKey: 'total',           kind:'value',    prompt: 'Highlight the grand Total.',          regex: RE.currency.source },
+  { fieldKey: 'deposit',         kind:'value',    prompt: 'Highlight any Deposit recorded.',     regex: RE.currency.source },
+  { fieldKey: 'balance',         kind:'value',    prompt: 'Highlight the Balance due.',          regex: RE.currency.source },
 ];
 
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
-  state.steps = DEFAULT_FIELDS.map(d => ({...byKey[d.fieldKey], fieldKey:d.fieldKey, prompt:d.prompt, regex: d.regex || byKey[d.fieldKey]?.regex || undefined}));
+  state.steps = DEFAULT_FIELDS.map(d => ({...byKey[d.fieldKey], fieldKey:d.fieldKey, prompt:d.prompt, regex: d.regex || byKey[d.fieldKey]?.regex || undefined, kind: d.kind }));
   state.stepIdx = 0;
   updatePrompt();
 }
@@ -252,6 +284,32 @@ function updatePrompt(){
   const step = state.steps[state.stepIdx];
   els.stepLabel.textContent = `Step ${state.stepIdx+1}/${state.steps.length}`;
   els.questionText.textContent = step?.prompt || 'Highlight field';
+}
+
+function goToStep(idx){
+  const max = state.steps.length - 1;
+  state.stepIdx = Math.max(0, Math.min(idx, max));
+  els.confirmBtn.disabled = false;
+  els.skipBtn.disabled = false;
+  updatePrompt();
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
+}
+
+function finishWizard(){
+  els.confirmBtn.disabled = true;
+  els.skipBtn.disabled = true;
+  els.backBtn.disabled = false;
+  document.getElementById('promptBar').innerHTML =
+    `<span id="stepLabel">Wizard complete</span>
+     <strong id="questionText">Click “Save & Return” or export JSON.</strong>`;
+}
+
+function afterConfirmAdvance(){
+  if(state.stepIdx < state.steps.length - 1){
+    goToStep(state.stepIdx + 1);
+  } else {
+    finishWizard();
+  }
 }
 
 /* --------------------- Landmark utilities ------------------------ */
@@ -551,6 +609,7 @@ els.loginForm?.addEventListener('submit', (e)=>{
   state.profile = LS.getProfile(state.username, state.docType) || null;
   els.loginSection.style.display = 'none';
   els.dashboard.style.display = 'block';
+  populateModelSelect();
   renderResultsTable();
 });
 els.logoutBtn?.addEventListener('click', ()=>{
@@ -566,6 +625,21 @@ els.configureBtn?.addEventListener('click', ()=>{
   renderSavedFieldsTable();
 });
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
+
+els.docType?.addEventListener('change', ()=>{
+  state.docType = els.docType.value || 'invoice';
+  populateModelSelect();
+});
+
+const modelSelect = document.getElementById('model-select');
+if(modelSelect){
+  modelSelect.addEventListener('change', ()=>{
+    const id = modelSelect.value;
+    if(!id) return;
+    loadModelById(id);
+    alert('Model selected. Drop files to auto-extract.');
+  });
+}
 
 // Batch dropzone (dashboard)
 ;['dragover','dragleave','drop'].forEach(evt=>{
@@ -603,23 +677,45 @@ els.clearSelectionBtn?.addEventListener('click', ()=>{
   state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
 });
 
+els.backBtn?.addEventListener('click', ()=>{
+  if(state.stepIdx > 0) goToStep(state.stepIdx - 1);
+});
+
+els.skipBtn?.addEventListener('click', ()=>{
+  if(state.stepIdx < state.steps.length - 1) goToStep(state.stepIdx + 1);
+  else finishWizard();
+});
+
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
-  const { value, boxPx } = extractFieldValue(step, tokens, state.viewport);
-  const norm = toNorm(boxPx || state.snappedPx, state.viewport);
+
+  let value = '', boxPx = state.snappedPx;
+  if(step.kind === 'landmark'){
+    value = (state.snappedText || '').trim();
+  } else if (step.kind === 'block'){
+    value = (state.snappedText || '').trim();
+  } else {
+    const res = extractFieldValue(step, tokens, state.viewport);
+    value = res.value || (state.snappedText || '').trim();
+    boxPx = res.boxPx || state.snappedPx;
+  }
+
+  const norm = toNorm(boxPx, state.viewport);
   upsertFieldInProfile(step.fieldKey, norm, value, state.pageNum);
   ensureAnchorFor(step.fieldKey);
 
-  // Build simple fields object for current profile (latest values)
-  const fieldsObj = Object.fromEntries((state.profile.fields||[]).map(f=>[f.fieldKey, f.value||'']));
+  const fieldsObj = {};
+  for(const f of (state.profile.fields || [])){
+    if(f.value !== undefined && f.value !== null && String(f.value).trim() !== ''){
+      fieldsObj[f.fieldKey] = f.value;
+    }
+  }
   insertRecord(fieldsObj);
 
-  // Next
-  state.stepIdx = (state.stepIdx + 1) % state.steps.length;
-  updatePrompt();
+  afterConfirmAdvance();
 });
 
 // Export JSON (profile)
@@ -633,20 +729,43 @@ els.exportBtn?.addEventListener('click', ()=>{
   URL.revokeObjectURL(url);
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
+  saveCurrentProfileAsModel();
   els.wizardSection.style.display = 'none';
   els.dashboard.style.display = 'block';
+  populateModelSelect();
 });
 
 /* ---------------------------- Batch ------------------------------- */
+async function autoExtractFileWithProfile(file, profile){
+  await openFile(file);
+  const fieldsObj = {};
+  for(const spec of (profile.fields || [])){
+    if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
+      state.pageNum = clamp(spec.page+1, 1, state.numPages);
+      updatePageIndicator();
+      await renderPage(state.pageNum);
+    }
+    const tokens = await ensureTokensForPage(state.pageNum);
+    const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, page: spec.page };
+    state.snappedPx = null; state.snappedText = '';
+    const { value, boxPx } = extractFieldValue(fieldSpec, tokens, state.viewport);
+    if(value){ fieldsObj[spec.fieldKey] = value; }
+    if(boxPx){ state.snappedPx = boxPx; drawOverlay(); }
+  }
+  insertRecord(fieldsObj);
+}
+
 async function processBatch(files){
   if(!files.length) return;
   els.dashboard.style.display = 'none';
   els.wizardSection.style.display = 'block';
   ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
+  const modelId = document.getElementById('model-select')?.value || '';
+  const model = modelId ? getModels().find(m => m.id === modelId) : null;
 
   for(const f of files){
-    await openFile(f);
-    // (Optional) auto-run extraction by anchors here later
+    if(model){ await autoExtractFileWithProfile(f, model.profile); }
+    else { await openFile(f); }
   }
 }
 
