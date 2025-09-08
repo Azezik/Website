@@ -146,16 +146,19 @@ function loadModelById(id){
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
-const toPx   = (norm, vp)=> {
+
+const toPx = (norm, vp) => {
   const w = (vp.w ?? vp.width) || 1;
   const h = (vp.h ?? vp.height) || 1;
-  return { x:norm.x*w, y:norm.y*h, w:norm.w*w, h:norm.h*h, page:norm.page };
+  return { x: norm.x * w, y: norm.y * h, w: norm.w * w, h: norm.h * h, page: norm.page };
 };
-const toNorm = (px, vp)=> {
+
+const toNorm = (px, vp) => {
   const w = (vp.w ?? vp.width) || 1;
   const h = (vp.h ?? vp.height) || 1;
-  return { x:px.x/w, y:px.y/h, w:px.w/w, h:px.h/h, page:px.page };
+  return { x: px.x / w, y: px.y / h, w: px.w / w, h: px.h / h, page: px.page };
 };
+
 function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 function bboxOfTokens(tokens){
   const x1 = Math.min(...tokens.map(t=>t.x)), y1 = Math.min(...tokens.map(t=>t.y));
