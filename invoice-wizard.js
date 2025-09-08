@@ -20,7 +20,7 @@ const TesseractRef = window.Tesseract;
      #pdfCanvas, #imgCanvas, #overlayCanvas
      #prevPageBtn, #nextPageBtn, #pageIndicator, #ocrToggle
      #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
-     #fieldsTbody, #savedJson, #exportBtn, #finishWizardBtn
+     #fieldsPreview, #savedJson, #exportBtn, #finishWizardBtn
     #wizard-file  (single-file open), #file-input + #dropzone (batch)
    Tesseract.js is already included by the page.
 */
@@ -32,8 +32,13 @@ const els = {
   loginForm:       document.getElementById('login-form'),
   username:        document.getElementById('username'),
   password:        document.getElementById('password'),
-  dashboard:       document.getElementById('dashboard'),
+  app:             document.getElementById('app'),
+  tabs:            document.querySelectorAll('#dashTabs button'),
+  docDashboard:    document.getElementById('document-dashboard'),
+  extractedData:   document.getElementById('extracted-data'),
+  reports:         document.getElementById('reports'),
   docType:         document.getElementById('doc-type'),
+  dataDocType:     document.getElementById('data-doc-type'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
@@ -67,7 +72,7 @@ const els = {
   stepLabel:       document.getElementById('stepLabel'),
   questionText:    document.getElementById('questionText'),
 
-  fieldsTbody:     document.getElementById('fieldsTbody'),
+  fieldsPreview:   document.getElementById('fieldsPreview'),
   savedJson:       document.getElementById('savedJson'),
   exportBtn:       document.getElementById('exportBtn'),
   finishWizardBtn: document.getElementById('finishWizardBtn'),
@@ -75,13 +80,19 @@ const els = {
 
 (function ensureResultsMount() {
   if (!document.getElementById('resultsMount')) {
-    const details = document.createElement('details');
-    details.className = 'panel minimal';
-    details.open = true;
-    details.innerHTML = `<summary>Extracted invoices (live)</summary><div id="resultsMount" style="overflow:auto;"></div>`;
-    els.wizardSection?.appendChild(details);
+    const div = document.createElement('div');
+    div.id = 'resultsMount';
+    els.extractedData?.appendChild(div);
   }
 })();
+
+function showTab(id){
+  [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
+    if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
+  });
+  els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
+}
+els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 
 let state = {
   username: null,
@@ -674,7 +685,9 @@ function insertRecord(fieldsObj){
 }
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
-  const db = LS.getDb();
+  let db = LS.getDb();
+  const filter = els.dataDocType?.value;
+  if(filter){ db = db.filter(r => r.vendorProfileId.endsWith(':'+filter)); }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
   const cols = Array.from(db.reduce((set, r)=>{ Object.keys(r.fields||{}).forEach(k=>set.add(k)); return set; }, new Set()));
   const thead = `<tr>${['file','date', ...cols].map(h=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${h}</th>`).join('')}</tr>`;
@@ -715,14 +728,14 @@ function ensureAnchorFor(fieldKey){
   }
 }
 function renderSavedFieldsTable(){
-  const rows = (state.profile?.fields||[]).map(f => {
-    const bbox = f.bbox.map(n => Number(n).toFixed(4)).join(', ');
-    return `<tr><td style="padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</td>
-      <td style="padding:6px;border-bottom:1px solid var(--border)">${f.page}</td>
-      <td style="padding:6px;border-bottom:1px solid var(--border)">[${bbox}]</td>
-      <td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td></tr>`;
-  }).join('');
-  els.fieldsTbody.innerHTML = rows;
+  const fields = (state.profile?.fields||[]).filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+  if(!fields.length){
+    els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
+  } else {
+    const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+    const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
+    els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+  }
   els.savedJson.textContent = JSON.stringify(state.profile, null, 2);
 }
 
@@ -734,12 +747,13 @@ els.loginForm?.addEventListener('submit', (e)=>{
   state.docType = els.docType?.value || 'invoice';
   state.profile = LS.getProfile(state.username, state.docType) || null;
   els.loginSection.style.display = 'none';
-  els.dashboard.style.display = 'block';
+  els.app.style.display = 'block';
+  showTab('document-dashboard');
   populateModelSelect();
   renderResultsTable();
 });
 els.logoutBtn?.addEventListener('click', ()=>{
-  els.dashboard.style.display = 'none';
+  els.app.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
 });
@@ -758,7 +772,7 @@ alert('Model and records reset.');
 
 });
 els.configureBtn?.addEventListener('click', ()=>{
-  els.dashboard.style.display = 'none';
+  els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
   ensureProfile();
   initStepsFromProfile();
@@ -768,8 +782,12 @@ els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
+  state.profile = LS.getProfile(state.username, state.docType) || null;
+  renderSavedFieldsTable();
   populateModelSelect();
 });
+
+els.dataDocType?.addEventListener('change', renderResultsTable);
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
@@ -899,7 +917,8 @@ els.exportBtn?.addEventListener('click', ()=>{
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
   els.wizardSection.style.display = 'none';
-  els.dashboard.style.display = 'block';
+  els.app.style.display = 'block';
+  showTab('document-dashboard');
   populateModelSelect();
 });
 
@@ -926,7 +945,7 @@ async function autoExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
-  els.dashboard.style.display = 'none';
+  els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
   ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
   const modelId = document.getElementById('model-select')?.value || '';
