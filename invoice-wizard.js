@@ -112,6 +112,7 @@ let state = {
   steps: [],                 // wizard steps
   stepIdx: 0,
   currentFileName: '',
+  currentFileId: '',        // unique id per opened file
 };
 
 /* ---------------------- Storage / Persistence --------------------- */
@@ -123,6 +124,10 @@ const LS = {
   getDb() { const raw = localStorage.getItem(this.dbKey()); return raw ? JSON.parse(raw) : []; },
   setDb(arr){ localStorage.setItem(this.dbKey(), JSON.stringify(arr)); },
 };
+
+// Raw and compiled stores
+const rawStore = {};       // {fileId: [{fieldKey,value,page,bbox,ts}]}
+const fileMeta = {};       // {fileId: {fileName}}
 
 const MODELS_KEY = 'wiz.models';
 function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]'); } catch{ return []; } }
@@ -735,6 +740,9 @@ async function openFile(file){
   cleanupDoc();
   state.pdf = null;
   state.currentFileName = file.name || 'untitled';
+  state.currentFileId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  fileMeta[state.currentFileId] = { fileName: state.currentFileName };
+  rawStore[state.currentFileId] = rawStore[state.currentFileId] || [];
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
 
@@ -941,34 +949,101 @@ function drawOverlay(){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function insertRecord(fieldsObj){
+function compileDocument(fileId){
+  const raw = rawStore[fileId] || [];
+  if(!raw.length) return null;
+  const byKey = {};
+  raw.forEach(r=>{ byKey[r.fieldKey] = r; });
+  const compiled = {
+    fileId,
+    fileName: fileMeta[fileId]?.fileName || 'unnamed',
+    processedAtISO: new Date().toISOString(),
+    customer: {
+      name: byKey['customer_name']?.value || '',
+      phone: '',
+      email: '',
+      addressLine1: '',
+      addressLine2: '',
+      city: '',
+      province: '',
+      postalCode: ''
+    },
+    invoice: {
+      number: byKey['invoice_number']?.value || '',
+      salesDateISO: byKey['invoice_date']?.value || '',
+      deliveryDateISO: '',
+      salesperson: byKey['salesperson_rep']?.value || '',
+      store: byKey['store_name']?.value || '',
+      terms: '',
+      customerId: ''
+    },
+    totals: {
+      subtotal: byKey['subtotal']?.value || '',
+      hst: byKey['tax']?.value || '',
+      qst: '',
+      total: byKey['invoice_total']?.value || '',
+      deposit: byKey['deposit']?.value || '',
+      balance: byKey['balance']?.value || ''
+    },
+    lineItems: [],
+    notes: [],
+    templateKey: `${state.username}:${state.docType}`
+  };
   const db = LS.getDb();
-  db.push({
-    id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
-    vendorProfileId: `${state.username}:${state.docType}`,
-    createdAt: Date.now(),
-    fileName: state.currentFileName || 'unnamed',
-    pages: state.numPages,
-    fields: fieldsObj,
-    lineItems: []
-  });
+  const idx = db.findIndex(r => r.fileId === fileId);
+  if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(db);
   renderResultsTable();
+  return compiled;
 }
+
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
-  let db = LS.getDb();
+  let db = LS.getDb().filter(r => r.templateKey.startsWith(`${state.username}:`));
   const filter = els.dataDocType?.value;
-  if(filter){ db = db.filter(r => r.vendorProfileId.endsWith(':'+filter)); }
+  if(filter){ db = db.filter(r => r.templateKey.endsWith(':'+filter)); }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
-  const cols = Array.from(db.reduce((set, r)=>{ Object.keys(r.fields||{}).forEach(k=>set.add(k)); return set; }, new Set()));
-  const thead = `<tr>${['file','date', ...cols].map(h=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${h}</th>`).join('')}</tr>`;
+  const thead = `<tr>`+
+    ['file','processedAt','customer','address','total','items','actions'].map(h=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${h}</th>`).join('')+
+    `</tr>`;
   const rows = db.map(r=>{
-    const dt = new Date(r.createdAt).toLocaleString();
-    const cells = cols.map(k=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(r.fields?.[k]??'')}</td>`).join('');
-    return `<tr><td style="padding:6px;border-bottom:1px solid var(--border)">${r.fileName}</td><td style="padding:6px;border-bottom:1px solid var(--border)">${dt}</td>${cells}</tr>`;
+    const addr = [r.customer?.addressLine1, r.customer?.city, r.customer?.province].filter(Boolean).join(', ');
+    const rawCount = (rawStore[r.fileId]||[]).length;
+    return `<tr data-id="${r.fileId}">`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.fileName}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.processedAtISO}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.customer?.name||''}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${addr}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.totals?.total||''}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.lineItems?.length||0}</td>`+
+      `<td style="padding:6px;border-bottom:1px solid var(--border)">`+
+        `<button class="btn recompile" data-id="${r.fileId}">Recompile</button>`+
+        `<button class="btn viewRaw" data-id="${r.fileId}">Raw (${rawCount})</button>`+
+        `<button class="btn exportJson" data-id="${r.fileId}">Export JSON</button>`+
+      `</td>`+
+      `</tr>`+
+      `<tr class="rawRow" data-id="${r.fileId}" style="display:none"><td colspan="7"><pre class="code">${(rawStore[r.fileId]||[]).length?JSON.stringify(rawStore[r.fileId],null,2):'[]'}</pre></td></tr>`;
   }).join('');
   mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
+
+  mount.querySelectorAll('button.recompile').forEach(btn=>btn.addEventListener('click', ()=>{
+    compileDocument(btn.dataset.id);
+  }));
+  mount.querySelectorAll('button.viewRaw').forEach(btn=>btn.addEventListener('click', ()=>{
+    const row = mount.querySelector(`tr.rawRow[data-id="${btn.dataset.id}"]`);
+    if(row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+  }));
+  mount.querySelectorAll('button.exportJson').forEach(btn=>btn.addEventListener('click', ()=>{
+    const db = LS.getDb();
+    const rec = db.find(r=>r.fileId===btn.dataset.id);
+    if(!rec) return;
+    const blob = new Blob([JSON.stringify(rec, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${rec.fileName||'record'}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }));
 }
 
 /* ---------------------- Profile save / table --------------------- */
@@ -1043,6 +1118,7 @@ renderResultsTable();
 alert('Model and records reset.');
 
 });
+els.dataDocType?.addEventListener('change', renderResultsTable);
 els.configureBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
@@ -1165,13 +1241,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   upsertFieldInProfile(step.fieldKey, norm, value, state.pageNum);
   ensureAnchorFor(step.fieldKey);
 
-  const fieldsObj = {};
-  for(const f of (state.profile.fields || [])){
-    if(f.value !== undefined && f.value !== null && String(f.value).trim() !== ''){
-      fieldsObj[f.fieldKey] = f.value;
-    }
+  const fid = state.currentFileId;
+  if(fid){
+    rawStore[fid] = rawStore[fid] || [];
+    rawStore[fid].push({ fieldKey: step.fieldKey, value, page: state.pageNum, bbox: norm, ts: Date.now() });
   }
-  insertRecord(fieldsObj);
 
   afterConfirmAdvance();
 });
@@ -1188,16 +1262,16 @@ els.exportBtn?.addEventListener('click', ()=>{
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
+  compileDocument(state.currentFileId);
   els.wizardSection.style.display = 'none';
   els.app.style.display = 'block';
-  showTab('document-dashboard');
+  showTab('extracted-data');
   populateModelSelect();
 });
 
 /* ---------------------------- Batch ------------------------------- */
 async function autoExtractFileWithProfile(file, profile){
   await openFile(file);
-  const fieldsObj = {};
   for(const spec of (profile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
       state.pageNum = clamp(spec.page+1, 1, state.numPages);
@@ -1209,10 +1283,13 @@ async function autoExtractFileWithProfile(file, profile){
     const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, bbox: spec.bbox, page: spec.page };
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx } = extractFieldValue(fieldSpec, tokens, state.viewport);
-    if(value){ fieldsObj[spec.fieldKey] = value; }
+    if(value){
+      const norm = boxPx ? toNorm({ ...boxPx, page: state.pageNum }, state.viewport) : null;
+      rawStore[state.currentFileId].push({ fieldKey: spec.fieldKey, value, page: state.pageNum, bbox: norm, ts: Date.now() });
+    }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
-  insertRecord(fieldsObj);
+  compileDocument(state.currentFileId);
 }
 
 async function processBatch(files){
@@ -1227,6 +1304,9 @@ async function processBatch(files){
     if(model){ await autoExtractFileWithProfile(f, model.profile); }
     else { await openFile(f); }
   }
+  els.wizardSection.style.display = 'none';
+  els.app.style.display = 'block';
+  showTab('extracted-data');
 }
 
 /* ------------------------ Init on load ---------------------------- */
