@@ -239,6 +239,7 @@
     const app = document.getElementById('app');
     const logoutBtn = document.getElementById('logout-btn');
     const loginForm = document.getElementById('login-form');
+
     if(loginForm){
       loginForm.addEventListener('submit', e => {
         e.preventDefault();
@@ -246,6 +247,7 @@
         if(app) app.style.display = '';
       });
     }
+
     if(logoutBtn){
       logoutBtn.addEventListener('click', () => {
         if(app) app.style.display = 'none';
@@ -253,8 +255,13 @@
       });
     }
   }
+
   if (typeof window !== 'undefined') {
-    window.addEventListener('DOMContentLoaded', initLogin);
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', initLogin);
+    } else {
+      initLogin();
+    }
   }
 
   return {
