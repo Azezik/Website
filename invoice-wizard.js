@@ -223,6 +223,19 @@ const RE = {
   percent: /\b(\d{1,2}(?:\.\d{1,2})?)\s*%/,
 };
 
+const FIELD_ALIASES = {
+  order_number: 'invoice_number',
+  sales_date: 'invoice_date',
+  salesperson: 'salesperson_rep',
+  customer_name: 'customer_name',
+  sold_to_block: 'customer_address',
+  store: 'store_name',
+  subtotal: 'subtotal',
+  hst: 'tax',
+  qst: 'tax',
+  total: 'invoice_total'
+};
+
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   if(state.profile) return;
@@ -277,42 +290,162 @@ function ensureProfile(){
   // Seed from any existing saved schema (same shape you uploaded earlier)
   const existing = LS.getProfile(state.username, state.docType);
   if (existing?.fields?.length) {
-    state.profile.fields = existing.fields;
+    state.profile.fields = existing.fields.map(f => ({
+      ...f,
+      fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
+    }));
   }
   LS.setProfile(state.username, state.docType, state.profile);
 }
 
 /* ------------------------ Wizard Steps --------------------------- */
 const DEFAULT_FIELDS = [
-  // Identifiers (one "landmark" title; the rest are value fields)
-  { fieldKey: 'invoice_title',   kind:'landmark', prompt: 'Highlight the “Invoice / Sales Bill” title.', landmarkKey:'invoice_title' },
-  { fieldKey: 'order_number',    kind:'value',    prompt: 'Highlight the order/invoice number.', regex: RE.orderLike.source },
-  { fieldKey: 'salesperson',     kind:'value',    prompt: 'Highlight the salesperson’s name.' },
-  { fieldKey: 'sales_date',      kind:'value',    prompt: 'Highlight the sales date.',           regex: RE.date.source },
-  { fieldKey: 'delivery_date',   kind:'value',    prompt: 'Highlight the delivery date (if present).', regex: RE.date.source },
-  { fieldKey: 'term',            kind:'value',    prompt: 'Highlight the payment term (e.g., Net 30).' },
-  { fieldKey: 'customer_name',   kind:'value',    prompt: 'Highlight the customer name.' },
-  { fieldKey: 'store',           kind:'value',    prompt: 'Highlight the store/location (if present).' },
+  // Header / Transaction (single cell highlights)
+  {
+    fieldKey: 'store_name',
+    label: 'Store / Business Name',
+    prompt: 'Highlight the store or business name on the invoice header.',
+    kind: 'value',
+    mode: 'cell',
+    required: true
+  },
+  {
+    fieldKey: 'department_division',
+    label: 'Department / Division',
+    prompt: 'Highlight the department/division (if shown). If not present, click Skip.',
+    kind: 'value',
+    mode: 'cell',
+    required: false
+  },
+  {
+    fieldKey: 'invoice_number',
+    label: 'Invoice Number',
+    prompt: 'Highlight the invoice number (e.g., INV-12345).',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.orderLike.source,
+    required: true
+  },
+  {
+    fieldKey: 'invoice_date',
+    label: 'Invoice Date',
+    prompt: 'Highlight the invoice date (e.g., 2025-09-08 or Sept 8, 2025).',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.date.source,
+    required: true
+  },
+  {
+    fieldKey: 'salesperson_rep',
+    label: 'Salesperson / Rep',
+    prompt: 'Highlight the salesperson/rep name or ID (if shown). If not present, click Skip.',
+    kind: 'value',
+    mode: 'cell',
+    required: false
+  },
+  {
+    fieldKey: 'customer_name',
+    label: 'Customer (Sold To)',
+    prompt: 'Highlight the customer name (Sold To/Bill To).',
+    kind: 'value',
+    mode: 'cell',
+    required: true
+  },
+  {
+    fieldKey: 'customer_address',
+    label: 'Customer Address (City/Province/Postal)',
+    prompt: 'Highlight the customer address block (include city, province, and postal code if present).',
+    kind: 'block',
+    mode: 'cell',
+    required: false
+  },
 
-  // Address / info blocks (store the box; value is the snapped text)
-  { fieldKey: 'sold_to_block',   kind:'block',    prompt: 'Draw a box over the “Sold To” address block.' },
-  { fieldKey: 'ship_to_block',   kind:'block',    prompt: 'Draw a box over the “Ship To” address block.' },
-  { fieldKey: 'information_blk', kind:'block',    prompt: 'Highlight the “Information” block if present.' },
+  // Line-Item Columns
+  {
+    fieldKey: 'description_col',
+    label: 'Product / Service Description (Column)',
+    prompt: 'Highlight the entire column containing product/service descriptions. Drag from the first row to the last row so the whole column is selected.',
+    kind: 'block',
+    mode: 'column',
+    required: true
+  },
+  {
+    fieldKey: 'sku_col',
+    label: 'Product Code / SKU (Column)',
+    prompt: 'Highlight the entire column of product codes/SKUs (if present). If none, click Skip.',
+    kind: 'block',
+    mode: 'column',
+    required: false
+  },
+  {
+    fieldKey: 'quantity_col',
+    label: 'Quantity (Column)',
+    prompt: 'Highlight the entire column of quantities.',
+    kind: 'block',
+    mode: 'column',
+    required: true
+  },
+  {
+    fieldKey: 'unit_price_col',
+    label: 'Unit Price (Column)',
+    prompt: 'Highlight the entire column of unit prices.',
+    kind: 'block',
+    mode: 'column',
+    required: true
+  },
 
-  // Totals (values)
-  { fieldKey: 'subtotal',        kind:'value',    prompt: 'Highlight the Sub-Total amount.',     regex: RE.currency.source },
-  { fieldKey: 'hst',             kind:'value',    prompt: 'Highlight the HST amount (if present).', regex: RE.currency.source },
-  { fieldKey: 'hst_number',      kind:'value',    prompt: 'Highlight the HST/QST registration number, if shown.', regex: RE.taxCode.source },
-  { fieldKey: 'qst',             kind:'value',    prompt: 'Highlight the QST amount (if present).', regex: RE.currency.source },
-  { fieldKey: 'total',           kind:'value',    prompt: 'Highlight the grand Total.',          regex: RE.currency.source },
-  { fieldKey: 'deposit',         kind:'value',    prompt: 'Highlight any Deposit recorded.',     regex: RE.currency.source },
-  { fieldKey: 'balance',         kind:'value',    prompt: 'Highlight the Balance due.',          regex: RE.currency.source },
+  // Totals & Taxes (single cell highlights)
+  {
+    fieldKey: 'subtotal',
+    label: 'Subtotal (before tax & discounts)',
+    prompt: 'Highlight the Subtotal amount (before tax and discounts).',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.currency.source,
+    required: true
+  },
+  {
+    fieldKey: 'discounts',
+    label: 'Discounts (if any)',
+    prompt: 'Highlight the total Discounts amount (if present). If none, click Skip.',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.currency.source,
+    required: false
+  },
+  {
+    fieldKey: 'tax',
+    label: 'Tax (HST/GST/PST)',
+    prompt: 'Highlight the total tax line (e.g., HST). If multiple taxes, highlight the combined total.',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.currency.source,
+    required: true
+  },
+  {
+    fieldKey: 'invoice_total',
+    label: 'Invoice Total (Grand Total)',
+    prompt: 'Highlight the final amount due (Grand Total/Total).',
+    kind: 'value',
+    mode: 'cell',
+    regex: RE.currency.source,
+    required: true
+  }
 ];
 
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
-  state.steps = DEFAULT_FIELDS.map(d => ({...byKey[d.fieldKey], fieldKey:d.fieldKey, prompt:d.prompt, regex: d.regex || byKey[d.fieldKey]?.regex || undefined, kind: d.kind }));
+  state.steps = DEFAULT_FIELDS.map(d => ({
+    ...byKey[d.fieldKey],
+    fieldKey: d.fieldKey,
+    prompt: d.prompt,
+    regex: d.regex || byKey[d.fieldKey]?.regex || undefined,
+    kind: d.kind,
+    label: d.label,
+    mode: d.mode,
+    required: d.required
+  }));
   state.stepIdx = 0;
   updatePrompt();
 }
