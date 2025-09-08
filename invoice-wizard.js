@@ -736,16 +736,17 @@ els.logoutBtn?.addEventListener('click', ()=>{
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   if(!state.username) return;
-  if(!confirm('Clear saved model and extracted records?')) return;
-  localStorage.removeItem(LS.profileKey(state.username, state.docType));
-  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
-  setModels(models);
-  localStorage.removeItem(LS.dbKey());
-  state.profile = null;
-  renderSavedFieldsTable();
-  populateModelSelect();
-  renderResultsTable();
-  alert('Model and records reset.');
+if(!confirm('Clear saved model and extracted records?')) return;
+localStorage.removeItem(LS.profileKey(state.username, state.docType));
+const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
+setModels(models);
+localStorage.removeItem(LS.dbKey());
+state.profile = null;
+renderSavedFieldsTable();
+populateModelSelect();
+renderResultsTable();
+alert('Model and records reset.');
+
 });
 els.configureBtn?.addEventListener('click', ()=>{
   els.dashboard.style.display = 'none';
