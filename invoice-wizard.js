@@ -184,6 +184,27 @@ function cosine3Gram(a,b){
   B.forEach(v=>{ nB+=v*v; });
   return (dot===0)?0:(dot/Math.sqrt(nA*nB));
 }
+
+function collapseAdjacentDuplicates(str){
+  if(!str) return '';
+  let out = str;
+  const re = /(\b[\w#&.-]+(?:\s+[\w#&.-]+)*)\s+\1\b/gi;
+  do { var prev = out; out = out.replace(re, '$1'); } while(out !== prev);
+  return out;
+}
+
+function cleanScalarValue(raw, fieldKey=''){
+  let txt = (raw || '').replace(/[:#]*$/, '').trim();
+  const label = fieldKey.replace(/_/g,' ');
+  if(label){
+    const labelRe = new RegExp(`^${label}\\s*[:#-]?\\s*`, 'i');
+    txt = txt.replace(labelRe, '').trim();
+    if(txt.toLowerCase() === label.toLowerCase()) txt = '';
+  }
+  txt = collapseAdjacentDuplicates(txt).replace(/\s+/g,' ').trim();
+  return txt;
+}
+
 function groupIntoLines(tokens, tol=4){
   const sorted = [...tokens].sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
   const lines = [];
@@ -536,20 +557,22 @@ function labelValueHeuristic(fieldSpec, tokens){
 }
 
 function extractFieldValue(fieldSpec, tokens, viewportPx){
-  let confidence = 0, value = '', usedBox = null;
+  const candidates = [];
+  const label = (fieldSpec.fieldKey||'').replace(/_/g,' ');
 
-  // 1) Use current snapped selection, if any
+  // 1) Current snapped selection
   if(state.snappedPx){
-    usedBox = state.snappedPx;
-    value = fieldSpec.regex
+    let val = fieldSpec.regex
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
-    // Only consider the selection "confident" if it yielded text
-    confidence = value.trim() ? (fieldSpec.regex ? 0.85 : 0.8) : 0;
+    val = cleanScalarValue(val, label);
+    if(val){
+      candidates.push({ value: val, boxPx: state.snappedPx, confidence: fieldSpec.regex ? 0.85 : 0.8 });
+    }
   }
 
-  // 2) Try anchor via landmark
-  if(confidence < 0.75 && fieldSpec.anchor && state.profile?.landmarks?.length){
+  // 2) Anchor via landmark
+  if(fieldSpec.anchor && state.profile?.landmarks?.length){
     const lmSpec = state.profile.landmarks.find(
       l => l.landmarkKey === fieldSpec.anchor.landmarkKey && (l.page === fieldSpec.page || l.page === 0)
     );
@@ -560,23 +583,61 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
         const snap = snapToLine(tokens, candidate);
         const txt = snap.text || '';
         if(txt.trim()){
-          usedBox = snap.box;
-          value = fieldSpec.regex
+          let val = fieldSpec.regex
             ? ((txt.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
             : txt;
-          confidence = fieldSpec.regex ? 0.9 : 0.8;
+          val = cleanScalarValue(val, label);
+          if(val){
+            candidates.push({ value: val, boxPx: snap.box, confidence: fieldSpec.regex ? 0.9 : 0.8 });
+          }
         }
       }
     }
   }
 
-  // 3) Label→Value fallback
-  if(confidence < 0.7){
-    const lv = labelValueHeuristic(fieldSpec, tokens);
-    if(lv.value){ value = lv.value; usedBox = lv.usedBox; confidence = Math.max(confidence, lv.confidence); }
+  // 3) Label→Value heuristic
+  const lv = labelValueHeuristic(fieldSpec, tokens);
+  if(lv.value){
+    const val = cleanScalarValue(lv.value, label);
+    if(val){ candidates.push({ value: val, boxPx: lv.usedBox, confidence: lv.confidence }); }
   }
 
-  return { value: (value||'').trim(), boxPx: usedBox, confidence };
+  // Near-duplicate collapse
+  const unique = [];
+  for(const c of candidates){
+    const dup = unique.find(u => cosine3Gram(u.value, c.value) >= 0.9);
+    if(dup){
+      if(c.value.length < dup.value.length){
+        dup.value = c.value; dup.boxPx = c.boxPx;
+      }
+      dup.confidence = Math.max(dup.confidence, c.confidence);
+    } else {
+      unique.push({ ...c });
+    }
+  }
+
+  if(unique.length){
+    const score = c => {
+      let s = c.confidence || 0;
+      const v = c.value;
+      if(fieldSpec.regex){
+        s += new RegExp(fieldSpec.regex,'i').test(v) ? 0.1 : -0.1;
+      } else if(/date/i.test(fieldSpec.fieldKey)){
+        s += RE.date.test(v) ? 0.1 : 0;
+      } else if(/total|subtotal|tax|discount/i.test(fieldSpec.fieldKey)){
+        s += RE.currency.test(v) ? 0.1 : 0;
+      } else if(/invoice|order|number|no/i.test(fieldSpec.fieldKey)){
+        s += RE.orderLike.test(v) ? 0.1 : 0;
+      }
+      return s - v.length * 0.001; // cleanliness
+    };
+    unique.sort((a,b)=> score(b) - score(a));
+    const best = unique[0];
+    return { value: best.value.trim(), boxPx: best.boxPx, confidence: score(best) };
+  }
+
+  const fb = cleanScalarValue(state.snappedText, label);
+  return { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0 };
 }
 
 /* ---------------------- PDF/Image Loading ------------------------ */
