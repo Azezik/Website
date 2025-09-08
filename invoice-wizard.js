@@ -239,19 +239,45 @@
     const app = document.getElementById('app');
     const logoutBtn = document.getElementById('logout-btn');
     const loginForm = document.getElementById('login-form');
+    const userInput = document.getElementById('username');
+    const passInput = document.getElementById('password');
+
+    function showApp(){
+      if(loginSection) loginSection.style.display = 'none';
+      if(app) app.style.display = 'block';
+    }
+
+    function showLogin(){
+      if(app) app.style.display = 'none';
+      if(loginSection) loginSection.style.display = 'block';
+    }
+
+    // Auto-login if user persisted
+    try {
+      const storedUser = window.localStorage.getItem('iwUser');
+      if(storedUser){
+        showApp();
+      }
+    } catch(err) {
+      // localStorage unavailable; continue without persistence
+    }
 
     if(loginForm){
       loginForm.addEventListener('submit', e => {
         e.preventDefault();
-        if(loginSection) loginSection.style.display = 'none';
-        if(app) app.style.display = '';
+        const user = userInput ? userInput.value.trim() : '';
+        const pass = passInput ? passInput.value : '';
+        if(!user || !pass) return;
+        try { window.localStorage.setItem('iwUser', user); } catch(err) {}
+        showApp();
+        loginForm.reset();
       });
     }
 
     if(logoutBtn){
       logoutBtn.addEventListener('click', () => {
-        if(app) app.style.display = 'none';
-        if(loginSection) loginSection.style.display = '';
+        try { window.localStorage.removeItem('iwUser'); } catch(err) {}
+        showLogin();
       });
     }
   }
@@ -274,6 +300,7 @@
     validateMoney,
     findAnchorToken,
     anchorWindow,
-    patternSearch
+    patternSearch,
+    initLogin
   };
 }));
