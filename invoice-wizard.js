@@ -184,6 +184,12 @@ function cosine3Gram(a,b){
   B.forEach(v=>{ nB+=v*v; });
   return (dot===0)?0:(dot/Math.sqrt(nA*nB));
 }
+
+function lastMatch(rx, txt){
+  const r = rx.global ? rx : new RegExp(rx.source, rx.flags + 'g');
+  const matches = [...txt.matchAll(r)];
+  return matches.length ? matches[matches.length - 1][1] || '' : '';
+}
 function groupIntoLines(tokens, tol=4){
   const sorted = [...tokens].sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
   const lines = [];
@@ -286,7 +292,7 @@ function ensureProfile(){
 const DEFAULT_FIELDS = [
   // Identifiers (one "landmark" title; the rest are value fields)
   { fieldKey: 'invoice_title',   kind:'landmark', prompt: 'Highlight the “Invoice / Sales Bill” title.', landmarkKey:'invoice_title' },
-  { fieldKey: 'order_number',    kind:'value',    prompt: 'Highlight the order/invoice number.', regex: RE.orderLike.source },
+  { fieldKey: 'invoice_number',  kind:'value',    prompt: 'Highlight the invoice number.', regex: RE.orderLike.source },
   { fieldKey: 'salesperson',     kind:'value',    prompt: 'Highlight the salesperson’s name.' },
   { fieldKey: 'sales_date',      kind:'value',    prompt: 'Highlight the sales date.',           regex: RE.date.source },
   { fieldKey: 'delivery_date',   kind:'value',    prompt: 'Highlight the delivery date (if present).', regex: RE.date.source },
@@ -389,13 +395,13 @@ function labelValueHeuristic(fieldSpec, tokens){
         const snap = snapToLine(tokens, tmpBox);
         usedBox = snap.box;
         const txt2 = (snap.text||'').trim();
-        const rx = fieldSpec.regex ? new RegExp(fieldSpec.regex,'i')
-                 : /total|deposit|balance|hst|qst/i.test(want) ? RE.currency
-                 : /date/i.test(want) ? RE.date
-                 : /order|invoice|no/i.test(want) ? RE.orderLike
+        const rx = fieldSpec.regex ? new RegExp(fieldSpec.regex,'ig')
+                 : /total|deposit|balance|hst|qst/i.test(want) ? new RegExp(RE.currency.source, 'ig')
+                 : /date/i.test(want) ? new RegExp(RE.date.source, 'ig')
+                 : /order|invoice|no/i.test(want) ? new RegExp(RE.orderLike.source, 'ig')
                  : null;
-        const m = rx ? (txt2.match(rx)||[])[1] : txt2;
-        if(m){ value = (m||txt2).toString(); confidence = rx ? 0.8 : 0.72; break; }
+        const m = rx ? lastMatch(rx, txt2) : txt2;
+        if(m){ value = m.toString(); confidence = rx ? 0.8 : 0.72; break; }
       }
     }
   }
@@ -409,7 +415,7 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(state.snappedPx){
     usedBox = state.snappedPx;
     value = fieldSpec.regex
-      ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
+      ? lastMatch(new RegExp(fieldSpec.regex, 'ig'), state.snappedText)
       : state.snappedText;
     // Only consider the selection "confident" if it yielded text
     confidence = value.trim() ? (fieldSpec.regex ? 0.85 : 0.8) : 0;
@@ -429,7 +435,7 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
         if(txt.trim()){
           usedBox = snap.box;
           value = fieldSpec.regex
-            ? ((txt.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
+            ? lastMatch(new RegExp(fieldSpec.regex, 'ig'), txt)
             : txt;
           confidence = fieldSpec.regex ? 0.9 : 0.8;
         }
@@ -694,7 +700,9 @@ function renderResultsTable(){
   const filter = els.dataDocType?.value;
   if(filter){ db = db.filter(r => r.vendorProfileId.endsWith(':'+filter)); }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
-  const cols = Array.from(db.reduce((set, r)=>{ Object.keys(r.fields||{}).forEach(k=>set.add(k)); return set; }, new Set()));
+  const baseCols = DEFAULT_FIELDS.map(f=>f.fieldKey);
+  const dynamic = db.reduce((set, r)=>{ Object.keys(r.fields||{}).forEach(k=>set.add(k)); return set; }, new Set());
+  const cols = baseCols.concat([...dynamic].filter(k => !baseCols.includes(k)));
   const thead = `<tr>${['file','date', ...cols].map(h=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${h}</th>`).join('')}</tr>`;
   const rows = db.map(r=>{
     const dt = new Date(r.createdAt).toLocaleString();
@@ -719,7 +727,7 @@ function ensureAnchorFor(fieldKey){
   const f = state.profile.fields.find(x => x.fieldKey === fieldKey);
   if(!f || f.anchor) return;
   const anchorMap = {
-    order_number:   { landmarkKey:'sales_bill',    dx: 0.02, dy: 0.00, w: 0.10, h: 0.035 },
+    invoice_number: { landmarkKey:'sales_bill',    dx: 0.02, dy: 0.00, w: 0.10, h: 0.035 },
     subtotal:       { landmarkKey:'subtotal_hdr',  dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
     hst:            { landmarkKey:'hst_hdr',       dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
     qst:            { landmarkKey:'qst_hdr',       dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
@@ -900,9 +908,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
 
   const fieldsObj = {};
   for(const f of (state.profile.fields || [])){
-    if(f.value !== undefined && f.value !== null && String(f.value).trim() !== ''){
-      fieldsObj[f.fieldKey] = f.value;
-    }
+    fieldsObj[f.fieldKey] = (f.value !== undefined && f.value !== null) ? f.value : '';
   }
   insertRecord(fieldsObj);
 
