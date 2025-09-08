@@ -199,12 +199,17 @@ function groupIntoLines(tokens, tol=4){
 function snapToLine(tokens, hintPx, marginPx=6){
   const hits = tokens.filter(t => intersect(hintPx, t));
   if(!hits.length) return { box: hintPx, text: '' };
-  const bandCy = hits.map(t=>t.y+t.h/2).reduce((a,b)=>a+b,0)/hits.length;
+  const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
   const line = groupIntoLines(tokens, 4).find(L => Math.abs(L.cy - bandCy) <= 4);
   const lineTokens = line ? line.tokens : hits;
-  const box = bboxOfTokens(lineTokens);
+  // Horizontally limit to tokens inside the hint box, but keep full line height
+  const left   = Math.min(...hits.map(t => t.x));
+  const right  = Math.max(...hits.map(t => t.x + t.w));
+  const top    = Math.min(...lineTokens.map(t => t.y));
+  const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
+  const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
-  const text = lineTokens.map(t=>t.text).join(' ').trim();
+  const text = hits.map(t => t.text).join(' ').trim();
   return { box: expanded, text };
 }
 
