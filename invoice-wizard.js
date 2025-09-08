@@ -392,22 +392,31 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
   // 1) Use current snapped selection, if any
   if(state.snappedPx){
     usedBox = state.snappedPx;
-    value = fieldSpec.regex ? ((state.snappedText.match(new RegExp(fieldSpec.regex,'i'))||[])[1] || '') : state.snappedText;
-    confidence = fieldSpec.regex ? 0.85 : 0.7;
+    value = fieldSpec.regex
+      ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
+      : state.snappedText;
+    // Only consider the selection "confident" if it yielded text
+    confidence = value.trim() ? (fieldSpec.regex ? 0.85 : 0.8) : 0;
   }
 
   // 2) Try anchor via landmark
   if(confidence < 0.75 && fieldSpec.anchor && state.profile?.landmarks?.length){
-    const lmSpec = state.profile.landmarks.find(l => l.landmarkKey === fieldSpec.anchor.landmarkKey && (l.page===fieldSpec.page || l.page===0));
+    const lmSpec = state.profile.landmarks.find(
+      l => l.landmarkKey === fieldSpec.anchor.landmarkKey && (l.page === fieldSpec.page || l.page === 0)
+    );
     if(lmSpec){
       const lmBox = findLandmark(tokens, lmSpec, state.viewport);
       if(lmBox){
         const candidate = boxFromAnchor(lmBox, fieldSpec.anchor, state.viewport);
         const snap = snapToLine(tokens, candidate);
-        usedBox = snap.box;
         const txt = snap.text || '';
-        value = fieldSpec.regex ? ((txt.match(new RegExp(fieldSpec.regex,'i'))||[])[1] || '') : txt;
-        confidence = fieldSpec.regex ? 0.9 : 0.8;
+        if(txt.trim()){
+          usedBox = snap.box;
+          value = fieldSpec.regex
+            ? ((txt.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
+            : txt;
+          confidence = fieldSpec.regex ? 0.9 : 0.8;
+        }
       }
     }
   }
