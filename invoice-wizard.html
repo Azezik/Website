@@ -60,40 +60,63 @@
         </form>
       </section>
 
-      <!-- Dashboard -->
-      <section id="dashboard" class="panel" style="display:none">
-        <h2>Dashboard</h2>
-        <div class="grid">
-          <div class="field">
-            <label for="doc-type">Document Type</label>
-            <select id="doc-type">
-              <option value="invoice" selected>Invoice</option>
-              <option value="product_inventory_sheet">Product Inventory Sheet</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Quick Actions</label>
-            <div class="actions">
-              <button id="configure-btn" class="btn">Configure Wizard</button>
-              <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
-              <button id="demo-btn" class="btn">Demo Wizard</button>
-              <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
-              <button id="reset-model-btn" class="btn" type="button">Reset Model</button>
-              <button id="logout-btn" class="btn" type="button">Logout</button>
+      <!-- App sections -->
+      <section id="app" style="display:none">
+        <nav class="subtabs" id="dashTabs">
+          <button class="tablink active" data-target="document-dashboard">Document Dashboard</button>
+          <button class="tablink" data-target="extracted-data">Extracted Data</button>
+          <button class="tablink" data-target="reports">Reports</button>
+        </nav>
+
+        <section id="document-dashboard" class="panel">
+          <div class="grid">
+            <div class="field">
+              <label for="doc-type">Document Type</label>
+              <select id="doc-type">
+                <option value="invoice" selected>Invoice</option>
+                <option value="product_inventory_sheet">Product Inventory Sheet</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Quick Actions</label>
+              <div class="actions">
+                <button id="configure-btn" class="btn">Configure Wizard</button>
+                <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
+                <button id="demo-btn" class="btn">Demo Wizard</button>
+                <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
+                <button id="reset-model-btn" class="btn" type="button">Reset Model</button>
+                <button id="logout-btn" class="btn" type="button">Logout</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="model-select">Saved Wizard Models</label>
+              <select id="model-select">
+                <option value="">— Select a saved model —</option>
+              </select>
+              <p class="sub">Pick a model and then drop files below to auto-extract.</p>
             </div>
           </div>
 
-          <div class="field">
-            <label for="model-select">Saved Wizard Models</label>
-            <select id="model-select">
-              <option value="">— Select a saved model —</option>
-            </select>
-            <p class="sub">Pick a model and then drop files below to auto-extract.</p>
-          </div>
-        </div>
+          <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
+          <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+        </section>
 
-        <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
-        <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+        <section id="extracted-data" class="panel" style="display:none">
+          <div class="field">
+            <label for="data-doc-type">Wizard</label>
+            <select id="data-doc-type">
+              <option value="">All</option>
+              <option value="invoice">Invoice</option>
+              <option value="product_inventory_sheet">Product Inventory Sheet</option>
+            </select>
+          </div>
+          <div id="resultsMount"></div>
+        </section>
+
+        <section id="reports" class="panel" style="display:none">
+          <p class="sub">Reports coming soon.</p>
+        </section>
       </section>
 
       <!-- Wizard -->
@@ -137,19 +160,7 @@
 
         <details class="panel minimal">
           <summary>Saved fields</summary>
-          <div style="overflow:auto;">
-            <table id="fieldsTable" style="width:100%; border-collapse:collapse; font-size:12px;">
-              <thead>
-                <tr>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Field</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Page</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">BBox [x,y,w,h]</th>
-                  <th style="text-align:left; padding:6px; border-bottom:1px solid var(--border);">Value</th>
-                </tr>
-              </thead>
-              <tbody id="fieldsTbody"></tbody>
-            </table>
-          </div>
+          <div id="fieldsPreview" style="overflow:auto;"></div>
           <pre id="savedJson" class="code"></pre>
           <div class="actions">
             <button id="exportBtn" class="btn">Export JSON</button>

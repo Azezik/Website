@@ -10,6 +10,10 @@ html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); font-fa
 .tabs a{ color:var(--muted); text-decoration:none; padding:8px 10px; border-radius:6px; }
 .tabs a.active, .tabs a:hover{ color:var(--text); background:var(--panel); border:1px solid var(--border); }
 
+.subtabs{ display:flex; gap:16px; margin-bottom:16px; }
+.subtabs .tablink{ background:none; border:1px solid transparent; color:var(--muted); padding:8px 10px; border-radius:6px; cursor:pointer; }
+.subtabs .tablink.active, .subtabs .tablink:hover{ color:var(--text); background:var(--panel); border-color:var(--border); }
+
 .header{ margin:8px 0 18px; }
 .header h1{ margin:0 0 8px; font-size:28px; }
 .hash{ color:var(--accent); margin-right:6px; }
