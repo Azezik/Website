@@ -232,6 +232,43 @@
     }
   }
 
+  // UI helpers for the browser dashboard
+  let appInitialized = false;
+  function initApp(){
+    if(appInitialized) return;
+    appInitialized = true;
+
+    const tabs = document.querySelectorAll('#dashTabs .tablink');
+    const sections = Array.from(tabs).map(b => b.dataset.target);
+    tabs.forEach(btn => {
+      btn.addEventListener('click', () => {
+        tabs.forEach(b => b.classList.toggle('active', b === btn));
+        sections.forEach(id => {
+          const el = document.getElementById(id);
+          if(el) el.style.display = id === btn.dataset.target ? 'block' : 'none';
+        });
+      });
+    });
+
+    const app = document.getElementById('app');
+    const wizard = document.getElementById('wizard-section');
+    function showWizard(){ if(app) app.style.display='none'; if(wizard) wizard.style.display='block'; }
+    function showDashboard(){ if(wizard) wizard.style.display='none'; if(app) app.style.display='block'; }
+
+    const configureBtn = document.getElementById('configure-btn');
+    const demoBtn = document.getElementById('demo-btn');
+    const newBtn = document.getElementById('new-wizard-btn');
+    [configureBtn,demoBtn,newBtn].forEach(btn => {
+      if(btn) btn.addEventListener('click', showWizard);
+    });
+
+    const backBtn = document.getElementById('backBtn');
+    const finishBtn = document.getElementById('finishWizardBtn');
+    [backBtn, finishBtn].forEach(btn => {
+      if(btn) btn.addEventListener('click', showDashboard);
+    });
+  }
+
   // Optional browser login toggles used by the UI
   function initLogin(){
     if (typeof window === 'undefined') return;
@@ -245,6 +282,7 @@
     function showApp(){
       if(loginSection) loginSection.style.display = 'none';
       if(app) app.style.display = 'block';
+      initApp();
     }
 
     function showLogin(){
