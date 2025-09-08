@@ -620,7 +620,31 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
     }
   }
 
-  // 2) Anchor via landmark
+  // 2) Saved bbox from profile
+  if(fieldSpec.bbox){
+    const basePx = toPx({ x: fieldSpec.bbox[0], y: fieldSpec.bbox[1], w: fieldSpec.bbox[2], h: fieldSpec.bbox[3], page: fieldSpec.page }, viewportPx);
+    const pads = [0,4,8,12];
+    let fallbackText = '';
+    for(const pad of pads){
+      const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
+      const hits = tokens.filter(t => t.page === search.page && intersect(search, t));
+      if(!hits.length) continue;
+      hits.sort((a,b)=>a.x-b.x);
+      const text = hits.map(t=>t.text).join(' ').trim();
+      if(text) fallbackText = fallbackText || text;
+      let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex, 'i'))||[])[1] || '') : text;
+      val = cleanScalarValue(val, label);
+      if(val){
+        candidates.push({ value: val, boxPx: search, confidence: fieldSpec.regex ? 0.95 : 0.85 });
+        break;
+      }
+    }
+    if(!candidates.length && fallbackText){
+      candidates.push({ value: cleanScalarValue(fallbackText, label), boxPx: basePx, confidence: 0.3 });
+    }
+  }
+
+  // 3) Anchor via landmark
   if(fieldSpec.anchor && state.profile?.landmarks?.length){
     const lmSpec = state.profile.landmarks.find(
       l => l.landmarkKey === fieldSpec.anchor.landmarkKey && (l.page === fieldSpec.page || l.page === 0)
@@ -644,7 +668,7 @@ function extractFieldValue(fieldSpec, tokens, viewportPx){
     }
   }
 
-  // 3) Label→Value heuristic
+  // 4) Label→Value heuristic
   const lv = labelValueHeuristic(fieldSpec, tokens);
   if(lv.value){
     const val = cleanScalarValue(lv.value, label);
@@ -1182,7 +1206,7 @@ async function autoExtractFileWithProfile(file, profile){
       els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
     }
     const tokens = await ensureTokensForPage(state.pageNum);
-    const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, page: spec.page };
+    const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, bbox: spec.bbox, page: spec.page };
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx } = extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){ fieldsObj[spec.fieldKey] = value; }
