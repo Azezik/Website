@@ -38,6 +38,7 @@ const els = {
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
   uploadBtn:       document.getElementById('upload-btn'),
+  resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
   dropzone:        document.getElementById('dropzone'),
   fileInput:       document.getElementById('file-input'),
@@ -200,7 +201,7 @@ function snapToLine(tokens, hintPx, marginPx=6){
 const RE = {
   currency: /([-$]?\s?\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{2})?)/,
   date: /([0-3]?\d[\-\/\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{1,2})[\-\/\s]\d{2,4})/i,
-  orderLike: /(?:order|invoice|no\.?|number|#)\s*[:\-]?\s*([A-Z]?\d{5,})/i,
+  orderLike: /(?:order|invoice|no\.?|number|#)?\s*[:\-]?\s*([A-Z0-9-]{5,})/i,
   sku: /\b([A-Z0-9]{3,}[-_/]?[A-Z0-9]{2,})\b/,
   taxCode: /\b(?:HST|QST)\s*(?:#|no\.?|number)?\s*[:\-]?\s*([0-9A-Z\- ]{8,})\b/i,
   percent: /\b(\d{1,2}(?:\.\d{1,2})?)\s*%/,
@@ -732,6 +733,19 @@ els.logoutBtn?.addEventListener('click', ()=>{
   els.dashboard.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
+});
+els.resetModelBtn?.addEventListener('click', ()=>{
+  if(!state.username) return;
+  if(!confirm('Clear saved model and extracted records?')) return;
+  localStorage.removeItem(LS.profileKey(state.username, state.docType));
+  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
+  setModels(models);
+  localStorage.removeItem(LS.dbKey());
+  state.profile = null;
+  renderSavedFieldsTable();
+  populateModelSelect();
+  renderResultsTable();
+  alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
   els.dashboard.style.display = 'none';
