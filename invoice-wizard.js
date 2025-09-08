@@ -73,16 +73,18 @@
     return null;
   }
 
-  function reconcileTotals(fields, cfg=config){
+  function reconcileTotals(fields, cfg = config){
     const sub = fields.get('subtotal')?.value;
     const tax = fields.get('tax')?.value;
     const total = fields.get('total')?.value;
+
     if(sub!=null && tax!=null && total!=null){
       if(Math.abs((sub + tax) - total) > cfg.ARITH_TOLERANCE){
         const t = fields.get('total');
         if(t){ t.status = 'validation-error'; t.reason = 'subtotal+tax!=total'; }
       }
     }
+
     const dep = fields.get('deposit')?.value;
     const bal = fields.get('balance')?.value;
     if(total!=null && dep!=null && bal!=null){
@@ -107,10 +109,12 @@
       }
     }
     if(cur) merged.push(cur);
+
     const cleaned = merged.map(m => ({
       description: m.description.join(' ').replace(/\s+/g,' ').trim(),
       qty: m.qty, price: m.price, amount: m.amount, confidence:m.confidence
     }));
+
     const dedup=new Map();
     for(const row of cleaned){
       const key = `${row.description}|${row.qty}|${row.amount}`;
@@ -122,7 +126,7 @@
   }
 
   class TemplateStore {
-    constructor(cfg=config){
+    constructor(cfg = config){
       this.cfg = cfg;
       this.families = [];
     }
@@ -130,7 +134,9 @@
       const anchors=[];
       doc.pages.forEach(p=>{
         for(const t of p.tokens){
-          if(this.cfg.ANCHORS.map(a=>a.toLowerCase()).includes(t.text.toLowerCase())) anchors.push(t.text.toLowerCase());
+          if(this.cfg.ANCHORS.map(a=>a.toLowerCase()).includes(t.text.toLowerCase())) {
+            anchors.push(t.text.toLowerCase());
+          }
         }
       });
       anchors.sort();
@@ -146,7 +152,7 @@
   }
 
   class DocumentExtractor {
-    constructor(cfg=config, store=new TemplateStore(cfg)){
+    constructor(cfg = config, store = new TemplateStore(cfg)){
       this.cfg = cfg; this.store = store;
       this.fields = new FieldMap();
       this.audit = {}; this.profile={zones:{}};
@@ -158,6 +164,7 @@
       const key = spec.fieldKey;
       const threshold = this.cfg.CONF_THRESHOLDS[spec.type] || this.cfg.CONF_THRESHOLDS.default;
 
+      // Strategy 1: known zone
       if(this.profile.zones[key]){
         const rectPx = pctRectToPx(this.profile.zones[key].rect, page);
         const padded = expandRect(rectPx, this.cfg.PADDING_PCT, page);
@@ -169,6 +176,7 @@
         }
       }
 
+      // Strategy 2: anchor search
       const anchors = spec.anchors || [];
       for(const a of anchors){
         const tok = findAnchorToken(page.tokens, a);
@@ -184,6 +192,7 @@
         }
       }
 
+      // Strategy 3: pattern fallback
       const pat = patternSearch(spec.type, page.tokens);
       if(pat){
         const val = this.validate(spec.type, pat.value);
@@ -223,6 +232,7 @@
     }
   }
 
+  // Optional browser login toggles used by the UI
   function initLogin(){
     if (typeof window === 'undefined') return;
     const loginSection = document.getElementById('login-section');
@@ -243,7 +253,6 @@
       });
     }
   }
-
   if (typeof window !== 'undefined') {
     window.addEventListener('DOMContentLoaded', initLogin);
   }
