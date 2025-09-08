@@ -1,4 +1,4 @@
-module.exports = {
+const config = {
   PADDING_PCT: 0.02,
   ANCHORS: [
     'Invoice',
@@ -19,3 +19,9 @@ module.exports = {
   MONEY_LOCALE: 'en-US',
   ARITH_TOLERANCE: 0.02
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = config;
+} else {
+  window.InvoiceConfig = config;
+}

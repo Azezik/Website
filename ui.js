@@ -24,4 +24,10 @@ class FieldMap {
   }
 }
 
-module.exports = { FieldMap };
+const api = { FieldMap };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = api;
+} else {
+  window.UI = api;
+}

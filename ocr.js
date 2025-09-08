@@ -36,10 +36,16 @@ function normalizeSpace(str) {
   return (str || '').replace(/\s+/g, ' ').trim();
 }
 
-module.exports = {
+const api = {
   intersects,
   tokensInRect,
   pctRectToPx,
   expandRect,
   normalizeSpace
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = api;
+} else {
+  window.OCR = api;
+}
