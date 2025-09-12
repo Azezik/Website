@@ -7,6 +7,8 @@ const TesseractRef = window.Tesseract;
               'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
 })();
 
+console.log("WROKIT: conflict fix applied");
+
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
@@ -130,6 +132,9 @@ const LS = {
   dbKey: () => `wiz.db.records`,
   getDb() { const raw = localStorage.getItem(this.dbKey()); return raw ? JSON.parse(raw) : []; },
   setDb(arr){ localStorage.setItem(this.dbKey(), JSON.stringify(arr)); },
+  getProfile(u,d){ const raw = localStorage.getItem(this.profileKey(u,d)); return raw ? JSON.parse(raw, jsonReviver) : null; },
+  setProfile(u,d,p){ localStorage.setItem(this.profileKey(u,d), serializeProfile(p)); },
+  removeProfile(u,d){ localStorage.removeItem(this.profileKey(u,d)); }
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
@@ -188,9 +193,15 @@ function jsonReplacer(key, value){
   }
   return value;
 }
+function b64ToU8(str){ const bin = atob(str); const u8 = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i); return u8; }
 function jsonReviver(key, value){
-  if(value && value.type === 'rle' && Array.isArray(value.data)){
-    return rleDecode(value.data, (value.width||0)*(value.height||0));
+  if(value){
+    if(value.type === 'rle' && Array.isArray(value.data)){
+      return rleDecode(value.data, (value.width||0)*(value.height||0));
+    }
+    if(value.type === 'b64' && typeof value.data === 'string'){
+      return b64ToU8(value.data);
+    }
   }
   return value;
 }
@@ -200,18 +211,16 @@ function serializeProfile(p){
 }
 
 let saveTimer=null;
-function saveProfile(p){
-  const key = LS.profileKey(state.username, state.docType);
+function saveProfile(u, d, p){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    try{ localStorage.setItem(key, serializeProfile(p)); }
+    try{ LS.setProfile(u, d, p); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
   },300);
 }
-function loadProfile(u=state.username, d=state.docType){
+function loadProfile(u, d){
   try{
-    const raw = localStorage.getItem(LS.profileKey(u,d));
-    return raw ? migrateProfile(JSON.parse(raw, jsonReviver)) : null;
+    return migrateProfile(LS.getProfile(u,d));
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
@@ -247,7 +256,7 @@ function loadModelById(id){
   const m = getModels().find(x => x.id === id);
   if(!m) return null;
   state.profile = migrateProfile(m.profile);
-  saveProfile(state.profile);
+  saveProfile(state.username, state.docType, state.profile);
   return m.profile;
 }
 
@@ -512,7 +521,7 @@ function ensureProfile(){
       fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
     }));
   }
-  saveProfile(state.profile);
+  saveProfile(state.username, state.docType, state.profile);
 }
 
 /* ------------------------ Wizard Steps --------------------------- */
@@ -939,7 +948,7 @@ function captureGlobalLandmarks(){
     const lm = captureRingLandmark(px);
     return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
   });
-  saveProfile(state.profile);
+  saveProfile(state.username, state.docType, state.profile);
 }
 
 /* ----------------------- Field Extraction ------------------------ */
@@ -1565,7 +1574,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={})
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column) entry.column = extras.column;
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
-  saveProfile(state.profile);
+  saveProfile(state.username, state.docType, state.profile);
 }
 function ensureAnchorFor(fieldKey){
   if(!state.profile) return;
@@ -1582,7 +1591,7 @@ function ensureAnchorFor(fieldKey){
   };
   if(anchorMap[fieldKey]){
     f.anchor = anchorMap[fieldKey];
-    saveProfile(state.profile);
+    saveProfile(state.username, state.docType, state.profile);
   }
 }
 function renderSavedFieldsTable(){
@@ -1618,7 +1627,7 @@ function renderConfirmedTables(){
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
         fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
           const fld = state.profile.fields.find(x=>x.fieldKey===inp.dataset.field);
-          if(fld){ fld.value = inp.value; fld.confidence = 1; saveProfile(state.profile); renderConfirmedTables(); }
+          if(fld){ fld.value = inp.value; fld.confidence = 1; saveProfile(state.username, state.docType, state.profile); renderConfirmedTables(); }
         }));
       }
     }
@@ -1657,7 +1666,7 @@ els.logoutBtn?.addEventListener('click', ()=>{
 els.resetModelBtn?.addEventListener('click', ()=>{
   if(!state.username) return;
 if(!confirm('Clear saved model and extracted records?')) return;
-localStorage.removeItem(LS.profileKey(state.username, state.docType));
+LS.removeProfile(state.username, state.docType);
 const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
 setModels(models);
 localStorage.removeItem(LS.dbKey());
