@@ -368,6 +368,33 @@ function normalizeDate(raw){
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
+function applyOcrCorrections(txt, fieldKey=''){
+  const alphaMap = { '0':'O', '1':'I', '5':'S', '8':'B', '6':'G', '7':'T' };
+  const numMap   = { 'O':'0', 'I':'1', 'l':'1', 'S':'5', 'B':'8' };
+  const corrections = [];
+  const numericField = /invoice_number|sku|quantity|qty|total|subtotal|amount|price|balance|deposit|discount|unit|grand|date/i.test(fieldKey);
+  if(numericField){
+    if(!/^[-\d.,]+$/.test(txt)){
+      txt = txt.replace(/[OIlSB]/g, ch => {
+        const repl = numMap[ch];
+        if(repl){ corrections.push(`${ch}->${repl}`); return repl; }
+        return ch;
+      });
+    }
+  } else {
+    txt = txt.split('').map((ch,i,arr)=>{
+      const prev = arr[i-1] || '';
+      const next = arr[i+1] || '';
+      if(alphaMap[ch] && (/[A-Za-z]/.test(prev) || /[A-Za-z]/.test(next))){
+        corrections.push(`${ch}->${alphaMap[ch]}`);
+        return alphaMap[ch];
+      }
+      return ch;
+    }).join('');
+  }
+  return { text: txt, corrections };
+}
+
 function cleanScalarValue(raw, fieldKey=''){
   let txt = (raw || '').replace(/[#:—•]*$/, '').trim();
   const label = fieldKey.replace(/_/g,' ');
@@ -388,11 +415,10 @@ function cleanScalarValue(raw, fieldKey=''){
     txt = txt.replace(/\s+/g,'').toUpperCase();
   }
 
-  if(/invoice_number|sku|quantity|qty|total|subtotal|tax|amount|price|balance|deposit|discount/i.test(fieldKey)){
-    txt = txt.replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5');
-  }
+  const preCorr = txt;
+  const { text: corrected, corrections } = applyOcrCorrections(preCorr, fieldKey);
 
-  return txt;
+  return { raw: preCorr, value: corrected, corrections };
 }
 
 function groupIntoLines(tokens, tol=4){
@@ -1019,7 +1045,6 @@ function labelValueHeuristic(fieldSpec, tokens){
 }
 
 async function extractFieldValue(fieldSpec, tokens, viewportPx){
-  const label = (fieldSpec.fieldKey||'').replace(/_/g,' ');
   const ftype = fieldSpec.type || 'static';
 
   async function attempt(box){
@@ -1027,13 +1052,13 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(hits.length){
       const text = hits.sort((a,b)=>a.x-b.x).map(t=>t.text).join(' ').trim();
       let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
-      val = cleanScalarValue(val, label);
-      if(val) return { value: val, boxPx: box, confidence: 0.9 };
+      const cleaned = cleanScalarValue(val, fieldSpec.fieldKey||'');
+      if(cleaned.value) return { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: box, confidence: 0.9 };
     }
     if(els.ocrToggle.checked){
       const txt = await ocrBox(box, fieldSpec.fieldKey);
-      const val = cleanScalarValue(txt, label);
-      if(val) return { value: val, boxPx: box, confidence: 0.7 };
+      const cleaned = cleanScalarValue(txt, fieldSpec.fieldKey||'');
+      if(cleaned.value) return { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: box, confidence: 0.7 };
     }
     return null;
   }
@@ -1081,21 +1106,21 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     let val = fieldSpec.regex
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
-    val = cleanScalarValue(val, label);
-    if(val) result = { value: val, boxPx: state.snappedPx, confidence: 0.8, method: method||'snap', score };
+    const cleaned = cleanScalarValue(val, fieldSpec.fieldKey||'');
+    if(cleaned.value) result = { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: state.snappedPx, confidence: 0.8, method: method||'snap', score };
   }
 
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
-      const val = cleanScalarValue(lv.value, label);
-      if(val) result = { value: val, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
+      const cleaned = cleanScalarValue(lv.value, fieldSpec.fieldKey||'');
+      if(cleaned.value) result = { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
 
   if(!result){
-    const fb = cleanScalarValue(state.snappedText, label);
-    result = { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0, method: method||'fallback', score };
+    const fb = cleanScalarValue(state.snappedText, fieldSpec.fieldKey||'');
+    result = { value: fb.value, raw: fb.raw, corrections: fb.corrections, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   result.method = result.method || method || 'fallback';
   result.score = score;
@@ -1155,9 +1180,9 @@ async function extractLineItems(profile){
         }
         const keyMap={description_col:'description',sku_col:'sku',quantity_col:'qty',unit_price_col:'unitPrice'};
         let val=txt;
-        if(f.fieldKey==='sku_col') val=cleanScalarValue(txt,'sku');
-        if(f.fieldKey==='quantity_col') val=cleanScalarValue(txt,'quantity');
-        if(f.fieldKey==='unit_price_col') val=cleanScalarValue(txt,'unit_price');
+        if(f.fieldKey==='sku_col') val=cleanScalarValue(txt,'sku').value;
+        if(f.fieldKey==='quantity_col') val=cleanScalarValue(txt,'quantity').value;
+        if(f.fieldKey==='unit_price_col') val=cleanScalarValue(txt,'unit_price').value;
         if(f.fieldKey==='description_col') val=txt;
         if(val){
           row[keyMap[f.fieldKey]]=val;
@@ -1476,7 +1501,7 @@ function drawOverlay(){
 function compileDocument(fileId, lineItems=[]){
   const raw = rawStore[fileId] || [];
   const byKey = {};
-  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, confidence: r.confidence || 0 }; });
+  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0 }; });
   const sub = parseFloat(byKey['subtotal']?.value);
   const tax = parseFloat(byKey['tax']?.value);
   const tot = parseFloat(byKey['invoice_total']?.value);
@@ -1532,7 +1557,7 @@ function renderResultsTable(){
   const rows = db.map(r=>{
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', confidence:0 };
-      const warn = f.confidence < 0.6 ? '<span class="warn">⚠️</span>' : '';
+      const warn = f.confidence < 0.6 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
       return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
     const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.6?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
@@ -1585,7 +1610,7 @@ function renderReports(){
 }
 
 /* ---------------------- Profile save / table --------------------- */
-function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}){
+function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[]) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const entry = {
@@ -1596,7 +1621,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={})
     bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1],
     bboxPct:{x0:normBox.x0, y0:normBox.y0, x1:normBox.x1, y1:normBox.y1},
     value,
-    confidence
+    confidence,
+    raw,
+    correctionsApplied: corrections
   };
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column) entry.column = extras.column;
@@ -1647,7 +1674,8 @@ function renderConfirmedTables(){
       if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
       else {
         const rows = statics.map(f=>{
-          const warn = (f.confidence||0) < 0.6 ? '<span class="warn">⚠️</span>' : '';
+          const warn = (f.confidence||0) < 0.6 || (f.correctionsApplied&&f.correctionsApplied.length)
+            ? '<span class="warn">⚠️</span>' : '';
           const conf = `<span class="confidence">${Math.round((f.confidence||0)*100)}%</span>`;
           return `<tr><td>${f.fieldKey}</td><td><input class="confirmEdit" data-field="${f.fieldKey}" value="${f.value}"/>${warn}${conf}</td></tr>`;
         }).join('');
@@ -1817,16 +1845,20 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
 
   let value = '', boxPx = state.snappedPx;
-  let confidence = 0;
+  let confidence = 0, raw = '', corrections=[];
   if(step.kind === 'landmark'){
     value = (state.snappedText || '').trim();
+    raw = value;
   } else if (step.kind === 'block'){
     value = (state.snappedText || '').trim();
+    raw = value;
   } else {
     const res = await extractFieldValue(step, tokens, state.viewport);
     value = res.value || (state.snappedText || '').trim();
     boxPx = res.boxPx || state.snappedPx;
     confidence = res.confidence || 0;
+    raw = res.raw || (state.snappedText || '').trim();
+    corrections = res.corrections || [];
   }
 
   const norm = toPct(state.viewport, boxPx);
@@ -1838,7 +1870,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, norm, boxPx, tokens);
   }
-  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras);
+  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras, raw, corrections);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
   renderSavedFieldsTable();
@@ -1848,7 +1880,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     rawStore[fid] = rawStore[fid] || [];
     const arr = rawStore[fid];
     const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
-    const rec = { fieldKey: step.fieldKey, value, confidence, page: state.pageNum, bboxPct: norm, ts: Date.now() };
+    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: norm, ts: Date.now() };
     if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
@@ -1887,12 +1919,12 @@ async function autoExtractFileWithProfile(file, profile){
     const tokens = await ensureTokensForPage(state.pageNum);
     const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, bbox: spec.bbox, page: spec.page };
     state.snappedPx = null; state.snappedText = '';
-    const { value, boxPx, confidence } = await extractFieldValue(fieldSpec, tokens, state.viewport);
+    const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
       const norm = boxPx ? toPct(state.viewport, { ...boxPx, page: state.pageNum }) : null;
       const arr = rawStore[state.currentFileId];
       const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
-      const rec = { fieldKey: spec.fieldKey, value, confidence, page: state.pageNum, bbox: norm, ts: Date.now() };
+      const rec = { fieldKey: spec.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
       if(idx>=0) arr[idx]=rec; else arr.push(rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
