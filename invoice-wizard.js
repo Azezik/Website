@@ -1186,11 +1186,13 @@ async function extractLineItems(profile){
 /* ---------------------- PDF/Image Loading ------------------------ */
 const overlayCtx = els.overlayCanvas.getContext('2d');
 
-function sizeOverlayTo(w,h){
-  els.overlayCanvas.width = w;
-  els.overlayCanvas.height = h;
-  els.overlayCanvas.style.width = w+'px';
-  els.overlayCanvas.style.height = h+'px';
+function sizeOverlayTo(w, h){
+  const dpr = window.devicePixelRatio || 1;
+  els.overlayCanvas.style.width = w + 'px';
+  els.overlayCanvas.style.height = h + 'px';
+  els.overlayCanvas.width = Math.round(w * dpr);
+  els.overlayCanvas.height = Math.round(h * dpr);
+  overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
@@ -1316,6 +1318,14 @@ async function renderAllPages(){
   }
 }
 
+window.addEventListener('resize', () => {
+  const base = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!base) return;
+  const rect = base.getBoundingClientRect();
+  sizeOverlayTo(rect.width, rect.height);
+  drawOverlay();
+});
+
 /* ----------------------- Text Extraction ------------------------- */
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
@@ -1352,31 +1362,47 @@ function pageFromY(y){
 /* --------------------- Overlay / Drawing Box --------------------- */
 let drawing = false, start = null;
 
-els.overlayCanvas.addEventListener('mousedown', e=>{
+els.overlayCanvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
   drawing = true;
   const rect = els.overlayCanvas.getBoundingClientRect();
   start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-});
-els.overlayCanvas.addEventListener('mousemove', e=>{
-  if(!drawing) return;
+  els.overlayCanvas.setPointerCapture?.(e.pointerId);
+}, { passive: false });
+
+els.overlayCanvas.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  e.preventDefault();
   const rect = els.overlayCanvas.getBoundingClientRect();
   const cur = { x: e.clientX - rect.left, y: e.clientY - rect.top };
   const page = pageFromY(start.y);
-  const offset = state.pageOffsets[page-1] || 0;
-  const box = { x: Math.min(start.x,cur.x), y: Math.min(start.y,cur.y) - offset, w: Math.abs(cur.x-start.x), h: Math.abs(cur.y-start.y), page };
-  state.selectionPx = box; drawOverlay();
-});
-els.overlayCanvas.addEventListener('mouseup', async ()=>{
+  const offset = state.pageOffsets[page - 1] || 0;
+  const box = {
+    x: Math.min(start.x, cur.x),
+    y: Math.min(start.y, cur.y) - offset,
+    w: Math.abs(cur.x - start.x),
+    h: Math.abs(cur.y - start.y),
+    page
+  };
+  state.selectionPx = box;
+  drawOverlay();
+}, { passive: false });
+
+async function finalizeSelection() {
   drawing = false;
-  if(!state.selectionPx) return;
+  if (!state.selectionPx) return;
   state.pageNum = state.selectionPx.page;
-  state.viewport = state.pageViewports[state.pageNum-1];
+  state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
   const snap = snapToLine(tokens, state.selectionPx);
-  state.snappedPx = snap.box; state.snappedText = snap.text;
+  state.snappedPx = snap.box;
+  state.snappedText = snap.text;
   drawOverlay();
-});
+}
+
+els.overlayCanvas.addEventListener('pointerup', finalizeSelection, { passive: false });
+els.overlayCanvas.addEventListener('pointercancel', finalizeSelection, { passive: false });
 
 els.viewer.addEventListener('scroll', ()=>{
   const y = els.viewer.scrollTop;
