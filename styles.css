@@ -40,7 +40,7 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 .prompt{ display:flex; align-items:center; gap:12px; margin:10px 0; }
 .viewer{ position:relative; display:block; overflow:auto; max-height:70vh; padding:8px; border:1px dashed var(--border); border-radius:12px; background:#0b1111; }
 .docCanvas{ display:block; max-width:100%; height:auto; }
-.overlay{ position:absolute; left:0; top:0; pointer-events:auto; }
+.overlay{ position:absolute; left:0; top:0; pointer-events:none; }
 
 .code{ white-space:pre-wrap; font-size:12px; color:#cde; }
 
@@ -49,9 +49,10 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 /* Wizard viewer layering */
 .viewer   { position: relative; }
 .docCanvas{ position: relative; z-index: 1; background: #ffffff; }
-.overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: auto; }
+.overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: none; }
 
 /* Extraction / results */
 .confidence{ font-size:10px; color:var(--muted); margin-left:4px; }
+.warn{ color:var(--accent); font-size:12px; margin-left:2px; }
 .line-items-table{ width:100%; border-collapse:collapse; font-size:12px; }
 .line-items-table th, .line-items-table td{ border-bottom:1px solid var(--border); padding:4px; }
