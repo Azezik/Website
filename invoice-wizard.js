@@ -40,6 +40,9 @@ const els = {
   docType:         document.getElementById('doc-type'),
   dataDocType:     document.getElementById('data-doc-type'),
   showBoxesToggle: document.getElementById('show-boxes-toggle'),
+  showRingToggles: document.querySelectorAll('.show-ring-toggle'),
+  showMatchToggles: document.querySelectorAll('.show-match-toggle'),
+  telemetryPanel: document.getElementById('telemetryPanel'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
@@ -110,6 +113,10 @@ let state = {
   selectionPx: null,         // current user-drawn selection (px)
   snappedPx: null,           // snapped line box (px)
   snappedText: '',           // snapped line text
+  pageTransform: { scale:1, rotation:0 }, // calibration transform per page
+  telemetry: [],            // extraction telemetry
+  grayCanvases: {},         // cached grayscale canvases by page
+  matchPoints: [],          // ring/anchor match points
   steps: [],                 // wizard steps
   stepIdx: 0,
   currentFileName: '',
@@ -133,6 +140,12 @@ const fileMeta = {};       // {fileId: {fileName}}
 const MODELS_KEY = 'wiz.models';
 function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]'); } catch{ return []; } }
 function setModels(m){ localStorage.setItem(MODELS_KEY, JSON.stringify(m)); }
+
+function migrateProfile(p){
+  if(!p) return p;
+  (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; });
+  return p;
+}
 
 function saveCurrentProfileAsModel(){
   ensureProfile();
@@ -165,29 +178,49 @@ function loadModelById(id){
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
-const toPx = (norm, vp) => {
+const toPx = (vp, pctBox) => {
   const dpr = window.devicePixelRatio || 1;
   const w = ((vp.w ?? vp.width) || 1) * dpr;
   const h = ((vp.h ?? vp.height) || 1) * dpr;
-  const x = norm.x0 * w;
-  const y = norm.y0 * h;
-  const wPx = (norm.x1 - norm.x0) * w;
-  const hPx = (norm.y1 - norm.y0) * h;
-  return { x, y, w: wPx, h: hPx, page: norm.page };
+  const x = pctBox.x0 * w;
+  const y = pctBox.y0 * h;
+  const wPx = (pctBox.x1 - pctBox.x0) * w;
+  const hPx = (pctBox.y1 - pctBox.y0) * h;
+  return { x, y, w: wPx, h: hPx, page: pctBox.page };
 };
 
-const toNorm = (px, vp) => {
+const toPct = (vp, pxBox) => {
   const dpr = window.devicePixelRatio || 1;
   const w = ((vp.w ?? vp.width) || 1) * dpr;
   const h = ((vp.h ?? vp.height) || 1) * dpr;
   return {
-    x0: px.x / w,
-    y0: px.y / h,
-    x1: (px.x + px.w) / w,
-    y1: (px.y + px.h) / h,
-    page: px.page
+    x0: pxBox.x / w,
+    y0: pxBox.y / h,
+    x1: (pxBox.x + pxBox.w) / w,
+    y1: (pxBox.y + pxBox.h) / h,
+    page: pxBox.page
   };
 };
+
+function applyTransform(boxPx, transform=state.pageTransform){
+  const { scale=1, rotation=0 } = transform || {};
+  if(scale === 1 && rotation === 0) return { ...boxPx };
+  const vp = state.pageViewports[boxPx.page-1] || state.viewport;
+  const dpr = window.devicePixelRatio || 1;
+  const wPage = ((vp.w ?? vp.width) || 1) * dpr;
+  const hPage = ((vp.h ?? vp.height) || 1) * dpr;
+  const cx = wPage/2, cy = hPage/2;
+  const x = boxPx.x + boxPx.w/2;
+  const y = boxPx.y + boxPx.h/2;
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  let dx = (x - cx) * scale;
+  let dy = (y - cy) * scale;
+  const x2 = dx*cos - dy*sin + cx;
+  const y2 = dx*sin + dy*cos + cy;
+  const w = boxPx.w * scale;
+  const h = boxPx.h * scale;
+  return { x: x2 - w/2, y: y2 - h/2, w, h, page: boxPx.page };
+}
 
 function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 function bboxOfTokens(tokens){
@@ -328,6 +361,20 @@ const FIELD_ALIASES = {
   total: 'invoice_total'
 };
 
+const ANCHOR_HINTS = {
+  store_name: ['store', 'business'],
+  department_division: ['department', 'division'],
+  invoice_number: ['invoice number', 'invoice no', 'inv no'],
+  invoice_date: ['invoice date', 'date'],
+  salesperson_rep: ['salesperson', 'rep'],
+  customer_name: ['customer', 'sold to', 'bill to'],
+  customer_address: ['address', 'customer address'],
+  subtotal: ['subtotal', 'sub-total'],
+  discounts: ['discount', 'discounts'],
+  tax: ['tax', 'hst', 'gst', 'qst'],
+  invoice_total: ['total', 'grand total', 'amount due']
+};
+
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   if(state.profile) return;
@@ -337,6 +384,7 @@ function ensureProfile(){
     docType: state.docType,
     version: 2,
     fields: [],
+    globals: [],
     landmarks: [
       // General identifiers
       { landmarkKey:'sales_bill',     page:0, type:'text', text:'Sales Bill',  strategy:'fuzzy', threshold:0.86 },
@@ -380,10 +428,11 @@ function ensureProfile(){
   };
 
   // Seed from any existing saved schema (same shape you uploaded earlier)
-  const existing = LS.getProfile(state.username, state.docType);
+  const existing = migrateProfile(LS.getProfile(state.username, state.docType));
   if (existing?.fields?.length) {
     state.profile.fields = existing.fields.map(f => ({
       ...f,
+      type: f.type || 'static',
       fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
     }));
   }
@@ -399,7 +448,8 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the store or business name on the invoice header.',
     kind: 'value',
     mode: 'cell',
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'department_division',
@@ -407,7 +457,8 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the department/division (if shown). If not present, click Skip.',
     kind: 'value',
     mode: 'cell',
-    required: false
+    required: false,
+    type: 'static'
   },
   {
     fieldKey: 'invoice_number',
@@ -416,7 +467,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.orderLike.source,
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'invoice_date',
@@ -425,7 +477,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.date.source,
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'salesperson_rep',
@@ -433,7 +486,8 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the salesperson/rep name or ID (if shown). If not present, click Skip.',
     kind: 'value',
     mode: 'cell',
-    required: false
+    required: false,
+    type: 'static'
   },
   {
     fieldKey: 'customer_name',
@@ -441,7 +495,8 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the customer name (Sold To/Bill To).',
     kind: 'value',
     mode: 'cell',
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'customer_address',
@@ -449,7 +504,8 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the customer address block (include city, province, and postal code if present).',
     kind: 'block',
     mode: 'cell',
-    required: false
+    required: false,
+    type: 'static'
   },
 
   // Line-Item Columns
@@ -459,7 +515,9 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the entire column containing product/service descriptions. Drag from the first row to the last row so the whole column is selected.',
     kind: 'block',
     mode: 'column',
-    required: true
+    required: true,
+    regex: '.+',
+    type: 'column'
   },
   {
     fieldKey: 'sku_col',
@@ -467,7 +525,9 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the entire column of product codes/SKUs (if present). If none, click Skip.',
     kind: 'block',
     mode: 'column',
-    required: false
+    required: false,
+    regex: RE.sku.source,
+    type: 'column'
   },
   {
     fieldKey: 'quantity_col',
@@ -475,7 +535,9 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the entire column of quantities.',
     kind: 'block',
     mode: 'column',
-    required: true
+    required: true,
+    regex: '[0-9]+(?:\\.[0-9]+)?',
+    type: 'column'
   },
   {
     fieldKey: 'unit_price_col',
@@ -483,7 +545,9 @@ const DEFAULT_FIELDS = [
     prompt: 'Highlight the entire column of unit prices.',
     kind: 'block',
     mode: 'column',
-    required: true
+    required: true,
+    regex: RE.currency.source,
+    type: 'column'
   },
 
   // Totals & Taxes (single cell highlights)
@@ -494,7 +558,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'discounts',
@@ -503,7 +568,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
-    required: false
+    required: false,
+    type: 'static'
   },
   {
     fieldKey: 'tax',
@@ -512,7 +578,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
-    required: true
+    required: true,
+    type: 'static'
   },
   {
     fieldKey: 'invoice_total',
@@ -521,7 +588,8 @@ const DEFAULT_FIELDS = [
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
-    required: true
+    required: true,
+    type: 'static'
   }
 ];
 
@@ -536,7 +604,8 @@ function initStepsFromProfile(){
     kind: d.kind,
     label: d.label,
     mode: d.mode,
-    required: d.required
+    required: d.required,
+    type: d.type
   }));
   state.stepIdx = 0;
   updatePrompt();
@@ -577,7 +646,7 @@ function afterConfirmAdvance(){
 function findLandmark(tokens, spec, viewportPx){
   const lines = groupIntoLines(tokens);
   const withinPrior = spec.bbox
-    ? lines.filter(L => L.tokens.some(t => intersect(toPx({x0:spec.bbox[0],y0:spec.bbox[1],x1:spec.bbox[2],y1:spec.bbox[3],page:spec.page}, viewportPx), t)))
+    ? lines.filter(L => L.tokens.some(t => intersect(toPx(viewportPx, {x0:spec.bbox[0],y0:spec.bbox[1],x1:spec.bbox[2],y1:spec.bbox[3],page:spec.page}), t)))
     : lines;
 
   for(const L of withinPrior){
@@ -591,6 +660,209 @@ function findLandmark(tokens, spec, viewportPx){
 function boxFromAnchor(landmarkPx, anchor, viewportPx){
   const {dx,dy,w,h} = anchor; // normalized offsets relative to page
   return { x: landmarkPx.x + dx*viewportPx.w, y: landmarkPx.y + dy*viewportPx.h, w: w*viewportPx.w, h: h*viewportPx.h, page: landmarkPx.page };
+}
+
+function ensureGrayCanvas(page){
+  if(state.grayCanvases[page]) return state.grayCanvases[page];
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const offY = state.pageOffsets[page-1] || 0;
+  const vp = state.pageViewports[page-1] || state.viewport;
+  const dpr = window.devicePixelRatio || 1;
+  const w = src.width;
+  const h = Math.round(((vp.h ?? vp.height) || 1) * dpr);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(src, 0, offY, w, h, 0, 0, w, h);
+  const img = ctx.getImageData(0,0,w,h);
+  for(let i=0;i<img.data.length;i+=4){
+    const g = Math.round(0.299*img.data[i] + 0.587*img.data[i+1] + 0.114*img.data[i+2]);
+    img.data[i]=img.data[i+1]=img.data[i+2]=g;
+  }
+  ctx.putImageData(img,0,0);
+  state.grayCanvases[page]=canvas;
+  return canvas;
+}
+
+function sobelEdges(data, w, h){
+  const out = new Uint8Array(w*h);
+  const thresh = 0.3;
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      const i = y*w + x;
+      const gx = -data[i-w-1] -2*data[i-1] -data[i+w-1] + data[i-w+1] +2*data[i+1] + data[i+w+1];
+      const gy = -data[i-w-1] -2*data[i-w] -data[i-w+1] + data[i+w-1] +2*data[i+w] + data[i+w+1];
+      const g = Math.sqrt(gx*gx + gy*gy);
+      out[i] = g > thresh ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+function captureRingLandmark(boxPx, rot=0){
+  const src = ensureGrayCanvas(boxPx.page);
+  const pad = 8;
+  const side = Math.max(boxPx.w, boxPx.h) + pad*2;
+  const x = Math.round(boxPx.x + boxPx.w/2 - side/2);
+  const y = Math.round(boxPx.y + boxPx.h/2 - side/2);
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const cctx = canvas.getContext('2d');
+  cctx.translate(size/2, size/2);
+  if(rot) cctx.rotate(-rot);
+  cctx.translate(-size/2, -size/2);
+  cctx.drawImage(src, x, y, side, side, 0, 0, size, size);
+  const img = cctx.getImageData(0,0,size,size);
+  const lum = new Float32Array(size*size);
+  const ringMask = new Uint8Array(size*size);
+  const cx=size/2, cy=size/2;
+  const innerR = (size/2) * (Math.max(boxPx.w, boxPx.h) / side);
+  const outerR = size/2;
+  let sum=0, sumSq=0, count=0;
+  for(let j=0;j<size;j++){
+    for(let i=0;i<size;i++){
+      const idx = j*size + i;
+      const val = img.data[idx*4];
+      lum[idx]=val;
+      const dx=i-cx, dy=j-cy; const dist=Math.sqrt(dx*dx+dy*dy);
+      const m = (dist>=innerR && dist<=outerR)?1:0;
+      ringMask[idx]=m;
+      if(m){ sum+=val; sumSq+=val*val; count++; }
+    }
+  }
+  const mean = count?sum/count:0;
+  const std = count?Math.sqrt(sumSq/count - mean*mean):1;
+  const norm = new Float32Array(size*size);
+  for(let i=0;i<norm.length;i++) norm[i] = (lum[i]-mean)/std;
+  const edgePatch = sobelEdges(norm, size, size);
+  return { patchSize:size, ringMask, edgePatch, mean, std,
+    offset:{dx:0,dy:0,w:boxPx.w/side,h:boxPx.h/side} };
+}
+
+function edgeScore(sample, tmpl, half=null){
+  const mask = tmpl.ringMask;
+  const w = tmpl.patchSize;
+  let count=0, sumA=0, sumB=0;
+  for(let i=0;i<mask.length;i++){
+    if(!mask[i]) continue;
+    const x=i%w;
+    if(half==='right' && x < w/2) continue;
+    if(half==='left' && x >= w/2) continue;
+    sumA += sample.edgePatch[i];
+    sumB += tmpl.edgePatch[i];
+    count++;
+  }
+  const meanA = count?sumA/count:0;
+  const meanB = count?sumB/count:0;
+  let num=0, dA=0, dB=0, match=0;
+  for(let i=0;i<mask.length;i++){
+    if(!mask[i]) continue;
+    const x=i%w;
+    if(half==='right' && x < w/2) continue;
+    if(half==='left' && x >= w/2) continue;
+    const a = sample.edgePatch[i];
+    const b = tmpl.edgePatch[i];
+    num += (a-meanA)*(b-meanB);
+    dA += (a-meanA)*(a-meanA);
+    dB += (b-meanB)*(b-meanB);
+    if(a===b) match++;
+  }
+  if(dA>0 && dB>0) return { score: num/Math.sqrt(dA*dB), comparator:'edge_zncc' };
+  return { score: count?match/count:-1, comparator:'edge_hamming' };
+}
+
+function matchRingLandmark(lm, guessPx, half=null){
+  const vp = state.pageViewports[guessPx.page-1] || state.viewport;
+  const dpr = window.devicePixelRatio || 1;
+  const maxRange = 0.25 * ((vp.h ?? vp.height) || 1) * dpr;
+  const range = Math.min(maxRange, 100);
+  const step = 4;
+  let best = { score:-1, box:null, comparator:null };
+  for(let dy=-range; dy<=range; dy+=step){
+    for(let dx=-range; dx<=range; dx+=step){
+      const box = { x: guessPx.x+dx, y: guessPx.y+dy, w: guessPx.w, h: guessPx.h, page: guessPx.page };
+      const sample = captureRingLandmark(box, state.pageTransform.rotation);
+      const {score, comparator} = edgeScore(sample, lm, half);
+      if(score > best.score){ best = { score, box, comparator }; }
+    }
+  }
+  const thresh = half ? 0.60 : 0.75;
+  if(best.score >= thresh){ best.box.score = best.score; best.box.comparator = best.comparator; return best.box; }
+  return null;
+}
+
+function anchorAssist(hints=[], tokens=[], guessPx){
+  if(!hints.length || !tokens.length) return null;
+  const rx = new RegExp(hints.map(h=>h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|'), 'i');
+  const near = tokens.filter(t=> t.page===guessPx.page && rx.test(t.text) && Math.abs((t.y+t.h/2)-(guessPx.y+guessPx.h/2)) < guessPx.h*4);
+  if(!near.length) return null;
+  const lab = near[0];
+  const right = tokens.filter(t=> t.page===lab.page && t.x > lab.x + lab.w + 2 && Math.abs((t.y+t.h/2)-(lab.y+lab.h/2)) < lab.h*1.5);
+  if(right.length){ return { box: bboxOfTokens(right) }; }
+  const below = tokens.filter(t=> t.page===lab.page && t.y > lab.y + lab.h && t.y < lab.y + lab.h + guessPx.h*2);
+  if(below.length){ return { box: bboxOfTokens(below) }; }
+  return null;
+}
+
+async function calibrateIfNeeded(){
+  const tokens = state.tokensByPage[1] || [];
+  if(tokens.length > 5 || !(state.profile?.globals||[]).length) return;
+  const vp = state.pageViewports[0] || state.viewport;
+  const candidates=[];
+  [0.9,1,1.1].forEach(s=>{ [-1,0,1].forEach(r=>{ candidates.push({scale:s, rotation:r*Math.PI/180}); }); });
+  let best={score:-Infinity, scale:1, rotation:0};
+  for(const cand of candidates){
+    let sum=0, count=0;
+    for(const g of state.profile.globals){
+      const base = toPx(vp, {x0:g.bboxPct.x0,y0:g.bboxPct.y0,x1:g.bboxPct.x1,y1:g.bboxPct.y1,page:1});
+      const box = applyTransform(base, cand);
+      const sample = captureRingLandmark(box, cand.rotation);
+      const {score} = edgeScore(sample, g.landmark);
+      if(score>-1){ sum+=score; count++; }
+    }
+    const avg = count?sum/count:-Infinity;
+    if(avg > best.score){ best = { score:avg, scale:cand.scale, rotation:cand.rotation }; }
+    if(best.score > 0.9) break;
+  }
+  state.pageTransform = { scale: best.scale, rotation: best.rotation };
+}
+
+function buildColumnModel(step, norm, boxPx, tokens){
+  const dpr = window.devicePixelRatio || 1;
+  const vp = state.viewport;
+  const colTokens = tokens.filter(t=> intersect(t, boxPx));
+  const avgH = colTokens.length ? colTokens.reduce((s,t)=>s+t.h,0)/colTokens.length : 0;
+  const lineHeightPct = avgH / (((vp.h ?? vp.height)||1) * dpr);
+  const right = boxPx.x + boxPx.w;
+  const rightAligned = colTokens.filter(t => Math.abs((t.x + t.w) - right) < boxPx.w*0.1).length;
+  const align = rightAligned > (colTokens.length/2) ? 'right' : 'left';
+  const headerTokens = colTokens.filter(t => (t.y + t.h/2) < boxPx.y + avgH*1.5);
+  const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
+  return {
+    xband:[norm.x0, norm.x1],
+    lineHeightPct,
+    regexHint: step.regex || '',
+    align,
+    header: header ? [header.x0, header.y0, header.x1, header.y1] : null,
+    bottomGuards:['subtotal','tax','notes']
+  };
+}
+
+function captureGlobalLandmarks(){
+  ensureProfile();
+  const vp = state.pageViewports[0] || state.viewport;
+  const samples = [
+    {x0:0.02,y0:0.02,x1:0.06,y1:0.06,page:1},
+    {x0:0.50,y0:0.02,x1:0.54,y1:0.06,page:1},
+    {x0:0.80,y0:0.90,x1:0.84,y1:0.94,page:1}
+  ];
+  state.profile.globals = samples.map(b=>{
+    const px = toPx(vp, b);
+    const lm = captureRingLandmark(px);
+    return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
+  });
+  LS.setProfile(state.username, state.docType, state.profile);
 }
 
 /* ----------------------- Field Extraction ------------------------ */
@@ -661,6 +933,7 @@ function labelValueHeuristic(fieldSpec, tokens){
 
 async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const label = (fieldSpec.fieldKey||'').replace(/_/g,' ');
+  const ftype = fieldSpec.type || 'static';
 
   async function attempt(box){
     const hits = tokens.filter(t => t.page === box.page && intersect(box, t));
@@ -678,13 +951,40 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     return null;
   }
 
-  let result = null;
+  let result = null, method=null, score=null, comp=null, basePx=null;
   if(fieldSpec.bbox){
-    const basePx = toPx({x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, viewportPx);
+    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+    basePx = applyTransform(raw);
     for(const pad of [0,4,8,12]){
       const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
       result = await attempt(search);
-      if(result) break;
+      if(result){ method='bbox'; break; }
+    }
+  }
+
+  if(!result && ftype==='static' && fieldSpec.landmark && basePx){
+    let m = matchRingLandmark(fieldSpec.landmark, basePx);
+    if(m){
+      const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+      const r = await attempt(box);
+      if(r){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+    }
+    if(!result){
+      const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
+      if(a){
+        const r = await attempt(a.box);
+        if(r){ result=r; method='anchor'; comp='text_anchor'; score=null; }
+      }
+    }
+    if(!result){
+      for(const half of ['right','left']){
+        m = matchRingLandmark(fieldSpec.landmark, basePx, half);
+        if(m){
+          const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+          const r = await attempt(box);
+          if(r){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+        }
+      }
     }
   }
 
@@ -693,61 +993,103 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
     val = cleanScalarValue(val, label);
-    if(val) result = { value: val, boxPx: state.snappedPx, confidence: 0.8 };
+    if(val) result = { value: val, boxPx: state.snappedPx, confidence: 0.8, method: method||'snap', score };
   }
 
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
       const val = cleanScalarValue(lv.value, label);
-      if(val) result = { value: val, boxPx: lv.usedBox, confidence: lv.confidence };
+      if(val) result = { value: val, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
 
   if(!result){
     const fb = cleanScalarValue(state.snappedText, label);
-    result = { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0 };
+    result = { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0, method: method||'fallback', score };
+  }
+  result.method = result.method || method || 'fallback';
+  result.score = score;
+  result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
+  if(result.score){ result.confidence = clamp(result.confidence * result.score, 0, 1); }
+  state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence });
+  if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
+    state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
   }
   return result;
 }
 
-async function extractLineItems(profile, tokens){
-  const colKeys = ['description_col','sku_col','quantity_col','unit_price_col'];
-  const cols = {};
-  for(const key of colKeys){
-    const spec = profile.fields.find(f=>f.fieldKey===key);
-    if(spec?.bbox){
-      const vp = state.pageViewports[spec.page-1];
-      if(vp){
-        cols[key] = toPx({x0:spec.bbox[0],y0:spec.bbox[1],x1:spec.bbox[2],y1:spec.bbox[3],page:spec.page}, vp);
+async function extractLineItems(profile){
+  const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column);
+  if(!colFields.length) return [];
+  const startPage = Math.min(...colFields.map(f=>f.page||1));
+  const rows=[];
+  const guardWords = Array.from(new Set(colFields.flatMap(f=>f.column.bottomGuards||[])));
+  const guardRe = guardWords.length ? new RegExp(guardWords.join('|'),'i') : null;
+
+  for(let p=startPage; p<=state.numPages; p++){
+    const vp = state.pageViewports[p-1];
+    if(!vp) continue;
+    const tokens = await ensureTokensForPage(p);
+    const bands={};
+    let headerBottom=0;
+    colFields.forEach(f=>{
+      const band = toPx(vp,{x0:f.column.xband[0],y0:0,x1:f.column.xband[1],y1:1,page:p});
+      bands[f.fieldKey]=band;
+      if(f.column.header){
+        const hb=toPx(vp,{x0:f.column.header[0],y0:f.column.header[1],x1:f.column.header[2],y1:f.column.header[3],page:p});
+        headerBottom=Math.max(headerBottom,hb.y+hb.h);
+      }
+    });
+    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w));
+    if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
+    const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.5);
+    const lines = groupIntoLines(pageTokens, lineTol);
+    if(lines.length){
+      const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
+      if(/description|qty|quantity|price|amount|sku/.test(first)) lines.shift();
+    }
+    for(const L of lines){
+      const lower = L.tokens.map(t=>t.text.toLowerCase()).join(' ');
+      if(guardRe && guardRe.test(lower)){ p=state.numPages+1; break; }
+      const row={};
+      const used=new Set();
+      const colConfs=[]; const yCenters=[];
+      for(const f of colFields){
+        const band=bands[f.fieldKey];
+        const colT=L.tokens.filter(t=>t.x+t.w/2>=band.x && t.x+t.w/2<=band.x+band.w && !used.has(t));
+        if(!colT.length) continue;
+        const txt=colT.map(t=>t.text).join(' ').trim();
+        let colConf=1;
+        if(f.column.regexHint){
+          const rx=new RegExp(f.column.regexHint); if(!rx.test(txt)) colConf=0.5;
+        }
+        const keyMap={description_col:'description',sku_col:'sku',quantity_col:'qty',unit_price_col:'unitPrice'};
+        let val=txt;
+        if(f.fieldKey==='sku_col') val=cleanScalarValue(txt,'sku');
+        if(f.fieldKey==='quantity_col') val=cleanScalarValue(txt,'quantity');
+        if(f.fieldKey==='unit_price_col') val=cleanScalarValue(txt,'unit_price');
+        if(f.fieldKey==='description_col') val=txt;
+        if(val){
+          row[keyMap[f.fieldKey]]=val;
+          colConfs.push(colConf);
+          const yc=colT.reduce((s,t)=>s+(t.y+t.h/2),0)/colT.length;
+          yCenters.push(yc);
+          colT.forEach(t=>used.add(t));
+        }
+      }
+      if(row.description && !row.qty && rows.length){
+        rows[rows.length-1].description = (rows[rows.length-1].description + ' ' + row.description).trim();
+        continue;
+      }
+      if(Object.keys(row).length){
+        const base = colConfs.length ? Math.min(...colConfs) : 0;
+        const ySpread = yCenters.length ? Math.max(...yCenters) - Math.min(...yCenters) : 0;
+        const mis = ySpread > lineTol ? 0.2 : 0;
+        row.confidence = clamp(base - mis,0,1);
+        rows.push(row);
       }
     }
-  }
-  if(!Object.keys(cols).length) return [];
-
-  // filter tokens to those inside any column
-  const inCols = tokens.filter(t => Object.values(cols).some(b => t.page===b.page && intersect(b,t)));
-  const lines = groupIntoLines(inCols, 6);
-  if(lines.length){
-    const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
-    if(/description|qty|quantity|price|amount|sku/.test(first)) lines.shift();
-  }
-  const rows=[]; let prev=null;
-  for(const L of lines){
-    const row={};
-    for(const [key,box] of Object.entries(cols)){
-      const tok = L.tokens.filter(t=> intersect(box,t)).map(t=>t.text).join(' ').trim();
-      if(!tok) continue;
-      if(key==='description_col') row.description = tok;
-      if(key==='sku_col') row.sku = cleanScalarValue(tok,'sku');
-      if(key==='quantity_col') row.qty = cleanScalarValue(tok,'quantity');
-      if(key==='unit_price_col') row.unitPrice = cleanScalarValue(tok,'unit_price');
-    }
-    if(row.description && !row.qty && prev){
-      prev.description = (prev.description + ' ' + row.description).trim();
-      continue;
-    }
-    if(Object.keys(row).length){ rows.push(row); prev=row; }
   }
   return rows;
 }
@@ -773,6 +1115,10 @@ async function openFile(file){
 
   cleanupDoc();
   state.pdf = null;
+  state.grayCanvases = {};
+  state.matchPoints = [];
+  state.telemetry = [];
+  renderTelemetry();
   state.currentFileName = file.name || 'untitled';
   state.currentFileId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   fileMeta[state.currentFileId] = { fileName: state.currentFileName };
@@ -789,6 +1135,8 @@ async function openFile(file){
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     await ensureTokensForPage(1);
+    if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
+    else await calibrateIfNeeded();
     drawOverlay();
     return;
   }
@@ -809,6 +1157,8 @@ async function openFile(file){
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     await ensureTokensForPage(1);
+    if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
+    else await calibrateIfNeeded();
     drawOverlay();
   } catch (err) {
     console.error('Failed to load PDF:', err);
@@ -953,6 +1303,8 @@ els.viewer.addEventListener('scroll', ()=>{
 });
 function drawOverlay(){
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
+  const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
   if(els.showBoxesToggle?.checked && state.profile?.fields){
     overlayCtx.strokeStyle = 'rgba(255,0,0,0.6)';
     overlayCtx.lineWidth = 1;
@@ -960,9 +1312,37 @@ function drawOverlay(){
       if(!f.bbox) continue;
       const vp = state.pageViewports[f.page-1];
       if(!vp) continue;
-      const box = toPx({x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3],page:f.page}, vp);
+      const pct = f.bboxPct || {x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3]};
+      const box = applyTransform(toPx(vp, { ...pct, page:f.page }));
       const off = state.pageOffsets[box.page-1] || 0;
       overlayCtx.strokeRect(box.x, box.y + off, box.w, box.h);
+    }
+  }
+  if(ringsOn && state.profile?.fields){
+    overlayCtx.strokeStyle = 'rgba(255,105,180,0.7)';
+    for(const f of state.profile.fields){
+      if(f.type !== 'static' || !f.bbox) continue;
+      const vp = state.pageViewports[f.page-1];
+      if(!vp) continue;
+      const pct = f.bboxPct || {x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3]};
+      const box = applyTransform(toPx(vp, { ...pct, page:f.page }));
+      const off = state.pageOffsets[box.page-1] || 0;
+      const cx = box.x + box.w/2;
+      const cy = box.y + off + box.h/2;
+      const r = Math.max(box.w, box.h)/2 + 8;
+      overlayCtx.beginPath();
+      overlayCtx.arc(cx, cy, r, 0, Math.PI*2);
+      overlayCtx.stroke();
+    }
+  }
+  if(matchesOn && state.matchPoints.length){
+    overlayCtx.fillStyle = 'yellow';
+    for(const mp of state.matchPoints){
+      if(mp.page !== state.pageNum) continue;
+      const off = state.pageOffsets[mp.page-1] || 0;
+      overlayCtx.beginPath();
+      overlayCtx.arc(mp.x, mp.y + off, 3, 0, Math.PI*2);
+      overlayCtx.fill();
     }
   }
   if(state.selectionPx){
@@ -982,6 +1362,16 @@ function compileDocument(fileId, lineItems=[]){
   const raw = rawStore[fileId] || [];
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, confidence: r.confidence || 0 }; });
+  const sub = parseFloat(byKey['subtotal']?.value);
+  const tax = parseFloat(byKey['tax']?.value);
+  const tot = parseFloat(byKey['invoice_total']?.value);
+  if(isFinite(sub) && isFinite(tax) && isFinite(tot)){
+    const diff = Math.abs(sub + tax - tot);
+    const adj = diff < 1 ? 0.05 : -0.2;
+    ['subtotal','tax','invoice_total'].forEach(k=>{
+      if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
+    });
+  }
   const compiled = {
     fileId,
     fileName: fileMeta[fileId]?.fileName || 'unnamed',
@@ -1007,6 +1397,7 @@ function compileDocument(fileId, lineItems=[]){
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(db);
   renderResultsTable();
+  renderTelemetry();
   renderReports();
   return compiled;
 }
@@ -1026,9 +1417,10 @@ function renderResultsTable(){
   const rows = db.map(r=>{
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', confidence:0 };
-      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/><span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
+      const warn = f.confidence < 0.6 ? '<span class="warn">⚠️</span>' : '';
+      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
-    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
+    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.6?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
     return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
@@ -1042,12 +1434,19 @@ function renderResultsTable(){
     const rec = db.find(r=>r.fileId===fileId);
     if(rec && rec.fields?.[field]){
       rec.fields[field].value = inp.value;
+      rec.fields[field].confidence = 1;
       if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
       if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
       LS.setDb(db);
+      renderResultsTable();
       renderReports();
     }
   }));
+}
+
+function renderTelemetry(){
+  if(!els.telemetryPanel) return;
+  els.telemetryPanel.textContent = state.telemetry.map(t=>`${t.field}: ${t.comparator} (${(t.score||0).toFixed(2)}) -> ${(t.confidence||0).toFixed(2)}`).join('\n');
 }
 
 function renderReports(){
@@ -1071,12 +1470,21 @@ function renderReports(){
 }
 
 /* ---------------------- Profile save / table --------------------- */
-function upsertFieldInProfile(fieldKey, normBox, value, page){
+function upsertFieldInProfile(step, normBox, value, page, extras={}){
   ensureProfile();
-  const existing = state.profile.fields.find(f => f.fieldKey === fieldKey);
-  const entry = { fieldKey, page, selectorType:'bbox', bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1], value };
-  if(existing) Object.assign(existing, entry);
-  else state.profile.fields.push(entry);
+  const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
+  const entry = {
+    fieldKey: step.fieldKey,
+    type: step.type,
+    page,
+    selectorType:'bbox',
+    bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1],
+    bboxPct:{x0:normBox.x0, y0:normBox.y0, x1:normBox.x1, y1:normBox.y1},
+    value
+  };
+  if(extras.landmark) entry.landmark = extras.landmark;
+  if(step.type === 'column' && extras.column) entry.column = extras.column;
+  if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   LS.setProfile(state.username, state.docType, state.profile);
   renderSavedFieldsTable();
 }
@@ -1116,7 +1524,7 @@ els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
   state.username = (els.username?.value || 'demo').trim();
   state.docType = els.docType?.value || 'invoice';
-  state.profile = LS.getProfile(state.username, state.docType) || null;
+  state.profile = migrateProfile(LS.getProfile(state.username, state.docType) || null);
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
@@ -1153,7 +1561,7 @@ els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
-  state.profile = LS.getProfile(state.username, state.docType) || null;
+  state.profile = migrateProfile(LS.getProfile(state.username, state.docType) || null);
   renderSavedFieldsTable();
   populateModelSelect();
 });
@@ -1208,6 +1616,8 @@ els.fileInput.addEventListener('change', e=>{
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
+els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
+els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
@@ -1263,8 +1673,16 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     var confidence = res.confidence || 0;
   }
 
-  const norm = toNorm(boxPx, state.viewport);
-  upsertFieldInProfile(step.fieldKey, norm, value, state.pageNum);
+  const norm = toPct(state.viewport, boxPx);
+  const extras = {};
+  if(step.type === 'static'){
+    const lm = captureRingLandmark(boxPx);
+    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+    extras.landmark = lm;
+  } else if(step.type === 'column'){
+    extras.column = buildColumnModel(step, norm, boxPx, tokens);
+  }
+  upsertFieldInProfile(step, norm, value, state.pageNum, extras);
   ensureAnchorFor(step.fieldKey);
 
   const fid = state.currentFileId;
@@ -1272,7 +1690,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     rawStore[fid] = rawStore[fid] || [];
     const arr = rawStore[fid];
     const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
-    const rec = { fieldKey: step.fieldKey, value, confidence, page: state.pageNum, bbox: norm, ts: Date.now() };
+    const rec = { fieldKey: step.fieldKey, value, confidence, page: state.pageNum, bboxPct: norm, ts: Date.now() };
     if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
@@ -1313,7 +1731,7 @@ async function autoExtractFileWithProfile(file, profile){
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx, confidence } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
-      const norm = boxPx ? toNorm({ ...boxPx, page: state.pageNum }, state.viewport) : null;
+      const norm = boxPx ? toPct(state.viewport, { ...boxPx, page: state.pageNum }) : null;
       const arr = rawStore[state.currentFileId];
       const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
       const rec = { fieldKey: spec.fieldKey, value, confidence, page: state.pageNum, bbox: norm, ts: Date.now() };
@@ -1321,8 +1739,8 @@ async function autoExtractFileWithProfile(file, profile){
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
-  const tokensFinal = await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(profile, tokensFinal);
+  await ensureTokensForPage(state.pageNum);
+  const lineItems = await extractLineItems(profile);
   compileDocument(state.currentFileId, lineItems);
 }
 
