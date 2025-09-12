@@ -1726,7 +1726,7 @@ function toFilesList(evt) {
 
 // Dropzone
 ['dragover','dragleave','drop'].forEach(evtName => {
-  els.dropzone.addEventListener(evtName, (e)=>{
+  els.dropzone?.addEventListener(evtName, (e)=>{
     e.preventDefault();
     if (evtName==='dragover') els.dropzone.classList.add('dragover');
     if (evtName==='dragleave') els.dropzone.classList.remove('dragover');
@@ -1739,7 +1739,7 @@ function toFilesList(evt) {
 });
 
 // File input
-els.fileInput.addEventListener('change', e=>{
+els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
   if (files.length) processBatch(files);
 });
