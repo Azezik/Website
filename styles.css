@@ -50,3 +50,8 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 .viewer   { position: relative; }
 .docCanvas{ position: relative; z-index: 1; background: #ffffff; }
 .overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: auto; }
+
+/* Extraction / results */
+.confidence{ font-size:10px; color:var(--muted); margin-left:4px; }
+.line-items-table{ width:100%; border-collapse:collapse; font-size:12px; }
+.line-items-table th, .line-items-table td{ border-bottom:1px solid var(--border); padding:4px; }

@@ -39,6 +39,7 @@ const els = {
   reports:         document.getElementById('reports'),
   docType:         document.getElementById('doc-type'),
   dataDocType:     document.getElementById('data-doc-type'),
+  showBoxesToggle: document.getElementById('show-boxes-toggle'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
@@ -165,15 +166,27 @@ function loadModelById(id){
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
 const toPx = (norm, vp) => {
-  const w = (vp.w ?? vp.width) || 1;
-  const h = (vp.h ?? vp.height) || 1;
-  return { x: norm.x * w, y: norm.y * h, w: norm.w * w, h: norm.h * h, page: norm.page };
+  const dpr = window.devicePixelRatio || 1;
+  const w = ((vp.w ?? vp.width) || 1) * dpr;
+  const h = ((vp.h ?? vp.height) || 1) * dpr;
+  const x = norm.x0 * w;
+  const y = norm.y0 * h;
+  const wPx = (norm.x1 - norm.x0) * w;
+  const hPx = (norm.y1 - norm.y0) * h;
+  return { x, y, w: wPx, h: hPx, page: norm.page };
 };
 
 const toNorm = (px, vp) => {
-  const w = (vp.w ?? vp.width) || 1;
-  const h = (vp.h ?? vp.height) || 1;
-  return { x: px.x / w, y: px.y / h, w: px.w / w, h: px.h / h, page: px.page };
+  const dpr = window.devicePixelRatio || 1;
+  const w = ((vp.w ?? vp.width) || 1) * dpr;
+  const h = ((vp.h ?? vp.height) || 1) * dpr;
+  return {
+    x0: px.x / w,
+    y0: px.y / h,
+    x1: (px.x + px.w) / w,
+    y1: (px.y + px.h) / h,
+    page: px.page
+  };
 };
 
 function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
@@ -254,6 +267,10 @@ function cleanScalarValue(raw, fieldKey=''){
     if(norm) txt = norm;
   } else if(/sku|product_code/i.test(fieldKey)){
     txt = txt.replace(/\s+/g,'').toUpperCase();
+  }
+
+  if(/invoice_number|sku|quantity|qty|total|subtotal|tax|amount|price|balance|deposit|discount/i.test(fieldKey)){
+    txt = txt.replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5');
   }
 
   return txt;
@@ -560,7 +577,7 @@ function afterConfirmAdvance(){
 function findLandmark(tokens, spec, viewportPx){
   const lines = groupIntoLines(tokens);
   const withinPrior = spec.bbox
-    ? lines.filter(L => L.tokens.some(t => intersect(toPx({x:spec.bbox[0],y:spec.bbox[1],w:spec.bbox[2],h:spec.bbox[3],page:spec.page}, viewportPx), t)))
+    ? lines.filter(L => L.tokens.some(t => intersect(toPx({x0:spec.bbox[0],y0:spec.bbox[1],x1:spec.bbox[2],y1:spec.bbox[3],page:spec.page}, viewportPx), t)))
     : lines;
 
   for(const L of withinPrior){
@@ -577,6 +594,38 @@ function boxFromAnchor(landmarkPx, anchor, viewportPx){
 }
 
 /* ----------------------- Field Extraction ------------------------ */
+function ocrConfigFor(fieldKey){
+  if(/invoice_number|sku|quantity|qty/i.test(fieldKey)){
+    return { psm: 8, whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.\/' };
+  }
+  if(/date/i.test(fieldKey)){
+    return { psm: 7, whitelist: '0123456789/\-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' };
+  }
+  if(/total|subtotal|tax|amount|price|balance|deposit|discount/i.test(fieldKey)){
+    return { psm: 7, whitelist: '$€£0123456789,.-' };
+  }
+  if(/address/i.test(fieldKey)){
+    return { psm: 4, whitelist: '' };
+  }
+  return { psm: 7, whitelist: '' };
+}
+
+async function ocrBox(boxPx, fieldKey){
+  const pad = 4;
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const offY = state.pageOffsets[boxPx.page-1] || 0;
+  const canvas = document.createElement('canvas');
+  canvas.width = boxPx.w + pad*2;
+  canvas.height = boxPx.h + pad*2;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(src, boxPx.x - pad, offY + boxPx.y - pad, boxPx.w + pad*2, boxPx.h + pad*2, 0, 0, boxPx.w + pad*2, boxPx.h + pad*2);
+  const cfg = ocrConfigFor(fieldKey);
+  const opts = { tessedit_pageseg_mode: cfg.psm };
+  if(cfg.whitelist) opts.tessedit_char_whitelist = cfg.whitelist;
+  const { data: { text } } = await TesseractRef.recognize(canvas, 'eng', opts);
+  return text.trim();
+}
+
 function labelValueHeuristic(fieldSpec, tokens){
   let value = '', usedBox = null, confidence = 0;
   const lines = groupIntoLines(tokens);
@@ -610,112 +659,97 @@ function labelValueHeuristic(fieldSpec, tokens){
   return { value, usedBox, confidence };
 }
 
-function extractFieldValue(fieldSpec, tokens, viewportPx){
-  const candidates = [];
+async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const label = (fieldSpec.fieldKey||'').replace(/_/g,' ');
 
-  // 1) Current snapped selection
-  if(state.snappedPx){
+  async function attempt(box){
+    const hits = tokens.filter(t => t.page === box.page && intersect(box, t));
+    if(hits.length){
+      const text = hits.sort((a,b)=>a.x-b.x).map(t=>t.text).join(' ').trim();
+      let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
+      val = cleanScalarValue(val, label);
+      if(val) return { value: val, boxPx: box, confidence: 0.9 };
+    }
+    if(els.ocrToggle.checked){
+      const txt = await ocrBox(box, fieldSpec.fieldKey);
+      const val = cleanScalarValue(txt, label);
+      if(val) return { value: val, boxPx: box, confidence: 0.7 };
+    }
+    return null;
+  }
+
+  let result = null;
+  if(fieldSpec.bbox){
+    const basePx = toPx({x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, viewportPx);
+    for(const pad of [0,4,8,12]){
+      const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
+      result = await attempt(search);
+      if(result) break;
+    }
+  }
+
+  if(!result && state.snappedPx){
     let val = fieldSpec.regex
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
     val = cleanScalarValue(val, label);
-    if(val){
-      candidates.push({ value: val, boxPx: state.snappedPx, confidence: fieldSpec.regex ? 0.85 : 0.8 });
+    if(val) result = { value: val, boxPx: state.snappedPx, confidence: 0.8 };
+  }
+
+  if(!result){
+    const lv = labelValueHeuristic(fieldSpec, tokens);
+    if(lv.value){
+      const val = cleanScalarValue(lv.value, label);
+      if(val) result = { value: val, boxPx: lv.usedBox, confidence: lv.confidence };
     }
   }
 
-  // 2) Saved bbox from profile
-  if(fieldSpec.bbox){
-    const basePx = toPx({ x: fieldSpec.bbox[0], y: fieldSpec.bbox[1], w: fieldSpec.bbox[2], h: fieldSpec.bbox[3], page: fieldSpec.page }, viewportPx);
-    const pads = [0,4,8,12];
-    let fallbackText = '';
-    for(const pad of pads){
-      const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-      const hits = tokens.filter(t => t.page === search.page && intersect(search, t));
-      if(!hits.length) continue;
-      hits.sort((a,b)=>a.x-b.x);
-      const text = hits.map(t=>t.text).join(' ').trim();
-      if(text) fallbackText = fallbackText || text;
-      let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex, 'i'))||[])[1] || '') : text;
-      val = cleanScalarValue(val, label);
-      if(val){
-        candidates.push({ value: val, boxPx: search, confidence: fieldSpec.regex ? 0.95 : 0.85 });
-        break;
-      }
-    }
-    if(!candidates.length && fallbackText){
-      candidates.push({ value: cleanScalarValue(fallbackText, label), boxPx: basePx, confidence: 0.3 });
-    }
+  if(!result){
+    const fb = cleanScalarValue(state.snappedText, label);
+    result = { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0 };
   }
+  return result;
+}
 
-  // 3) Anchor via landmark
-  if(fieldSpec.anchor && state.profile?.landmarks?.length){
-    const lmSpec = state.profile.landmarks.find(
-      l => l.landmarkKey === fieldSpec.anchor.landmarkKey && (l.page === fieldSpec.page || l.page === 0)
-    );
-    if(lmSpec){
-      const lmBox = findLandmark(tokens, lmSpec, state.viewport);
-      if(lmBox){
-        const candidate = boxFromAnchor(lmBox, fieldSpec.anchor, state.viewport);
-        const snap = snapToLine(tokens, candidate);
-        const txt = snap.text || '';
-        if(txt.trim()){
-          let val = fieldSpec.regex
-            ? ((txt.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
-            : txt;
-          val = cleanScalarValue(val, label);
-          if(val){
-            candidates.push({ value: val, boxPx: snap.box, confidence: fieldSpec.regex ? 0.9 : 0.8 });
-          }
-        }
+async function extractLineItems(profile, tokens){
+  const colKeys = ['description_col','sku_col','quantity_col','unit_price_col'];
+  const cols = {};
+  for(const key of colKeys){
+    const spec = profile.fields.find(f=>f.fieldKey===key);
+    if(spec?.bbox){
+      const vp = state.pageViewports[spec.page-1];
+      if(vp){
+        cols[key] = toPx({x0:spec.bbox[0],y0:spec.bbox[1],x1:spec.bbox[2],y1:spec.bbox[3],page:spec.page}, vp);
       }
     }
   }
+  if(!Object.keys(cols).length) return [];
 
-  // 4) Label→Value heuristic
-  const lv = labelValueHeuristic(fieldSpec, tokens);
-  if(lv.value){
-    const val = cleanScalarValue(lv.value, label);
-    if(val){ candidates.push({ value: val, boxPx: lv.usedBox, confidence: lv.confidence }); }
+  // filter tokens to those inside any column
+  const inCols = tokens.filter(t => Object.values(cols).some(b => t.page===b.page && intersect(b,t)));
+  const lines = groupIntoLines(inCols, 6);
+  if(lines.length){
+    const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
+    if(/description|qty|quantity|price|amount|sku/.test(first)) lines.shift();
   }
-
-  // Near-duplicate collapse
-  const unique = [];
-  for(const c of candidates){
-    const dup = unique.find(u => cosine3Gram(u.value, c.value) >= 0.9);
-    if(dup){
-      if(c.value.length < dup.value.length){
-        dup.value = c.value; dup.boxPx = c.boxPx;
-      }
-      dup.confidence = Math.max(dup.confidence, c.confidence);
-    } else {
-      unique.push({ ...c });
+  const rows=[]; let prev=null;
+  for(const L of lines){
+    const row={};
+    for(const [key,box] of Object.entries(cols)){
+      const tok = L.tokens.filter(t=> intersect(box,t)).map(t=>t.text).join(' ').trim();
+      if(!tok) continue;
+      if(key==='description_col') row.description = tok;
+      if(key==='sku_col') row.sku = cleanScalarValue(tok,'sku');
+      if(key==='quantity_col') row.qty = cleanScalarValue(tok,'quantity');
+      if(key==='unit_price_col') row.unitPrice = cleanScalarValue(tok,'unit_price');
     }
+    if(row.description && !row.qty && prev){
+      prev.description = (prev.description + ' ' + row.description).trim();
+      continue;
+    }
+    if(Object.keys(row).length){ rows.push(row); prev=row; }
   }
-
-  if(unique.length){
-    const score = c => {
-      let s = c.confidence || 0;
-      const v = c.value;
-      if(fieldSpec.regex){
-        s += new RegExp(fieldSpec.regex,'i').test(v) ? 0.1 : -0.1;
-      } else if(/date/i.test(fieldSpec.fieldKey)){
-        s += RE.date.test(v) ? 0.1 : 0;
-      } else if(/total|subtotal|tax|discount/i.test(fieldSpec.fieldKey)){
-        s += RE.currency.test(v) ? 0.1 : 0;
-      } else if(/invoice|order|number|no/i.test(fieldSpec.fieldKey)){
-        s += RE.orderLike.test(v) ? 0.1 : 0;
-      }
-      return s - v.length * 0.001; // cleanliness
-    };
-    unique.sort((a,b)=> score(b) - score(a));
-    const best = unique[0];
-    return { value: best.value.trim(), boxPx: best.boxPx, confidence: score(best) };
-  }
-
-  const fb = cleanScalarValue(state.snappedText, label);
-  return { value: fb, boxPx: state.snappedPx || null, confidence: fb ? 0.3 : 0 };
+  return rows;
 }
 
 /* ---------------------- PDF/Image Loading ------------------------ */
@@ -755,6 +789,7 @@ async function openFile(file){
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     await ensureTokensForPage(1);
+    drawOverlay();
     return;
   }
 
@@ -774,6 +809,7 @@ async function openFile(file){
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     await ensureTokensForPage(1);
+    drawOverlay();
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
@@ -846,8 +882,6 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
   let tokens = [];
   if(state.isImage){
-    const { data: { words } } = await TesseractRef.recognize(els.imgCanvas, 'eng');
-    tokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
     state.tokensByPage[pageNum] = tokens;
     return tokens;
   }
@@ -855,7 +889,6 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   if(!pageObj) pageObj = await state.pdf.getPage(pageNum);
   if(!vp) vp = state.pageViewports[pageNum-1];
 
-  // Always attempt to use embedded PDF text first
   try {
     const content = await pageObj.getTextContent();
     for(const item of content.items){
@@ -863,25 +896,9 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
       const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
       tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
     }
-    if(tokens.length && !els.ocrToggle.checked){
-      state.tokensByPage[pageNum] = tokens;
-      return tokens;
-    }
   } catch(err){
-    console.warn('PDF textContent failed, falling back to OCR', err);
+    console.warn('PDF textContent failed', err);
   }
-
-  // OCR fallback or supplement
-  let pageCanvas = canvasEl;
-  if(!pageCanvas){
-    pageCanvas = document.createElement('canvas');
-    pageCanvas.width = vp.width; pageCanvas.height = vp.height;
-    const cctx = pageCanvas.getContext('2d');
-    cctx.drawImage(els.pdfCanvas, 0, state.pageOffsets[pageNum-1], vp.width, vp.height, 0, 0, vp.width, vp.height);
-  }
-  const { data: { words } } = await TesseractRef.recognize(pageCanvas, 'eng');
-  const ocrTokens = (words||[]).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1-w.bbox.x0, h: w.bbox.y1-w.bbox.y0, page: pageNum }));
-  tokens = tokens.length ? tokens.concat(ocrTokens) : ocrTokens;
   state.tokensByPage[pageNum] = tokens;
   return tokens;
 }
@@ -936,6 +953,18 @@ els.viewer.addEventListener('scroll', ()=>{
 });
 function drawOverlay(){
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  if(els.showBoxesToggle?.checked && state.profile?.fields){
+    overlayCtx.strokeStyle = 'rgba(255,0,0,0.6)';
+    overlayCtx.lineWidth = 1;
+    for(const f of state.profile.fields){
+      if(!f.bbox) continue;
+      const vp = state.pageViewports[f.page-1];
+      if(!vp) continue;
+      const box = toPx({x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3],page:f.page}, vp);
+      const off = state.pageOffsets[box.page-1] || 0;
+      overlayCtx.strokeRect(box.x, box.y + off, box.w, box.h);
+    }
+  }
   if(state.selectionPx){
     overlayCtx.strokeStyle = '#2ee6a6'; overlayCtx.lineWidth = 1.5;
     const b = state.selectionPx; const off = state.pageOffsets[b.page-1] || 0;
@@ -949,44 +978,28 @@ function drawOverlay(){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function compileDocument(fileId){
+function compileDocument(fileId, lineItems=[]){
   const raw = rawStore[fileId] || [];
-  if(!raw.length) return null;
   const byKey = {};
-  raw.forEach(r=>{ byKey[r.fieldKey] = r; });
+  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, confidence: r.confidence || 0 }; });
   const compiled = {
     fileId,
     fileName: fileMeta[fileId]?.fileName || 'unnamed',
     processedAtISO: new Date().toISOString(),
-    customer: {
-      name: byKey['customer_name']?.value || '',
-      phone: '',
-      email: '',
-      addressLine1: '',
-      addressLine2: '',
-      city: '',
-      province: '',
-      postalCode: ''
-    },
+    fields: byKey,
     invoice: {
       number: byKey['invoice_number']?.value || '',
       salesDateISO: byKey['invoice_date']?.value || '',
-      deliveryDateISO: '',
       salesperson: byKey['salesperson_rep']?.value || '',
-      store: byKey['store_name']?.value || '',
-      terms: '',
-      customerId: ''
+      store: byKey['store_name']?.value || ''
     },
     totals: {
       subtotal: byKey['subtotal']?.value || '',
-      hst: byKey['tax']?.value || '',
-      qst: '',
+      tax: byKey['tax']?.value || '',
       total: byKey['invoice_total']?.value || '',
-      deposit: byKey['deposit']?.value || '',
-      balance: byKey['balance']?.value || ''
+      discount: byKey['discounts']?.value || ''
     },
-    lineItems: [],
-    notes: [],
+    lineItems,
     templateKey: `${state.username}:${state.docType}`
   };
   const db = LS.getDb();
@@ -994,6 +1007,7 @@ function compileDocument(fileId){
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(db);
   renderResultsTable();
+  renderReports();
   return compiled;
 }
 
@@ -1003,54 +1017,64 @@ function renderResultsTable(){
   const filter = els.dataDocType?.value;
   if(filter){ db = db.filter(r => r.templateKey.endsWith(':'+filter)); }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
-  const thead = `<tr>`+
-    ['file','processedAt','customer','address','total','items','actions'].map(h=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${h}</th>`).join('')+
-    `</tr>`;
+
+  const keySet = new Set();
+  db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
+  const keys = Array.from(keySet);
+
+  const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
   const rows = db.map(r=>{
-    const addr = [r.customer?.addressLine1, r.customer?.city, r.customer?.province].filter(Boolean).join(', ');
-    const rawCount = (rawStore[r.fileId]||[]).length;
-    return `<tr data-id="${r.fileId}">`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.fileName}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.processedAtISO}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.customer?.name||''}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${addr}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.totals?.total||''}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">${r.lineItems?.length||0}</td>`+
-      `<td style="padding:6px;border-bottom:1px solid var(--border)">`+
-        `<button class="btn recompile" data-id="${r.fileId}">Recompile</button>`+
-        `<button class="btn viewRaw" data-id="${r.fileId}">Raw (${rawCount})</button>`+
-        `<button class="btn exportJson" data-id="${r.fileId}">Export JSON</button>`+
-      `</td>`+
-      `</tr>`+
-      `<tr class="rawRow" data-id="${r.fileId}" style="display:none"><td colspan="7"><pre class="code">${(rawStore[r.fileId]||[]).length?JSON.stringify(rawStore[r.fileId],null,2):'[]'}</pre></td></tr>`;
+    const cells = keys.map(k=>{
+      const f = r.fields?.[k] || { value:'', confidence:0 };
+      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/><span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
+    }).join('');
+    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
+    const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
+    return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
+
   mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
 
-  mount.querySelectorAll('button.recompile').forEach(btn=>btn.addEventListener('click', ()=>{
-    compileDocument(btn.dataset.id);
-  }));
-  mount.querySelectorAll('button.viewRaw').forEach(btn=>btn.addEventListener('click', ()=>{
-    const row = mount.querySelector(`tr.rawRow[data-id="${btn.dataset.id}"]`);
-    if(row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
-  }));
-  mount.querySelectorAll('button.exportJson').forEach(btn=>btn.addEventListener('click', ()=>{
+  mount.querySelectorAll('input.editField').forEach(inp=>inp.addEventListener('change', ()=>{
+    const fileId = inp.dataset.file;
+    const field = inp.dataset.field;
     const db = LS.getDb();
-    const rec = db.find(r=>r.fileId===btn.dataset.id);
-    if(!rec) return;
-    const blob = new Blob([JSON.stringify(rec, null, 2)], {type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${rec.fileName||'record'}.json`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    const rec = db.find(r=>r.fileId===fileId);
+    if(rec && rec.fields?.[field]){
+      rec.fields[field].value = inp.value;
+      if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
+      if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
+      LS.setDb(db);
+      renderReports();
+    }
   }));
+}
+
+function renderReports(){
+  let db = LS.getDb().filter(r => r.templateKey.startsWith(`${state.username}:`));
+  const totalRevenue = db.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
+  const orders = db.length;
+  const taxTotal = db.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
+  const discountTotal = db.reduce((s,r)=> s + Math.abs(parseFloat(r.totals?.discount)||0), 0);
+  const skuMap = {};
+  db.forEach(r => (r.lineItems||[]).forEach(it=>{
+    const sku = it.sku || '';
+    if(!sku) return;
+    const qty = parseFloat(it.qty)||0;
+    const amt = parseFloat(it.unitPrice)||0 * qty;
+    const cur = skuMap[sku] || { qty:0, revenue:0 };
+    cur.qty += qty; cur.revenue += amt; skuMap[sku] = cur;
+  }));
+  const top = Object.entries(skuMap).sort((a,b)=>b[1].revenue - a[1].revenue).slice(0,5);
+  const topRows = top.map(([sku,d])=>`<tr><td>${sku}</td><td>${d.qty}</td><td>${d.revenue.toFixed(2)}</td></tr>`).join('');
+  els.reports.innerHTML = `<p>Total revenue: ${totalRevenue.toFixed(2)}</p><p>Orders: ${orders}</p><p>Tax total: ${taxTotal.toFixed(2)}</p><p>Discount total: ${discountTotal.toFixed(2)}</p><h4>Top SKUs</h4><table class="line-items-table"><thead><tr><th>SKU</th><th>Qty</th><th>Revenue</th></tr></thead><tbody>${topRows}</tbody></table>`;
 }
 
 /* ---------------------- Profile save / table --------------------- */
 function upsertFieldInProfile(fieldKey, normBox, value, page){
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === fieldKey);
-  const entry = { fieldKey, page, selectorType:'bbox', bbox:[normBox.x, normBox.y, normBox.w, normBox.h], value };
+  const entry = { fieldKey, page, selectorType:'bbox', bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1], value };
   if(existing) Object.assign(existing, entry);
   else state.profile.fields.push(entry);
   LS.setProfile(state.username, state.docType, state.profile);
@@ -1118,7 +1142,6 @@ renderResultsTable();
 alert('Model and records reset.');
 
 });
-els.dataDocType?.addEventListener('change', renderResultsTable);
 els.configureBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
@@ -1135,7 +1158,7 @@ els.docType?.addEventListener('change', ()=>{
   populateModelSelect();
 });
 
-els.dataDocType?.addEventListener('change', renderResultsTable);
+els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
@@ -1183,6 +1206,8 @@ els.fileInput.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
   if (files.length) processBatch(files);
 });
+
+els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
@@ -1232,9 +1257,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   } else if (step.kind === 'block'){
     value = (state.snappedText || '').trim();
   } else {
-    const res = extractFieldValue(step, tokens, state.viewport);
+    const res = await extractFieldValue(step, tokens, state.viewport);
     value = res.value || (state.snappedText || '').trim();
     boxPx = res.boxPx || state.snappedPx;
+    var confidence = res.confidence || 0;
   }
 
   const norm = toNorm(boxPx, state.viewport);
@@ -1244,7 +1270,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const fid = state.currentFileId;
   if(fid){
     rawStore[fid] = rawStore[fid] || [];
-    rawStore[fid].push({ fieldKey: step.fieldKey, value, page: state.pageNum, bbox: norm, ts: Date.now() });
+    const arr = rawStore[fid];
+    const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
+    const rec = { fieldKey: step.fieldKey, value, confidence, page: state.pageNum, bbox: norm, ts: Date.now() };
+    if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
   afterConfirmAdvance();
@@ -1282,14 +1311,19 @@ async function autoExtractFileWithProfile(file, profile){
     const tokens = await ensureTokensForPage(state.pageNum);
     const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, bbox: spec.bbox, page: spec.page };
     state.snappedPx = null; state.snappedText = '';
-    const { value, boxPx } = extractFieldValue(fieldSpec, tokens, state.viewport);
+    const { value, boxPx, confidence } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
       const norm = boxPx ? toNorm({ ...boxPx, page: state.pageNum }, state.viewport) : null;
-      rawStore[state.currentFileId].push({ fieldKey: spec.fieldKey, value, page: state.pageNum, bbox: norm, ts: Date.now() });
+      const arr = rawStore[state.currentFileId];
+      const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
+      const rec = { fieldKey: spec.fieldKey, value, confidence, page: state.pageNum, bbox: norm, ts: Date.now() };
+      if(idx>=0) arr[idx]=rec; else arr.push(rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
-  compileDocument(state.currentFileId);
+  const tokensFinal = await ensureTokensForPage(state.pageNum);
+  const lineItems = await extractLineItems(profile, tokensFinal);
+  compileDocument(state.currentFileId, lineItems);
 }
 
 async function processBatch(files){
@@ -1311,3 +1345,4 @@ async function processBatch(files){
 
 /* ------------------------ Init on load ---------------------------- */
 renderResultsTable();
+renderReports();
