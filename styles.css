@@ -53,5 +53,6 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 
 /* Extraction / results */
 .confidence{ font-size:10px; color:var(--muted); margin-left:4px; }
+.warn{ color:var(--accent); font-size:12px; margin-left:2px; }
 .line-items-table{ width:100%; border-collapse:collapse; font-size:12px; }
 .line-items-table th, .line-items-table td{ border-bottom:1px solid var(--border); padding:4px; }

@@ -115,3 +115,9 @@ Tunable Behaviors (plain language)
 “Micro-expansion size”: a very small padding added around the bbox, applied in a few steps, with a modest cap.
 “Same-line band”: the vertical thickness considered “same line” when walking right from a label.
 “Tolerance”: allowed difference for arithmetic checks (e.g., a few cents or a small percent).
+
+## Field Types & Landmarks
+Fields are tagged as **static** or **column**. Static fields store an edge-based ring fingerprint (normalized luminance + Sobel edges) and an offset to the value box. During extraction the ring is searched only near the saved bbox (±25% of page height). If the ring is found, the offset is applied to read the value; if not, the engine falls back to the bbox and nearby anchor words. Column fields save an x-band, line height, header info, and guard words. Extraction scans tokens inside each band, removes headers, groups by row, merges wrapped descriptions, and stops at guard words.
+
+## Confidence
+Static field confidence blends the ring match score, anchor proximity, grammar checks, and arithmetic consistency (e.g., subtotal + tax ≈ total). Column row confidence is the minimum of its column confidences with penalties for misalignment across columns. Low-confidence results are surfaced in the UI with a ⚠️ marker so users can review or override the value.
