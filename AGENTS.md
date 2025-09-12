@@ -122,5 +122,8 @@ Fields are tagged as **static** or **column**. Static fields store an edge-based
 ## Confidence
 Static field confidence blends the ring match score, anchor proximity, grammar checks, and arithmetic consistency (e.g., subtotal + tax ≈ total). Column row confidence is the minimum of its column confidences with penalties for misalignment across columns. Low-confidence results are surfaced in the UI with a ⚠️ marker so users can review or override the value.
 
+
 ## Versioning
 Profiles include a `version` number (currently 3). On load, migrations add any missing field types or landmark data so older profiles remain compatible. Always use the provided save/load helpers so ring masks and edge maps are stored in compact form.
+
+main

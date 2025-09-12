@@ -1060,7 +1060,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r){ result=r; method='anchor'; comp='text_anchor'; score=null; }
+        if(r){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
     if(!result){
@@ -1667,17 +1667,16 @@ els.logoutBtn?.addEventListener('click', ()=>{
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   if(!state.username) return;
-if(!confirm('Clear saved model and extracted records?')) return;
-LS.removeProfile(state.username, state.docType);
-const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
-setModels(models);
-localStorage.removeItem(LS.dbKey());
-state.profile = null;
-renderSavedFieldsTable();
-populateModelSelect();
-renderResultsTable();
-alert('Model and records reset.');
-
+  if(!confirm('Clear saved model and extracted records?')) return;
+  LS.removeProfile(state.username, state.docType);
+  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
+  setModels(models);
+  localStorage.removeItem(LS.dbKey());
+  state.profile = null;
+  renderSavedFieldsTable();
+  populateModelSelect();
+  renderResultsTable();
+  alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
