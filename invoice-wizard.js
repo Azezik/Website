@@ -7,7 +7,7 @@ const TesseractRef = window.Tesseract;
               'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
 })();
 
-console.log("WROKIT: conflict fix applied");
+console.log("WROKIT: conflict resolver applied");
 
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
@@ -220,7 +220,8 @@ function saveProfile(u, d, p){
 }
 function loadProfile(u, d){
   try{
-    return migrateProfile(LS.getProfile(u,d));
+    const raw = LS.getProfile(u, d);
+    return migrateProfile(raw);
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
@@ -1651,7 +1652,8 @@ els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
   state.username = (els.username?.value || 'demo').trim();
   state.docType = els.docType?.value || 'invoice';
-  state.profile = loadProfile(state.username, state.docType) || null;
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
@@ -1688,7 +1690,8 @@ els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
-  state.profile = loadProfile(state.username, state.docType) || null;
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
   renderSavedFieldsTable();
   populateModelSelect();
 });
