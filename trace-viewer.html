@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Trace Viewer</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="trace.js"></script>
+  <script src="trace-viewer.js" defer></script>
+</head>
+<body>
+  <h2>Trace Viewer</h2>
+  <div id="filters">
+    <label>Doc <select id="docFilter"></select></label>
+    <label>Field <select id="fieldFilter"></select></label>
+    <label>Stage <select id="stageFilter"></select></label>
+  </div>
+  <div id="thumbs"></div>
+  <div id="viewer">
+    <div id="overlayControls">
+      <label><input type="checkbox" id="ovSel" checked>Selection</label>
+      <label><input type="checkbox" id="ovTok">Tokens</label>
+      <label><input type="checkbox" id="ovAnc">Anchors</label>
+      <label><input type="checkbox" id="ovHeat">Heatmap</label>
+      <button id="copyTraceBtn" class="btn">Copy trace JSON</button>
+    </div>
+    <div id="imgWrap" style="position:relative">
+      <img id="detailImg" />
+      <canvas id="ovCanvas" style="position:absolute;left:0;top:0;"></canvas>
+    </div>
+    <pre id="eventJson" class="code"></pre>
+  </div>
+</body>
+</html>
