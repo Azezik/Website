@@ -129,8 +129,18 @@
               Show match points
             </label>
           </div>
+          <div class="field">
+            <label style="flex-direction:row;align-items:center;gap:6px;">
+              <input type="checkbox" id="show-ocr-boxes-toggle" />
+              Show OCR Boxes
+            </label>
+          </div>
           <div id="resultsMount"></div>
           <pre id="telemetryPanel" class="code" style="max-height:120px;overflow:auto;"></pre>
+          <div id="ocrCropSelfTest" class="panel minimal">
+            <h3>OCR Crop Self-Test</h3>
+            <div id="ocrCropList"></div>
+          </div>
         </section>
 
         <section id="reports" class="panel" style="display:none">

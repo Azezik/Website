@@ -42,6 +42,8 @@ const els = {
   showBoxesToggle: document.getElementById('show-boxes-toggle'),
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
+  showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
@@ -97,6 +99,7 @@ function showTab(id){
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
+if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
 let state = {
   username: null,
@@ -123,6 +126,8 @@ let state = {
   currentFileName: '',
   currentFileId: '',        // unique id per opened file
   currentLineItems: [],
+  lastOcrCropPx: null,
+  cropAudits: [],
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -1261,6 +1266,137 @@ async function ocrBox(boxPx, fieldKey){
   return bestTokens;
 }
 
+function getOcrCropForSelection({ docId, pageIndex, boxPx }){
+  const vp = state.pageViewports[pageIndex] || state.viewport;
+  const viewportScale = vp.scale || 1;
+  const rotation = vp.rotation || 0;
+  const dpr = window.devicePixelRatio || 1;
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const ctx = src.getContext('2d');
+  const meta = {
+    docId,
+    pageIndex,
+    devicePixelRatio: dpr,
+    viewportScale,
+    pageRotation: rotation,
+    sourceCanvas: { w: src.width, h: src.height },
+    boxCss: boxPx
+  };
+  if(!ctx || !src.width || !src.height){
+    console.error('ERROR: wrong-canvas');
+    meta.status = 'needs_review';
+    meta.reason = 'wrong-canvas';
+    return { canvasSource: src, cropBitmap: null, meta };
+  }
+  if(boxPx.page-1 !== pageIndex){
+    console.error('ERROR: page-mismatch');
+    meta.status='needs_review';
+    meta.reason='page-mismatch';
+    return { canvasSource: src, cropBitmap: null, meta };
+  }
+  const boxPxDev = {
+    x: Math.round((boxPx.x * viewportScale) * dpr),
+    y: Math.round((boxPx.y * viewportScale) * dpr),
+    w: Math.max(1, Math.round((boxPx.w * viewportScale) * dpr)),
+    h: Math.max(1, Math.round((boxPx.h * viewportScale) * dpr))
+  };
+  const offY = state.pageOffsets[pageIndex] || 0;
+  const clampRect = r => {
+    const x = Math.max(0, Math.min(r.x, src.width-1));
+    const y = Math.max(0, Math.min(r.y, src.height-1));
+    const w = Math.max(1, Math.min(r.w, src.width - x));
+    const h = Math.max(1, Math.min(r.h, src.height - y));
+    return { x, y, w, h };
+  };
+  const rectA = clampRect(boxPxDev);
+  const pad2 = Math.round(2 * dpr);
+  const rectB = clampRect({ x: rectA.x - pad2, y: rectA.y - pad2, w: rectA.w + pad2*2, h: rectA.h + pad2*2 });
+  const pad5 = Math.round(Math.max(rectA.w, rectA.h) * 0.05);
+  const rectC = clampRect({ x: rectA.x - pad5, y: rectA.y - pad5, w: rectA.w + pad5*2, h: rectA.h + pad5*2 });
+  const tiny = r => r.w <= 2 || r.h <= 2;
+  if(tiny(rectA) || tiny(rectB) || tiny(rectC)){
+    console.error('ERROR: tiny-or-zero-crop');
+    meta.status='needs_review';
+    meta.reason='tiny-or-zero-crop';
+  }
+  const cropFrom = r => {
+    const c=document.createElement('canvas'); c.width=r.w; c.height=r.h;
+    c.getContext('2d').drawImage(src, r.x, offY + r.y, r.w, r.h, 0,0,r.w,r.h);
+    return c;
+  };
+  const crops = { A: cropFrom(rectA), B: cropFrom(rectB), C: cropFrom(rectC) };
+  meta.boxPx = rectA;
+  meta.cropA = { w: rectA.w, h: rectA.h };
+  meta.cropB = { w: rectB.w, h: rectB.h };
+  meta.cropC = { w: rectC.w, h: rectC.h };
+  const cssBack = {
+    x: rectA.x / (viewportScale * dpr),
+    y: rectA.y / (viewportScale * dpr),
+    w: rectA.w / (viewportScale * dpr),
+    h: rectA.h / (viewportScale * dpr),
+    page: boxPx.page
+  };
+  state.lastOcrCropPx = cssBack;
+  return { canvasSource: src, cropBitmap: crops, meta };
+}
+
+async function auditCropSelfTest(question, boxPx){
+  const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
+  const pageIndex = (boxPx.page||1) - 1;
+  const { canvasSource, cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, boxPx });
+  meta.question = question;
+  if(meta.reason){
+    state.cropAudits.push(meta); renderCropAuditPanel();
+    return meta;
+  }
+  const fs = window.fs || (window.require && window.require('fs'));
+  const dir = `debug/crops/${docId}/${pageIndex}`;
+  const ts = Date.now();
+  const baseName = `${question}__${ts}`;
+  const bufFromCanvas = c => Buffer.from(c.toDataURL('image/png').split(',')[1], 'base64');
+  if(fs){
+    fs.mkdirSync(dir,{recursive:true});
+    fs.writeFileSync(`${dir}/${baseName}__A.png`, bufFromCanvas(cropBitmap.A));
+    fs.writeFileSync(`${dir}/${baseName}__B.png`, bufFromCanvas(cropBitmap.B));
+    fs.writeFileSync(`${dir}/${baseName}__C.png`, bufFromCanvas(cropBitmap.C));
+  }
+  async function runPass(canvas, psm){
+    const { data } = await TesseractRef.recognize(canvas,'eng',{ tessedit_pageseg_mode:psm });
+    const toks=(data.words||[]).map(w=>w.text.trim()).filter(Boolean);
+    const mean=toks.length? (data.words.reduce((s,w)=>s+w.confidence,0)/toks.length)/100 : 0;
+    return { raw:data.text, tokens:toks, tokensLength:toks.length, meanTokenConfidence:mean };
+  }
+  const probe = { A:{}, B:{}, C:{} };
+  const order = ['A','B','C'];
+  let best=null;
+  for(const key of order){
+    const canvas = cropBitmap[key];
+    const p6 = await runPass(canvas,6); const p7 = await runPass(canvas,7);
+    probe[key].psm6 = p6; probe[key].psm7 = p7;
+    const localBest = p6.tokensLength>p7.tokensLength || (p6.tokensLength===p7.tokensLength && p6.meanTokenConfidence>=p7.meanTokenConfidence) ? { ...p6, psm:6, variant:key } : { ...p7, psm:7, variant:key };
+    if(!best || localBest.tokensLength>best.tokensLength || (localBest.tokensLength===best.tokensLength && localBest.meanTokenConfidence>best.meanTokenConfidence) || (localBest.tokensLength===best.tokensLength && localBest.meanTokenConfidence===best.meanTokenConfidence && order.indexOf(key)<order.indexOf(best.variant))){
+      best = localBest;
+    }
+  }
+  meta.ocrProbe = probe;
+  meta.best = { variant: best.variant, psm: best.psm, raw: best.raw, tokensLength: best.tokensLength, meanTokenConfidence: best.meanTokenConfidence };
+  const allTokens = order.flatMap(k=>[...(probe[k].psm6.tokens||[]), ...(probe[k].psm7.tokens||[])]);
+  const labels=['subtotal','tax','total','hst'];
+  if(allTokens.length===0){
+    meta.status='needs_review'; meta.reason='empty_ocr_for_box';
+  } else if(allTokens.every(t=>labels.includes(t.toLowerCase()))){
+    meta.status='needs_review'; meta.reason='label_only_in_box';
+  } else {
+    meta.status='ok';
+  }
+  if(fs){ fs.writeFileSync(`${dir}/${baseName}.json`, JSON.stringify(meta,null,2)); }
+  meta.thumb = cropBitmap.A.toDataURL('image/png');
+  state.cropAudits.push(meta);
+  renderCropAuditPanel();
+  drawOverlay();
+  return meta;
+}
+
 function labelValueHeuristic(fieldSpec, tokens){
   let value = '', usedBox = null, confidence = 0;
   const lines = groupIntoLines(tokens);
@@ -1786,6 +1922,39 @@ function drawOverlay(){
     const s = state.snappedPx; const off2 = state.pageOffsets[s.page-1] || 0;
     overlayCtx.strokeRect(s.x, s.y + off2, s.w, s.h);
   }
+  if(els.showOcrBoxesToggle?.checked && state.lastOcrCropPx){
+    overlayCtx.strokeStyle = 'red'; overlayCtx.lineWidth = 2;
+    const c = state.lastOcrCropPx; const off3 = state.pageOffsets[c.page-1] || 0;
+    overlayCtx.strokeRect(c.x, c.y + off3, c.w, c.h);
+  }
+}
+
+function renderCropAuditPanel(){
+  if(!els.ocrCropList) return;
+  els.ocrCropList.innerHTML = '';
+  state.cropAudits.forEach(a => {
+    const row = document.createElement('div');
+    row.className = 'ocrCropRow';
+    const img = document.createElement('img');
+    img.src = a.thumb || '';
+    img.alt = a.question || '';
+    img.style.maxWidth = '80px';
+    img.style.maxHeight = '80px';
+    const info = document.createElement('div');
+    const a6 = a.ocrProbe?.A?.psm6?.tokensLength || 0;
+    const a7 = a.ocrProbe?.A?.psm7?.tokensLength || 0;
+    const b6 = a.ocrProbe?.B?.psm6?.tokensLength || 0;
+    const b7 = a.ocrProbe?.B?.psm7?.tokensLength || 0;
+    const c6 = a.ocrProbe?.C?.psm6?.tokensLength || 0;
+    const c7 = a.ocrProbe?.C?.psm7?.tokensLength || 0;
+    const raw = (a.best?.raw || '').slice(0,80).replace(/\s+/g,' ');
+    const conf = a.best?.meanTokenConfidence || 0;
+    const guard = a.reason ? ` ${a.reason}` : '';
+    info.textContent = `${a.question}: A${a6}/${a7} B${b6}/${b7} C${c6}/${c7} conf:${conf.toFixed(2)} ${raw}${guard}`;
+    row.appendChild(img);
+    row.appendChild(info);
+    els.ocrCropList.appendChild(row);
+  });
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
@@ -2102,6 +2271,7 @@ els.fileInput?.addEventListener('change', e=>{
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
+els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
@@ -2166,6 +2336,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     raw = res.raw || (state.snappedText || '').trim();
     corrections = res.correctionsApplied || res.corrections || [];
     fieldTokens = res.tokens || [];
+  }
+
+  if(els.ocrToggle?.checked){
+    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
+    catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
   const norm = toPct(state.viewport, boxPx);
