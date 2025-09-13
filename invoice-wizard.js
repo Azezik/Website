@@ -101,6 +101,7 @@ els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.
 let state = {
   username: null,
   docType: 'invoice',
+  mode: 'CONFIG',
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
   isImage: false,
@@ -389,7 +390,7 @@ function applyOcrCorrections(txt, fieldKey=''){
   const numMap   = { 'O':'0', 'I':'1', 'l':'1', 'S':'5', 'B':'8' };
   const corrections = [];
   let out = txt;
-  const numericField = /invoice_number|sku|quantity|qty|total|subtotal|amount|price|balance|deposit|discount|unit|grand|date/i.test(fieldKey) || /^[-\d.,]+$/.test(out);
+  const numericField = /invoice_number|sku|quantity|qty|invoice_total|subtotal_amount|amount|unit_price|price|balance|deposit|discounts_amount|discount|tax_amount|unit|grand|date/i.test(fieldKey) || /^[-\d.,]+$/.test(out);
   if(numericField){
     for(const [k,v] of Object.entries(numMap)){
       const repl = out.replace(new RegExp(k,'g'), v);
@@ -453,42 +454,44 @@ const FieldDataEngine = (() => {
   const patterns = {};
   const fieldDefs = {
     store_name:      { codes:['12122','11112'], regex:'^[A-Z0-9&.\s]{2,40}$' },
-    department:      { codes:['12122','12112'] },
+    department_division:{ codes:['12122','12112'] },
     invoice_number:  { codes:['21222','11222','11212'] },
     invoice_date:    { codes:['21212','11122'], regex:'^(\\d{4}-\\d{2}-\\d{2}|\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}|[A-Z][a-z]+\\s\\d{1,2},\\s\\d{4})$' },
-    salesperson_name:{ codes:['12122'] },
-    salesperson_id:  { codes:['11222','11212','21222'] },
+    salesperson_rep: { codes:['12122','11222','11212','21222'] },
     customer_name:   { codes:['12122'] },
-    address:         { codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
+    customer_address:{ codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
     description:     { codes:['11122','11112'] },
     sku:             { codes:['11222','11212'], regex:'^[A-Z0-9-]{5,12}$' },
     quantity:        { codes:['21222'] },
     unit_price:      { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    subtotal:        { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    total:           { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    discount:        { codes:['21211','21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    tax:             { codes:['21221','11121'], regex:'^-?\\d+(?:\\.\\d{2})$' }
+    amount:          { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    subtotal_amount: { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    invoice_total:   { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d+(?:\\.\\d{2})$' }
   };
 
   function learn(ftype, value){
     if(!value) return;
-    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}});
+    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}, digit:{}});
     const c = codeOf(value);
     const s = shapeOf(value);
     const l = value.length;
+    const d = digitRatio(value).toFixed(2);
     p.code[c] = (p.code[c] || 0) + 1;
     p.shape[s] = (p.shape[s] || 0) + 1;
     p.len[l] = (p.len[l] || 0) + 1;
+    p.digit[d] = (p.digit[d] || 0) + 1;
   }
 
   function dominant(ftype){
     const p = patterns[ftype];
     if(!p) return {};
     const maxKey = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1])[0]?.[0];
-    return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len) };
+    return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len), digit: parseFloat(maxKey(p.digit)) };
   }
 
-  function clean(ftype, input){
+  function clean(ftype, input, mode='RUN'){
     const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
     const raw = arr.map(t=>t.text).join(' ').trim();
     let txt = collapseAdjacentDuplicates(raw).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
@@ -503,11 +506,18 @@ const FieldDataEngine = (() => {
     const regex = def.regex ? new RegExp(def.regex, 'i') : null;
     let code = codeOf(txt);
     let shape = shapeOf(txt);
+    let digit = digitRatio(txt);
+    if(mode === 'CONFIG'){
+      const value = regex ? ((txt.match(regex)||[])[1]||txt) : txt;
+      learn(ftype, value);
+      return { value, raw, corrected: value, conf, code: codeOf(value), shape: shapeOf(value), score: regex && value ? 1 : 0, correctionsApplied: [], digit: digitRatio(value) };
+    }
     let score = 0;
     if(def.codes && def.codes.includes(code)) score += 2;
     if(regex && regex.test(txt)) score += 2;
     const dom = dominant(ftype);
     if((dom.code && dom.code===code) || (dom.shape && dom.shape===shape) || (dom.len && dom.len===txt.length)) score += 1;
+    if(dom.digit && Math.abs(dom.digit - digit) < 0.01) score += 1;
     let correctionsApplied = [];
     let corrected = txt;
     if(conf < 0.8 && regex && !regex.test(txt)){
@@ -520,14 +530,15 @@ const FieldDataEngine = (() => {
         corrected = corr;
         code = codeOf(corrected);
         shape = shapeOf(corrected);
+        digit = digitRatio(corrected);
         score += 1;
       }
     }
     if(score >= 5){
       learn(ftype, corrected);
-      return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied };
+      return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied, digit };
     }
-    return { value: '', raw, corrected, conf, code, shape, score, correctionsApplied };
+    return { value: '', raw, corrected, conf, code, shape, score, correctionsApplied, digit };
   }
 
   function exportPatterns(){ return patterns; }
@@ -595,9 +606,9 @@ const FIELD_ALIASES = {
   customer_name: 'customer_name',
   sold_to_block: 'customer_address',
   store: 'store_name',
-  subtotal: 'subtotal',
-  hst: 'tax',
-  qst: 'tax',
+  subtotal: 'subtotal_amount',
+  hst: 'tax_amount',
+  qst: 'tax_amount',
   total: 'invoice_total'
 };
 
@@ -609,9 +620,9 @@ const ANCHOR_HINTS = {
   salesperson_rep: ['salesperson', 'rep'],
   customer_name: ['customer', 'sold to', 'bill to'],
   customer_address: ['address', 'customer address'],
-  subtotal: ['subtotal', 'sub-total'],
-  discounts: ['discount', 'discounts'],
-  tax: ['tax', 'hst', 'gst', 'qst'],
+  subtotal_amount: ['subtotal', 'sub-total'],
+  discounts_amount: ['discount', 'discounts'],
+  tax_amount: ['tax', 'hst', 'gst', 'qst'],
   invoice_total: ['total', 'grand total', 'amount due']
 };
 
@@ -753,7 +764,7 @@ const DEFAULT_FIELDS = [
 
   // Line-Item Columns
   {
-    fieldKey: 'description_col',
+    fieldKey: 'product_description',
     label: 'Product / Service Description (Column)',
     prompt: 'Highlight the entire column containing product/service descriptions. Drag from the first row to the last row so the whole column is selected.',
     kind: 'block',
@@ -792,10 +803,20 @@ const DEFAULT_FIELDS = [
     regex: RE.currency.source,
     type: 'column'
   },
+  {
+    fieldKey: 'amount_col',
+    label: 'Amount (Column)',
+    prompt: 'Highlight the entire column of line amounts.',
+    kind: 'block',
+    mode: 'column',
+    required: true,
+    regex: RE.currency.source,
+    type: 'column'
+  },
 
   // Totals & Taxes (single cell highlights)
   {
-    fieldKey: 'subtotal',
+    fieldKey: 'subtotal_amount',
     label: 'Subtotal (before tax & discounts)',
     prompt: 'Highlight the Subtotal amount (before tax and discounts).',
     kind: 'value',
@@ -805,7 +826,7 @@ const DEFAULT_FIELDS = [
     type: 'static'
   },
   {
-    fieldKey: 'discounts',
+    fieldKey: 'discounts_amount',
     label: 'Discounts (if any)',
     prompt: 'Highlight the total Discounts amount (if present). If none, click Skip.',
     kind: 'value',
@@ -815,7 +836,7 @@ const DEFAULT_FIELDS = [
     type: 'static'
   },
   {
-    fieldKey: 'tax',
+    fieldKey: 'tax_amount',
     label: 'Tax (HST/GST/PST)',
     prompt: 'Highlight the total tax line (e.g., HST). If multiple taxes, highlight the combined total.',
     kind: 'value',
@@ -1089,7 +1110,7 @@ function buildColumnModel(step, norm, boxPx, tokens){
     regexHint: step.regex || '',
     align,
     header: header ? [header.x0, header.y0, header.x1, header.y1] : null,
-    bottomGuards:['subtotal','tax','notes']
+    bottomGuards:['subtotal_amount','tax_amount','notes']
   };
 }
 
@@ -1244,7 +1265,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       const lineTokens = lines.flatMap(L=>L.tokens);
       const text = lineTokens.map(t=>t.text).join(' ').trim();
       let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lineTokens);
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lineTokens, state.mode);
       if(cleaned.value){
         state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
         return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: lineTokens };
@@ -1254,7 +1275,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       const oTokens = await ocrBox(box, fieldSpec.fieldKey);
       if(oTokens.length){
         const text = oTokens.map(t=>t.text).join(' ').trim();
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens);
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens, state.mode);
         if(cleaned.value){
           state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
           return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: oTokens };
@@ -1268,7 +1289,8 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
-    for(const pad of [0,4,8,12]){
+    const pads = state.mode==='CONFIG' ? [0,4] : [0,4,8,12];
+    for(const pad of pads){
       const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
       result = await attempt(search);
       if(result){ method='bbox'; break; }
@@ -1307,7 +1329,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     let val = fieldSpec.regex
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', val);
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', val, state.mode);
     if(cleaned.value){
       state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
       result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, method: method||'snap', score };
@@ -1317,7 +1339,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(!result){
       const lv = labelValueHeuristic(fieldSpec, tokens);
       if(lv.value){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value);
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
         if(cleaned.value){
           state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
           result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
@@ -1326,7 +1348,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     }
 
     if(!result){
-      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText);
+      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
       state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
       result = { value: fb.value, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
     }
@@ -1365,6 +1387,7 @@ async function extractLineItems(profile){
       }
     });
     let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w));
+    pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
     if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
     const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.5);
     const lines = groupIntoLines(pageTokens, lineTol);
@@ -1387,12 +1410,10 @@ async function extractLineItems(profile){
         if(f.column.regexHint){
           const rx=new RegExp(f.column.regexHint); if(!rx.test(txt)) colConf=0.5;
         }
-        const keyMap={description_col:'description',sku_col:'sku',quantity_col:'qty',unit_price_col:'unitPrice'};
+        const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',amount_col:'amount'};
         let val=txt;
-        if(f.fieldKey==='sku_col') val=FieldDataEngine.clean('sku', txt).value;
-        if(f.fieldKey==='quantity_col') val=FieldDataEngine.clean('quantity', txt).value;
-        if(f.fieldKey==='unit_price_col') val=FieldDataEngine.clean('unit_price', txt).value;
-        if(f.fieldKey==='description_col') val=txt;
+        const baseType=keyMap[f.fieldKey];
+        if(baseType) val=FieldDataEngine.clean(baseType, txt, state.mode).value;
         if(val){
           row[keyMap[f.fieldKey]]=val;
           colConfs.push(colConf);
@@ -1401,7 +1422,7 @@ async function extractLineItems(profile){
           colT.forEach(t=>used.add(t));
         }
       }
-      if(row.description && !row.qty && rows.length){
+      if(row.description && !row.quantity && rows.length){
         rows[rows.length-1].description = (rows[rows.length-1].description + ' ' + row.description).trim();
         continue;
       }
@@ -1410,6 +1431,11 @@ async function extractLineItems(profile){
         const ySpread = yCenters.length ? Math.max(...yCenters) - Math.min(...yCenters) : 0;
         const mis = ySpread > lineTol ? 0.2 : 0;
         row.confidence = clamp(base - mis,0,1);
+        if(row.quantity && row.unit_price && row.amount){
+          const exp = parseFloat(row.quantity) * parseFloat(row.unit_price);
+          const diff = Math.abs(exp - parseFloat(row.amount));
+          if(!isNaN(diff) && diff > 0.02) row.confidence *= 0.8;
+        }
         rows.push(row);
       }
     }
@@ -1713,13 +1739,13 @@ function compileDocument(fileId, lineItems=[]){
   const raw = rawStore[fileId] || [];
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
-  const sub = parseFloat(byKey['subtotal']?.value);
-  const tax = parseFloat(byKey['tax']?.value);
+  const sub = parseFloat(byKey['subtotal_amount']?.value);
+  const tax = parseFloat(byKey['tax_amount']?.value);
   const tot = parseFloat(byKey['invoice_total']?.value);
   if(isFinite(sub) && isFinite(tax) && isFinite(tot)){
     const diff = Math.abs(sub + tax - tot);
     const adj = diff < 1 ? 0.05 : -0.2;
-    ['subtotal','tax','invoice_total'].forEach(k=>{
+    ['subtotal_amount','tax_amount','invoice_total'].forEach(k=>{
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
@@ -1735,10 +1761,10 @@ function compileDocument(fileId, lineItems=[]){
       store: byKey['store_name']?.value || ''
     },
     totals: {
-      subtotal: byKey['subtotal']?.value || '',
-      tax: byKey['tax']?.value || '',
+      subtotal: byKey['subtotal_amount']?.value || '',
+      tax: byKey['tax_amount']?.value || '',
       total: byKey['invoice_total']?.value || '',
-      discount: byKey['discounts']?.value || ''
+      discount: byKey['discounts_amount']?.value || ''
     },
     lineItems,
     templateKey: `${state.username}:${state.docType}`
@@ -1771,7 +1797,7 @@ function renderResultsTable(){
       const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
       return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
-    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
+    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td></tr>`).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
     return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
@@ -1810,8 +1836,8 @@ function renderReports(){
   db.forEach(r => (r.lineItems||[]).forEach(it=>{
     const sku = it.sku || '';
     if(!sku) return;
-    const qty = parseFloat(it.qty)||0;
-    const amt = parseFloat(it.unitPrice)||0 * qty;
+    const qty = parseFloat(it.quantity)||0;
+    const amt = parseFloat(it.unit_price)||0 * qty;
     const cur = skuMap[sku] || { qty:0, revenue:0 };
     cur.qty += qty; cur.revenue += amt; skuMap[sku] = cur;
   }));
@@ -1848,10 +1874,9 @@ function ensureAnchorFor(fieldKey){
   if(!f || f.anchor) return;
   const anchorMap = {
     order_number:   { landmarkKey:'sales_bill',    dx: 0.02, dy: 0.00, w: 0.10, h: 0.035 },
-    subtotal:       { landmarkKey:'subtotal_hdr',  dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
-    hst:            { landmarkKey:'hst_hdr',       dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
-    qst:            { landmarkKey:'qst_hdr',       dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
-    total:          { landmarkKey:'total_hdr',     dx: 0.12, dy: 0.00, w: 0.14, h: 0.04  },
+    subtotal_amount:{ landmarkKey:'subtotal_hdr',  dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
+    tax_amount:     { landmarkKey:'tax_hdr',       dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
+    invoice_total:  { landmarkKey:'total_hdr',     dx: 0.12, dy: 0.00, w: 0.14, h: 0.04  },
     deposit:        { landmarkKey:'deposit_hdr',   dx: 0.12, dy: 0.00, w: 0.12, h: 0.035 },
     balance:        { landmarkKey:'balance_hdr',   dx: 0.12, dy: 0.00, w: 0.14, h: 0.04  },
   };
@@ -1904,7 +1929,7 @@ function renderConfirmedTables(){
       else {
         const rows = items.map(it=>{
           const warn = (it.confidence||0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
-          return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td><td>${it.amount||''}</td></tr>`;
+          return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${it.amount||''}</td></tr>`;
         }).join('');
         liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Description</th><th>SKU</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
@@ -1945,6 +1970,7 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
+  state.mode = 'CONFIG';
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
   ensureProfile();
@@ -2122,6 +2148,9 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 
 /* ---------------------------- Batch ------------------------------- */
 async function autoExtractFileWithProfile(file, profile){
+  state.mode = 'RUN';
+  state.profile = profile;
+  FieldDataEngine.importPatterns(profile.fieldPatterns || {});
   await openFile(file);
   for(const spec of (profile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
@@ -2150,6 +2179,7 @@ async function autoExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
+  state.mode = 'RUN';
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
   ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
