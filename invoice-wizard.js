@@ -1704,26 +1704,24 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
     const hits = tokensInBox(tokens, searchBox);
-    if (hits.length) {
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey || '', hits, state.mode);
-      if (cleaned.value || cleaned.raw) {
-        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-        return {
-          value: cleaned.value || cleaned.raw,
-          raw: cleaned.raw,
-          corrected: cleaned.corrected,
-          code: cleaned.code,
-          shape: cleaned.shape,
-          score: cleaned.score,
-          correctionsApplied: cleaned.correctionsApplied,
-          corrections: cleaned.correctionsApplied,
-          boxPx: searchBox,
-          confidence: cleaned.conf,
-          tokens: hits
-        };
-      }
-    }
-    return null;
+    if(!hits.length) return null;
+    const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode));
+    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+    const cleaned = sel.cleaned || {};
+    return {
+      value: sel.value,
+      raw: sel.raw,
+      corrected: cleaned.corrected,
+      code: cleaned.code,
+      shape: cleaned.shape,
+      score: cleaned.score,
+      correctionsApplied: cleaned.correctionsApplied,
+      corrections: cleaned.correctionsApplied,
+      boxPx: searchBox,
+      confidence: cleaned.conf || (sel.cleanedOk ? 1 : 0.1),
+      tokens: hits,
+      cleanedOk: sel.cleanedOk
+    };
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
@@ -1749,14 +1747,22 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     };
     return result;
   }
+  let selectionRaw = '';
+  let firstAttempt = null;
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
-    const pads = state.mode==='CONFIG' ? [0,4] : [0,4,8,12];
-    for(const pad of pads){
-      const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-      const r = await attempt(search);
-      if(r && r.value){ result = r; method='bbox'; break; }
+    firstAttempt = await attempt(basePx);
+    selectionRaw = firstAttempt?.raw || '';
+    if(firstAttempt && firstAttempt.cleanedOk){
+      result = firstAttempt; method='bbox';
+    } else {
+      const pads = state.mode==='CONFIG' ? [4] : [4,8,12];
+      for(const pad of pads){
+        const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
+        const r = await attempt(search);
+        if(r && r.cleanedOk){ result = r; method='bbox'; break; }
+      }
     }
   }
 
@@ -1799,12 +1805,12 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(!result){
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
     state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-    result = { value: fb.value || fb.raw, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
-  if(!result.value && state.snappedText){
+  if(!result.value && selectionRaw){
     bumpDebugBlank();
-    const raw = (state.snappedText||'').trim();
-    result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || state.snappedPx || null;
+    const raw = selectionRaw.trim();
+    result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
   }
   result.method = result.method || method || 'fallback';
   result.score = score;
