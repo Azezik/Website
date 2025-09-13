@@ -43,6 +43,7 @@ const els = {
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
   ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
@@ -112,6 +113,7 @@ let state = {
   username: null,
   docType: 'invoice',
   mode: 'CONFIG',
+  modes: { rawData: false },
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
   isImage: false,
@@ -1771,6 +1773,42 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
 
+  if(state.modes.rawData){
+    let boxPx = null;
+    if(state.mode === 'CONFIG' && state.snappedPx){
+      boxPx = state.snappedPx;
+      traceEvent(spanKey,'selection.captured',{ boxPx });
+    } else if(fieldSpec.bbox){
+      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      boxPx = applyTransform(raw);
+      traceEvent(spanKey,'selection.captured',{ boxPx });
+    }
+    if(!boxPx){ return { value:'', raw:'', confidence:0, boxPx:null, tokens:[], method:'raw' }; }
+    const docId = state.currentFileId || state.currentFileName || 'doc';
+    const pageIndex = (boxPx.page||1) - 1;
+    const vp = state.pageViewports[pageIndex] || state.viewport || {width:1,height:1};
+    const canvasW = (vp.width ?? vp.w) || 1;
+    const canvasH = (vp.height ?? vp.h) || 1;
+    const normBox = normalizeBox(boxPx, canvasW, canvasH);
+    const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
+    if(meta.errors.length){
+      alert('OCR crop error: '+meta.errors.join(','));
+      return { value:'', raw:'', confidence:0, boxPx, tokens:[], method:'raw' };
+    }
+    const probe = await runOcrProbes(cropBitmap);
+    const best = chooseBestProbe(probe);
+    const rawText = (best.raw || '').trim();
+    traceEvent(spanKey,'ocr.raw',{ mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false, tokens: best.tokensLength, crop: cropBitmap.toDataURL('image/png') });
+    if(!rawText && !confirm('OCR returned empty. Keep empty value?')){
+      alert('Please re-select the field.');
+      return { value:'', raw:'', confidence:0, boxPx, tokens:[], method:'raw' };
+    }
+    const tokensOut = best.tokens.map(t=>({ text:t }));
+    const result = { value: rawText, raw: rawText, corrected: rawText, code:null, shape:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
+    traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method:'raw', mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false });
+    return result;
+  }
+
   async function attempt(box){
     const snap = snapToLine(tokens, box);
     let searchBox = snap.box;
@@ -1906,6 +1944,29 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 async function extractLineItems(profile){
   const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column);
   if(!colFields.length) return [];
+  if(state.modes.rawData){
+    const rows=[];
+    const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',amount_col:'amount'};
+    for(const f of colFields){
+      const pageIndex=(f.page||1)-1;
+      const vp=state.pageViewports[pageIndex];
+      if(!vp) continue;
+      const band=toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:f.column.yband?f.column.yband[1]:1,page:f.page});
+      const docId=state.currentFileId || state.currentFileName || 'doc';
+      const canvasW=(vp.width??vp.w)||1;
+      const canvasH=(vp.height??vp.h)||1;
+      const normBox=normalizeBox(band, canvasW, canvasH);
+      const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
+      if(meta.errors.length){ alert('OCR crop error: '+meta.errors.join(',')); continue; }
+      const probe=await runOcrProbes(cropBitmap);
+      const best=chooseBestProbe(probe);
+      traceEvent({docId,pageIndex,fieldKey:f.fieldKey},'column.raw',{ mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false, tokens: best.tokensLength });
+      const raw=(best.raw||'').trim();
+      const key=keyMap[f.fieldKey]||f.fieldKey;
+      const row={}; row[key]=raw; row.confidence=1; rows.push(row);
+    }
+    return rows;
+  }
   const startPage = Math.min(...colFields.map(f=>f.page||1));
   const rows=[];
   const guardWords = Array.from(new Set(colFields.flatMap(f=>f.column.bottomGuards||[])));
@@ -2572,7 +2633,7 @@ function renderResultsTable(){
   const keySet = new Set();
   db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
-  const showRaw = els.showRawToggle?.checked;
+  const showRaw = state.modes.rawData || els.showRawToggle?.checked;
 
   const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
   const rows = db.map(r=>{
@@ -2608,6 +2669,16 @@ function renderResultsTable(){
       renderReports();
     }
   }));
+}
+
+function syncRawModeUI(){
+  const on = state.modes.rawData;
+  if(els.showRawToggle){
+    els.showRawToggle.checked = true;
+    els.showRawToggle.disabled = on;
+    if(!on) els.showRawToggle.checked = false;
+  }
+  renderResultsTable();
 }
 
 function renderTelemetry(){
@@ -2792,6 +2863,10 @@ els.docType?.addEventListener('change', ()=>{
 
 els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
 els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
+els.rawDataToggle?.addEventListener('change', ()=>{
+  state.modes.rawData = !!els.rawDataToggle.checked;
+  syncRawModeUI();
+});
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
@@ -3018,3 +3093,4 @@ async function processBatch(files){
 /* ------------------------ Init on load ---------------------------- */
 renderResultsTable();
 renderReports();
+syncRawModeUI();
