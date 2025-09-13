@@ -31,6 +31,7 @@ label .req{ color:#f39; }
 input, select{ background:#0e1516; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; }
 .btn{ background:#0e1516; color:var(--text); border:1px solid var(--border); padding:10px 14px; border-radius:10px; cursor:pointer; }
 .btn.primary{ background:var(--accent); color:#081412; border-color:transparent; }
+.btn.active{ background:var(--accent); color:#081412; border-color:transparent; }
 .btn:hover{ filter:brightness(1.1); }
 .actions{ display:flex; gap:8px; flex-wrap:wrap; }
 
