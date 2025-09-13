@@ -125,6 +125,11 @@ let state = {
   currentLineItems: [],
 };
 
+window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
+function bumpDebugBlank(){
+  window.__debugBlankAvoided = (window.__debugBlankAvoided || 0) + 1;
+}
+
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
   profileKey: (u, d) => `wiz.profile.${u}.${d}`,
@@ -453,22 +458,22 @@ function digitRatio(str){
 const FieldDataEngine = (() => {
   const patterns = {};
   const fieldDefs = {
-    store_name:      { codes:['12122','11112'], regex:'^[A-Z0-9&.\s]{2,40}$' },
-    department_division:{ codes:['12122','12112'] },
-    invoice_number:  { codes:['21222','11222','11212'] },
+    store_name:      { codes:['12122','11112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    department_division:{ codes:['12122','12112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    invoice_number:  { codes:['21222','11222','11212'], regex:'^[A-Z0-9-]{3,20}$' },
     invoice_date:    { codes:['21212','11122'], regex:'^(\\d{4}-\\d{2}-\\d{2}|\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}|[A-Z][a-z]+\\s\\d{1,2},\\s\\d{4})$' },
-    salesperson_rep: { codes:['12122','11222','11212','21222'] },
-    customer_name:   { codes:['12122'] },
+    salesperson_rep: { codes:['12122','11222','11212','21222'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    customer_name:   { codes:['12122'], regex:"^[A-Z&.'\\s-]{2,60}$" },
     customer_address:{ codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
     description:     { codes:['11122','11112'] },
     sku:             { codes:['11222','11212'], regex:'^[A-Z0-9-]{5,12}$' },
     quantity:        { codes:['21222'] },
-    unit_price:      { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    amount:          { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    subtotal_amount: { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    invoice_total:   { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d+(?:\\.\\d{2})$' }
+    unit_price:      { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    amount:          { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    subtotal_amount: { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    invoice_total:   { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' }
   };
 
   function learn(ftype, value){
@@ -493,8 +498,11 @@ const FieldDataEngine = (() => {
 
   function clean(ftype, input, mode='RUN'){
     const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
-    const raw = arr.map(t=>t.text).join(' ').trim();
-    let txt = collapseAdjacentDuplicates(raw).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
+    let raw = lineStrs.join(' ').trim();
+    let joined = lineStrs.join(' ').trim();
+    if(ftype==='customer_address') joined = lineStrs.join(', ').trim();
+    let txt = collapseAdjacentDuplicates(joined).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
     if(/date/i.test(ftype)){ const n = normalizeDate(txt); if(n) txt = n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       const n = normalizeMoney(txt); if(n) txt = n;
@@ -508,9 +516,23 @@ const FieldDataEngine = (() => {
     let shape = shapeOf(txt);
     let digit = digitRatio(txt);
     if(mode === 'CONFIG'){
-      const value = regex ? ((txt.match(regex)||[])[1]||txt) : txt;
-      learn(ftype, value);
-      return { value, raw, corrected: value, conf, code: codeOf(value), shape: shapeOf(value), score: regex && value ? 1 : 0, correctionsApplied: [], digit: digitRatio(value) };
+      const codeOk = !def.codes || def.codes.includes(code);
+      const regexOk = !regex || regex.test(txt);
+      if(codeOk && regexOk) learn(ftype, txt);
+      else bumpDebugBlank();
+      return { value: raw, raw, corrected: regexOk && regex ? ((txt.match(regex)||[])[1]||txt) : raw, conf, code, shape, score: (codeOk && regexOk) ? 1 : 0, correctionsApplied: [], digit };
+    }
+    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
+    }
+    if(ftype==='customer_address'){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(!/\d/.test(txt) && !postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
     }
     let score = 0;
     if(def.codes && def.codes.includes(code)) score += 2;
@@ -538,7 +560,8 @@ const FieldDataEngine = (() => {
       learn(ftype, corrected);
       return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied, digit };
     }
-    return { value: '', raw, corrected, conf, code, shape, score, correctionsApplied, digit };
+    bumpDebugBlank();
+    return { value: raw, raw, corrected, conf: Math.min(conf, 0.3), code, shape, score, correctionsApplied, digit };
   }
 
   function exportPatterns(){ return patterns; }
@@ -565,7 +588,8 @@ function tokensInBox(tokens, box){
     const cx = t.x + t.w/2;
     if(cx < box.x || cx > box.x + box.w) return false;
     const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
-    if(overlapY / t.h < 0.7) return false;
+    const minOverlap = state.mode === 'CONFIG' ? 0.5 : 0.7;
+    if(overlapY / t.h < minOverlap) return false;
     return true;
   }).sort((a,b)=>{
     const ay = a.y + a.h/2, by = b.y + b.h/2;
@@ -585,7 +609,7 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
-  const text = hits.map(t => t.text).join(' ').trim();
+  const text = lineTokens.map(t => t.text).join(' ').trim();
   return { box: expanded, text };
 }
 
@@ -671,6 +695,8 @@ function ensureProfile(){
       { landmarkKey:'subtotal_hdr',   page:0, type:'text', text:'Sub-Total',   strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'hst_hdr',        page:0, type:'text', text:'HST',         strategy:'exact' },
       { landmarkKey:'qst_hdr',        page:0, type:'text', text:'QST',         strategy:'exact' },
+      { landmarkKey:'gst_hdr',        page:0, type:'text', text:'GST',         strategy:'exact' },
+      { landmarkKey:'tax_hdr',        page:0, type:'text', text:'Tax',         strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'total_hdr',      page:0, type:'text', text:'Total',       strategy:'exact' },
       { landmarkKey:'deposit_hdr',    page:0, type:'text', text:'Deposit',     strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'balance_hdr',    page:0, type:'text', text:'Balance',     strategy:'fuzzy', threshold:0.86 },
@@ -1106,6 +1132,7 @@ function buildColumnModel(step, norm, boxPx, tokens){
   const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
   return {
     xband:[norm.x0, norm.x1],
+    yband:[norm.y0, norm.y1],
     lineHeightPct,
     regexHint: step.regex || '',
     align,
@@ -1259,41 +1286,43 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
 
   async function attempt(box){
-    const hits = tokensInBox(tokens, box);
+    const snap = snapToLine(tokens, box);
+    let searchBox = snap.box;
+    if(fieldSpec.fieldKey === 'customer_address'){
+      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
+    }
+    const hits = tokensInBox(tokens, searchBox);
     if(hits.length){
-      const lines = groupIntoLines(hits);
-      const lineTokens = lines.flatMap(L=>L.tokens);
-      const text = lineTokens.map(t=>t.text).join(' ').trim();
-      let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lineTokens, state.mode);
-      if(cleaned.value){
-        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-        return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: lineTokens };
-      }
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
+      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+      return { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: hits };
     }
     if(els.ocrToggle.checked){
-      const oTokens = await ocrBox(box, fieldSpec.fieldKey);
+      const oTokens = await ocrBox(searchBox, fieldSpec.fieldKey);
       if(oTokens.length){
-        const text = oTokens.map(t=>t.text).join(' ').trim();
         const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens, state.mode);
-        if(cleaned.value){
-          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-          return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: oTokens };
-        }
+        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+        return { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: oTokens };
       }
     }
     return null;
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
+  if(state.mode === 'CONFIG' && state.snappedPx){
+    const hits = tokensInBox(tokens, state.snappedPx);
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : state.snappedText, state.mode);
+    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+    result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, tokens: hits, method:'snap' };
+  }
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
     const pads = state.mode==='CONFIG' ? [0,4] : [0,4,8,12];
     for(const pad of pads){
       const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-      result = await attempt(search);
-      if(result){ method='bbox'; break; }
+      const r = await attempt(search);
+      if(r && r.value){ result = r; method='bbox'; break; }
     }
   }
 
@@ -1302,13 +1331,13 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(m){
       const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
       const r = await attempt(box);
-      if(r){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+      if(r && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
     }
     if(!result){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        if(r && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
     if(!result){
@@ -1319,39 +1348,30 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
           const r = await attempt(box);
           const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
           const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-          if(r && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+          if(r && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
         }
       }
     }
   }
-
-  if(!result && state.snappedPx){
-    let val = fieldSpec.regex
-      ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
-      : state.snappedText;
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', val, state.mode);
-    if(cleaned.value){
+  if(!result){
+    const lv = labelValueHeuristic(fieldSpec, tokens);
+    if(lv.value){
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
       state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-      result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, method: method||'snap', score };
+      result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
 
-    if(!result){
-      const lv = labelValueHeuristic(fieldSpec, tokens);
-      if(lv.value){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
-        if(cleaned.value){
-          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-          result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
-        }
-      }
-    }
-
-    if(!result){
-      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
-      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-      result = { value: fb.value, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
-    }
+  if(!result){
+    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
+    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+    result = { value: fb.value || fb.raw, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+  }
+  if(!result.value && state.snappedText){
+    bumpDebugBlank();
+    const raw = (state.snappedText||'').trim();
+    result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || state.snappedPx || null;
+  }
   result.method = result.method || method || 'fallback';
   result.score = score;
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
@@ -1379,14 +1399,14 @@ async function extractLineItems(profile){
     const bands={};
     let headerBottom=0;
     colFields.forEach(f=>{
-      const band = toPx(vp,{x0:f.column.xband[0],y0:0,x1:f.column.xband[1],y1:1,page:p});
+      const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
       bands[f.fieldKey]=band;
       if(f.column.header){
         const hb=toPx(vp,{x0:f.column.header[0],y0:f.column.header[1],x1:f.column.header[2],y1:f.column.header[3],page:p});
         headerBottom=Math.max(headerBottom,hb.y+hb.h);
       }
     });
-    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w));
+    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w && t.y+t.h/2>=b.y));
     pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
     if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
     const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.5);
@@ -1850,6 +1870,15 @@ function renderReports(){
 function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
+  if(step.type === 'static'){
+    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(normBox.y1,f.bboxPct.y1) - Math.max(normBox.y0,f.bboxPct.y0) > 0);
+    if(clash){
+      console.warn('Overlapping static bboxes, adjusting', step.fieldKey, clash.fieldKey);
+      const shift = (clash.bboxPct.y1 - clash.bboxPct.y0) + 0.001;
+      normBox.y0 = clash.bboxPct.y1 + 0.001;
+      normBox.y1 = normBox.y0 + shift;
+    }
+  }
   const entry = {
     fieldKey: step.fieldKey,
     type: step.type,
@@ -2093,7 +2122,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     raw = value;
   } else {
     const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value || (state.snappedText || '').trim();
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
     boxPx = res.boxPx || state.snappedPx;
     confidence = res.confidence || 0;
     raw = res.raw || (state.snappedText || '').trim();
@@ -2166,8 +2199,11 @@ async function autoExtractFileWithProfile(file, profile){
     if(value){
       const norm = boxPx ? toPct(state.viewport, { ...boxPx, page: state.pageNum }) : null;
       const arr = rawStore[state.currentFileId];
+      let conf = confidence;
+      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
+      if(dup) conf *= 0.5;
       const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
+      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
       if(idx>=0) arr[idx]=rec; else arr.push(rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
