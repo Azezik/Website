@@ -63,3 +63,9 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .ocrCropRow .badge{ font-size:11px; padding:2px 4px; background:#222; border:1px solid var(--border); border-radius:4px; }
 .ocrCropRow .badge.warn{ background:#ffea00; color:#000; }
 .ocrGeom{ font-size:10px; color:var(--muted); }
+
+/* Trace viewer */
+#traceViewer{ display:none; }
+.traceStage{ cursor:pointer; padding:2px 0; }
+.traceStage:hover{ background:#222; }
+#traceDetail{ max-height:160px; overflow:auto; }

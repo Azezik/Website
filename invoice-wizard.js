@@ -45,6 +45,12 @@ const els = {
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
   ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
+  traceViewer:    document.getElementById('traceViewer'),
+  traceHeader:    document.getElementById('traceHeader'),
+  traceSummary:   document.getElementById('traceSummary'),
+  traceWaterfall: document.getElementById('traceWaterfall'),
+  traceDetail:    document.getElementById('traceDetail'),
+  traceExportBtn: document.getElementById('traceExportBtn'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
@@ -132,6 +138,7 @@ let state = {
   pageSnapshots: {},     // tracks saved full-page debug PNGs
   pageRenderPromises: [],
   pageRenderReady: [],
+  currentTraceId: null,
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -2219,6 +2226,11 @@ function renderCropAuditPanel(){
       geom.textContent = `c: ${cs.w}x${cs.h}  n:[${nb.x0n.toFixed(3)},${nb.y0n.toFixed(3)},${nb.wN.toFixed(3)},${nb.hN.toFixed(3)}]  p:${cp.sx},${cp.sy},${cp.sw},${cp.sh}  r:${cp.rotation}`;
     }
     row.appendChild(geom);
+    const traceBtn = document.createElement('button');
+    traceBtn.className = 'btn';
+    traceBtn.textContent = 'Trace this field';
+    traceBtn.addEventListener('click', ()=>traceFromAudit(a));
+    row.appendChild(traceBtn);
     els.ocrCropList.appendChild(row);
   });
 }
@@ -2253,6 +2265,74 @@ async function refreshCropAuditThumbs(){
     state.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
   }
   renderCropAuditPanel();
+}
+
+function traceFromAudit(a){
+  const meta = a.meta || {};
+  const docId = meta.docId || (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
+  const pageIndex = meta.pageIndex || 0;
+  const traceId = debugTraces.start({ docId, pageIndex, fieldKey: a.question });
+  state.currentTraceId = traceId;
+  debugTraces.add(traceId,'selection.captured',{ input:{ normBox: meta.normBox }, output:{}, warnings:[], errors:[] });
+  const srcObj = getPdfBitmapCanvas(pageIndex) || {};
+  let renderUrl='';
+  if(srcObj.canvas){
+    const src = srcObj.canvas;
+    const c=document.createElement('canvas');
+    const maxW=120; const scale = maxW/src.width;
+    c.width=maxW; c.height=Math.round(src.height*scale);
+    c.getContext('2d').drawImage(src,0,0,c.width,c.height);
+    renderUrl=c.toDataURL('image/png');
+  }
+  const rErrors = (meta.errors||[]).includes('render_not_ready')? ['source_unavailable']:[];
+  debugTraces.add(traceId,'render.ready',{ output:{ canvas: meta.canvasSize }, warnings:[], errors:rErrors, artifact:renderUrl });
+  debugTraces.add(traceId,'crop.computed',{ input:{ normBox: meta.normBox }, output:{ rect: meta.computedPx, clamped: meta.clamped }, warnings: meta.warnings||[], errors: meta.errors||[] });
+  if(a.thumbUrl){
+    debugTraces.add(traceId,'crop.emitted',{ output:{ w: meta.computedPx?.sw, h: meta.computedPx?.sh }, warnings:[], errors:[], artifact:a.thumbUrl });
+  }
+  debugTraces.add(traceId,'ocr.started',{ input:{ engine:'tesseract', params:{ psm: meta.best?.psm } }, output:{}, warnings:[], errors:[] });
+  const ocrWarnings = [];
+  if((meta.best?.tokensLength||0)===0) ocrWarnings.push('no_tokens');
+  debugTraces.add(traceId,'ocr.completed',{ output:{ charCount:(meta.best?.raw||'').length, tokenCount:meta.best?.tokensLength||0, meanConf:meta.best?.meanConf||0, sample:(meta.best?.raw||'').slice(0,120) }, warnings:ocrWarnings, errors:[] });
+  const cleaned = (meta.best?.raw||'').trim();
+  debugTraces.add(traceId,'cleaner.completed',{ input:{ raw:meta.best?.raw }, output:{ normalizedValue:cleaned, transforms:[] }, warnings:[], errors:[] });
+  debugTraces.add(traceId,'validation.completed',{ input:{ value:cleaned }, output:{ status: meta.status || 'ok', confidence: meta.best?.meanConf || 0 }, warnings:[], errors:[] });
+  debugTraces.add(traceId,'persist.upserted',{ input:{}, output:{ location:'memory', key:a.question, version:1 }, warnings:[], errors:[] });
+  debugTraces.add(traceId,'ui.bound',{ input:{ value:cleaned }, output:{ component:'traceViewer', displayTextLength:cleaned.length, trunc:false }, warnings:[], errors:[] });
+  displayTrace(traceId);
+}
+
+function displayTrace(traceId){
+  const trace = debugTraces.get(traceId);
+  if(!trace) return;
+  els.traceViewer.style.display='block';
+  els.traceHeader.textContent = trace.spanKey.fieldKey;
+  const nb = trace.events.find(e=>e.stage==='selection.captured')?.input?.normBox || {};
+  const cs = trace.events.find(e=>e.stage==='render.ready')?.output?.canvas || {};
+  const cp = trace.events.find(e=>e.stage==='crop.computed')?.output?.rect || {};
+  const ocr = trace.events.find(e=>e.stage==='ocr.completed')?.output || {};
+  const val = trace.events.find(e=>e.stage==='validation.completed')?.output || {};
+  const ui = trace.events.find(e=>e.stage==='ui.bound')?.output || {};
+  const sn = v => (typeof v==='number' && Number.isFinite(v)) ? v : 'err';
+  els.traceSummary.textContent = `sel:[${sn(nb.x0n)},${sn(nb.y0n)},${sn(nb.wN)},${sn(nb.hN)}] src:${sn(cs.w)}×${sn(cs.h)} crop:${sn(cp.sx)},${sn(cp.sy)},${sn(cp.sw)},${sn(cp.sh)} ocr:${sn(ocr.charCount)}/${sn(ocr.meanConf)} val:${val.status||'?'}/${sn(val.confidence)} ui:${ui.component?'bound':'unbound'}`;
+  els.traceWaterfall.innerHTML='';
+  let prev = trace.events[0]?.ts;
+  trace.events.forEach(ev=>{
+    const div=document.createElement('div');
+    div.className='traceStage';
+    const delta = prev ? ev.ts - prev : 0;
+    div.textContent = `${ev.stage} (+${delta}ms)`;
+    div.addEventListener('click',()=>{
+      if(ev.artifact){
+        els.traceDetail.innerHTML = `<img src="${ev.artifact}" alt="artifact" style="max-width:120px;max-height:120px;"/><pre class="code">${JSON.stringify(ev,null,2)}</pre>`;
+      } else {
+        els.traceDetail.textContent = JSON.stringify(ev,null,2);
+      }
+    });
+    els.traceWaterfall.appendChild(div);
+    prev = ev.ts;
+  });
+  if(els.traceExportBtn){ els.traceExportBtn.onclick = ()=>exportTraceFile(traceId); }
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
