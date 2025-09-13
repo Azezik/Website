@@ -56,3 +56,9 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .warn{ color:var(--accent); font-size:12px; margin-left:2px; }
 .line-items-table{ width:100%; border-collapse:collapse; font-size:12px; }
 .line-items-table th, .line-items-table td{ border-bottom:1px solid var(--border); padding:4px; }
+
+/* OCR crop self-test */
+.ocrCropRow{ display:flex; align-items:flex-start; gap:8px; margin-bottom:6px; }
+.ocrCropRow img{ width:80px; height:auto; max-height:80px; border:1px solid var(--border); background:#fff; }
+.ocrCropRow .badge{ font-size:11px; padding:2px 4px; background:#222; border:1px solid var(--border); border-radius:4px; }
+.ocrGeom{ font-size:10px; color:var(--muted); }
