@@ -149,7 +149,7 @@ const LS = {
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 3;
+const PROFILE_VERSION = 4;
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -158,6 +158,18 @@ const migrations = {
       if(lm){
         if(lm.ringMask && !(lm.ringMask instanceof Uint8Array)) lm.ringMask = Uint8Array.from(Array.isArray(lm.ringMask)?lm.ringMask:Object.values(lm.ringMask));
         if(lm.edgePatch && !(lm.edgePatch instanceof Uint8Array)) lm.edgePatch = Uint8Array.from(Array.isArray(lm.edgePatch)?lm.edgePatch:Object.values(lm.edgePatch));
+      }
+    });
+  },
+  3: p => {
+    (p.fields||[]).forEach(f=>{
+      if(!f.normBox && f.rawBox && f.rawBox.canvasW && f.rawBox.canvasH){
+        const { x, y, w, h, canvasW, canvasH } = f.rawBox;
+        const nb = { x0n: x/canvasW, y0n: y/canvasH, wN: w/canvasW, hN: h/canvasH };
+        f.normBox = nb;
+        if(!f.bboxPct){
+          f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+        }
       }
     });
   }
@@ -1265,25 +1277,31 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   const src = getPdfBitmapCanvas(pageIndex);
   const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null } };
   if(!src){
-    result.meta.errors.push('wrong-source-element');
+    result.meta.errors.push('pdf_canvas_unavailable');
     return result;
   }
   const vp = state.pageViewports[pageIndex] || state.viewport || {width:src.width, height:src.height};
   const dpr = window.devicePixelRatio || 1;
-  const W = Math.round((vp.width || 1) * dpr);
-  const H = Math.round((vp.height || 1) * dpr);
+  const scale = state.pageTransform?.scale || 1;
+  const rotation = state.pageTransform?.rotation || 0;
+  const W = Math.round((vp.width || 1) * scale * dpr);
+  const H = Math.round((vp.height || 1) * scale * dpr);
   const offY = state.pageOffsets[pageIndex] || 0;
-  result.meta.canvasSize = { w: W, h: H };
+  result.meta.canvasSize = { w: W, h: H, dpr };
   let { sx, sy, sw, sh } = denormalizeBox(normBox, W, H);
+  let box = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
+  if(scale !== 1 || rotation !== 0){
+    box = applyTransform(box, { scale, rotation });
+    sx = Math.round(box.x); sy = Math.round(box.y); sw = Math.round(box.w); sh = Math.round(box.h);
+  }
   let clamped = false;
   if(sx < 0){ sw += sx; sx = 0; clamped = true; }
   if(sy < 0){ sh += sy; sy = 0; clamped = true; }
   if(sx + sw > W){ sw = W - sx; clamped = true; }
   if(sy + sh > H){ sh = H - sy; clamped = true; }
-  result.meta.computedPx = { sx, sy, sw, sh };
+  result.meta.computedPx = { sx, sy, sw, sh, rotation };
   if(sw <= 2 || sh <= 2){
-    console.error('ERROR: tiny-or-zero-crop');
-    result.meta.errors.push('tiny-or-zero-crop');
+    result.meta.errors.push('tiny_or_zero_crop');
     result.meta.clamped = clamped;
     return result;
   }
@@ -1292,7 +1310,13 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   off.width = sw; off.height = sh;
   const octx = off.getContext('2d');
   octx.clearRect(0,0,sw,sh);
-  octx.drawImage(src, sx, offY + sy, sw, sh, 0, 0, sw, sh);
+  try{
+    octx.drawImage(src, sx, offY + sy, sw, sh, 0, 0, sw, sh);
+  }catch(err){
+    console.error('drawImage failed', err);
+    result.meta.errors.push('canvas_tainted');
+    return result;
+  }
 
   const overlay = els.overlayCanvas?.getContext('2d');
   if(overlay){
@@ -1436,6 +1460,11 @@ async function ocrBox(boxPx, fieldKey){
 }
 
 async function auditCropSelfTest(question, boxPx){
+  if(!boxPx){
+    state.cropAudits.push({ question, reason:'no_selection', ocrProbe:{}, best:{}, thumbUrl:'', meta:{} });
+    renderCropAuditPanel();
+    return { errors:['no_selection'] };
+  }
   const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
   const pageIndex = (boxPx.page||1) - 1;
   const vp = state.pageViewports[pageIndex] || state.viewport || {width:1,height:1};
@@ -1451,13 +1480,26 @@ async function auditCropSelfTest(question, boxPx){
   if(cropBitmap && fs){ fs.writeFileSync(`${dir}/${baseName}.png`, bufFromCanvas(cropBitmap)); }
   if(cropBitmap && !fs){ console.log('OCR crop', cropBitmap.toDataURL('image/png')); }
   console.log({ question, canvasSize: meta.canvasSize, normBox: meta.normBox, computedPx: meta.computedPx });
+  meta.normBox = normBox;
   if(meta.errors.length){
-    meta.status='needs_review'; meta.reason='crop_geometry_error';
+    meta.status='needs_review';
+    meta.reason = meta.errors[0] || 'crop_geometry_error';
     if(fs) fs.writeFileSync(`${dir}/${baseName}.json`, JSON.stringify(meta,null,2));
-    state.cropAudits.push({ question, reason: meta.reason, ocrProbe:{}, best:{}, thumb: cropBitmap?.toDataURL('image/png') });
+    state.cropAudits.push({ question, reason: meta.reason, ocrProbe:{}, best:{}, thumbUrl:'', meta });
     renderCropAuditPanel();
     return meta;
   }
+  let blob;
+  try{
+    blob = await new Promise(res => cropBitmap.toBlob(res, 'image/png'));
+  }catch(e){ blob = null; }
+  if(!blob){
+    meta.status='needs_review'; meta.reason='blob_failed';
+    state.cropAudits.push({ question, reason: meta.reason, ocrProbe:{}, best:{}, thumbUrl:'', meta });
+    renderCropAuditPanel();
+    return meta;
+  }
+  const url = URL.createObjectURL(blob);
   const probe = await runOcrProbes(cropBitmap);
   meta.ocrProbe = probe;
   const best = chooseBestProbe(probe);
@@ -1476,7 +1518,8 @@ async function auditCropSelfTest(question, boxPx){
     reason: meta.reason,
     ocrProbe: probe,
     best,
-    thumb: cropBitmap.toDataURL('image/png')
+    thumbUrl: url,
+    meta
   });
   renderCropAuditPanel();
   return meta;
@@ -1797,6 +1840,7 @@ function cleanupDoc(){
   state.tokensByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
+  clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
@@ -1808,6 +1852,7 @@ async function renderImage(url){
     img.height = img.naturalHeight * scale;
     sizeOverlayTo(img.width, img.height);
     state.viewport = { w: img.width, h: img.height, scale };
+    refreshCropAuditThumbs();
     URL.revokeObjectURL(url);
   };
   img.src = url;
@@ -1851,6 +1896,7 @@ async function renderAllPages(){
     await ensureTokensForPage(i+1, p.page, p.vp, p.canvas);
     y += p.canvas.height;
   }
+  await refreshCropAuditThumbs();
 }
 
 window.addEventListener('resize', () => {
@@ -2029,12 +2075,17 @@ function renderCropAuditPanel(){
   state.cropAudits.forEach(a => {
     const row = document.createElement('div');
     row.className = 'ocrCropRow';
-    const img = document.createElement('img');
-    img.src = a.thumb || '';
-    img.alt = a.question;
-    img.style.maxWidth = '80px';
-    img.style.maxHeight = '80px';
-    row.appendChild(img);
+    if(a.thumbUrl){
+      const img = document.createElement('img');
+      img.src = a.thumbUrl;
+      img.alt = a.question;
+      row.appendChild(img);
+    } else {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = a.reason || 'no_selection';
+      row.appendChild(badge);
+    }
     const info = document.createElement('div');
     const probe = a.ocrProbe || {};
     const t6 = probe.psm6?.tokensLength || 0;
@@ -2046,8 +2097,43 @@ function renderCropAuditPanel(){
     const guard = a.reason ? ` ${a.reason}` : '';
     info.textContent = `${a.question}: ${summary} ${raw}${guard}`;
     row.appendChild(info);
+    const m = a.meta || {};
+    const nb = m.normBox || {};
+    const cp = m.computedPx || {};
+    const geom = document.createElement('div');
+    geom.className = 'ocrGeom';
+    const x1 = nb.x0n ?? 0, y1 = nb.y0n ?? 0, x2 = (nb.x0n ?? 0) + (nb.wN ?? 0), y2 = (nb.y0n ?? 0) + (nb.hN ?? 0);
+    geom.textContent = `c:${m.canvasSize?.w}x${m.canvasSize?.h} n:[${x1.toFixed(3)},${y1.toFixed(3)},${x2.toFixed(3)},${y2.toFixed(3)}] p:${cp.sx},${cp.sy},${cp.sw}x${cp.sh} r:${cp.rotation}`;
+    row.appendChild(geom);
     els.ocrCropList.appendChild(row);
   });
+}
+
+function clearCropThumbs(){
+  (state.cropAudits||[]).forEach(a=>{
+    if(a.thumbUrl) URL.revokeObjectURL(a.thumbUrl);
+  });
+  state.cropAudits = [];
+  if(els.ocrCropList) els.ocrCropList.innerHTML = '';
+}
+
+async function refreshCropAuditThumbs(){
+  const existing = state.cropAudits.slice();
+  clearCropThumbs();
+  for(const a of existing){
+    const meta = a.meta || {};
+    if(!meta.normBox){ state.cropAudits.push(a); continue; }
+    const { cropBitmap, meta: m2 } = getOcrCropForSelection({ docId: meta.docId || '', pageIndex: meta.pageIndex, normBox: meta.normBox });
+    m2.question = a.question;
+    if(m2.errors.length){
+      state.cropAudits.push({ question:a.question, reason:m2.errors[0], ocrProbe:{}, best:{}, thumbUrl:'', meta:m2 });
+      continue;
+    }
+    let blob; try{ blob = await new Promise(res=>cropBitmap.toBlob(res,'image/png')); }catch(e){ blob=null; }
+    const url = blob ? URL.createObjectURL(blob) : '';
+    state.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
+  }
+  renderCropAuditPanel();
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
