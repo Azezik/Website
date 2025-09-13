@@ -299,6 +299,20 @@ const toPct = (vp, pxBox) => {
   };
 };
 
+const normalizeBox = (boxPx, canvasW, canvasH) => ({
+  x0n: boxPx.x / canvasW,
+  y0n: boxPx.y / canvasH,
+  wN: boxPx.w / canvasW,
+  hN: boxPx.h / canvasH
+});
+
+const denormalizeBox = (normBox, W, H) => ({
+  sx: Math.round(normBox.x0n * W),
+  sy: Math.round(normBox.y0n * H),
+  sw: Math.max(1, Math.round(normBox.wN * W)),
+  sh: Math.max(1, Math.round(normBox.hN * H))
+});
+
 function applyTransform(boxPx, transform=state.pageTransform){
   const { scale=1, rotation=0 } = transform || {};
   if(scale === 1 && rotation === 0) return { ...boxPx };
@@ -1247,62 +1261,47 @@ function getPdfBitmapCanvas(pageIndex){
   return node;
 }
 
-function getOcrCropForSelection({docId, pageIndex, boxPx}){
+function getOcrCropForSelection({docId, pageIndex, normBox}){
   const src = getPdfBitmapCanvas(pageIndex);
-  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [] } };
+  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null } };
   if(!src){
     result.meta.errors.push('wrong-source-element');
     return result;
   }
-  if((boxPx.page||1) - 1 !== pageIndex){
-    console.error('ERROR: page-mismatch');
-    result.meta.errors.push('page-mismatch');
-    result.meta.selectionPageIndex = (boxPx.page||1) - 1;
-    result.meta.sourcePageIndex = pageIndex;
-    return result;
-  }
-  const vp = state.pageViewports[pageIndex] || state.viewport || { scale:1, rotation:0, width:src.width, height:src.height };
+  const vp = state.pageViewports[pageIndex] || state.viewport || {width:src.width, height:src.height};
   const dpr = window.devicePixelRatio || 1;
-  const viewportScale = vp.scale || 1;
-  const rotation = vp.rotation || 0;
-  const pdfW = vp.width;
-  const pdfH = vp.height;
+  const W = Math.round((vp.width || 1) * dpr);
+  const H = Math.round((vp.height || 1) * dpr);
   const offY = state.pageOffsets[pageIndex] || 0;
-  const boxCss = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h };
-  const sx = Math.round(boxCss.x * viewportScale * dpr);
-  const sy = Math.round(boxCss.y * viewportScale * dpr);
-  const sw = Math.max(1, Math.round(boxCss.w * viewportScale * dpr));
-  const sh = Math.max(1, Math.round(boxCss.h * viewportScale * dpr));
-  let Sx = sx, Sy = sy, Sw = sw, Sh = sh;
-  const rot = ((rotation % 360) + 360) % 360;
-  if(rot === 90){
-    Sx = pdfH - (sy + sh); Sy = sx; Sw = sh; Sh = sw;
-  } else if(rot === 180){
-    Sx = pdfW - (sx + sw); Sy = pdfH - (sy + sh); Sw = sw; Sh = sh;
-  } else if(rot === 270){
-    Sx = sy; Sy = pdfW - (sx + sw); Sw = sh; Sh = sw;
-  }
-  const beforeClamp = { x:Sx, y:Sy, w:Sw, h:Sh };
+  result.meta.canvasSize = { w: W, h: H };
+  let { sx, sy, sw, sh } = denormalizeBox(normBox, W, H);
   let clamped = false;
-  if(Sx<0){ Sx=0; clamped=true; }
-  if(Sy<0){ Sy=0; clamped=true; }
-  if(Sx+Sw>pdfW){ Sw = pdfW - Sx; clamped=true; }
-  if(Sy+Sh>pdfH){ Sh = pdfH - Sy; clamped=true; }
-  if(Sw<=2 || Sh<=2){
+  if(sx < 0){ sw += sx; sx = 0; clamped = true; }
+  if(sy < 0){ sh += sy; sy = 0; clamped = true; }
+  if(sx + sw > W){ sw = W - sx; clamped = true; }
+  if(sy + sh > H){ sh = H - sy; clamped = true; }
+  result.meta.computedPx = { sx, sy, sw, sh };
+  if(sw <= 2 || sh <= 2){
     console.error('ERROR: tiny-or-zero-crop');
     result.meta.errors.push('tiny-or-zero-crop');
-    result.meta.boxCss = boxCss;
-    result.meta.boxPx_input = {x:sx,y:sy,w:sw,h:sh};
-    result.meta.boxPx_afterRotation = beforeClamp;
     result.meta.clamped = clamped;
     return result;
   }
   const off = document.createElement('canvas');
   off.className = 'debug-crop';
-  off.width = Sw; off.height = Sh;
+  off.width = sw; off.height = sh;
   const octx = off.getContext('2d');
-  octx.clearRect(0,0,Sw,Sh);
-  octx.drawImage(src, Sx, offY + Sy, Sw, Sh, 0, 0, Sw, Sh);
+  octx.clearRect(0,0,sw,sh);
+  octx.drawImage(src, sx, offY + sy, sw, sh, 0, 0, sw, sh);
+
+  const overlay = els.overlayCanvas?.getContext('2d');
+  if(overlay){
+    overlay.save();
+    overlay.strokeStyle = 'red';
+    overlay.lineWidth = 2 * dpr;
+    overlay.strokeRect(sx, offY + sy, sw, sh);
+    overlay.restore();
+  }
 
   // hash for duplicate detection
   const buf = Buffer.from(off.toDataURL('image/png').split(',')[1],'base64');
@@ -1311,42 +1310,39 @@ function getOcrCropForSelection({docId, pageIndex, boxPx}){
   if(crypto){
     hash = crypto.createHash('sha1').update(buf).digest('hex');
   } else if(window.crypto?.subtle){
-    // browser subtle
-    hash = ''; // synchronous placeholder
+    hash = '';
   }
   if(hash){
     const pageKey = `${docId}_${pageIndex}`;
     state.cropHashes[pageKey] = state.cropHashes[pageKey] || {};
     const prev = state.cropHashes[pageKey][hash];
-    if(prev && (prev.x!==Sx || prev.y!==Sy || prev.w!==Sw || prev.h!==Sh)){
-      console.error('ERROR: repeated-crop-content suspected wrong-source-or-rect', prev, {x:Sx,y:Sy,w:Sw,h:Sh,pageIndex});
+    if(prev && (prev.x!==sx || prev.y!==sy || prev.w!==sw || prev.h!==sh)){
+      console.error('ERROR: repeated-crop-content suspected wrong-source-or-rect', prev, {x:sx,y:sy,w:sw,h:sh,pageIndex});
       result.meta.errors.push('repeated-crop-content suspected wrong-source-or-rect');
     }
-    state.cropHashes[pageKey][hash] = { x:Sx, y:Sy, w:Sw, h:Sh };
+    state.cropHashes[pageKey][hash] = { x:sx, y:sy, w:sw, h:sh };
   }
 
-  // banding detector
-  const imgData = octx.getImageData(0,0,Sw,Sh).data;
+  const imgData = octx.getImageData(0,0,sw,sh).data;
   const rowHashes = new Set();
-  for(let y=0;y<Sh;y++){
+  for(let y=0;y<sh;y++){
     let row='';
-    for(let x=0;x<Sw;x++){
-      const i=(y*Sw+x)*4; row+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    for(let x=0;x<sw;x++){
+      const i=(y*sw+x)*4; row+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
     }
     rowHashes.add(row);
   }
   const colHashes = new Set();
-  for(let x=0;x<Sw;x++){
+  for(let x=0;x<sw;x++){
     let col='';
-    for(let y=0;y<Sh;y++){
-      const i=(y*Sw+x)*4; col+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    for(let y=0;y<sh;y++){
+      const i=(y*sw+x)*4; col+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
     }
     colHashes.add(col);
   }
-  const bandingScore = Math.max(1 - rowHashes.size/Sh, 1 - colHashes.size/Sw);
+  const bandingScore = Math.max(1 - rowHashes.size/sh, 1 - colHashes.size/sw);
   if(bandingScore > 0.3){ result.meta.warnings.push('banding/tiling-like artifact'); }
 
-  // full-page snapshot once
   const fs = window.fs || (window.require && window.require('fs'));
   if(fs){
     const pageSnapKey = `${docId}_${pageIndex}`;
@@ -1354,32 +1350,20 @@ function getOcrCropForSelection({docId, pageIndex, boxPx}){
       const pageDir = `debug/pages/${docId}`;
       fs.mkdirSync(pageDir,{recursive:true});
       const pageCanvas = document.createElement('canvas');
-      pageCanvas.width = pdfW; pageCanvas.height = pdfH;
+      pageCanvas.width = W; pageCanvas.height = H;
       const pctx = pageCanvas.getContext('2d');
-      pctx.drawImage(src, 0, offY, pdfW, pdfH, 0,0,pdfW,pdfH);
+      pctx.drawImage(src, 0, offY, W, H, 0,0,W,H);
       fs.writeFileSync(`${pageDir}/${pageIndex}.png`, Buffer.from(pageCanvas.toDataURL('image/png').split(',')[1],'base64'));
       state.pageSnapshots[pageSnapKey] = true;
     }
   }
 
   result.cropBitmap = off;
-  result.meta = {
-    docId,
-    pageIndex,
-    pdfCanvas:{ w: src.width, h: src.height },
-    dpr,
-    viewportScale,
-    pageRotation: rotation,
-    boxCss,
-    boxPx_input:{x:sx,y:sy,w:sw,h:sh},
-    boxPx_afterRotation: beforeClamp,
-    clamped,
-    hash,
-    bandingScore,
-    errors: result.meta.errors,
-    warnings: result.meta.warnings
-  };
-  state.lastOcrCropPx = { x:Sx, y:Sy, w:Sw, h:Sh, page: pageIndex+1 };
+  result.meta.pdfCanvas = { w: src.width, h: src.height };
+  result.meta.hash = hash;
+  result.meta.bandingScore = bandingScore;
+  result.meta.clamped = clamped;
+  state.lastOcrCropPx = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
   drawOverlay();
   return result;
 }
@@ -1454,7 +1438,9 @@ async function ocrBox(boxPx, fieldKey){
 async function auditCropSelfTest(question, boxPx){
   const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
   const pageIndex = (boxPx.page||1) - 1;
-  const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, boxPx });
+  const vp = state.pageViewports[pageIndex] || state.viewport || {width:1,height:1};
+  const normBox = normalizeBox(boxPx, vp.width || 1, vp.height || 1);
+  const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
   meta.question = question;
   const fs = window.fs || (window.require && window.require('fs'));
   const dir = `debug/crops/${docId}/${pageIndex}`;
@@ -1464,6 +1450,7 @@ async function auditCropSelfTest(question, boxPx){
   if(fs){ fs.mkdirSync(dir,{recursive:true}); }
   if(cropBitmap && fs){ fs.writeFileSync(`${dir}/${baseName}.png`, bufFromCanvas(cropBitmap)); }
   if(cropBitmap && !fs){ console.log('OCR crop', cropBitmap.toDataURL('image/png')); }
+  console.log({ question, canvasSize: meta.canvasSize, normBox: meta.normBox, computedPx: meta.computedPx });
   if(meta.errors.length){
     meta.status='needs_review'; meta.reason='crop_geometry_error';
     if(fs) fs.writeFileSync(`${dir}/${baseName}.json`, JSON.stringify(meta,null,2));
@@ -1974,11 +1961,15 @@ function drawOverlay(){
     overlayCtx.strokeStyle = 'rgba(255,0,0,0.6)';
     overlayCtx.lineWidth = 1;
     for(const f of state.profile.fields){
-      if(!f.bbox) continue;
+      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
+      if(!nb) continue;
       const vp = state.pageViewports[f.page-1];
       if(!vp) continue;
-      const pct = f.bboxPct || {x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3]};
-      const box = applyTransform(toPx(vp, { ...pct, page:f.page }));
+      const dpr = window.devicePixelRatio || 1;
+      const W = Math.round(vp.width * dpr);
+      const H = Math.round(vp.height * dpr);
+      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
+      const box = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
       const off = state.pageOffsets[box.page-1] || 0;
       overlayCtx.strokeRect(box.x, box.y + off, box.w, box.h);
     }
@@ -1986,11 +1977,16 @@ function drawOverlay(){
   if(ringsOn && state.profile?.fields){
     overlayCtx.strokeStyle = 'rgba(255,105,180,0.7)';
     for(const f of state.profile.fields){
-      if(f.type !== 'static' || !f.bbox) continue;
+      if(f.type !== 'static') continue;
+      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
+      if(!nb) continue;
       const vp = state.pageViewports[f.page-1];
       if(!vp) continue;
-      const pct = f.bboxPct || {x0:f.bbox[0],y0:f.bbox[1],x1:f.bbox[2],y1:f.bbox[3]};
-      const box = applyTransform(toPx(vp, { ...pct, page:f.page }));
+      const dpr = window.devicePixelRatio || 1;
+      const W = Math.round(vp.width * dpr);
+      const H = Math.round(vp.height * dpr);
+      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
+      const box = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
       const off = state.pageOffsets[box.page-1] || 0;
       const cx = box.x + box.w/2;
       const cy = box.y + off + box.h/2;
@@ -2167,16 +2163,19 @@ function renderReports(){
 }
 
 /* ---------------------- Profile save / table --------------------- */
-function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
+function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[], rawBox=null) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
+  const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   if(step.type === 'static'){
-    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(normBox.y1,f.bboxPct.y1) - Math.max(normBox.y0,f.bboxPct.y0) > 0);
+    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(pctBox.y1,f.bboxPct.y1) - Math.max(pctBox.y0,f.bboxPct.y0) > 0);
     if(clash){
       console.warn('Overlapping static bboxes, adjusting', step.fieldKey, clash.fieldKey);
       const shift = (clash.bboxPct.y1 - clash.bboxPct.y0) + 0.001;
-      normBox.y0 = clash.bboxPct.y1 + 0.001;
-      normBox.y1 = normBox.y0 + shift;
+      pctBox.y0 = clash.bboxPct.y1 + 0.001;
+      pctBox.y1 = pctBox.y0 + shift;
+      normBox.y0n = pctBox.y0;
+      normBox.hN = pctBox.y1 - pctBox.y0;
     }
   }
   const entry = {
@@ -2184,8 +2183,10 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     type: step.type,
     page,
     selectorType:'bbox',
-    bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1],
-    bboxPct:{x0:normBox.x0, y0:normBox.y0, x1:normBox.x1, y1:normBox.y1},
+    bbox:[pctBox.x0, pctBox.y0, pctBox.x1, pctBox.y1],
+    bboxPct:{x0:pctBox.x0, y0:pctBox.y0, x1:pctBox.x1, y1:pctBox.y1},
+    normBox,
+    rawBox,
     value,
     confidence,
     raw,
@@ -2440,16 +2441,21 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
-  const norm = toPct(state.viewport, boxPx);
+  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+  const canvasW = vp.width || 1;
+  const canvasH = vp.height || 1;
+  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
   const extras = {};
   if(step.type === 'static'){
     const lm = captureRingLandmark(boxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
     extras.landmark = lm;
   } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, norm, boxPx, tokens);
+    extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
-  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens);
+  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
   renderSavedFieldsTable();
@@ -2459,7 +2465,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     rawStore[fid] = rawStore[fid] || [];
     const arr = rawStore[fid];
     const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: norm, ts: Date.now(), tokens: fieldTokens };
+    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
@@ -2503,13 +2509,15 @@ async function autoExtractFileWithProfile(file, profile){
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
-      const norm = boxPx ? toPct(state.viewport, { ...boxPx, page: state.pageNum }) : null;
+      const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+      const nb = boxPx ? normalizeBox(boxPx, vp.width || 1, vp.height || 1) : null;
+      const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
       const arr = rawStore[state.currentFileId];
       let conf = confidence;
       const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
       if(dup) conf *= 0.5;
       const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
+      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
       if(idx>=0) arr[idx]=rec; else arr.push(rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
