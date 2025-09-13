@@ -165,18 +165,22 @@ const migrations = {
   },
   3: p => {
     (p.fields||[]).forEach(f=>{
-      if(!f.normBox){
-        const rb = f.rawBox;
-        if(rb && Number.isFinite(rb.x) && Number.isFinite(rb.y) && Number.isFinite(rb.w) && Number.isFinite(rb.h) && Number.isFinite(rb.canvasW) && Number.isFinite(rb.canvasH) && rb.canvasW>0 && rb.canvasH>0){
-          const { x, y, w, h, canvasW, canvasH } = rb;
-          const nb = { x0n: x/canvasW, y0n: y/canvasH, wN: w/canvasW, hN: h/canvasH };
-          f.normBox = nb;
-          if(!f.bboxPct){
-            f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
-          }
-        } else if(rb){
-          f.boxError = 'invalid_box_input';
+      if(f.normBox){
+        const chk = validateSelection(f.normBox);
+        if(!chk.ok){ f.boxError = chk.reason; }
+        return;
+      }
+      const rb = f.rawBox;
+      if(!rb) return;
+      const chk = validateSelection(rb);
+      if(chk.ok){
+        f.normBox = chk.normBox;
+        if(!f.bboxPct){
+          const nb = chk.normBox;
+          f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
         }
+      } else {
+        f.boxError = 'invalid_box_input';
       }
     });
   }
@@ -343,6 +347,26 @@ function validateNormBox(nb){
     return { ok:false, reason:'invalid_box_input' };
   }
   return { ok:true };
+}
+
+function validateSelection(sel){
+  if(!sel) return { ok:false, reason:'invalid_box_input' };
+  // already normalized?
+  if(sel.x0n !== undefined || sel.wN !== undefined){
+    const nb = { x0n:Number(sel.x0n), y0n:Number(sel.y0n), wN:Number(sel.wN), hN:Number(sel.hN) };
+    const v = validateNormBox(nb);
+    return v.ok ? { ok:true, normBox: nb } : { ok:false, reason:v.reason };
+  }
+  // legacy pixel coordinates
+  const canvasW = Number(sel.canvasW0 ?? sel.canvasW);
+  const canvasH = Number(sel.canvasH0 ?? sel.canvasH);
+  const vals = [sel.x, sel.y, sel.w, sel.h, canvasW, canvasH];
+  if(vals.every(v => typeof v === 'number' && Number.isFinite(v)) && sel.w > 0 && sel.h > 0 && canvasW > 0 && canvasH > 0){
+    const nb = { x0n: sel.x / canvasW, y0n: sel.y / canvasH, wN: sel.w / canvasW, hN: sel.h / canvasH };
+    const v = validateNormBox(nb);
+    return v.ok ? { ok:true, normBox: nb } : { ok:false, reason:'invalid_box_input' };
+  }
+  return { ok:false, reason:'invalid_box_input' };
 }
 
 function applyTransform(boxPx, transform=state.pageTransform){
@@ -778,6 +802,23 @@ function ensureProfile(){
       type: f.type || 'static',
       fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
     }));
+    state.profile.fields.forEach(f=>{
+      if(f.normBox){
+        const chk = validateSelection(f.normBox);
+        if(!chk.ok){ f.boxError = chk.reason; }
+      } else if(f.rawBox){
+        const chk = validateSelection(f.rawBox);
+        if(chk.ok){
+          f.normBox = chk.normBox;
+          if(!f.bboxPct){
+            const nb = chk.normBox;
+            f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+          }
+        } else {
+          f.boxError = chk.reason;
+        }
+      }
+    });
   }
   state.profile.fieldPatterns = existing?.fieldPatterns || state.profile.fieldPatterns || {};
   FieldDataEngine.importPatterns(state.profile.fieldPatterns);
@@ -1299,25 +1340,32 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null } };
   if(canvasErr){ result.meta.errors.push(canvasErr); return result; }
 
-  const valid = validateNormBox(normBox);
-  if(!valid.ok){ result.meta.errors.push(valid.reason); return result; }
+  const val = validateSelection(normBox);
+  if(!val.ok){ result.meta.errors.push(val.reason); return result; }
+  normBox = val.normBox;
 
   if(!state.pageRenderReady[pageIndex]){
     result.meta.errors.push('render_not_ready');
     return result;
   }
 
-  const vp = state.pageViewports[pageIndex] || state.viewport || {width:src.width, height:src.height};
-  const dpr = window.devicePixelRatio || 1;
+  const vp = state.pageViewports[pageIndex] || state.viewport || { width: src.width, height: src.height, scale:1 };
+  const viewportScale = Number(vp.scale || 1);
+  const dpr = Number(window.devicePixelRatio || 1);
+  const W = Number(src.width);
+  const H = Number(src.height);
+  const inputs = { canvasW: W, canvasH: H, viewportScale, dpr };
+  for(const [k,v] of Object.entries(inputs)){
+    if(typeof v !== 'number' || !Number.isFinite(v)){
+      result.meta.errors.push(`nan_or_infinity_in_math(${k})`);
+      return result;
+    }
+    if(v <= 0){ result.meta.errors.push('render_not_ready'); return result; }
+  }
   const scale = state.pageTransform?.scale || 1;
   const rotation = state.pageTransform?.rotation || 0;
-  const cssW = Math.round((vp.width || 1) * scale);
-  const cssH = Math.round((vp.height || 1) * scale);
-  const W = Math.round(cssW * dpr);
-  const H = Math.round(cssH * dpr);
   const offY = state.pageOffsets[pageIndex] || 0;
-  result.meta.canvasSize = { w: W, h: H, dpr, scale, rotation };
-  result.meta.canvasCss = { w: cssW, h: cssH };
+  result.meta.canvasSize = { w: W, h: H, dpr, scale: viewportScale, rotation };
 
   let { sx, sy, sw, sh } = denormalizeBox(normBox, W, H);
   let box = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
@@ -1331,10 +1379,13 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   if(sy < 0){ sh += sy; sy = 0; clamped = true; }
   if(sx + sw > W){ sw = W - sx; clamped = true; }
   if(sy + sh > H){ sh = H - sy; clamped = true; }
-  const nums = [W,H,sx,sy,sw,sh,dpr,scale,rotation,offY];
-  if(nums.some(v => typeof v !== 'number' || !Number.isFinite(v))){
-    result.meta.errors.push('nan_or_infinity_in_math');
-    return result;
+
+  const nums = { W, H, sx, sy, sw, sh, dpr, scale, rotation, offY };
+  for(const [k,v] of Object.entries(nums)){
+    if(typeof v !== 'number' || !Number.isFinite(v)){
+      result.meta.errors.push(`nan_or_infinity_in_math(${k})`);
+      return result;
+    }
   }
   result.meta.computedPx = { sx, sy, sw, sh, rotation };
   if(sw <= 2 || sh <= 2){
@@ -2145,13 +2196,27 @@ function renderCropAuditPanel(){
     const m = a.meta || {};
     const nb = m.normBox || {};
     const cp = m.computedPx || {};
+    const cs = m.canvasSize || {};
     const geom = document.createElement('div');
     geom.className = 'ocrGeom';
-    const vals = [m.canvasSize?.w, m.canvasSize?.h, nb.x0n, nb.y0n, nb.wN, nb.hN, cp.sx, cp.sy, cp.sw, cp.sh, cp.rotation];
-    if(vals.some(v => typeof v !== 'number' || !Number.isFinite(v))){
-      geom.textContent = 'nan_or_infinity_in_math';
-    }else{
-      geom.textContent = `c:${m.canvasSize?.w}x${m.canvasSize?.h} n:[${nb.x0n.toFixed(3)},${nb.y0n.toFixed(3)},${nb.wN.toFixed(3)},${nb.hN.toFixed(3)}] p:${cp.sx},${cp.sy},${cp.sw}x${cp.sh} r:${cp.rotation}`;
+    const vars = {
+      canvasW: cs.w,
+      canvasH: cs.h,
+      x0n: nb.x0n,
+      y0n: nb.y0n,
+      wN: nb.wN,
+      hN: nb.hN,
+      sx: cp.sx,
+      sy: cp.sy,
+      sw: cp.sw,
+      sh: cp.sh,
+      rotation: cp.rotation
+    };
+    const bad = Object.entries(vars).find(([_,v]) => typeof v !== 'number' || !Number.isFinite(v));
+    if(bad){
+      geom.textContent = `nan_or_infinity_in_math(${bad[0]})`;
+    } else {
+      geom.textContent = `c: ${cs.w}x${cs.h}  n:[${nb.x0n.toFixed(3)},${nb.y0n.toFixed(3)},${nb.wN.toFixed(3)},${nb.hN.toFixed(3)}]  p:${cp.sx},${cp.sy},${cp.sw},${cp.sh}  r:${cp.rotation}`;
     }
     row.appendChild(geom);
     els.ocrCropList.appendChild(row);
