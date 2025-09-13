@@ -61,4 +61,5 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .ocrCropRow{ display:flex; align-items:flex-start; gap:8px; margin-bottom:6px; }
 .ocrCropRow img{ width:80px; height:auto; max-height:80px; border:1px solid var(--border); background:#fff; }
 .ocrCropRow .badge{ font-size:11px; padding:2px 4px; background:#222; border:1px solid var(--border); border-radius:4px; }
+.ocrCropRow .badge.warn{ background:#ffea00; color:#000; }
 .ocrGeom{ font-size:10px; color:var(--muted); }
