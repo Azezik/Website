@@ -1558,49 +1558,102 @@ function chooseBestProbe(probe){
   return best;
 }
 
+function _iou(a,b){
+  const ix=Math.max(0, Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x));
+  const iy=Math.max(0, Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+  const inter=ix*iy; if(!inter) return 0;
+  return inter / (a.w*a.h + b.w*b.h - inter);
+}
+function _centerDist(a,b){
+  const ax=a.x+a.w/2, ay=a.y+a.h/2;
+  const bx=b.x+b.w/2, by=b.y+b.h/2;
+  return Math.hypot(ax-bx, ay-by);
+}
+
 async function ocrBox(boxPx, fieldKey){
   const pad = 4;
   const { canvas: src } = getPdfBitmapCanvas((boxPx.page||1)-1);
   if(!src) return [];
   const offY = state.pageOffsets[boxPx.page-1] || 0;
   const scale = 3;
-  const canvas = document.createElement('canvas');
-  canvas.width = (boxPx.w + pad*2)*scale;
-  canvas.height = (boxPx.h + pad*2)*scale;
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(src, boxPx.x - pad, offY + boxPx.y - pad, boxPx.w + pad*2, boxPx.h + pad*2, 0, 0, canvas.width, canvas.height);
-  preprocessCanvas(canvas);
+
   const cfg = ocrConfigFor(fieldKey);
   const opts = { tessedit_pageseg_mode: cfg.psm, oem:1 };
   if(cfg.whitelist) opts.tessedit_char_whitelist = cfg.whitelist;
-  let bestTokens = [], bestAvg = -Infinity;
-  for(const ang of [-3,0,3]){
-    const rot = rotateCanvas(canvas, ang);
-    const { data } = await TesseractRef.recognize(rot, 'eng', opts);
-    const words = (data.words||[]).map(w=>{
-      const raw = w.text.trim();
-      if(!raw) return null;
-      const { text: corrected, corrections } = applyOcrCorrections(raw, fieldKey);
-      return {
-        raw,
-        corrected,
-        text: corrected,
-        correctionsApplied: corrections,
-        confidence: w.confidence/100,
-        x: boxPx.x - pad + w.bbox.x/scale,
-        y: boxPx.y - pad + w.bbox.y/scale,
-        w: w.bbox.width/scale,
-        h: w.bbox.height/scale,
-        page: boxPx.page
-      };
-    }).filter(Boolean);
-    const filtered = tokensInBox(words, boxPx);
-    const avg = filtered.reduce((s,t)=>s+t.confidence,0)/(filtered.length||1);
-    if(avg > bestAvg){ bestAvg=avg; bestTokens = filtered; }
+
+  async function runBox(subBox){
+    const canvas = document.createElement('canvas');
+    canvas.width = (subBox.w + pad*2)*scale;
+    canvas.height = (subBox.h + pad*2)*scale;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, subBox.x - pad, offY + subBox.y - pad, subBox.w + pad*2, subBox.h + pad*2, 0, 0, canvas.width, canvas.height);
+    preprocessCanvas(canvas);
+    let bestTokens = [], bestAvg = -Infinity;
+    for(const ang of [-3,0,3]){
+      const rot = rotateCanvas(canvas, ang);
+      const { data } = await TesseractRef.recognize(rot, 'eng', opts);
+      const words = (data.words||[]).map(w=>{
+        const raw = w.text.trim();
+        if(!raw) return null;
+        const { text: corrected, corrections } = applyOcrCorrections(raw, fieldKey);
+        return {
+          raw,
+          corrected,
+          text: corrected,
+          correctionsApplied: corrections,
+          confidence: w.confidence/100,
+          x: subBox.x - pad + w.bbox.x/scale,
+          y: subBox.y - pad + w.bbox.y/scale,
+          w: w.bbox.width/scale,
+          h: w.bbox.height/scale,
+          page: subBox.page
+        };
+      }).filter(Boolean);
+      const filtered = tokensInBox(words, subBox);
+      const avg = filtered.reduce((s,t)=>s+t.confidence,0)/(filtered.length||1);
+      if(avg > bestAvg){ bestAvg=avg; bestTokens = filtered; }
+    }
+    return { tokens: bestTokens, avg: bestAvg };
   }
-  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.raw', { tokens: bestTokens.length });
-  return bestTokens;
+
+  const { tokens: baseTokens, avg: baseAvg } = await runBox(boxPx);
+  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.raw', { tokens: baseTokens.length });
+
+  const TILE=512, OVER=0.15;
+  const area=boxPx.w*boxPx.h;
+  const needTiles = area > TILE*TILE || baseAvg < 0.6;
+  if(!needTiles) return baseTokens;
+
+  const step=TILE*(1-OVER);
+  const tiles=[];
+  for(let ty=0; ty<boxPx.h; ty+=step){
+    for(let tx=0; tx<boxPx.w; tx+=step){
+      const tile={ x:boxPx.x+tx, y:boxPx.y+ty, w:Math.min(TILE, boxPx.w-tx), h:Math.min(TILE, boxPx.h-ty), page:boxPx.page };
+      const { tokens } = await runBox(tile);
+      tiles.push({ box:tile, tokens });
+    }
+  }
+
+  const merged=[];
+  for(const t of tiles){
+    for(const tok of t.tokens){
+      let m = merged.find(o => o.text===tok.text && (_iou(o,tok)>0.8 || _centerDist(o,tok)<5));
+      if(m){
+        const total=m.confidence+tok.confidence;
+        m.x=(m.x*m.confidence + tok.x*tok.confidence)/total;
+        m.y=(m.y*m.confidence + tok.y*tok.confidence)/total;
+        m.w=(m.w*m.confidence + tok.w*tok.confidence)/total;
+        m.h=(m.h*m.confidence + tok.h*tok.confidence)/total;
+        m.confidence=Math.min(1,total/2);
+      } else {
+        merged.push({...tok});
+      }
+    }
+  }
+
+  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.tiled', { tiles: tiles.map((t,i)=>({ index:i, tokens:t.tokens.length })) });
+  return merged;
 }
 
 async function auditCropSelfTest(question, boxPx){
