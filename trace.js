@@ -38,4 +38,13 @@
   global.TraceStore=TraceStore;
   global.debugTraces=new TraceStore();
   global.exportTraceFile=exportTraceFile;
+  const _traceMap=new Map();
+  function _spanKeyKey(k){ return `${k?.docId||''}:${k?.pageIndex||0}:${k?.fieldKey||''}`; }
+  global.traceEvent=function(spanKey, stage, payload={}){
+    if(!global.debugTraces||!spanKey||!stage) return;
+    const key=_spanKeyKey(spanKey);
+    let id=_traceMap.get(key);
+    if(!id){ id=global.debugTraces.start(spanKey); _traceMap.set(key,id); }
+    global.debugTraces.add(id, stage, { output: payload });
+  };
 })(window);
