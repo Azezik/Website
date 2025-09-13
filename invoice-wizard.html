@@ -135,6 +135,12 @@
               Show OCR Boxes
             </label>
           </div>
+          <div class="field">
+            <label style="flex-direction:row;align-items:center;gap:6px;">
+              <input type="checkbox" id="show-raw-toggle" />
+              Show raw values
+            </label>
+          </div>
           <div id="resultsMount"></div>
           <pre id="telemetryPanel" class="code" style="max-height:120px;overflow:auto;"></pre>
           <div id="ocrCropSelfTest" class="panel minimal">
@@ -229,6 +235,7 @@
 
   <script src="trace.js"></script>
   <script src="orchestrator.js"></script>
+  <script src="field-map.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
