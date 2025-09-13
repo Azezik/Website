@@ -141,6 +141,15 @@
             <h3>OCR Crop Self-Test</h3>
             <div id="ocrCropList"></div>
           </div>
+          <div id="traceViewer" class="panel minimal" style="display:none">
+            <h3 id="traceHeader">Trace Viewer</h3>
+            <div id="traceSummary" class="sub"></div>
+            <div id="traceWaterfall"></div>
+            <pre id="traceDetail" class="code"></pre>
+            <div class="actions">
+              <button id="traceExportBtn" class="btn">Export trace</button>
+            </div>
+          </div>
         </section>
 
         <section id="reports" class="panel" style="display:none">
@@ -218,6 +227,7 @@
     </footer>
   </div>
 
+  <script src="trace.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
