@@ -76,6 +76,7 @@ const els = {
   pdfCanvas:       document.getElementById('pdfCanvas'),
   imgCanvas:       document.getElementById('imgCanvas'),
   overlayCanvas:   document.getElementById('overlayCanvas'),
+  overlayHud:      document.getElementById('overlayHud'),
 
   boxModeBtn:      document.getElementById('boxModeBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
@@ -123,8 +124,10 @@ let state = {
   pageViewports: [],       // viewport per page
   pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: {},          // {page:number: Token[] in px}
-  selectionPx: null,         // current user-drawn selection (px)
-  snappedPx: null,           // snapped line box (px)
+  selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
+  selectionPx: null,         // current user-drawn selection (px, page-relative)
+  snappedCss: null,          // snapped line box (CSS units, page-relative)
+  snappedPx: null,           // snapped line box (px, page-relative)
   snappedText: '',           // snapped line text
   pageTransform: { scale:1, rotation:0 }, // calibration transform per page
   telemetry: [],            // extraction telemetry
@@ -142,6 +145,10 @@ let state = {
   pageRenderPromises: [],
   pageRenderReady: [],
   currentTraceId: null,
+  overlayPinned: false,
+  overlayMetrics: null,
+  pendingSelection: null,
+  lastOcrCropCss: null,
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -1398,7 +1405,7 @@ function getPdfBitmapCanvas(pageIndex){
 
 function getOcrCropForSelection({docId, pageIndex, normBox}){
   const { canvas: src, error: canvasErr } = getPdfBitmapCanvas(pageIndex);
-  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null, overlayPinned:isOverlayPinned() } };
+  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null, cssBox:null, overlayPinned:isOverlayPinned() } };
   if(!result.meta.overlayPinned){ result.meta.errors.push('overlay_not_pinned'); }
   if(canvasErr){ result.meta.errors.push(canvasErr); return result; }
 
@@ -1540,7 +1547,9 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   result.meta.hash = hash;
   result.meta.bandingScore = bandingScore;
   result.meta.clamped = clamped;
-  state.lastOcrCropPx = { x:cssSX, y:cssSY, w:cssSW, h:cssSH, page: pageIndex+1 };
+  state.lastOcrCropCss = { x:cssSX, y:cssSY, w:cssSW, h:cssSH, page: pageIndex+1 };
+  state.lastOcrCropPx = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
+  result.meta.cssBox = { sx: cssSX, sy: cssSY, sw: cssSW, sh: cssSH };
   drawOverlay();
   return result;
 }
@@ -2067,6 +2076,7 @@ async function extractLineItems(profile){
 
 /* ---------------------- PDF/Image Loading ------------------------ */
 const overlayCtx = els.overlayCanvas.getContext('2d');
+const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/100 : 'err';
 
 function sizeOverlayTo(w, h){
   const dpr = window.devicePixelRatio || 1;
@@ -2087,18 +2097,76 @@ function syncOverlay(){
   els.overlayCanvas.style.left = left + 'px';
   els.overlayCanvas.style.top = top + 'px';
   sizeOverlayTo(rect.width, rect.height);
+  const dpr = window.devicePixelRatio || 1;
+  state.overlayMetrics = {
+    pin: isOverlayPinned(),
+    cssW: rect.width,
+    cssH: rect.height,
+    pxW: src.width,
+    pxH: src.height,
+    dpr,
+    cssBox: state.snappedCss || state.selectionCss || null,
+    pxBox: state.snappedPx || state.selectionPx || null,
+  };
+  state.overlayPinned = state.overlayMetrics.pin;
+  updateOverlayHud();
+  if(state.overlayPinned && state.pendingSelection && !state.pendingSelection.active){
+    applySelectionFromCss(state.pendingSelection.startCss, state.pendingSelection.endCss);
+    state.pendingSelection = null;
+  }
 }
 
 function isOverlayPinned(){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
-  if(!src) return false;
+  const ov = els.overlayCanvas;
+  if(!src || !ov) return false;
   const srcRect = src.getBoundingClientRect();
-  const ovRect = els.overlayCanvas.getBoundingClientRect();
-  const eps = 1; // tolerance in pixels
+  const ovRect = ov.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const eps = 1; // css pixel tolerance
   return Math.abs(srcRect.left - ovRect.left) < eps &&
          Math.abs(srcRect.top - ovRect.top) < eps &&
          Math.abs(srcRect.width - ovRect.width) < eps &&
-         Math.abs(srcRect.height - ovRect.height) < eps;
+         Math.abs(srcRect.height - ovRect.height) < eps &&
+         ov.width === src.width &&
+         ov.height === src.height &&
+         src.width === Math.round(srcRect.width * dpr) &&
+         src.height === Math.round(srcRect.height * dpr);
+}
+
+function updateOverlayHud(){
+  if(!els.overlayHud) return;
+  const m = state.overlayMetrics || {};
+  const boxCss = m.cssBox ? ` cssBox:[${sn(m.cssBox.x)},${sn(m.cssBox.y)},${sn(m.cssBox.w)},${sn(m.cssBox.h)}]` : '';
+  const boxPx = m.pxBox ? ` pxBox:[${sn(m.pxBox.x)},${sn(m.pxBox.y)},${sn(m.pxBox.w)},${sn(m.pxBox.h)}]` : '';
+  els.overlayHud.textContent = `pin:${m.pin?1:0} css:${sn(m.cssW)}×${sn(m.cssH)} px:${sn(m.pxW)}×${sn(m.pxH)} dpr:${sn(m.dpr)}${boxCss}${boxPx}`;
+}
+
+function applySelectionFromCss(startCss, endCss){
+  const { scaleX, scaleY } = getScaleFactors();
+  const startPx = { x:startCss.x*scaleX, y:startCss.y*scaleY };
+  const endPx = { x:endCss.x*scaleX, y:endCss.y*scaleY };
+  const page = pageFromYPx(startPx.y);
+  const offPx = state.pageOffsets[page-1] || 0;
+  const offCss = offPx/scaleY;
+  const boxCss = {
+    x: Math.min(startCss.x, endCss.x),
+    y: Math.min(startCss.y, endCss.y) - offCss,
+    w: Math.abs(endCss.x - startCss.x),
+    h: Math.abs(endCss.y - startCss.y),
+    page
+  };
+  const boxPx = {
+    x: Math.min(startPx.x, endPx.x),
+    y: Math.min(startPx.y, endPx.y) - offPx,
+    w: Math.abs(endPx.x - startPx.x),
+    h: Math.abs(endPx.y - startPx.y),
+    page
+  };
+  state.selectionCss = boxCss;
+  state.selectionPx = boxPx;
+  drawOverlay();
+  finalizeSelection();
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
@@ -2175,12 +2243,14 @@ function cleanupDoc(){
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
 async function renderImage(url){
+  state.overlayPinned = false;
   const img = els.imgCanvas;
   img.onload = () => {
     const scale = Math.min(1, 980 / img.naturalWidth);
     img.width = img.naturalWidth * scale;
     img.height = img.naturalHeight * scale;
     syncOverlay();
+    state.overlayPinned = isOverlayPinned();
     state.viewport = { w: img.width, h: img.height, scale };
     state.pageRenderReady[0] = true;
     state.pageRenderPromises[0] = Promise.resolve();
@@ -2192,6 +2262,7 @@ async function renderImage(url){
 // ===== Render all PDF pages vertically =====
 async function renderAllPages(){
   if(!state.pdf) return;
+  state.overlayPinned = false;
   const scale = 1.5;
   const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
   state.pageViewports = [];
@@ -2233,9 +2304,12 @@ async function renderAllPages(){
     y += p.canvas.height;
   }
   await refreshCropAuditThumbs();
+  syncOverlay();
+  state.overlayPinned = isOverlayPinned();
 }
 
 window.addEventListener('resize', () => {
+  state.overlayPinned = false;
   const base = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!base) return;
   const rect = base.getBoundingClientRect();
@@ -2271,43 +2345,82 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   return tokens;
 }
 
-function pageFromY(y){
+function pageFromYPx(yPx){
   for(let i=state.pageOffsets.length-1; i>=0; i--){
-    if(y >= state.pageOffsets[i]) return i+1;
+    if(yPx >= state.pageOffsets[i]) return i+1;
   }
   return 1;
 }
 
+function getScaleFactors(){
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!src) return { scaleX:1, scaleY:1 };
+  const rect = src.getBoundingClientRect();
+  const scaleX = src.width / rect.width;
+  const scaleY = src.height / rect.height;
+  return { scaleX, scaleY };
+}
+
 /* --------------------- Overlay / Drawing Box --------------------- */
-let drawing = false, start = null;
+let drawing = false, start = null, startCss = null;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
   e.preventDefault();
-  drawing = true;
   const rect = els.overlayCanvas.getBoundingClientRect();
-  start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const css = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  if(!state.overlayPinned){
+    state.pendingSelection = { startCss: css, endCss: css, active: true };
+    return;
+  }
+  const { scaleX, scaleY } = getScaleFactors();
+  startCss = css;
+  start = { x: css.x*scaleX, y: css.y*scaleY };
+  drawing = true;
   els.overlayCanvas.setPointerCapture?.(e.pointerId);
 }, { passive: false });
 
 els.overlayCanvas.addEventListener('pointermove', e => {
+  if(state.pendingSelection && state.pendingSelection.active && !state.overlayPinned){
+    const rect = els.overlayCanvas.getBoundingClientRect();
+    state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    return;
+  }
   if (!drawing) return;
   e.preventDefault();
   const rect = els.overlayCanvas.getBoundingClientRect();
-  const cur = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  const page = pageFromY(start.y);
-  const offset = state.pageOffsets[page - 1] || 0;
-  const box = {
-    x: Math.min(start.x, cur.x),
-    y: Math.min(start.y, cur.y) - offset,
-    w: Math.abs(cur.x - start.x),
-    h: Math.abs(cur.y - start.y),
+  const curCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const { scaleX, scaleY } = getScaleFactors();
+  const curPx = { x: curCss.x*scaleX, y: curCss.y*scaleY };
+  const page = pageFromYPx(start.y);
+  const offPx = state.pageOffsets[page - 1] || 0;
+  const offCss = offPx/scaleY;
+  const boxCss = {
+    x: Math.min(startCss.x, curCss.x),
+    y: Math.min(startCss.y, curCss.y) - offCss,
+    w: Math.abs(curCss.x - startCss.x),
+    h: Math.abs(curCss.y - startCss.y),
     page
   };
-  state.selectionPx = box;
+  const boxPx = {
+    x: Math.min(start.x, curPx.x),
+    y: Math.min(start.y, curPx.y) - offPx,
+    w: Math.abs(curPx.x - start.x),
+    h: Math.abs(curPx.y - start.y),
+    page
+  };
+  state.selectionCss = boxCss;
+  state.selectionPx = boxPx;
   drawOverlay();
 }, { passive: false });
 
-async function finalizeSelection() {
+async function finalizeSelection(e) {
+  if(state.pendingSelection && !state.overlayPinned){
+    const rect = els.overlayCanvas.getBoundingClientRect();
+    state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    state.pendingSelection.active = false;
+    drawing = false;
+    return;
+  }
   drawing = false;
   if (!state.selectionPx) return;
   state.pageNum = state.selectionPx.page;
@@ -2317,18 +2430,26 @@ async function finalizeSelection() {
   const snap = snapToLine(tokens, state.selectionPx);
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
+  const { scaleX, scaleY } = getScaleFactors();
+  state.snappedCss = {
+    x: state.snappedPx.x/scaleX,
+    y: state.snappedPx.y/scaleY,
+    w: state.snappedPx.w/scaleX,
+    h: state.snappedPx.h/scaleY,
+    page: state.snappedPx.page
+  };
   const step = state.steps[state.stepIdx] || {};
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
-  const rect = src.getBoundingClientRect();
-  const nb = normalizeBox(state.snappedPx, rect.width, rect.height);
+  const vp = state.pageViewports[state.pageNum - 1] || { width: state.viewport.w, height: state.viewport.h };
+  const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
   const pinned = isOverlayPinned();
-  traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, renderSize:{ w:rect.width, h:rect.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
+  const srcRect = (state.isImage?els.imgCanvas:els.pdfCanvas).getBoundingClientRect();
+  traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, cssBox: state.snappedCss, cssSize:{ w:srcRect.width, h:srcRect.height }, pxSize:{ w:vp.width, h:vp.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
   drawOverlay();
 }
 
-els.overlayCanvas.addEventListener('pointerup', finalizeSelection, { passive: false });
-els.overlayCanvas.addEventListener('pointercancel', finalizeSelection, { passive: false });
+els.overlayCanvas.addEventListener('pointerup', e=>finalizeSelection(e), { passive: false });
+els.overlayCanvas.addEventListener('pointercancel', e=>finalizeSelection(e), { passive: false });
 
 els.viewer.addEventListener('scroll', ()=>{
   const y = els.viewer.scrollTop;
@@ -2345,6 +2466,7 @@ els.viewer.addEventListener('scroll', ()=>{
 function drawOverlay(){
   syncOverlay();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  const { scaleY } = getScaleFactors();
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
   if(els.showBoxesToggle?.checked && state.profile?.fields){
@@ -2396,19 +2518,19 @@ function drawOverlay(){
       overlayCtx.fill();
     }
   }
-  if(state.selectionPx){
+  if(state.selectionCss){
     overlayCtx.strokeStyle = '#2ee6a6'; overlayCtx.lineWidth = 1.5;
-    const b = state.selectionPx; const off = state.pageOffsets[b.page-1] || 0;
+    const b = state.selectionCss; const off = (state.pageOffsets[b.page-1] || 0)/scaleY;
     overlayCtx.strokeRect(b.x, b.y + off, b.w, b.h);
   }
-  if(state.snappedPx){
+  if(state.snappedCss){
     overlayCtx.strokeStyle = '#44ccff'; overlayCtx.lineWidth = 2;
-    const s = state.snappedPx; const off2 = state.pageOffsets[s.page-1] || 0;
+    const s = state.snappedCss; const off2 = (state.pageOffsets[s.page-1] || 0)/scaleY;
     overlayCtx.strokeRect(s.x, s.y + off2, s.w, s.h);
   }
-  if(els.showOcrBoxesToggle?.checked && state.lastOcrCropPx){
+  if(els.showOcrBoxesToggle?.checked && state.lastOcrCropCss){
     overlayCtx.strokeStyle = 'red'; overlayCtx.lineWidth = 2;
-    const c = state.lastOcrCropPx; const off3 = state.pageOffsets[c.page-1] || 0;
+    const c = state.lastOcrCropCss; const off3 = (state.pageOffsets[c.page-1] || 0)/scaleY;
     overlayCtx.strokeRect(c.x, c.y + off3, c.w, c.h);
   }
 }
@@ -2515,7 +2637,7 @@ function traceFromAudit(a){
   const pageIndex = meta.pageIndex || 0;
   const traceId = debugTraces.start({ docId, pageIndex, fieldKey: a.question });
   state.currentTraceId = traceId;
-  debugTraces.add(traceId,'selection.captured',{ input:{ normBox: meta.normBox }, output:{ pixelBox: meta.computedPx, overlayPinned: meta.overlayPinned, renderSize: meta.canvasSize, dpr: meta.canvasSize?.dpr }, warnings:[], errors:[] });
+  debugTraces.add(traceId,'selection.captured',{ input:{ normBox: meta.normBox }, output:{ pixelBox: meta.computedPx, cssBox: meta.cssBox, overlayPinned: meta.overlayPinned, renderSize: meta.canvasSize, dpr: meta.canvasSize?.dpr }, warnings:[], errors:[] });
   const srcObj = getPdfBitmapCanvas(pageIndex) || {};
   let renderUrl='';
   if(srcObj.canvas){
@@ -2556,7 +2678,6 @@ function displayTrace(traceId){
   const ocr = trace.events.find(e=>e.stage==='ocr.completed')?.output || {};
   const val = trace.events.find(e=>e.stage==='validation.completed')?.output || {};
   const ui = trace.events.find(e=>e.stage==='ui.bound')?.output || {};
-  const sn = v => (typeof v==='number' && Number.isFinite(v)) ? v : 'err';
   els.traceSummary.textContent = `sel:[${sn(nb.x0n)},${sn(nb.y0n)},${sn(nb.wN)},${sn(nb.hN)}] src:${sn(cs.w)}×${sn(cs.h)} crop:${sn(cp.sx)},${sn(cp.sy)},${sn(cp.sw)},${sn(cp.sh)} ocr:${sn(ocr.charCount)}/${sn(ocr.meanConf)} val:${val.status||'?'}/${sn(val.confidence)} pin:${selOut.overlayPinned?'1':'0'} ui:${ui.component?'bound':'unbound'}`;
   els.traceWaterfall.innerHTML='';
   let prev = trace.events[0]?.ts;

@@ -49,6 +49,20 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 .docCanvas{ position: relative; z-index: 1; background: #ffffff; }
 .overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: auto; touch-action: none; cursor: crosshair; }
 
+.overlay-hud {
+  position: absolute;
+  z-index: 3;
+  left: 4px;
+  top: 4px;
+  padding: 2px 4px;
+  font-size: 11px;
+  background: rgba(0,0,0,0.6);
+  color: #0f0;
+  font-family: monospace;
+  pointer-events: none;
+  white-space: pre;
+}
+
 canvas.debug-crop, #pdfCanvas{ background:none !important; }
 
 /* Extraction / results */
