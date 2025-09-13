@@ -42,6 +42,8 @@ const els = {
   showBoxesToggle: document.getElementById('show-boxes-toggle'),
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
+  showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
@@ -97,6 +99,7 @@ function showTab(id){
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
+if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
 let state = {
   username: null,
@@ -123,6 +126,8 @@ let state = {
   currentFileName: '',
   currentFileId: '',        // unique id per opened file
   currentLineItems: [],
+  lastOcrCropPx: null,
+  cropAudits: [],
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -1261,6 +1266,92 @@ async function ocrBox(boxPx, fieldKey){
   return bestTokens;
 }
 
+async function auditCropSelfTest(question, boxPx){
+  const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
+  const pageIndex = (boxPx.page||1) - 1;
+  const vp = state.pageViewports[pageIndex] || state.viewport;
+  const viewportScale = vp.scale || 1;
+  const rotation = vp.rotation || 0;
+  const dpr = window.devicePixelRatio || 1;
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(src === els.overlayCanvas){ console.error('ERROR: canvas-mismatch'); return; }
+  if(boxPx.page !== state.pageNum){ console.error('ERROR: page-mismatch'); state.cropAudits.push({question, status:'needs_review', reason:'page-mismatch'}); return; }
+  const after = {
+    x: Math.round(boxPx.x * viewportScale * dpr),
+    y: Math.round(boxPx.y * viewportScale * dpr),
+    w: Math.round(boxPx.w * viewportScale * dpr),
+    h: Math.round(boxPx.h * viewportScale * dpr),
+    page: boxPx.page
+  };
+  state.lastOcrCropPx = after;
+  const audit = {
+    docId,
+    question,
+    pageIndex,
+    viewportScale,
+    devicePixelRatio: dpr,
+    pageRotation: rotation,
+    sourceCanvas: { w: src.width, h: src.height },
+    selectionBoxPx_input: boxPx,
+    selectionBoxPx_afterTransforms: after,
+    cropSize: { w: after.w, h: after.h }
+  };
+  const dir = `debug/crops/${docId}/${pageIndex}`;
+  const ts = Date.now();
+  const baseName = `${question}__${ts}`;
+  const fs = window.fs || (window.require && window.require('fs'));
+  const offY = state.pageOffsets[boxPx.page-1] || 0;
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = after.w; cropCanvas.height = after.h;
+  cropCanvas.getContext('2d').drawImage(src, after.x, offY + after.y, after.w, after.h, 0,0,after.w,after.h);
+  const bufFromCanvas = c => Buffer.from(c.toDataURL('image/png').split(',')[1], 'base64');
+  if(fs){ fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(`${dir}/${baseName}.png`, bufFromCanvas(cropCanvas)); }
+  const savePad = (pad, suffix)=>{
+    const b={
+      x: Math.max(0, after.x-pad),
+      y: Math.max(0, after.y-pad),
+      w: Math.min(after.w+pad*2, src.width-(after.x-pad)),
+      h: Math.min(after.h+pad*2, src.height-(after.y-pad))
+    };
+    const c=document.createElement('canvas'); c.width=b.w; c.height=b.h;
+    c.getContext('2d').drawImage(src, b.x, offY+b.y, b.w, b.h, 0,0,b.w,b.h);
+    if(fs) fs.writeFileSync(`${dir}/${baseName}${suffix}.png`, bufFromCanvas(c));
+  };
+  savePad(2,'__pad2');
+  savePad(Math.round(Math.max(after.w,after.h)*0.05),'__pad5pct');
+  if(after.w <=2 || after.h <=2){
+    console.error('tiny-or-zero-crop');
+    audit.status='needs_review';
+    audit.reason='tiny-or-zero-crop';
+    if(fs) fs.writeFileSync(`${dir}/${baseName}.png.json`, JSON.stringify(audit,null,2));
+    state.cropAudits.push(audit); renderCropAuditPanel(); return audit;
+  }
+  async function runPass(psm){
+    const { data } = await TesseractRef.recognize(cropCanvas,'eng',{ tessedit_pageseg_mode:psm });
+    const toks=(data.words||[]).map(w=>w.text.trim()).filter(Boolean);
+    const mean=toks.length? (data.words.reduce((s,w)=>s+w.confidence,0)/toks.length)/100 : 0;
+    return { raw:data.text, tokens:toks, tokensLength:toks.length, meanConfidence:mean };
+  }
+  const passA=await runPass(6);
+  const passB=await runPass(7);
+  audit.ocrProbe={
+    passA:{ raw:passA.raw, tokensLength:passA.tokensLength, meanTokenConfidence:passA.meanConfidence },
+    passB:{ raw:passB.raw, tokensLength:passB.tokensLength, meanTokenConfidence:passB.meanConfidence }
+  };
+  const labels=['subtotal','tax','total','hst'];
+  if(passA.tokensLength===0 && passB.tokensLength===0){
+    audit.status='needs_review'; audit.reason='empty_ocr_for_box';
+  } else if(passA.tokens.concat(passB.tokens).every(t=>labels.includes(t.toLowerCase()))){
+    audit.status='needs_review'; audit.reason='label_only_in_box';
+  } else {
+    audit.status='ok';
+  }
+  if(fs) fs.writeFileSync(`${dir}/${baseName}.png.json`, JSON.stringify(audit,null,2));
+  state.cropAudits.push({ ...audit, thumb: cropCanvas.toDataURL('image/png') });
+  renderCropAuditPanel();
+  return audit;
+}
+
 function labelValueHeuristic(fieldSpec, tokens){
   let value = '', usedBox = null, confidence = 0;
   const lines = groupIntoLines(tokens);
@@ -1786,6 +1877,35 @@ function drawOverlay(){
     const s = state.snappedPx; const off2 = state.pageOffsets[s.page-1] || 0;
     overlayCtx.strokeRect(s.x, s.y + off2, s.w, s.h);
   }
+  if(els.showOcrBoxesToggle?.checked && state.lastOcrCropPx){
+    overlayCtx.strokeStyle = 'red'; overlayCtx.lineWidth = 2;
+    const c = state.lastOcrCropPx; const off3 = state.pageOffsets[c.page-1] || 0;
+    overlayCtx.strokeRect(c.x, c.y + off3, c.w, c.h);
+  }
+}
+
+function renderCropAuditPanel(){
+  if(!els.ocrCropList) return;
+  els.ocrCropList.innerHTML = '';
+  state.cropAudits.forEach(a => {
+    const row = document.createElement('div');
+    row.className = 'ocrCropRow';
+    const img = document.createElement('img');
+    img.src = a.thumb || '';
+    img.alt = a.question || '';
+    img.style.maxWidth = '80px';
+    img.style.maxHeight = '80px';
+    const info = document.createElement('div');
+    const aCount = a.ocrProbe?.passA?.tokensLength || 0;
+    const bCount = a.ocrProbe?.passB?.tokensLength || 0;
+    const raw = (a.ocrProbe?.passA?.raw || '').slice(0,80).replace(/\s+/g,' ');
+    const conf = a.ocrProbe?.passA?.meanTokenConfidence || 0;
+    const guard = a.reason ? ` ${a.reason}` : '';
+    info.textContent = `${a.question}: A${aCount}/B${bCount} conf:${conf.toFixed(2)} ${raw}${guard}`;
+    row.appendChild(img);
+    row.appendChild(info);
+    els.ocrCropList.appendChild(row);
+  });
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
@@ -2102,6 +2222,7 @@ els.fileInput?.addEventListener('change', e=>{
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
+els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
@@ -2166,6 +2287,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     raw = res.raw || (state.snappedText || '').trim();
     corrections = res.correctionsApplied || res.corrections || [];
     fieldTokens = res.tokens || [];
+  }
+
+  if(els.ocrToggle?.checked){
+    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
+    catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
   const norm = toPct(state.viewport, boxPx);
