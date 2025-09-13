@@ -1560,7 +1560,9 @@ async function auditCropSelfTest(question, boxPx){
   const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
   const pageIndex = (boxPx.page||1) - 1;
   const vp = state.pageViewports[pageIndex] || state.viewport || {width:1,height:1};
-  const normBox = normalizeBox(boxPx, vp.width || 1, vp.height || 1);
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const normBox = normalizeBox(boxPx, canvasW, canvasH);
   const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
   meta.question = question;
   const fs = window.fs || (window.require && window.require('fs'));
@@ -2727,8 +2729,8 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   }
 
   const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-  const canvasW = vp.width || 1;
-  const canvasH = vp.height || 1;
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
   const normBox = normalizeBox(boxPx, canvasW, canvasH);
   const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
@@ -2795,7 +2797,7 @@ async function autoExtractFileWithProfile(file, profile){
     const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
       const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const nb = boxPx ? normalizeBox(boxPx, vp.width || 1, vp.height || 1) : null;
+      const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
       const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
       const arr = rawStore[state.currentFileId];
       let conf = confidence;
