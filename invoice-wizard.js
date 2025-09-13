@@ -19,7 +19,7 @@ const TesseractRef = window.Tesseract;
      #login-section, #dashboard, #wizard-section
      #pdfCanvas, #imgCanvas, #overlayCanvas
      #prevPageBtn, #nextPageBtn, #pageIndicator, #ocrToggle
-     #boxModeBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
+     #boxModeBtn, #rawDataBtn, #clearSelectionBtn, #backBtn, #skipBtn, #confirmBtn
      #fieldsPreview, #savedJson, #exportBtn, #finishWizardBtn
     #wizard-file  (single-file open), #file-input + #dropzone (batch)
    Tesseract.js is already included by the page.
@@ -79,6 +79,7 @@ const els = {
   overlayHud:      document.getElementById('overlayHud'),
 
   boxModeBtn:      document.getElementById('boxModeBtn'),
+  rawDataBtn:      document.getElementById('rawDataBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
   backBtn:         document.getElementById('backBtn'),
   skipBtn:         document.getElementById('skipBtn'),
@@ -2078,13 +2079,15 @@ async function extractLineItems(profile){
 const overlayCtx = els.overlayCanvas.getContext('2d');
 const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/100 : 'err';
 
-function sizeOverlayTo(w, h){
-  const dpr = window.devicePixelRatio || 1;
-  els.overlayCanvas.style.width = w + 'px';
-  els.overlayCanvas.style.height = h + 'px';
-  els.overlayCanvas.width = Math.round(w * dpr);
-  els.overlayCanvas.height = Math.round(h * dpr);
-  overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+function sizeOverlayTo(cssW, cssH){
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const pxW = src?.width || Math.round(cssW * (window.devicePixelRatio || 1));
+  const pxH = src?.height || Math.round(cssH * (window.devicePixelRatio || 1));
+  els.overlayCanvas.style.width = cssW + 'px';
+  els.overlayCanvas.style.height = cssH + 'px';
+  els.overlayCanvas.width = pxW;
+  els.overlayCanvas.height = pxH;
+  overlayCtx.setTransform(pxW/cssW, 0, 0, pxH/cssH, 0, 0);
 }
 
 function syncOverlay(){
@@ -2122,16 +2125,13 @@ function isOverlayPinned(){
   if(!src || !ov) return false;
   const srcRect = src.getBoundingClientRect();
   const ovRect = ov.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
   const eps = 1; // css pixel tolerance
   return Math.abs(srcRect.left - ovRect.left) < eps &&
          Math.abs(srcRect.top - ovRect.top) < eps &&
          Math.abs(srcRect.width - ovRect.width) < eps &&
          Math.abs(srcRect.height - ovRect.height) < eps &&
          ov.width === src.width &&
-         ov.height === src.height &&
-         src.width === Math.round(srcRect.width * dpr) &&
-         src.height === Math.round(srcRect.height * dpr);
+         ov.height === src.height;
 }
 
 function updateOverlayHud(){
@@ -2799,6 +2799,9 @@ function syncRawModeUI(){
     els.showRawToggle.disabled = on;
     if(!on) els.showRawToggle.checked = false;
   }
+  if(els.rawDataBtn){
+    els.rawDataBtn.classList.toggle('active', on);
+  }
   renderResultsTable();
 }
 
@@ -2986,6 +2989,11 @@ els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderRe
 els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
 els.rawDataToggle?.addEventListener('change', ()=>{
   state.modes.rawData = !!els.rawDataToggle.checked;
+  syncRawModeUI();
+});
+els.rawDataBtn?.addEventListener('click', ()=>{
+  state.modes.rawData = !state.modes.rawData;
+  if(els.rawDataToggle) els.rawDataToggle.checked = state.modes.rawData;
   syncRawModeUI();
 });
 
