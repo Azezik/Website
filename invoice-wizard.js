@@ -43,6 +43,7 @@ const els = {
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  showRawToggle: document.getElementById('show-raw-toggle'),
   ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
   traceViewer:    document.getElementById('traceViewer'),
@@ -288,7 +289,7 @@ function loadProfile(u, d){
 }
 
 // Raw and compiled stores
-const rawStore = {};       // {fileId: [{fieldKey,value,page,bbox,ts}]}
+const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
 const fileMeta = {};       // {fileId: {fileName}}
 
 const MODELS_KEY = 'wiz.models';
@@ -2026,7 +2027,7 @@ async function openFile(file){
   state.currentFileName = file.name || 'untitled';
   state.currentFileId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   fileMeta[state.currentFileId] = { fileName: state.currentFileName };
-  rawStore[state.currentFileId] = rawStore[state.currentFileId] || [];
+  rawStore.clear(state.currentFileId);
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
 
@@ -2481,7 +2482,7 @@ function displayTrace(traceId){
 
 /* ---------------------- Results “DB” table ----------------------- */
 function compileDocument(fileId, lineItems=[]){
-  const raw = rawStore[fileId] || [];
+  const raw = rawStore.get(fileId);
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
   const sub = parseFloat(byKey['subtotal_amount']?.value);
@@ -2515,7 +2516,7 @@ function compileDocument(fileId, lineItems=[]){
     templateKey: `${state.username}:${state.docType}`
   };
   const db = LS.getDb();
-  const idx = db.findIndex(r => r.fileId === fileId);
+  const idx = db.findIndex(r => r.fileName === compiled.fileName && r.templateKey === compiled.templateKey);
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(db);
   renderResultsTable();
@@ -2534,13 +2535,16 @@ function renderResultsTable(){
   const keySet = new Set();
   db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
+  const showRaw = els.showRawToggle?.checked;
 
   const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
   const rows = db.map(r=>{
     const cells = keys.map(k=>{
-      const f = r.fields?.[k] || { value:'', confidence:0 };
+      const f = r.fields?.[k] || { value:'', raw:'', confidence:0 };
       const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
-      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
+      const val = showRaw ? (f.raw || f.value || '') : (f.value || f.raw || '');
+      const prop = showRaw ? 'raw' : 'value';
+      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
     const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td></tr>`).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
@@ -2552,13 +2556,16 @@ function renderResultsTable(){
   mount.querySelectorAll('input.editField').forEach(inp=>inp.addEventListener('change', ()=>{
     const fileId = inp.dataset.file;
     const field = inp.dataset.field;
+    const prop = inp.dataset.prop || 'value';
     const db = LS.getDb();
     const rec = db.find(r=>r.fileId===fileId);
     if(rec && rec.fields?.[field]){
-      rec.fields[field].value = inp.value;
-      rec.fields[field].confidence = 1;
-      if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
-      if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
+      rec.fields[field][prop] = inp.value;
+      if(prop === 'value'){
+        rec.fields[field].confidence = 1;
+        if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
+        if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
+      }
       LS.setDb(db);
       renderResultsTable();
       renderReports();
@@ -2747,6 +2754,7 @@ els.docType?.addEventListener('change', ()=>{
 });
 
 els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
+els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
@@ -2891,11 +2899,8 @@ els.confirmBtn?.addEventListener('click', async ()=>{
 
   const fid = state.currentFileId;
   if(fid){
-    rawStore[fid] = rawStore[fid] || [];
-    const arr = rawStore[fid];
-    const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
-    if(idx>=0) arr[idx]=rec; else arr.push(rec);
+    rawStore.upsert(fid, rec);
   }
 
   afterConfirmAdvance();
@@ -2941,13 +2946,12 @@ async function autoExtractFileWithProfile(file, profile){
       const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
       const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
       const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-      const arr = rawStore[state.currentFileId];
+      const arr = rawStore.get(state.currentFileId);
       let conf = confidence;
       const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
       if(dup) conf *= 0.5;
-      const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
       const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
-      if(idx>=0) arr[idx]=rec; else arr.push(rec);
+      rawStore.upsert(state.currentFileId, rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
