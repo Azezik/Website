@@ -49,6 +49,8 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 .docCanvas{ position: relative; z-index: 1; background: #ffffff; }
 .overlay  { position: absolute; z-index: 2; left: 0; top: 0; pointer-events: auto; touch-action: none; cursor: crosshair; }
 
+canvas.debug-crop, #pdfCanvas{ background:none !important; }
+
 /* Extraction / results */
 .confidence{ font-size:10px; color:var(--muted); margin-left:4px; }
 .warn{ color:var(--accent); font-size:12px; margin-left:2px; }
