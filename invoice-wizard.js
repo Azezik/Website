@@ -534,6 +534,18 @@ const FieldDataEngine = (() => {
         return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
       }
     }
+    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
+    }
+    if(ftype==='customer_address'){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(!/\d/.test(txt) && !postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
+    }
     let score = 0;
     if(def.codes && def.codes.includes(code)) score += 2;
     if(regex && regex.test(txt)) score += 2;
@@ -1294,15 +1306,22 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const hits = tokensInBox(tokens, searchBox);
     if(hits.length){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
-      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-      return { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: hits };
-    }
-    if(els.ocrToggle.checked){
-      const oTokens = await ocrBox(searchBox, fieldSpec.fieldKey);
-      if(oTokens.length){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens, state.mode);
-        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-        return { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: oTokens };
+if (cleaned.value || cleaned.raw) {
+  state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+  return { 
+    value: cleaned.value || cleaned.raw, 
+    raw: cleaned.raw, 
+    corrected: cleaned.corrected, 
+    code: cleaned.code, 
+    shape: cleaned.shape, 
+    score: cleaned.score, 
+    correctionsApplied: cleaned.correctionsApplied, 
+    corrections: cleaned.correctionsApplied, 
+    boxPx: searchBox, 
+    confidence: cleaned.conf, 
+    tokens: hits 
+  };
+}
       }
     }
     return null;
