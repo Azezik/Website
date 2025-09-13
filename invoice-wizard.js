@@ -1304,24 +1304,23 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
     const hits = tokensInBox(tokens, searchBox);
-    if(hits.length){
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
-if (cleaned.value || cleaned.raw) {
-  state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-  return { 
-    value: cleaned.value || cleaned.raw, 
-    raw: cleaned.raw, 
-    corrected: cleaned.corrected, 
-    code: cleaned.code, 
-    shape: cleaned.shape, 
-    score: cleaned.score, 
-    correctionsApplied: cleaned.correctionsApplied, 
-    corrections: cleaned.correctionsApplied, 
-    boxPx: searchBox, 
-    confidence: cleaned.conf, 
-    tokens: hits 
-  };
-}
+    if (hits.length) {
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey || '', hits, state.mode);
+      if (cleaned.value || cleaned.raw) {
+        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+        return {
+          value: cleaned.value || cleaned.raw,
+          raw: cleaned.raw,
+          corrected: cleaned.corrected,
+          code: cleaned.code,
+          shape: cleaned.shape,
+          score: cleaned.score,
+          correctionsApplied: cleaned.correctionsApplied,
+          corrections: cleaned.correctionsApplied,
+          boxPx: searchBox,
+          confidence: cleaned.conf,
+          tokens: hits
+        };
       }
     }
     return null;
