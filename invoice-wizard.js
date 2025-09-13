@@ -277,6 +277,7 @@ function saveProfile(u, d, p){
   saveTimer = setTimeout(()=>{
     try{ LS.setProfile(u, d, p); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
+    try{ traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { docType:d }); }catch{}
   },300);
 }
 function loadProfile(u, d){
@@ -600,13 +601,16 @@ const FieldDataEngine = (() => {
     return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len), digit: parseFloat(maxKey(p.digit)) };
   }
 
-  function clean(ftype, input, mode='RUN'){
+  function clean(ftype, input, mode='RUN', spanKey){
     const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
     const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
     let raw = lineStrs.join(' ').trim();
+    if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
     let joined = lineStrs.join(' ').trim();
     if(ftype==='customer_address') joined = lineStrs.join(', ').trim();
-    let txt = collapseAdjacentDuplicates(joined).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    const deduped = collapseAdjacentDuplicates(joined);
+    if(spanKey && deduped!==joined) traceEvent(spanKey,'dedupe.applied',{ before:joined, after:deduped });
+    let txt = deduped.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
     if(/date/i.test(ftype)){ const n = normalizeDate(txt); if(n) txt = n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       const n = normalizeMoney(txt); if(n) txt = n;
@@ -624,31 +628,36 @@ const FieldDataEngine = (() => {
       const regexOk = !regex || regex.test(txt);
       if(codeOk && regexOk) learn(ftype, txt);
       else bumpDebugBlank();
+      if(spanKey) traceEvent(spanKey, codeOk && regexOk ? 'clean.success' : 'clean.fail', { value: txt, raw });
       return { value: raw, raw, corrected: regexOk && regex ? ((txt.match(regex)||[])[1]||txt) : raw, conf, code, shape, score: (codeOk && regexOk) ? 1 : 0, correctionsApplied: [], digit };
     }
     if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
       const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
-        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-      }
+        if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'format_reject' });
+          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+        }
     }
     if(ftype==='customer_address'){
       const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-      if(!/\d/.test(txt) && !postalRe.test(txt)){
-        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-      }
+        if(!/\d/.test(txt) && !postalRe.test(txt)){
+          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'address_reject' });
+          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+        }
     }
     if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
       const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
-        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-      }
+        if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'format_reject' });
+          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+        }
     }
     if(ftype==='customer_address'){
       const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-      if(!/\d/.test(txt) && !postalRe.test(txt)){
-        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-      }
+        if(!/\d/.test(txt) && !postalRe.test(txt)){
+          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'address_reject' });
+          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+        }
     }
     let score = 0;
     if(def.codes && def.codes.includes(code)) score += 2;
@@ -674,9 +683,11 @@ const FieldDataEngine = (() => {
     }
     if(score >= 5){
       learn(ftype, corrected);
+      if(spanKey) traceEvent(spanKey,'clean.success',{ value: corrected, score });
       return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied, digit };
     }
     bumpDebugBlank();
+    if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, score });
     return { value: raw, raw, corrected, conf: Math.min(conf, 0.3), code, shape, score, correctionsApplied, digit };
   }
 
@@ -1588,6 +1599,7 @@ async function ocrBox(boxPx, fieldKey){
     const avg = filtered.reduce((s,t)=>s+t.confidence,0)/(filtered.length||1);
     if(avg > bestAvg){ bestAvg=avg; bestTokens = filtered; }
   }
+  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.raw', { tokens: bestTokens.length });
   return bestTokens;
 }
 
@@ -1696,6 +1708,7 @@ function labelValueHeuristic(fieldSpec, tokens){
 
 async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
+  const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
 
   async function attempt(box){
     const snap = snapToLine(tokens, box);
@@ -1705,7 +1718,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     }
     const hits = tokensInBox(tokens, searchBox);
     if(!hits.length) return null;
-    const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode));
+    const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     const cleaned = sel.cleaned || {};
     return {
@@ -1726,9 +1739,10 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 
   let result = null, method=null, score=null, comp=null, basePx=null;
   if(state.mode === 'CONFIG' && state.snappedPx){
+    traceEvent(spanKey,'selection.captured',{ boxPx: state.snappedPx });
     const hits = tokensInBox(tokens, state.snappedPx);
     const rawText = hits.length ? hits.map(t => t.text).join(' ') : (state.snappedText || '');
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : rawText, state.mode);
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : rawText, state.mode, spanKey);
     state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     const value = cleaned.value || cleaned.raw || rawText;
     result = {
@@ -1752,6 +1766,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     firstAttempt = await attempt(basePx);
     selectionRaw = firstAttempt?.raw || '';
     if(firstAttempt && firstAttempt.cleanedOk){
@@ -1796,14 +1811,16 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
       state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
       result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
 
   if(!result){
-    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
+    traceEvent(spanKey,'fallback.search',{});
+    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
+    traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
     state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
@@ -1820,6 +1837,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
     state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
   }
+  traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method });
   result.tokens = result.tokens || [];
   return result;
 }
@@ -1837,6 +1855,7 @@ async function extractLineItems(profile){
     if(!vp) continue;
     const tokens = await ensureTokensForPage(p);
     const bands={};
+    const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: 'line_items' };
     let headerBottom=0;
     colFields.forEach(f=>{
       const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
@@ -1846,6 +1865,7 @@ async function extractLineItems(profile){
         headerBottom=Math.max(headerBottom,hb.y+hb.h);
       }
     });
+    traceEvent(spanKey,'column.detected',{ columns:Object.keys(bands) });
     let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w && t.y+t.h/2>=b.y));
     pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
     if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
@@ -1855,6 +1875,7 @@ async function extractLineItems(profile){
       const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
       if(/description|qty|quantity|price|amount|sku/.test(first)) lines.shift();
     }
+    const before=rows.length;
     for(const L of lines){
       const lower = L.tokens.map(t=>t.text.toLowerCase()).join(' ');
       if(guardRe && guardRe.test(lower)){ p=state.numPages+1; break; }
@@ -1873,7 +1894,7 @@ async function extractLineItems(profile){
         const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',amount_col:'amount'};
         let val=txt;
         const baseType=keyMap[f.fieldKey];
-        if(baseType) val=FieldDataEngine.clean(baseType, txt, state.mode).value;
+        if(baseType) val=FieldDataEngine.clean(baseType, txt, state.mode, { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: baseType }).value;
         if(val){
           row[keyMap[f.fieldKey]]=val;
           colConfs.push(colConf);
@@ -1899,6 +1920,8 @@ async function extractLineItems(profile){
         rows.push(row);
       }
     }
+    const added=rows.length-before;
+    if(added) traceEvent(spanKey,'lineitems.parsed',{ rows:added });
   }
   return rows;
 }
@@ -2131,6 +2154,9 @@ async function finalizeSelection() {
   const snap = snapToLine(tokens, state.selectionPx);
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
+  const step = state.steps[state.stepIdx] || {};
+  const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
+  traceEvent(spanKey,'selection.captured',{ boxPx: state.snappedPx });
   drawOverlay();
 }
 
