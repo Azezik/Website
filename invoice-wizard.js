@@ -453,22 +453,22 @@ function digitRatio(str){
 const FieldDataEngine = (() => {
   const patterns = {};
   const fieldDefs = {
-    store_name:      { codes:['12122','11112'], regex:'^[A-Z0-9&.\s]{2,40}$' },
-    department_division:{ codes:['12122','12112'] },
-    invoice_number:  { codes:['21222','11222','11212'] },
+    store_name:      { codes:['12122','11112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    department_division:{ codes:['12122','12112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    invoice_number:  { codes:['21222','11222','11212'], regex:'^[A-Z0-9-]{3,20}$' },
     invoice_date:    { codes:['21212','11122'], regex:'^(\\d{4}-\\d{2}-\\d{2}|\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}|[A-Z][a-z]+\\s\\d{1,2},\\s\\d{4})$' },
-    salesperson_rep: { codes:['12122','11222','11212','21222'] },
-    customer_name:   { codes:['12122'] },
+    salesperson_rep: { codes:['12122','11222','11212','21222'], regex:"^[A-Z&.'\\s-]{2,60}$" },
+    customer_name:   { codes:['12122'], regex:"^[A-Z&.'\\s-]{2,60}$" },
     customer_address:{ codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
     description:     { codes:['11122','11112'] },
     sku:             { codes:['11222','11212'], regex:'^[A-Z0-9-]{5,12}$' },
     quantity:        { codes:['21222'] },
-    unit_price:      { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    amount:          { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    subtotal_amount: { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    invoice_total:   { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
-    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d+(?:\\.\\d{2})$' }
+    unit_price:      { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    amount:          { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    subtotal_amount: { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    invoice_total:   { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
+    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' }
   };
 
   function learn(ftype, value){
@@ -493,8 +493,11 @@ const FieldDataEngine = (() => {
 
   function clean(ftype, input, mode='RUN'){
     const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
-    const raw = arr.map(t=>t.text).join(' ').trim();
-    let txt = collapseAdjacentDuplicates(raw).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
+    let raw = lineStrs.join(' ').trim();
+    let joined = lineStrs.join(' ').trim();
+    if(ftype==='customer_address') joined = lineStrs.join(', ').trim();
+    let txt = collapseAdjacentDuplicates(joined).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
     if(/date/i.test(ftype)){ const n = normalizeDate(txt); if(n) txt = n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       const n = normalizeMoney(txt); if(n) txt = n;
@@ -511,6 +514,18 @@ const FieldDataEngine = (() => {
       const value = regex ? ((txt.match(regex)||[])[1]||txt) : txt;
       learn(ftype, value);
       return { value, raw, corrected: value, conf, code: codeOf(value), shape: shapeOf(value), score: regex && value ? 1 : 0, correctionsApplied: [], digit: digitRatio(value) };
+    }
+    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
+    }
+    if(ftype==='customer_address'){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(!/\d/.test(txt) && !postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
     }
     let score = 0;
     if(def.codes && def.codes.includes(code)) score += 2;
@@ -585,7 +600,7 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
-  const text = hits.map(t => t.text).join(' ').trim();
+  const text = lineTokens.map(t => t.text).join(' ').trim();
   return { box: expanded, text };
 }
 
@@ -671,6 +686,8 @@ function ensureProfile(){
       { landmarkKey:'subtotal_hdr',   page:0, type:'text', text:'Sub-Total',   strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'hst_hdr',        page:0, type:'text', text:'HST',         strategy:'exact' },
       { landmarkKey:'qst_hdr',        page:0, type:'text', text:'QST',         strategy:'exact' },
+      { landmarkKey:'gst_hdr',        page:0, type:'text', text:'GST',         strategy:'exact' },
+      { landmarkKey:'tax_hdr',        page:0, type:'text', text:'Tax',         strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'total_hdr',      page:0, type:'text', text:'Total',       strategy:'exact' },
       { landmarkKey:'deposit_hdr',    page:0, type:'text', text:'Deposit',     strategy:'fuzzy', threshold:0.86 },
       { landmarkKey:'balance_hdr',    page:0, type:'text', text:'Balance',     strategy:'fuzzy', threshold:0.86 },
@@ -1106,6 +1123,7 @@ function buildColumnModel(step, norm, boxPx, tokens){
   const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
   return {
     xband:[norm.x0, norm.x1],
+    yband:[norm.y0, norm.y1],
     lineHeightPct,
     regexHint: step.regex || '',
     align,
@@ -1259,26 +1277,26 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
 
   async function attempt(box){
-    const hits = tokensInBox(tokens, box);
+    const snap = snapToLine(tokens, box);
+    let searchBox = snap.box;
+    if(fieldSpec.fieldKey === 'customer_address'){
+      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
+    }
+    const hits = tokensInBox(tokens, searchBox);
     if(hits.length){
-      const lines = groupIntoLines(hits);
-      const lineTokens = lines.flatMap(L=>L.tokens);
-      const text = lineTokens.map(t=>t.text).join(' ').trim();
-      let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lineTokens, state.mode);
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
       if(cleaned.value){
         state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-        return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: lineTokens };
+        return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: hits };
       }
     }
     if(els.ocrToggle.checked){
-      const oTokens = await ocrBox(box, fieldSpec.fieldKey);
+      const oTokens = await ocrBox(searchBox, fieldSpec.fieldKey);
       if(oTokens.length){
-        const text = oTokens.map(t=>t.text).join(' ').trim();
         const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens, state.mode);
         if(cleaned.value){
           state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-          return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: oTokens };
+          return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: oTokens };
         }
       }
     }
@@ -1379,14 +1397,14 @@ async function extractLineItems(profile){
     const bands={};
     let headerBottom=0;
     colFields.forEach(f=>{
-      const band = toPx(vp,{x0:f.column.xband[0],y0:0,x1:f.column.xband[1],y1:1,page:p});
+      const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
       bands[f.fieldKey]=band;
       if(f.column.header){
         const hb=toPx(vp,{x0:f.column.header[0],y0:f.column.header[1],x1:f.column.header[2],y1:f.column.header[3],page:p});
         headerBottom=Math.max(headerBottom,hb.y+hb.h);
       }
     });
-    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w));
+    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w && t.y+t.h/2>=b.y));
     pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
     if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
     const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.5);
@@ -1850,6 +1868,15 @@ function renderReports(){
 function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
+  if(step.type === 'static'){
+    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(normBox.y1,f.bboxPct.y1) - Math.max(normBox.y0,f.bboxPct.y0) > 0);
+    if(clash){
+      console.warn('Overlapping static bboxes, adjusting', step.fieldKey, clash.fieldKey);
+      const shift = (clash.bboxPct.y1 - clash.bboxPct.y0) + 0.001;
+      normBox.y0 = clash.bboxPct.y1 + 0.001;
+      normBox.y1 = normBox.y0 + shift;
+    }
+  }
   const entry = {
     fieldKey: step.fieldKey,
     type: step.type,
@@ -2166,8 +2193,11 @@ async function autoExtractFileWithProfile(file, profile){
     if(value){
       const norm = boxPx ? toPct(state.viewport, { ...boxPx, page: state.pageNum }) : null;
       const arr = rawStore[state.currentFileId];
+      let conf = confidence;
+      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
+      if(dup) conf *= 0.5;
       const idx = arr.findIndex(r=>r.fieldKey===spec.fieldKey);
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
+      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: norm, ts: Date.now() };
       if(idx>=0) arr[idx]=rec; else arr.push(rec);
     }
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
