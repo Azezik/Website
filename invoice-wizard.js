@@ -1396,7 +1396,8 @@ function getPdfBitmapCanvas(pageIndex){
 
 function getOcrCropForSelection({docId, pageIndex, normBox}){
   const { canvas: src, error: canvasErr } = getPdfBitmapCanvas(pageIndex);
-  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null } };
+  const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null, overlayPinned:isOverlayPinned() } };
+  if(!result.meta.overlayPinned){ result.meta.errors.push('overlay_not_pinned'); }
   if(canvasErr){ result.meta.errors.push(canvasErr); return result; }
 
   const val = validateSelection(normBox);
@@ -1492,6 +1493,12 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   }
 
   const imgData = octx.getImageData(0,0,sw,sh).data;
+  let uniform = true;
+  const r0 = imgData[0], g0 = imgData[1], b0 = imgData[2], a0 = imgData[3];
+  for(let i=4;i<imgData.length;i+=4){
+    if(imgData[i]!==r0 || imgData[i+1]!==g0 || imgData[i+2]!==b0 || imgData[i+3]!==a0){ uniform=false; break; }
+  }
+  if(uniform){ result.meta.errors.push('blank_or_uniform_crop'); }
   const rowHashes = new Set();
   for(let y=0;y<sh;y++){
     let row='';
@@ -2008,6 +2015,30 @@ function sizeOverlayTo(w, h){
   els.overlayCanvas.height = Math.round(h * dpr);
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
+
+function syncOverlay(){
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!src) return;
+  const rect = src.getBoundingClientRect();
+  const parentRect = els.viewer.getBoundingClientRect();
+  const left = rect.left - parentRect.left + els.viewer.scrollLeft;
+  const top = rect.top - parentRect.top + els.viewer.scrollTop;
+  els.overlayCanvas.style.left = left + 'px';
+  els.overlayCanvas.style.top = top + 'px';
+  sizeOverlayTo(rect.width, rect.height);
+}
+
+function isOverlayPinned(){
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!src) return false;
+  const srcRect = src.getBoundingClientRect();
+  const ovRect = els.overlayCanvas.getBoundingClientRect();
+  const eps = 1; // tolerance in pixels
+  return Math.abs(srcRect.left - ovRect.left) < eps &&
+         Math.abs(srcRect.top - ovRect.top) < eps &&
+         Math.abs(srcRect.width - ovRect.width) < eps &&
+         Math.abs(srcRect.height - ovRect.height) < eps;
+}
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
 // ===== Open file (image or PDF), robust across browsers =====
@@ -2088,7 +2119,7 @@ async function renderImage(url){
     const scale = Math.min(1, 980 / img.naturalWidth);
     img.width = img.naturalWidth * scale;
     img.height = img.naturalHeight * scale;
-    sizeOverlayTo(img.width, img.height);
+    syncOverlay();
     state.viewport = { w: img.width, h: img.height, scale };
     state.pageRenderReady[0] = true;
     state.pageRenderPromises[0] = Promise.resolve();
@@ -2227,7 +2258,11 @@ async function finalizeSelection() {
   state.snappedText = snap.text;
   const step = state.steps[state.stepIdx] || {};
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
-  traceEvent(spanKey,'selection.captured',{ boxPx: state.snappedPx });
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const rect = src.getBoundingClientRect();
+  const nb = normalizeBox(state.snappedPx, rect.width, rect.height);
+  const pinned = isOverlayPinned();
+  traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, renderSize:{ w:rect.width, h:rect.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
   drawOverlay();
 }
 
@@ -2247,6 +2282,7 @@ els.viewer.addEventListener('scroll', ()=>{
   }
 });
 function drawOverlay(){
+  syncOverlay();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
@@ -2418,7 +2454,7 @@ function traceFromAudit(a){
   const pageIndex = meta.pageIndex || 0;
   const traceId = debugTraces.start({ docId, pageIndex, fieldKey: a.question });
   state.currentTraceId = traceId;
-  debugTraces.add(traceId,'selection.captured',{ input:{ normBox: meta.normBox }, output:{}, warnings:[], errors:[] });
+  debugTraces.add(traceId,'selection.captured',{ input:{ normBox: meta.normBox }, output:{ pixelBox: meta.computedPx, overlayPinned: meta.overlayPinned, renderSize: meta.canvasSize, dpr: meta.canvasSize?.dpr }, warnings:[], errors:[] });
   const srcObj = getPdfBitmapCanvas(pageIndex) || {};
   let renderUrl='';
   if(srcObj.canvas){
@@ -2453,13 +2489,14 @@ function displayTrace(traceId){
   els.traceViewer.style.display='block';
   els.traceHeader.textContent = trace.spanKey.fieldKey;
   const nb = trace.events.find(e=>e.stage==='selection.captured')?.input?.normBox || {};
+  const selOut = trace.events.find(e=>e.stage==='selection.captured')?.output || {};
   const cs = trace.events.find(e=>e.stage==='render.ready')?.output?.canvas || {};
   const cp = trace.events.find(e=>e.stage==='crop.computed')?.output?.rect || {};
   const ocr = trace.events.find(e=>e.stage==='ocr.completed')?.output || {};
   const val = trace.events.find(e=>e.stage==='validation.completed')?.output || {};
   const ui = trace.events.find(e=>e.stage==='ui.bound')?.output || {};
   const sn = v => (typeof v==='number' && Number.isFinite(v)) ? v : 'err';
-  els.traceSummary.textContent = `sel:[${sn(nb.x0n)},${sn(nb.y0n)},${sn(nb.wN)},${sn(nb.hN)}] src:${sn(cs.w)}×${sn(cs.h)} crop:${sn(cp.sx)},${sn(cp.sy)},${sn(cp.sw)},${sn(cp.sh)} ocr:${sn(ocr.charCount)}/${sn(ocr.meanConf)} val:${val.status||'?'}/${sn(val.confidence)} ui:${ui.component?'bound':'unbound'}`;
+  els.traceSummary.textContent = `sel:[${sn(nb.x0n)},${sn(nb.y0n)},${sn(nb.wN)},${sn(nb.hN)}] src:${sn(cs.w)}×${sn(cs.h)} crop:${sn(cp.sx)},${sn(cp.sy)},${sn(cp.sw)},${sn(cp.sh)} ocr:${sn(ocr.charCount)}/${sn(ocr.meanConf)} val:${val.status||'?'}/${sn(val.confidence)} pin:${selOut.overlayPinned?'1':'0'} ui:${ui.component?'bound':'unbound'}`;
   els.traceWaterfall.innerHTML='';
   let prev = trace.events[0]?.ts;
   trace.events.forEach(ev=>{
