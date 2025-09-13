@@ -1304,24 +1304,23 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
     const hits = tokensInBox(tokens, searchBox);
-    if(hits.length){
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
-if (cleaned.value || cleaned.raw) {
-  state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-  return { 
-    value: cleaned.value || cleaned.raw, 
-    raw: cleaned.raw, 
-    corrected: cleaned.corrected, 
-    code: cleaned.code, 
-    shape: cleaned.shape, 
-    score: cleaned.score, 
-    correctionsApplied: cleaned.correctionsApplied, 
-    corrections: cleaned.correctionsApplied, 
-    boxPx: searchBox, 
-    confidence: cleaned.conf, 
-    tokens: hits 
-  };
-}
+    if (hits.length) {
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey || '', hits, state.mode);
+      if (cleaned.value || cleaned.raw) {
+        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+        return {
+          value: cleaned.value || cleaned.raw,
+          raw: cleaned.raw,
+          corrected: cleaned.corrected,
+          code: cleaned.code,
+          shape: cleaned.shape,
+          score: cleaned.score,
+          correctionsApplied: cleaned.correctionsApplied,
+          corrections: cleaned.correctionsApplied,
+          boxPx: searchBox,
+          confidence: cleaned.conf,
+          tokens: hits
+        };
       }
     }
     return null;
@@ -1330,9 +1329,25 @@ if (cleaned.value || cleaned.raw) {
   let result = null, method=null, score=null, comp=null, basePx=null;
   if(state.mode === 'CONFIG' && state.snappedPx){
     const hits = tokensInBox(tokens, state.snappedPx);
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : state.snappedText, state.mode);
+    const rawText = hits.length ? hits.map(t => t.text).join(' ') : (state.snappedText || '');
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : rawText, state.mode);
     state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-    result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, tokens: hits, method:'snap' };
+    const value = cleaned.value || cleaned.raw || rawText;
+    result = {
+      value,
+      raw: cleaned.raw || rawText,
+      corrected: cleaned.corrected,
+      code: cleaned.code,
+      shape: cleaned.shape,
+      score: cleaned.score,
+      correctionsApplied: cleaned.correctionsApplied,
+      corrections: cleaned.correctionsApplied,
+      boxPx: state.snappedPx,
+      confidence: cleaned.conf ?? 1,
+      tokens: hits,
+      method:'snap'
+    };
+    return result;
   }
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
