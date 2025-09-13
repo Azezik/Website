@@ -2366,6 +2366,7 @@ let drawing = false, start = null, startCss = null;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
   e.preventDefault();
+  syncOverlay();
   const rect = els.overlayCanvas.getBoundingClientRect();
   const css = { x: e.clientX - rect.left, y: e.clientY - rect.top };
   if(!state.overlayPinned){
@@ -2452,6 +2453,7 @@ els.overlayCanvas.addEventListener('pointerup', e=>finalizeSelection(e), { passi
 els.overlayCanvas.addEventListener('pointercancel', e=>finalizeSelection(e), { passive: false });
 
 els.viewer.addEventListener('scroll', ()=>{
+  syncOverlay();
   const y = els.viewer.scrollTop;
   let p = 1;
   for(let i=0; i<state.pageOffsets.length; i++){
