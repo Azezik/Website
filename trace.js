@@ -35,9 +35,21 @@
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
+  function copyTraceJson(traceId){
+    const t=debugTraces.get(traceId); if(!t) return;
+    const txt=JSON.stringify(t,null,2);
+    if(global.navigator?.clipboard?.writeText) global.navigator.clipboard.writeText(txt);
+    else {
+      const ta=document.createElement('textarea');
+      ta.value=txt; document.body.appendChild(ta); ta.select();
+      try{ document.execCommand('copy'); }catch{}
+      document.body.removeChild(ta);
+    }
+  }
   global.TraceStore=TraceStore;
   global.debugTraces=new TraceStore();
   global.exportTraceFile=exportTraceFile;
+  global.copyTraceJson=copyTraceJson;
   const _traceMap=new Map();
   function _spanKeyKey(k){ return `${k?.docId||''}:${k?.pageIndex||0}:${k?.fieldKey||''}`; }
   global.traceEvent=function(spanKey, stage, payload={}){
