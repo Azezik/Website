@@ -7,8 +7,6 @@ const TesseractRef = window.Tesseract;
               'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
 })();
 
-console.log("WROKIT: conflict resolver applied");
-
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
@@ -368,58 +366,175 @@ function normalizeDate(raw){
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
+const KNOWN_LEXICON = [
+  'DELIVERY','PICKUP','SUBTOTAL','TOTAL','BALANCE','DEPOSIT','CONTINUATION','GST','QST','HST'
+];
+
+function editDistance(a,b){
+  const dp = Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
+  for(let i=0;i<=a.length;i++) dp[i][0]=i;
+  for(let j=0;j<=b.length;j++) dp[0][j]=j;
+  for(let i=1;i<=a.length;i++){
+    for(let j=1;j<=b.length;j++){
+      dp[i][j] = a[i-1]===b[j-1]
+        ? dp[i-1][j-1]
+        : Math.min(dp[i-1][j-1], dp[i][j-1], dp[i-1][j]) + 1;
+    }
+  }
+  return dp[a.length][b.length];
+}
+
 function applyOcrCorrections(txt, fieldKey=''){
-  const alphaMap = { '0':'O', '1':'I', '5':'S', '8':'B', '6':'G', '7':'T' };
+  const alphaMap = { '0':'O', '1':'I', '5':'S', '7':'T', '8':'B' };
   const numMap   = { 'O':'0', 'I':'1', 'l':'1', 'S':'5', 'B':'8' };
   const corrections = [];
-  const numericField = /invoice_number|sku|quantity|qty|total|subtotal|amount|price|balance|deposit|discount|unit|grand|date/i.test(fieldKey);
+  let out = txt;
+  const numericField = /invoice_number|sku|quantity|qty|total|subtotal|amount|price|balance|deposit|discount|unit|grand|date/i.test(fieldKey) || /^[-\d.,]+$/.test(out);
   if(numericField){
-    if(!/^[-\d.,]+$/.test(txt)){
-      txt = txt.replace(/[OIlSB]/g, ch => {
-        const repl = numMap[ch];
-        if(repl){ corrections.push(`${ch}->${repl}`); return repl; }
-        return ch;
-      });
+    for(const [k,v] of Object.entries(numMap)){
+      const repl = out.replace(new RegExp(k,'g'), v);
+      if(repl !== out && /^[-\d.,]+$/.test(repl)){
+        corrections.push(`${k}->${v}`);
+        out = repl;
+      }
     }
   } else {
-    txt = txt.split('').map((ch,i,arr)=>{
-      const prev = arr[i-1] || '';
-      const next = arr[i+1] || '';
-      if(alphaMap[ch] && (/[A-Za-z]/.test(prev) || /[A-Za-z]/.test(next))){
-        corrections.push(`${ch}->${alphaMap[ch]}`);
-        return alphaMap[ch];
+    let bestLex = '';
+    let bestDist = Infinity;
+    for(const lex of KNOWN_LEXICON){
+      const d = editDistance(out.toUpperCase(), lex);
+      if(d < bestDist){ bestDist = d; bestLex = lex; }
+    }
+    for(const [k,v] of Object.entries(alphaMap)){
+      const repl = out.replace(new RegExp(k,'g'), v);
+      if(editDistance(repl.toUpperCase(), bestLex) < editDistance(out.toUpperCase(), bestLex)){
+        corrections.push(`${k}->${v}`);
+        out = repl;
       }
-      return ch;
-    }).join('');
+    }
+    if(bestDist <= 2 && out.toUpperCase() !== bestLex){
+      corrections.push(`${out}->${bestLex}`);
+      out = bestLex;
+    }
   }
-  return { text: txt, corrections };
+  return { text: out, corrections };
 }
 
-function cleanScalarValue(raw, fieldKey=''){
-  let txt = (raw || '').replace(/[#:—•]*$/, '').trim();
-  const label = fieldKey.replace(/_/g,' ');
-  if(label){
-    const labelRe = new RegExp(`^${label}\\s*[:#-]?\\s*`, 'i');
-    txt = txt.replace(labelRe, '').trim();
-    if(txt.toLowerCase() === label.toLowerCase()) txt = '';
-  }
-  txt = collapseAdjacentDuplicates(txt).replace(/\s+/g,' ').trim();
-
-  if(/date/i.test(fieldKey)){
-    const norm = normalizeDate(txt);
-    if(norm) txt = norm;
-  } else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand/i.test(fieldKey)){
-    const norm = normalizeMoney(txt);
-    if(norm) txt = norm;
-  } else if(/sku|product_code/i.test(fieldKey)){
-    txt = txt.replace(/\s+/g,'').toUpperCase();
-  }
-
-  const preCorr = txt;
-  const { text: corrected, corrections } = applyOcrCorrections(preCorr, fieldKey);
-
-  return { raw: preCorr, value: corrected, corrections };
+function codeOf(str){
+  const q1 = /[A-Za-z]/.test(str) ? '1' : '2';
+  const q2 = /[0-9]/.test(str) ? '1' : '2';
+  const q3 = /\s/.test(str) ? '1' : '2';
+  const q4 = /[-\/()]/.test(str) ? '1' : '2';
+  const q5 = /[$€£¢%]/.test(str) || /\d+\.\d{2}/.test(str) ? '1' : '2';
+  return q1 + q2 + q3 + q4 + q5;
 }
+
+function shapeOf(str){
+  let out = '';
+  for(const ch of str){
+    if(/[A-Z]/.test(ch)) out += 'A';
+    else if(/[0-9]/.test(ch)) out += '9';
+    else if(ch === '-') out += '-';
+    else if(ch === '/') out += '/';
+    else if(ch === '.') out += '.';
+    else if(/\s/.test(ch)) out += '_';
+    else out += '?';
+  }
+  return out;
+}
+
+function digitRatio(str){
+  if(!str.length) return 0;
+  const digits = (str.match(/[0-9]/g) || []).length;
+  return digits / str.length;
+}
+
+const FieldDataEngine = (() => {
+  const patterns = {};
+  const fieldDefs = {
+    store_name:      { codes:['12122','11112'], regex:'^[A-Z0-9&.\s]{2,40}$' },
+    department:      { codes:['12122','12112'] },
+    invoice_number:  { codes:['21222','11222','11212'] },
+    invoice_date:    { codes:['21212','11122'], regex:'^(\\d{4}-\\d{2}-\\d{2}|\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}|[A-Z][a-z]+\\s\\d{1,2},\\s\\d{4})$' },
+    salesperson_name:{ codes:['12122'] },
+    salesperson_id:  { codes:['11222','11212','21222'] },
+    customer_name:   { codes:['12122'] },
+    address:         { codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
+    description:     { codes:['11122','11112'] },
+    sku:             { codes:['11222','11212'], regex:'^[A-Z0-9-]{5,12}$' },
+    quantity:        { codes:['21222'] },
+    unit_price:      { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    subtotal:        { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    total:           { codes:['21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    discount:        { codes:['21211','21221'], regex:'^-?\\d+(?:\\.\\d{2})$' },
+    tax:             { codes:['21221','11121'], regex:'^-?\\d+(?:\\.\\d{2})$' }
+  };
+
+  function learn(ftype, value){
+    if(!value) return;
+    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}});
+    const c = codeOf(value);
+    const s = shapeOf(value);
+    const l = value.length;
+    p.code[c] = (p.code[c] || 0) + 1;
+    p.shape[s] = (p.shape[s] || 0) + 1;
+    p.len[l] = (p.len[l] || 0) + 1;
+  }
+
+  function dominant(ftype){
+    const p = patterns[ftype];
+    if(!p) return {};
+    const maxKey = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1])[0]?.[0];
+    return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len) };
+  }
+
+  function clean(ftype, input){
+    const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
+    const raw = arr.map(t=>t.text).join(' ').trim();
+    let txt = collapseAdjacentDuplicates(raw).replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    if(/date/i.test(ftype)){ const n = normalizeDate(txt); if(n) txt = n; }
+    else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
+      const n = normalizeMoney(txt); if(n) txt = n;
+    } else if(/sku|product_code/.test(ftype)){
+      txt = txt.replace(/\s+/g,'').toUpperCase();
+    }
+    let conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
+    const def = fieldDefs[ftype] || {};
+    const regex = def.regex ? new RegExp(def.regex, 'i') : null;
+    let code = codeOf(txt);
+    let shape = shapeOf(txt);
+    let score = 0;
+    if(def.codes && def.codes.includes(code)) score += 2;
+    if(regex && regex.test(txt)) score += 2;
+    const dom = dominant(ftype);
+    if((dom.code && dom.code===code) || (dom.shape && dom.shape===shape) || (dom.len && dom.len===txt.length)) score += 1;
+    let correctionsApplied = [];
+    let corrected = txt;
+    if(conf < 0.8 && regex && !regex.test(txt)){
+      const { text: corr, corrections } = applyOcrCorrections(txt, ftype);
+      if(corrections.length){
+        correctionsApplied = corrections;
+        score -= 2;
+      }
+      if(regex.test(corr) && (!def.codes || def.codes.includes(codeOf(corr)))){
+        corrected = corr;
+        code = codeOf(corrected);
+        shape = shapeOf(corrected);
+        score += 1;
+      }
+    }
+    if(score >= 5){
+      learn(ftype, corrected);
+      return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied };
+    }
+    return { value: '', raw, corrected, conf, code, shape, score, correctionsApplied };
+  }
+
+  function exportPatterns(){ return patterns; }
+  function importPatterns(p){ Object.assign(patterns, p || {}); }
+
+  return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns };
+})();
 
 function groupIntoLines(tokens, tol=4){
   const sorted = [...tokens].sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
@@ -433,12 +548,25 @@ function groupIntoLines(tokens, tol=4){
   lines.forEach(L => L.tokens.sort((a,b)=>a.x-b.x));
   return lines;
 }
+function tokensInBox(tokens, box){
+  return tokens.filter(t => {
+    if(t.page !== box.page) return false;
+    const cx = t.x + t.w/2;
+    if(cx < box.x || cx > box.x + box.w) return false;
+    const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
+    if(overlapY / t.h < 0.7) return false;
+    return true;
+  }).sort((a,b)=>{
+    const ay = a.y + a.h/2, by = b.y + b.h/2;
+    return ay === by ? a.x - b.x : ay - by;
+  });
+}
 function snapToLine(tokens, hintPx, marginPx=6){
-  const hits = tokens.filter(t => intersect(hintPx, t));
+  const hits = tokensInBox(tokens, hintPx);
   if(!hits.length) return { box: hintPx, text: '' };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
   const line = groupIntoLines(tokens, 4).find(L => Math.abs(L.cy - bandCy) <= 4);
-  const lineTokens = line ? line.tokens : hits;
+  const lineTokens = line ? tokensInBox(line.tokens, hintPx) : hits;
   // Horizontally limit to tokens inside the hint box, but keep full line height
   const left   = Math.min(...hits.map(t => t.x));
   const right  = Math.max(...hits.map(t => t.x + t.w));
@@ -491,12 +619,15 @@ const ANCHOR_HINTS = {
 function ensureProfile(){
   if(state.profile) return;
 
-  state.profile = {
+  const existing = loadProfile(state.username, state.docType);
+
+  state.profile = existing || {
     username: state.username,
     docType: state.docType,
     version: PROFILE_VERSION,
     fields: [],
     globals: [],
+    fieldPatterns: {},
     landmarks: [
       // General identifiers
       { landmarkKey:'sales_bill',     page:0, type:'text', text:'Sales Bill',  strategy:'fuzzy', threshold:0.86 },
@@ -539,15 +670,15 @@ function ensureProfile(){
     }
   };
 
-  // Seed from any existing saved schema (same shape you uploaded earlier)
-  const existing = loadProfile(state.username, state.docType);
-  if (existing?.fields?.length) {
+  if(existing?.fields?.length){
     state.profile.fields = existing.fields.map(f => ({
       ...f,
       type: f.type || 'static',
       fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
     }));
   }
+  state.profile.fieldPatterns = existing?.fieldPatterns || state.profile.fieldPatterns || {};
+  FieldDataEngine.importPatterns(state.profile.fieldPatterns);
   saveProfile(state.username, state.docType, state.profile);
 }
 
@@ -980,35 +1111,94 @@ function captureGlobalLandmarks(){
 
 /* ----------------------- Field Extraction ------------------------ */
 function ocrConfigFor(fieldKey){
-  if(/invoice_number|sku|quantity|qty/i.test(fieldKey)){
-    return { psm: 8, whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.\/' };
+  if(/sku/i.test(fieldKey)){
+    return { psm:7, whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' };
   }
-  if(/date/i.test(fieldKey)){
-    return { psm: 7, whitelist: '0123456789/\-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' };
+  if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|qty|quantity/i.test(fieldKey)){
+    return { psm:7, whitelist:'0123456789.,-' };
   }
-  if(/total|subtotal|tax|amount|price|balance|deposit|discount/i.test(fieldKey)){
-    return { psm: 7, whitelist: '$€£0123456789,.-' };
+  return { psm:7, whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./' };
+}
+
+function preprocessCanvas(canvas){
+  const ctx = canvas.getContext('2d');
+  const {width,height} = canvas;
+  const img = ctx.getImageData(0,0,width,height);
+  const data = img.data;
+  let sum=0; let count=data.length/4;
+  for(let i=0;i<data.length;i+=4){
+    const gray = 0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+    data[i]=data[i+1]=data[i+2]=gray;
+    sum+=gray;
   }
-  if(/address/i.test(fieldKey)){
-    return { psm: 4, whitelist: '' };
+  const mean = sum/count;
+  for(let i=0;i<data.length;i+=4){
+    const v = data[i] < mean ? 0 : 255;
+    data[i]=data[i+1]=data[i+2]=v;
   }
-  return { psm: 7, whitelist: '' };
+  const tmp = document.createElement('canvas');
+  tmp.width=width; tmp.height=height;
+  tmp.getContext('2d').putImageData(img,0,0);
+  ctx.filter='blur(1px)';
+  ctx.drawImage(tmp,0,0);
+  ctx.filter='none';
+}
+
+function rotateCanvas(src, deg){
+  if(!deg) return src;
+  const rad = deg*Math.PI/180;
+  const w = src.width, h = src.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(Math.abs(w*Math.cos(rad)) + Math.abs(h*Math.sin(rad)));
+  canvas.height = Math.ceil(Math.abs(w*Math.sin(rad)) + Math.abs(h*Math.cos(rad)));
+  const ctx = canvas.getContext('2d');
+  ctx.translate(canvas.width/2, canvas.height/2);
+  ctx.rotate(rad);
+  ctx.drawImage(src,-w/2,-h/2);
+  return canvas;
 }
 
 async function ocrBox(boxPx, fieldKey){
   const pad = 4;
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   const offY = state.pageOffsets[boxPx.page-1] || 0;
+  const scale = 3;
   const canvas = document.createElement('canvas');
-  canvas.width = boxPx.w + pad*2;
-  canvas.height = boxPx.h + pad*2;
+  canvas.width = (boxPx.w + pad*2)*scale;
+  canvas.height = (boxPx.h + pad*2)*scale;
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(src, boxPx.x - pad, offY + boxPx.y - pad, boxPx.w + pad*2, boxPx.h + pad*2, 0, 0, boxPx.w + pad*2, boxPx.h + pad*2);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, boxPx.x - pad, offY + boxPx.y - pad, boxPx.w + pad*2, boxPx.h + pad*2, 0, 0, canvas.width, canvas.height);
+  preprocessCanvas(canvas);
   const cfg = ocrConfigFor(fieldKey);
-  const opts = { tessedit_pageseg_mode: cfg.psm };
+  const opts = { tessedit_pageseg_mode: cfg.psm, oem:1 };
   if(cfg.whitelist) opts.tessedit_char_whitelist = cfg.whitelist;
-  const { data: { text } } = await TesseractRef.recognize(canvas, 'eng', opts);
-  return text.trim();
+  let bestTokens = [], bestAvg = -Infinity;
+  for(const ang of [-3,0,3]){
+    const rot = rotateCanvas(canvas, ang);
+    const { data } = await TesseractRef.recognize(rot, 'eng', opts);
+    const words = (data.words||[]).map(w=>{
+      const raw = w.text.trim();
+      if(!raw) return null;
+      const { text: corrected, corrections } = applyOcrCorrections(raw, fieldKey);
+      return {
+        raw,
+        corrected,
+        text: corrected,
+        correctionsApplied: corrections,
+        confidence: w.confidence/100,
+        x: boxPx.x - pad + w.bbox.x/scale,
+        y: boxPx.y - pad + w.bbox.y/scale,
+        w: w.bbox.width/scale,
+        h: w.bbox.height/scale,
+        page: boxPx.page
+      };
+    }).filter(Boolean);
+    const filtered = tokensInBox(words, boxPx);
+    const avg = filtered.reduce((s,t)=>s+t.confidence,0)/(filtered.length||1);
+    if(avg > bestAvg){ bestAvg=avg; bestTokens = filtered; }
+  }
+  return bestTokens;
 }
 
 function labelValueHeuristic(fieldSpec, tokens){
@@ -1048,17 +1238,28 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
 
   async function attempt(box){
-    const hits = tokens.filter(t => t.page === box.page && intersect(box, t));
+    const hits = tokensInBox(tokens, box);
     if(hits.length){
-      const text = hits.sort((a,b)=>a.x-b.x).map(t=>t.text).join(' ').trim();
+      const lines = groupIntoLines(hits);
+      const lineTokens = lines.flatMap(L=>L.tokens);
+      const text = lineTokens.map(t=>t.text).join(' ').trim();
       let val = fieldSpec.regex ? ((text.match(new RegExp(fieldSpec.regex,'i'))||[])[1]||'') : text;
-      const cleaned = cleanScalarValue(val, fieldSpec.fieldKey||'');
-      if(cleaned.value) return { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: box, confidence: 0.9 };
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lineTokens);
+      if(cleaned.value){
+        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+        return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: lineTokens };
+      }
     }
     if(els.ocrToggle.checked){
-      const txt = await ocrBox(box, fieldSpec.fieldKey);
-      const cleaned = cleanScalarValue(txt, fieldSpec.fieldKey||'');
-      if(cleaned.value) return { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: box, confidence: 0.7 };
+      const oTokens = await ocrBox(box, fieldSpec.fieldKey);
+      if(oTokens.length){
+        const text = oTokens.map(t=>t.text).join(' ').trim();
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens);
+        if(cleaned.value){
+          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+          return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: box, confidence: cleaned.conf, tokens: oTokens };
+        }
+      }
     }
     return null;
   }
@@ -1106,22 +1307,29 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     let val = fieldSpec.regex
       ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
       : state.snappedText;
-    const cleaned = cleanScalarValue(val, fieldSpec.fieldKey||'');
-    if(cleaned.value) result = { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: state.snappedPx, confidence: 0.8, method: method||'snap', score };
-  }
-
-  if(!result){
-    const lv = labelValueHeuristic(fieldSpec, tokens);
-    if(lv.value){
-      const cleaned = cleanScalarValue(lv.value, fieldSpec.fieldKey||'');
-      if(cleaned.value) result = { value: cleaned.value, raw: cleaned.raw, corrections: cleaned.corrections, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', val);
+    if(cleaned.value){
+      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+      result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, method: method||'snap', score };
     }
   }
 
-  if(!result){
-    const fb = cleanScalarValue(state.snappedText, fieldSpec.fieldKey||'');
-    result = { value: fb.value, raw: fb.raw, corrections: fb.corrections, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
-  }
+    if(!result){
+      const lv = labelValueHeuristic(fieldSpec, tokens);
+      if(lv.value){
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value);
+        if(cleaned.value){
+          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+          result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
+        }
+      }
+    }
+
+    if(!result){
+      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText);
+      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+      result = { value: fb.value, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    }
   result.method = result.method || method || 'fallback';
   result.score = score;
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
@@ -1130,6 +1338,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
     state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
   }
+  result.tokens = result.tokens || [];
   return result;
 }
 
@@ -1180,9 +1389,9 @@ async function extractLineItems(profile){
         }
         const keyMap={description_col:'description',sku_col:'sku',quantity_col:'qty',unit_price_col:'unitPrice'};
         let val=txt;
-        if(f.fieldKey==='sku_col') val=cleanScalarValue(txt,'sku').value;
-        if(f.fieldKey==='quantity_col') val=cleanScalarValue(txt,'quantity').value;
-        if(f.fieldKey==='unit_price_col') val=cleanScalarValue(txt,'unit_price').value;
+        if(f.fieldKey==='sku_col') val=FieldDataEngine.clean('sku', txt).value;
+        if(f.fieldKey==='quantity_col') val=FieldDataEngine.clean('quantity', txt).value;
+        if(f.fieldKey==='unit_price_col') val=FieldDataEngine.clean('unit_price', txt).value;
         if(f.fieldKey==='description_col') val=txt;
         if(val){
           row[keyMap[f.fieldKey]]=val;
@@ -1368,7 +1577,9 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
     for(const item of content.items){
       const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
       const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
-      tokens.push({ text: item.str, x, y: yTop - h, w, h, page: pageNum });
+      const raw = item.str;
+      const { text: corrected, corrections } = applyOcrCorrections(raw);
+      tokens.push({ raw, corrected, text: corrected, correctionsApplied: corrections, confidence: 1, x, y: yTop - h, w, h, page: pageNum });
     }
   } catch(err){
     console.warn('PDF textContent failed', err);
@@ -1501,7 +1712,7 @@ function drawOverlay(){
 function compileDocument(fileId, lineItems=[]){
   const raw = rawStore[fileId] || [];
   const byKey = {};
-  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0 }; });
+  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
   const sub = parseFloat(byKey['subtotal']?.value);
   const tax = parseFloat(byKey['tax']?.value);
   const tot = parseFloat(byKey['invoice_total']?.value);
@@ -1557,10 +1768,10 @@ function renderResultsTable(){
   const rows = db.map(r=>{
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', confidence:0 };
-      const warn = f.confidence < 0.6 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
+      const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
       return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" value="${f.value}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
-    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.6?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
+    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td></tr>`).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
     return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
@@ -1610,7 +1821,7 @@ function renderReports(){
 }
 
 /* ---------------------- Profile save / table --------------------- */
-function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[]) {
+function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const entry = {
@@ -1623,7 +1834,8 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     value,
     confidence,
     raw,
-    correctionsApplied: corrections
+    correctionsApplied: corrections,
+    tokens
   };
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column) entry.column = extras.column;
@@ -1674,7 +1886,7 @@ function renderConfirmedTables(){
       if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
       else {
         const rows = statics.map(f=>{
-          const warn = (f.confidence||0) < 0.6 || (f.correctionsApplied&&f.correctionsApplied.length)
+          const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length)
             ? '<span class="warn">⚠️</span>' : '';
           const conf = `<span class="confidence">${Math.round((f.confidence||0)*100)}%</span>`;
           return `<tr><td>${f.fieldKey}</td><td><input class="confirmEdit" data-field="${f.fieldKey}" value="${f.value}"/>${warn}${conf}</td></tr>`;
@@ -1691,7 +1903,7 @@ function renderConfirmedTables(){
       if(!items.length){ liDiv.innerHTML = '<p class="sub">No line items.</p>'; }
       else {
         const rows = items.map(it=>{
-          const warn = (it.confidence||0) < 0.6 ? '<span class="warn">⚠️</span>' : '';
+          const warn = (it.confidence||0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
           return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.qty||''}</td><td>${it.unitPrice||''}</td><td>${it.amount||''}</td></tr>`;
         }).join('');
         liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Description</th><th>SKU</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -1846,6 +2058,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
 
   let value = '', boxPx = state.snappedPx;
   let confidence = 0, raw = '', corrections=[];
+  let fieldTokens = [];
   if(step.kind === 'landmark'){
     value = (state.snappedText || '').trim();
     raw = value;
@@ -1858,7 +2071,8 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     boxPx = res.boxPx || state.snappedPx;
     confidence = res.confidence || 0;
     raw = res.raw || (state.snappedText || '').trim();
-    corrections = res.corrections || [];
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
   }
 
   const norm = toPct(state.viewport, boxPx);
@@ -1870,7 +2084,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, norm, boxPx, tokens);
   }
-  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras, raw, corrections);
+  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
   renderSavedFieldsTable();
@@ -1880,7 +2094,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     rawStore[fid] = rawStore[fid] || [];
     const arr = rawStore[fid];
     const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: norm, ts: Date.now() };
+    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: norm, ts: Date.now(), tokens: fieldTokens };
     if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
