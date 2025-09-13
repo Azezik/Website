@@ -1280,7 +1280,7 @@ function getOcrCropForSelection({ docId, pageIndex, boxPx }){
     viewportScale,
     pageRotation: rotation,
     sourceCanvas: { w: src.width, h: src.height },
-    boxCss: boxPx
+    selectionBoxPx_input: { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, page: boxPx.page }
   };
   if(!ctx || !src.width || !src.height){
     console.error('ERROR: wrong-canvas');
@@ -1325,10 +1325,12 @@ function getOcrCropForSelection({ docId, pageIndex, boxPx }){
     return c;
   };
   const crops = { A: cropFrom(rectA), B: cropFrom(rectB), C: cropFrom(rectC) };
+  meta.selectionBoxPx_afterTransforms = { ...rectA, page: boxPx.page };
   meta.boxPx = rectA;
   meta.cropA = { w: rectA.w, h: rectA.h };
   meta.cropB = { w: rectB.w, h: rectB.h };
   meta.cropC = { w: rectC.w, h: rectC.h };
+  meta.cropSize = { w: rectA.w, h: rectA.h };
   const cssBack = {
     x: rectA.x / (viewportScale * dpr),
     y: rectA.y / (viewportScale * dpr),
