@@ -128,6 +128,8 @@ let state = {
   currentLineItems: [],
   lastOcrCropPx: null,
   cropAudits: [],
+  cropHashes: {},        // per page hash map for duplicate detection
+  pageSnapshots: {},     // tracks saved full-page debug PNGs
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -274,9 +276,8 @@ function loadModelById(id){
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
 const toPx = (vp, pctBox) => {
-  const dpr = window.devicePixelRatio || 1;
-  const w = ((vp.w ?? vp.width) || 1) * dpr;
-  const h = ((vp.h ?? vp.height) || 1) * dpr;
+  const w = (vp.w ?? vp.width) || 1;
+  const h = (vp.h ?? vp.height) || 1;
   const x = pctBox.x0 * w;
   const y = pctBox.y0 * h;
   const wPx = (pctBox.x1 - pctBox.x0) * w;
@@ -285,9 +286,8 @@ const toPx = (vp, pctBox) => {
 };
 
 const toPct = (vp, pxBox) => {
-  const dpr = window.devicePixelRatio || 1;
-  const w = ((vp.w ?? vp.width) || 1) * dpr;
-  const h = ((vp.h ?? vp.height) || 1) * dpr;
+  const w = (vp.w ?? vp.width) || 1;
+  const h = (vp.h ?? vp.height) || 1;
   return {
     x0: pxBox.x / w,
     y0: pxBox.y / h,
@@ -297,13 +297,21 @@ const toPct = (vp, pxBox) => {
   };
 };
 
+function normalizeBoxPx(boxPx, canvasW, canvasH){
+  return {
+    x0n: boxPx.x / canvasW,
+    y0n: boxPx.y / canvasH,
+    wN: boxPx.w / canvasW,
+    hN: boxPx.h / canvasH
+  };
+}
+
 function applyTransform(boxPx, transform=state.pageTransform){
   const { scale=1, rotation=0 } = transform || {};
   if(scale === 1 && rotation === 0) return { ...boxPx };
   const vp = state.pageViewports[boxPx.page-1] || state.viewport;
-  const dpr = window.devicePixelRatio || 1;
-  const wPage = ((vp.w ?? vp.width) || 1) * dpr;
-  const hPage = ((vp.h ?? vp.height) || 1) * dpr;
+  const wPage = (vp.w ?? vp.width) || 1;
+  const hPage = (vp.h ?? vp.height) || 1;
   const cx = wPage/2, cy = hPage/2;
   const x = boxPx.x + boxPx.w/2;
   const y = boxPx.y + boxPx.h/2;
@@ -1223,18 +1231,6 @@ function rotateCanvas(src, deg){
   return canvas;
 }
 
-function transformBoxForRotation(box, rotation, canvasW, canvasH){
-  const rot = ((rotation % 360) + 360) % 360;
-  if(rot === 90){
-    return { x: box.y, y: canvasH - box.x - box.w, w: box.h, h: box.w, page: box.page };
-  } else if(rot === 180){
-    return { x: canvasW - box.x - box.w, y: canvasH - box.y - box.h, w: box.w, h: box.h, page: box.page };
-  } else if(rot === 270){
-    return { x: canvasW - box.y - box.h, y: box.x, w: box.h, h: box.w, page: box.page };
-  }
-  return { ...box };
-}
-
 function clampRect(r, maxW, maxH){
   const x = Math.min(Math.max(r.x,0), maxW);
   const y = Math.min(Math.max(r.y,0), maxH);
@@ -1243,101 +1239,141 @@ function clampRect(r, maxW, maxH){
   return { x, y, w, h, page: r.page };
 }
 
-function getOcrCropForSelection({docId, pageIndex, boxPx}){
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
-  const ctx = src.getContext('2d');
-  const result = { canvasSource: src, cropBitmaps: {}, meta: { docId, pageIndex } };
-  if(src === els.overlayCanvas || !ctx || !src.width || !src.height){
-    console.error('ERROR: wrong-canvas');
-    result.meta.status = 'needs_review';
-    result.meta.reason = 'wrong-canvas';
+function getPdfBitmapCanvas(pageIndex){
+  const node = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!node || node.tagName !== 'CANVAS' || node === els.overlayCanvas || node.width<=0 || node.height<=0){
+    console.error('ERROR: wrong-source-element');
+    return null;
+  }
+  const ctx = node.getContext('2d');
+  if(!ctx){
+    console.error('ERROR: wrong-source-element');
+    return null;
+  }
+  return node;
+}
+
+function getOcrCropFromNormBox({docId, pageIndex, normBox, question}){
+  const src = getPdfBitmapCanvas(pageIndex);
+  const result = { cropBitmap: null, meta: { docId, pageIndex, question, errors: [], warnings: [] } };
+  if(!src){
+    result.meta.errors.push('wrong-source-element');
     return result;
   }
-  if((boxPx.page||1) - 1 !== pageIndex){
-    console.error('ERROR: page-mismatch');
-    result.meta.status = 'needs_review';
-    result.meta.reason = 'page-mismatch';
-    result.meta.selectionPageIndex = (boxPx.page||1) - 1;
-    result.meta.sourcePageIndex = pageIndex;
+  const vp = state.pageViewports[pageIndex] || { width: src.width, height: src.height };
+  const W = vp.width;
+  const H = vp.height;
+  const offY = state.pageOffsets[pageIndex] || 0;
+  let { x0n, y0n, wN, hN } = normBox;
+  let sx = Math.round(x0n * W);
+  let sy = Math.round(y0n * H);
+  let sw = Math.max(1, Math.round(wN * W));
+  let sh = Math.max(1, Math.round(hN * H));
+  let clamped = false;
+  if(sx < 0){ sx = 0; clamped = true; }
+  if(sy < 0){ sy = 0; clamped = true; }
+  if(sx + sw > W){ sw = W - sx; clamped = true; }
+  if(sy + sh > H){ sh = H - sy; clamped = true; }
+  if(sw <= 2 || sh <= 2){
+    console.error('ERROR: tiny-or-zero-crop');
+    result.meta.errors.push('tiny-or-zero-crop');
+    result.meta.canvasSize = { w: W, h: H };
+    result.meta.normBox = normBox;
+    result.meta.computedPx = { sx, sy, sw, sh };
+    result.meta.clamped = clamped;
     return result;
   }
-  const vp = state.pageViewports[pageIndex] || state.viewport || { scale:1, rotation:0 };
-  const dpr = window.devicePixelRatio || 1;
-  const viewportScale = vp.scale || 1;
-  const rotation = vp.rotation || 0;
-  const boxCss = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h };
-  let box = {
-    x: Math.round((boxCss.x * viewportScale) * dpr),
-    y: Math.round((boxCss.y * viewportScale) * dpr),
-    w: Math.max(1, Math.round((boxCss.w * viewportScale) * dpr)),
-    h: Math.max(1, Math.round((boxCss.h * viewportScale) * dpr)),
-    page: boxPx.page || pageIndex + 1
-  };
-  box = transformBoxForRotation(box, rotation, src.width, src.height);
-  box = clampRect(box, src.width, src.height);
-  state.lastOcrCropPx = { ...box };
-  const makeCrop = rect => {
-    const c = document.createElement('canvas');
-    c.width = rect.w; c.height = rect.h;
-    const offY = state.pageOffsets[rect.page-1] || 0;
-    c.getContext('2d').drawImage(src, rect.x, offY + rect.y, rect.w, rect.h, 0,0,rect.w,rect.h);
-    return c;
-  };
-  const cropA = makeCrop(box);
-  const pad2 = clampRect({ x: box.x-2, y: box.y-2, w: box.w+4, h: box.h+4, page: box.page }, src.width, src.height);
-  const cropB = makeCrop(pad2);
-  const pad = Math.round(Math.max(box.w, box.h)*0.05);
-  const pad5 = clampRect({ x: box.x-pad, y: box.y-pad, w: box.w+pad*2, h: box.h+pad*2, page: box.page }, src.width, src.height);
-  const cropC = makeCrop(pad5);
-  result.cropBitmaps = { A: cropA, B: cropB, C: cropC };
-  result.meta = {
-    docId,
-    pageIndex,
-    devicePixelRatio: dpr,
-    viewportScale,
-    pageRotation: rotation,
-    sourceCanvas: { w: src.width, h: src.height },
-    boxCss,
-    boxPx: { x: box.x, y: box.y, w: box.w, h: box.h, page: box.page },
-    cropA: { w: cropA.width, h: cropA.height },
-    cropB: { w: cropB.width, h: cropB.height },
-    cropC: { w: cropC.width, h: cropC.height }
-  };
-  if(cropA.width<=2 || cropA.height<=2){
-    console.error('tiny-or-zero-crop');
-    result.meta.status = 'needs_review';
-    result.meta.reason = 'tiny-or-zero-crop';
+  const off = document.createElement('canvas');
+  off.className = 'debug-crop';
+  off.width = sw; off.height = sh;
+  const octx = off.getContext('2d');
+  octx.clearRect(0,0,sw,sh);
+  octx.drawImage(src, sx, offY + sy, sw, sh, 0, 0, sw, sh);
+
+  const buf = Buffer.from(off.toDataURL('image/png').split(',')[1],'base64');
+  const crypto = window.crypto?.subtle ? null : (window.require && window.require('crypto'));
+  let hash = '';
+  if(crypto){
+    hash = crypto.createHash('sha1').update(buf).digest('hex');
+  } else if(window.crypto?.subtle){
+    hash = '';
   }
+  if(hash){
+    const pageKey = `${docId}_${pageIndex}`;
+    state.cropHashes[pageKey] = state.cropHashes[pageKey] || {};
+    const prev = state.cropHashes[pageKey][hash];
+    if(prev && (prev.x !== sx || prev.y !== sy || prev.w !== sw || prev.h !== sh)){
+      console.error('ERROR: repeated-crop-content suspected wrong-source-or-rect', prev, {x:sx,y:sy,w:sw,h:sh,pageIndex});
+      result.meta.errors.push('repeated-crop-content suspected wrong-source-or-rect');
+    }
+    state.cropHashes[pageKey][hash] = { x:sx, y:sy, w:sw, h:sh };
+  }
+
+  const imgData = octx.getImageData(0,0,sw,sh).data;
+  const rowHashes = new Set();
+  for(let y=0;y<sh;y++){
+    let row='';
+    for(let x=0;x<sw;x++){
+      const i=(y*sw+x)*4; row+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    }
+    rowHashes.add(row);
+  }
+  const colHashes = new Set();
+  for(let x=0;x<sw;x++){
+    let col='';
+    for(let y=0;y<sh;y++){
+      const i=(y*sw+x)*4; col+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    }
+    colHashes.add(col);
+  }
+  const bandingScore = Math.max(1 - rowHashes.size/sh, 1 - colHashes.size/sw);
+  if(bandingScore > 0.3){ result.meta.warnings.push('banding/tiling-like artifact'); }
+
+  const fs = window.fs || (window.require && window.require('fs'));
+  if(fs){
+    const pageSnapKey = `${docId}_${pageIndex}`;
+    if(!state.pageSnapshots[pageSnapKey]){
+      const pageDir = `debug/pages/${docId}`;
+      fs.mkdirSync(pageDir,{recursive:true});
+      const pageCanvas = document.createElement('canvas');
+      pageCanvas.width = W; pageCanvas.height = H;
+      const pctx = pageCanvas.getContext('2d');
+      pctx.drawImage(src, 0, offY, W, H, 0,0,W,H);
+      fs.writeFileSync(`${pageDir}/${pageIndex}.png`, Buffer.from(pageCanvas.toDataURL('image/png').split(',')[1],'base64'));
+      state.pageSnapshots[pageSnapKey] = true;
+    }
+  }
+
+  result.cropBitmap = off;
+  result.meta.canvasSize = { w: W, h: H };
+  result.meta.normBox = normBox;
+  result.meta.computedPx = { sx, sy, sw, sh };
+  result.meta.clamped = clamped;
+  result.meta.hash = hash;
+  result.meta.bandingScore = bandingScore;
+  state.lastOcrCropPx = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
+  drawOverlay();
   return result;
 }
 
-async function runOcrProbes(crops){
+async function runOcrProbes(crop){
   const out = {};
-  for(const key of ['A','B','C']){
-    const crop = crops[key];
-    out[key] = {};
-    for(const psm of [6,7]){
-      const { data } = await TesseractRef.recognize(crop,'eng',{ tessedit_pageseg_mode:psm });
-      const toks=(data.words||[]).map(w=>w.text.trim()).filter(Boolean);
-      const mean=toks.length? (data.words.reduce((s,w)=>s+w.confidence,0)/toks.length)/100 : 0;
-      out[key][`psm${psm}`] = { raw:data.text, tokens:toks, tokensLength:toks.length, meanConf:mean };
-    }
+  for(const psm of [6,7]){
+    const { data } = await TesseractRef.recognize(crop,'eng',{ tessedit_pageseg_mode:psm });
+    const toks=(data.words||[]).map(w=>w.text.trim()).filter(Boolean);
+    const mean=toks.length? (data.words.reduce((s,w)=>s+w.confidence,0)/toks.length)/100 : 0;
+    out[`psm${psm}`] = { raw:data.text, tokens:toks, tokensLength:toks.length, meanConf:mean };
   }
   return out;
 }
 
 function chooseBestProbe(probe){
-  const order = {A:0,B:1,C:2};
-  let best = { crop:'A', psm:'psm6', tokensLength:-1, meanConf:-1, raw:'', tokens:[] };
-  for(const cropKey of ['A','B','C']){
-    for(const psmKey of ['psm6','psm7']){
-      const r = probe[cropKey]?.[psmKey];
-      if(!r) continue;
-      if(r.tokensLength > best.tokensLength ||
-         (r.tokensLength === best.tokensLength && (r.meanConf > best.meanConf ||
-          (r.meanConf === best.meanConf && order[cropKey] < order[best.crop])))){
-        best = { crop: cropKey, psm: psmKey, ...r };
-      }
+  let best = { psm:'psm6', tokensLength:-1, meanConf:-1, raw:'', tokens:[] };
+  for(const psmKey of ['psm6','psm7']){
+    const r = probe[psmKey];
+    if(!r) continue;
+    if(r.tokensLength > best.tokensLength || (r.tokensLength === best.tokensLength && r.meanConf > best.meanConf)){
+      best = { psm: psmKey, ...r };
     }
   }
   return best;
@@ -1345,7 +1381,8 @@ function chooseBestProbe(probe){
 
 async function ocrBox(boxPx, fieldKey){
   const pad = 4;
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getPdfBitmapCanvas((boxPx.page||1)-1);
+  if(!src) return [];
   const offY = state.pageOffsets[boxPx.page-1] || 0;
   const scale = 3;
   const canvas = document.createElement('canvas');
@@ -1389,33 +1426,25 @@ async function ocrBox(boxPx, fieldKey){
 async function auditCropSelfTest(question, boxPx){
   const docId = (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
   const pageIndex = (boxPx.page||1) - 1;
-  const { cropBitmaps, meta } = getOcrCropForSelection({ docId, pageIndex, boxPx });
-  meta.question = question;
+  const vp = state.pageViewports[pageIndex] || { width: els.pdfCanvas.width, height: els.pdfCanvas.height };
+  const normBox = normalizeBoxPx(boxPx, vp.width, vp.height);
+  const { cropBitmap, meta } = getOcrCropFromNormBox({ docId, pageIndex, normBox, question });
   const fs = window.fs || (window.require && window.require('fs'));
   const dir = `debug/crops/${docId}/${pageIndex}`;
   const ts = Date.now();
   const baseName = `${question}__${ts}`;
-  if(!cropBitmaps.A){
-    state.cropAudits.push({ question, reason: meta.reason, ocrProbe: {}, best: {}, thumbs:{} });
-    renderCropAuditPanel();
+  const bufFromCanvas = c => Buffer.from(c.toDataURL('image/png').split(',')[1],'base64');
+  if(fs){ fs.mkdirSync(dir,{recursive:true}); }
+  if(cropBitmap && fs){ fs.writeFileSync(`${dir}/${baseName}.png`, bufFromCanvas(cropBitmap)); }
+  if(cropBitmap && !fs){ console.log('OCR crop', cropBitmap.toDataURL('image/png')); }
+  if(meta.errors.length){
+    meta.status='needs_review'; meta.reason='crop_geometry_error';
     if(fs) fs.writeFileSync(`${dir}/${baseName}.json`, JSON.stringify(meta,null,2));
+    state.cropAudits.push({ question, reason: meta.reason, ocrProbe:{}, best:{}, thumb: cropBitmap?.toDataURL('image/png') });
+    renderCropAuditPanel();
     return meta;
   }
-  const bufFromCanvas = c => Buffer.from(c.toDataURL('image/png').split(',')[1],'base64');
-  if(fs){
-    fs.mkdirSync(dir,{recursive:true});
-    fs.writeFileSync(`${dir}/${baseName}__A.png`, bufFromCanvas(cropBitmaps.A));
-    fs.writeFileSync(`${dir}/${baseName}__B.png`, bufFromCanvas(cropBitmaps.B));
-    fs.writeFileSync(`${dir}/${baseName}__C.png`, bufFromCanvas(cropBitmaps.C));
-  } else {
-    console.log('OCR crops',{
-      A: cropBitmaps.A.toDataURL('image/png'),
-      B: cropBitmaps.B.toDataURL('image/png'),
-      C: cropBitmaps.C.toDataURL('image/png'),
-      meta
-    });
-  }
-  const probe = await runOcrProbes(cropBitmaps);
+  const probe = await runOcrProbes(cropBitmap);
   meta.ocrProbe = probe;
   const best = chooseBestProbe(probe);
   meta.best = best;
@@ -1433,11 +1462,7 @@ async function auditCropSelfTest(question, boxPx){
     reason: meta.reason,
     ocrProbe: probe,
     best,
-    thumbs: {
-      A: cropBitmaps.A.toDataURL('image/png'),
-      B: cropBitmaps.B.toDataURL('image/png'),
-      C: cropBitmaps.C.toDataURL('image/png')
-    }
+    thumb: cropBitmap.toDataURL('image/png')
   });
   renderCropAuditPanel();
   return meta;
@@ -1981,24 +2006,19 @@ function renderCropAuditPanel(){
   state.cropAudits.forEach(a => {
     const row = document.createElement('div');
     row.className = 'ocrCropRow';
-    ['A','B','C'].forEach(k => {
-      const img = document.createElement('img');
-      img.src = a.thumbs?.[k] || '';
-      img.alt = `${a.question}-${k}`;
-      img.style.maxWidth = '80px';
-      img.style.maxHeight = '80px';
-      row.appendChild(img);
-    });
+    const img = document.createElement('img');
+    img.src = a.thumb || '';
+    img.alt = a.question;
+    img.style.maxWidth = '80px';
+    img.style.maxHeight = '80px';
+    row.appendChild(img);
     const info = document.createElement('div');
     const probe = a.ocrProbe || {};
-    const summary = ['A','B','C'].map(k => {
-      const p = probe[k] || {};
-      const t6 = p.psm6?.tokensLength || 0;
-      const c6 = p.psm6?.meanConf || 0;
-      const t7 = p.psm7?.tokensLength || 0;
-      const c7 = p.psm7?.meanConf || 0;
-      return `${k}6:${t6}/${c6.toFixed(2)} ${k}7:${t7}/${c7.toFixed(2)}`;
-    }).join(' ');
+    const t6 = probe.psm6?.tokensLength || 0;
+    const c6 = probe.psm6?.meanConf || 0;
+    const t7 = probe.psm7?.tokensLength || 0;
+    const c7 = probe.psm7?.meanConf || 0;
+    const summary = `6:${t6}/${c6.toFixed(2)} 7:${t7}/${c7.toFixed(2)}`;
     const raw = (a.best?.raw || '').slice(0,80).replace(/\s+/g,' ');
     const guard = a.reason ? ` ${a.reason}` : '';
     info.textContent = `${a.question}: ${summary} ${raw}${guard}`;
@@ -2120,16 +2140,20 @@ function renderReports(){
 }
 
 /* ---------------------- Profile save / table --------------------- */
-function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
+function upsertFieldInProfile(step, normBox, rawBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[]) {
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
+  let { x0n, y0n, wN, hN } = normBox;
+  let x1n = x0n + wN;
+  let y1n = y0n + hN;
   if(step.type === 'static'){
-    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(normBox.y1,f.bboxPct.y1) - Math.max(normBox.y0,f.bboxPct.y0) > 0);
+    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(y1n,f.bboxPct.y1) - Math.max(y0n,f.bboxPct.y0) > 0);
     if(clash){
       console.warn('Overlapping static bboxes, adjusting', step.fieldKey, clash.fieldKey);
       const shift = (clash.bboxPct.y1 - clash.bboxPct.y0) + 0.001;
-      normBox.y0 = clash.bboxPct.y1 + 0.001;
-      normBox.y1 = normBox.y0 + shift;
+      y0n = clash.bboxPct.y1 + 0.001;
+      y1n = y0n + shift;
+      hN = y1n - y0n;
     }
   }
   const entry = {
@@ -2137,8 +2161,10 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     type: step.type,
     page,
     selectorType:'bbox',
-    bbox:[normBox.x0, normBox.y0, normBox.x1, normBox.y1],
-    bboxPct:{x0:normBox.x0, y0:normBox.y0, x1:normBox.x1, y1:normBox.y1},
+    normBox: { x0n, y0n, wN, hN },
+    boxRaw: rawBox,
+    bbox:[x0n, y0n, x1n, y1n],
+    bboxPct:{x0:x0n, y0:y0n, x1:x1n, y1:y1n},
     value,
     confidence,
     raw,
@@ -2393,16 +2419,21 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
-  const norm = toPct(state.viewport, boxPx);
+  const vp = state.pageViewports[state.pageNum-1] || state.viewport;
+  const canvasW = vp.width || vp.w;
+  const canvasH = vp.height || vp.h;
+  const rawBox = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+  const normBox = normalizeBoxPx(boxPx, canvasW, canvasH);
+  const normPct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN, page: boxPx.page };
   const extras = {};
   if(step.type === 'static'){
     const lm = captureRingLandmark(boxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
     extras.landmark = lm;
   } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, norm, boxPx, tokens);
+    extras.column = buildColumnModel(step, normPct, boxPx, tokens);
   }
-  upsertFieldInProfile(step, norm, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens);
+  upsertFieldInProfile(step, normBox, rawBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
   renderSavedFieldsTable();
@@ -2412,7 +2443,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     rawStore[fid] = rawStore[fid] || [];
     const arr = rawStore[fid];
     const idx = arr.findIndex(r=>r.fieldKey===step.fieldKey);
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: norm, ts: Date.now(), tokens: fieldTokens };
+    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: normPct, ts: Date.now(), tokens: fieldTokens };
     if(idx>=0) arr[idx]=rec; else arr.push(rec);
   }
 
