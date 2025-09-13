@@ -1910,19 +1910,36 @@ async function extractLineItems(profile){
     const bands={};
     const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: 'line_items' };
     let headerBottom=0;
+    const headerBoxes=[];
     colFields.forEach(f=>{
-      const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
-      bands[f.fieldKey]=band;
-      if(f.column.header){
+      if(f.column?.header){
         const hb=toPx(vp,{x0:f.column.header[0],y0:f.column.header[1],x1:f.column.header[2],y1:f.column.header[3],page:p});
+        headerBoxes.push({ key:f.fieldKey, box:hb });
         headerBottom=Math.max(headerBottom,hb.y+hb.h);
+      } else {
+        const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
+        bands[f.fieldKey]=band;
       }
     });
+    if(headerBoxes.length){
+      headerBoxes.sort((a,b)=>(a.box.x+a.box.w/2)-(b.box.x+b.box.w/2));
+      const pageH = ((vp.h??vp.height)||1);
+      for(let i=0;i<headerBoxes.length;i++){
+        const cur=headerBoxes[i];
+        const prev=headerBoxes[i-1];
+        const next=headerBoxes[i+1];
+        const cx=cur.box.x+cur.box.w/2;
+        const left=prev ? (prev.box.x+prev.box.w/2+cx)/2 : cur.box.x;
+        const right=next ? (cx+next.box.x+next.box.w/2)/2 : cur.box.x+cur.box.w;
+        const pad=Math.max(4,cur.box.w*0.1);
+        bands[cur.key]={x:left-pad,y:0,w:right-left+pad*2,h:pageH};
+      }
+    }
     traceEvent(spanKey,'column.detected',{ columns:Object.keys(bands) });
     let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w && t.y+t.h/2>=b.y));
     pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
     if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
-    const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.5);
+    const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.75);
     const lines = groupIntoLines(pageTokens, lineTol);
     if(lines.length){
       const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
