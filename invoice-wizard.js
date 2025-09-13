@@ -2125,13 +2125,13 @@ function isOverlayPinned(){
   if(!src || !ov) return false;
   const srcRect = src.getBoundingClientRect();
   const ovRect = ov.getBoundingClientRect();
-  const eps = 1; // css pixel tolerance
+  const eps = 2; // css pixel tolerance
   return Math.abs(srcRect.left - ovRect.left) < eps &&
          Math.abs(srcRect.top - ovRect.top) < eps &&
          Math.abs(srcRect.width - ovRect.width) < eps &&
          Math.abs(srcRect.height - ovRect.height) < eps &&
-         ov.width === src.width &&
-         ov.height === src.height;
+         Math.abs(ov.width - src.width) <= 1 &&
+         Math.abs(ov.height - src.height) <= 1;
 }
 
 function updateOverlayHud(){
@@ -2420,6 +2420,7 @@ async function finalizeSelection(e) {
     state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     state.pendingSelection.active = false;
     drawing = false;
+    syncOverlay();
     return;
   }
   drawing = false;
