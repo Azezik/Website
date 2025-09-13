@@ -125,6 +125,11 @@ let state = {
   currentLineItems: [],
 };
 
+window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
+function bumpDebugBlank(){
+  window.__debugBlankAvoided = (window.__debugBlankAvoided || 0) + 1;
+}
+
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
   profileKey: (u, d) => `wiz.profile.${u}.${d}`,
@@ -511,9 +516,23 @@ const FieldDataEngine = (() => {
     let shape = shapeOf(txt);
     let digit = digitRatio(txt);
     if(mode === 'CONFIG'){
-      const value = regex ? ((txt.match(regex)||[])[1]||txt) : txt;
-      learn(ftype, value);
-      return { value, raw, corrected: value, conf, code: codeOf(value), shape: shapeOf(value), score: regex && value ? 1 : 0, correctionsApplied: [], digit: digitRatio(value) };
+      const codeOk = !def.codes || def.codes.includes(code);
+      const regexOk = !regex || regex.test(txt);
+      if(codeOk && regexOk) learn(ftype, txt);
+      else bumpDebugBlank();
+      return { value: raw, raw, corrected: regexOk && regex ? ((txt.match(regex)||[])[1]||txt) : raw, conf, code, shape, score: (codeOk && regexOk) ? 1 : 0, correctionsApplied: [], digit };
+    }
+    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
+    }
+    if(ftype==='customer_address'){
+      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
+      if(!/\d/.test(txt) && !postalRe.test(txt)){
+        return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
+      }
     }
     if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
       const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
@@ -553,7 +572,8 @@ const FieldDataEngine = (() => {
       learn(ftype, corrected);
       return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied, digit };
     }
-    return { value: '', raw, corrected, conf, code, shape, score, correctionsApplied, digit };
+    bumpDebugBlank();
+    return { value: raw, raw, corrected, conf: Math.min(conf, 0.3), code, shape, score, correctionsApplied, digit };
   }
 
   function exportPatterns(){ return patterns; }
@@ -580,7 +600,8 @@ function tokensInBox(tokens, box){
     const cx = t.x + t.w/2;
     if(cx < box.x || cx > box.x + box.w) return false;
     const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
-    if(overlapY / t.h < 0.7) return false;
+    const minOverlap = state.mode === 'CONFIG' ? 0.5 : 0.7;
+    if(overlapY / t.h < minOverlap) return false;
     return true;
   }).sort((a,b)=>{
     const ay = a.y + a.h/2, by = b.y + b.h/2;
@@ -1285,33 +1306,42 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const hits = tokensInBox(tokens, searchBox);
     if(hits.length){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits, state.mode);
-      if(cleaned.value){
-        state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-        return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: hits };
-      }
-    }
-    if(els.ocrToggle.checked){
-      const oTokens = await ocrBox(searchBox, fieldSpec.fieldKey);
-      if(oTokens.length){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', oTokens, state.mode);
-        if(cleaned.value){
-          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-          return { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: searchBox, confidence: cleaned.conf, tokens: oTokens };
-        }
+if (cleaned.value || cleaned.raw) {
+  state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+  return { 
+    value: cleaned.value || cleaned.raw, 
+    raw: cleaned.raw, 
+    corrected: cleaned.corrected, 
+    code: cleaned.code, 
+    shape: cleaned.shape, 
+    score: cleaned.score, 
+    correctionsApplied: cleaned.correctionsApplied, 
+    corrections: cleaned.correctionsApplied, 
+    boxPx: searchBox, 
+    confidence: cleaned.conf, 
+    tokens: hits 
+  };
+}
       }
     }
     return null;
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
+  if(state.mode === 'CONFIG' && state.snappedPx){
+    const hits = tokensInBox(tokens, state.snappedPx);
+    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : state.snappedText, state.mode);
+    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+    result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, tokens: hits, method:'snap' };
+  }
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
     const pads = state.mode==='CONFIG' ? [0,4] : [0,4,8,12];
     for(const pad of pads){
       const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-      result = await attempt(search);
-      if(result){ method='bbox'; break; }
+      const r = await attempt(search);
+      if(r && r.value){ result = r; method='bbox'; break; }
     }
   }
 
@@ -1320,13 +1350,13 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(m){
       const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
       const r = await attempt(box);
-      if(r){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+      if(r && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
     }
     if(!result){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        if(r && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
     if(!result){
@@ -1337,39 +1367,30 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
           const r = await attempt(box);
           const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
           const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-          if(r && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+          if(r && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
         }
       }
     }
   }
-
-  if(!result && state.snappedPx){
-    let val = fieldSpec.regex
-      ? ((state.snappedText.match(new RegExp(fieldSpec.regex, 'i')) || [])[1] || '')
-      : state.snappedText;
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', val, state.mode);
-    if(cleaned.value){
+  if(!result){
+    const lv = labelValueHeuristic(fieldSpec, tokens);
+    if(lv.value){
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
       state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-      result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: state.snappedPx, confidence: cleaned.conf, method: method||'snap', score };
+      result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
 
-    if(!result){
-      const lv = labelValueHeuristic(fieldSpec, tokens);
-      if(lv.value){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode);
-        if(cleaned.value){
-          state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-          result = { value: cleaned.value, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
-        }
-      }
-    }
-
-    if(!result){
-      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
-      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
-      result = { value: fb.value, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
-    }
+  if(!result){
+    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode);
+    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
+    result = { value: fb.value || fb.raw, raw: fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+  }
+  if(!result.value && state.snappedText){
+    bumpDebugBlank();
+    const raw = (state.snappedText||'').trim();
+    result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || state.snappedPx || null;
+  }
   result.method = result.method || method || 'fallback';
   result.score = score;
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
@@ -2120,7 +2141,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     raw = value;
   } else {
     const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value || (state.snappedText || '').trim();
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
     boxPx = res.boxPx || state.snappedPx;
     confidence = res.confidence || 0;
     raw = res.raw || (state.snappedText || '').trim();
