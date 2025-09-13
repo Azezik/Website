@@ -173,8 +173,28 @@ const migrations = {
   3: p => {
     (p.fields||[]).forEach(f=>{
       if(f.normBox){
-        const chk = validateSelection(f.normBox);
-        if(!chk.ok){ f.boxError = chk.reason; }
+        let chk = validateSelection(f.normBox);
+        if(!chk.ok){
+          let nb = null;
+          if(f.bboxPct){
+            const tmp = { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 };
+            const v = validateSelection(tmp);
+            if(v.ok) nb = v.normBox;
+          }
+          if(!nb && f.rawBox){
+            const v = validateSelection(f.rawBox);
+            if(v.ok) nb = v.normBox;
+          }
+          if(nb){
+            f.normBox = nb;
+            delete f.boxError;
+            if(!f.bboxPct){
+              f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+            }
+          } else {
+            f.boxError = chk.reason;
+          }
+        }
         return;
       }
       const rb = f.rawBox;
@@ -812,7 +832,27 @@ function ensureProfile(){
     state.profile.fields.forEach(f=>{
       if(f.normBox){
         const chk = validateSelection(f.normBox);
-        if(!chk.ok){ f.boxError = chk.reason; }
+        if(!chk.ok){
+          let nb = null;
+          if(f.bboxPct){
+            const tmp = { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 };
+            const v = validateSelection(tmp);
+            if(v.ok) nb = v.normBox;
+          }
+          if(!nb && f.rawBox){
+            const v = validateSelection(f.rawBox);
+            if(v.ok) nb = v.normBox;
+          }
+          if(nb){
+            f.normBox = nb;
+            delete f.boxError;
+            if(!f.bboxPct){
+              f.bboxPct = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+            }
+          } else {
+            f.boxError = chk.reason;
+          }
+        }
       } else if(f.rawBox){
         const chk = validateSelection(f.rawBox);
         if(chk.ok){
