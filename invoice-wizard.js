@@ -844,7 +844,7 @@ function ensureProfile(){
       { landmarkKey:'balance_hdr',    page:0, type:'text', text:'Balance',     strategy:'fuzzy', threshold:0.86 },
     ],
     tableHints: {
-      headerLandmarks: ['description_hdr','qty_header','price_header','amount_header'],
+      headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'],
       rowBandHeightPx: 18
     }
   };
@@ -904,7 +904,7 @@ const DEFAULT_FIELDS = [
   {
     fieldKey: 'store_name',
     label: 'Store / Business Name',
-    prompt: 'Highlight the store or business name on the invoice header.',
+    prompt: 'Highlight the Store / Business Name on the invoice header.',
     kind: 'value',
     mode: 'cell',
     required: true,
@@ -913,7 +913,7 @@ const DEFAULT_FIELDS = [
   {
     fieldKey: 'department_division',
     label: 'Department / Division',
-    prompt: 'Highlight the department/division (if shown). If not present, click Skip.',
+    prompt: 'Highlight the Department / Division (if shown).',
     kind: 'value',
     mode: 'cell',
     required: false,
@@ -921,8 +921,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'invoice_number',
-    label: 'Invoice Number',
-    prompt: 'Highlight the invoice number (e.g., INV-12345).',
+    label: 'Invoice #',
+    prompt: 'Highlight the Invoice #.',
     kind: 'value',
     mode: 'cell',
     regex: RE.orderLike.source,
@@ -932,7 +932,7 @@ const DEFAULT_FIELDS = [
   {
     fieldKey: 'invoice_date',
     label: 'Invoice Date',
-    prompt: 'Highlight the invoice date (e.g., 2025-09-08 or Sept 8, 2025).',
+    prompt: 'Highlight the Invoice Date.',
     kind: 'value',
     mode: 'cell',
     regex: RE.date.source,
@@ -941,8 +941,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'salesperson_rep',
-    label: 'Salesperson / Rep',
-    prompt: 'Highlight the salesperson/rep name or ID (if shown). If not present, click Skip.',
+    label: 'Salesperson',
+    prompt: 'Highlight the Salesperson (if shown).',
     kind: 'value',
     mode: 'cell',
     required: false,
@@ -950,8 +950,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'customer_name',
-    label: 'Customer (Sold To)',
-    prompt: 'Highlight the customer name (Sold To/Bill To).',
+    label: 'Customer Name',
+    prompt: 'Highlight the Customer Name.',
     kind: 'value',
     mode: 'cell',
     required: true,
@@ -959,8 +959,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'customer_address',
-    label: 'Customer Address (City/Province/Postal)',
-    prompt: 'Highlight the customer address block (include city, province, and postal code if present).',
+    label: 'Customer Address',
+    prompt: 'Draw a box around the Customer Address (include city, province/state, postal code).',
     kind: 'block',
     mode: 'cell',
     required: false,
@@ -969,19 +969,9 @@ const DEFAULT_FIELDS = [
 
   // Line-Item Columns
   {
-    fieldKey: 'product_description',
-    label: 'Product / Service Description (Column)',
-    prompt: 'Highlight the entire column containing product/service descriptions. Drag from the first row to the last row so the whole column is selected.',
-    kind: 'block',
-    mode: 'column',
-    required: true,
-    regex: '.+',
-    type: 'column'
-  },
-  {
     fieldKey: 'sku_col',
-    label: 'Product Code / SKU (Column)',
-    prompt: 'Highlight the entire column of product codes/SKUs (if present). If none, click Skip.',
+    label: 'Item Code (SKU)',
+    prompt: 'Identify the Item Code (SKU) column.',
     kind: 'block',
     mode: 'column',
     required: false,
@@ -989,9 +979,19 @@ const DEFAULT_FIELDS = [
     type: 'column'
   },
   {
+    fieldKey: 'product_description',
+    label: 'Item Description',
+    prompt: 'Identify the Item Description column.',
+    kind: 'block',
+    mode: 'column',
+    required: true,
+    regex: '.+',
+    type: 'column'
+  },
+  {
     fieldKey: 'quantity_col',
-    label: 'Quantity (Column)',
-    prompt: 'Highlight the entire column of quantities.',
+    label: 'Quantity',
+    prompt: 'Identify the Quantity column.',
     kind: 'block',
     mode: 'column',
     required: true,
@@ -1000,18 +1000,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'unit_price_col',
-    label: 'Unit Price (Column)',
-    prompt: 'Highlight the entire column of unit prices.',
-    kind: 'block',
-    mode: 'column',
-    required: true,
-    regex: RE.currency.source,
-    type: 'column'
-  },
-  {
-    fieldKey: 'amount_col',
-    label: 'Amount (Column)',
-    prompt: 'Highlight the entire column of line amounts.',
+    label: 'Unit Price',
+    prompt: 'Identify the Unit Price column.',
     kind: 'block',
     mode: 'column',
     required: true,
@@ -1022,8 +1012,8 @@ const DEFAULT_FIELDS = [
   // Totals & Taxes (single cell highlights)
   {
     fieldKey: 'subtotal_amount',
-    label: 'Subtotal (before tax & discounts)',
-    prompt: 'Highlight the Subtotal amount (before tax and discounts).',
+    label: 'Subtotal',
+    prompt: 'Highlight the Subtotal value in the totals area.',
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
@@ -1032,8 +1022,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'discounts_amount',
-    label: 'Discounts (if any)',
-    prompt: 'Highlight the total Discounts amount (if present). If none, click Skip.',
+    label: 'Discount',
+    prompt: 'Highlight the Discount value (if shown).',
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
@@ -1042,8 +1032,8 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'tax_amount',
-    label: 'Tax (HST/GST/PST)',
-    prompt: 'Highlight the total tax line (e.g., HST). If multiple taxes, highlight the combined total.',
+    label: 'Tax Amount',
+    prompt: 'Highlight the Tax Amount value.',
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
@@ -1052,12 +1042,30 @@ const DEFAULT_FIELDS = [
   },
   {
     fieldKey: 'invoice_total',
-    label: 'Invoice Total (Grand Total)',
-    prompt: 'Highlight the final amount due (Grand Total/Total).',
+    label: 'Invoice Total',
+    prompt: 'Highlight the Invoice Total value.',
     kind: 'value',
     mode: 'cell',
     regex: RE.currency.source,
     required: true,
+    type: 'static'
+  },
+  {
+    fieldKey: 'payment_method',
+    label: 'Payment Method',
+    prompt: 'Highlight the Payment Method (if shown).',
+    kind: 'value',
+    mode: 'cell',
+    required: false,
+    type: 'static'
+  },
+  {
+    fieldKey: 'payment_status',
+    label: 'Payment Status',
+    prompt: 'Highlight the Payment Status (if shown).',
+    kind: 'value',
+    mode: 'cell',
+    required: false,
     type: 'static'
   }
 ];
@@ -1960,7 +1968,7 @@ async function extractLineItems(profile){
   if(!colFields.length) return [];
   if(state.modes.rawData){
     const rows=[];
-    const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',amount_col:'amount'};
+    const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price'};
     for(const f of colFields){
       const pageIndex=(f.page||1)-1;
       const vp=state.pageViewports[pageIndex];
@@ -2044,7 +2052,7 @@ async function extractLineItems(profile){
         if(f.column.regexHint){
           const rx=new RegExp(f.column.regexHint); if(!rx.test(txt)) colConf=0.5;
         }
-        const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',amount_col:'amount'};
+        const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price'};
         let val=txt;
         const baseType=keyMap[f.fieldKey];
         if(baseType) val=FieldDataEngine.clean(baseType, txt, state.mode, { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: baseType }).value;
@@ -2714,6 +2722,9 @@ function compileDocument(fileId, lineItems=[]){
   const raw = rawStore.get(fileId);
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
+  (state.profile?.fields||[]).forEach(f=>{
+    if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
+  });
   const sub = parseFloat(byKey['subtotal_amount']?.value);
   const tax = parseFloat(byKey['tax_amount']?.value);
   const tot = parseFloat(byKey['invoice_total']?.value);
@@ -2778,8 +2789,11 @@ function renderResultsTable(){
       const prop = showRaw ? 'raw' : 'value';
       return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
-    const liRows = (r.lineItems||[]).map(it=>`<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td></tr>`).join('');
-    const liTable = `<table class="line-items-table"><thead><tr><th>Desc</th><th>SKU</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${liRows}</tbody></table>`;
+    const liRows = (r.lineItems||[]).map(it=>{
+      const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
+      return `<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
+    }).join('');
+    const liTable = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${liRows}</tbody></table>`;
     return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
 
@@ -2955,9 +2969,10 @@ function renderConfirmedTables(rec){
       else {
         const rows = items.map(it=>{
           const warn = (it.confidence||0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
-          return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${it.amount||''}</td></tr>`;
+          const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
+          return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
         }).join('');
-        liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Description</th><th>SKU</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table>`;
+        liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
     }
   });
