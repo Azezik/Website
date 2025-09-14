@@ -577,24 +577,6 @@ function digitRatio(str){
 
 const FieldDataEngine = (() => {
   const patterns = {};
-  const fieldDefs = {
-    store_name:      { codes:['12122','11112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
-    department_division:{ codes:['12122','12112'], regex:"^[A-Z&.'\\s-]{2,60}$" },
-    invoice_number:  { codes:['21222','11222','11212'], regex:'^[A-Z0-9-]{3,20}$' },
-    invoice_date:    { codes:['21212','11122'], regex:'^(\\d{4}-\\d{2}-\\d{2}|\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}|[A-Z][a-z]+\\s\\d{1,2},\\s\\d{4})$' },
-    salesperson_rep: { codes:['12122','11222','11212','21222'], regex:"^[A-Z&.'\\s-]{2,60}$" },
-    customer_name:   { codes:['12122'], regex:"^[A-Z&.'\\s-]{2,60}$" },
-    customer_address:{ codes:['11122','11112'], regex:'(\\d{5}(?:-\\d{4})?|[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d)' },
-    description:     { codes:['11122','11112'] },
-    sku:             { codes:['11222','11212'], regex:'^[A-Z0-9-]{5,12}$' },
-    quantity:        { codes:['21222'] },
-    unit_price:      { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
-    amount:          { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
-    subtotal_amount: { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
-    invoice_total:   { codes:['21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
-    discounts_amount:{ codes:['21211','21221'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' },
-    tax_amount:      { codes:['21221','11121'], regex:'^-?\\d{1,3}(?:[, ]\\d{3})*(?:\\.\\d{2})?$' }
-  };
 
   function learn(ftype, value){
     if(!value) return;
@@ -617,99 +599,34 @@ const FieldDataEngine = (() => {
   }
 
   function clean(ftype, input, mode='RUN', spanKey){
-    const arr = Array.isArray(input) ? input : [{text: String(input||'')}];
+    const arr = Array.isArray(input) ? input : [{text:String(input||'')}];
     const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
-    let raw = lineStrs.join(' ').trim();
+    const raw = lineStrs.join(' ').trim();
     if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
-    let joined = lineStrs.join(' ').trim();
-    if(ftype==='customer_address') joined = lineStrs.join(', ').trim();
-    const deduped = collapseAdjacentDuplicates(joined);
-    if(spanKey && deduped!==joined) traceEvent(spanKey,'dedupe.applied',{ before:joined, after:deduped });
-    let txt = deduped.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
-    if(/date/i.test(ftype)){ const n = normalizeDate(txt); if(n) txt = n; }
+    let txt = raw.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
-      const n = normalizeMoney(txt); if(n) txt = n;
-    } else if(/sku|product_code/.test(ftype)){
-      txt = txt.replace(/\s+/g,'').toUpperCase();
-    }
-    let conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
-    const def = fieldDefs[ftype] || {};
-    const regex = def.regex ? new RegExp(def.regex, 'i') : null;
-    let code = codeOf(txt);
-    let shape = shapeOf(txt);
-    let digit = digitRatio(txt);
-    if(mode === 'CONFIG'){
-      const codeOk = !def.codes || def.codes.includes(code);
-      const regexOk = !regex || regex.test(txt);
-      if(codeOk && regexOk) learn(ftype, txt);
-      else bumpDebugBlank();
-      if(spanKey) traceEvent(spanKey, codeOk && regexOk ? 'clean.success' : 'clean.fail', { value: txt, raw });
-      return { value: raw, raw, corrected: regexOk && regex ? ((txt.match(regex)||[])[1]||txt) : raw, conf, code, shape, score: (codeOk && regexOk) ? 1 : 0, correctionsApplied: [], digit };
-    }
-    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
-      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-        if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
-          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'format_reject' });
-          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-        }
-    }
-    if(ftype==='customer_address'){
-      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-        if(!/\d/.test(txt) && !postalRe.test(txt)){
-          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'address_reject' });
-          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-        }
-    }
-    if(/customer_name|salesperson_rep|store_name|department_division/.test(ftype)){
-      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-        if(/^[\d,]/.test(txt) || digit > 0.15 || postalRe.test(txt)){
-          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'format_reject' });
-          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-        }
-    }
-    if(ftype==='customer_address'){
-      const postalRe = new RegExp(fieldDefs.customer_address.regex, 'i');
-        if(!/\d/.test(txt) && !postalRe.test(txt)){
-          if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, reason:'address_reject' });
-          return { value:'', raw, corrected:txt, conf, code, shape, score:0, correctionsApplied:[], digit };
-        }
-    }
-    let score = 0;
-    if(def.codes && def.codes.includes(code)) score += 2;
-    if(regex && regex.test(txt)) score += 2;
+      const n=txt.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
+    } else if(/sku|product_code/.test(ftype)){ txt = txt.replace(/\s+/g,'').toUpperCase(); }
+    const conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
+    const code = codeOf(txt);
+    const shape = shapeOf(txt);
+    const digit = digitRatio(txt);
+    learn(ftype, txt);
     const dom = dominant(ftype);
-    if((dom.code && dom.code===code) || (dom.shape && dom.shape===shape) || (dom.len && dom.len===txt.length)) score += 1;
-    if(dom.digit && Math.abs(dom.digit - digit) < 0.01) score += 1;
-    let correctionsApplied = [];
-    let corrected = txt;
-    if(conf < 0.8 && regex && !regex.test(txt)){
-      const { text: corr, corrections } = applyOcrCorrections(txt, ftype);
-      if(corrections.length){
-        correctionsApplied = corrections;
-        score -= 2;
-      }
-      if(regex.test(corr) && (!def.codes || def.codes.includes(codeOf(corr)))){
-        corrected = corr;
-        code = codeOf(corrected);
-        shape = shapeOf(corrected);
-        digit = digitRatio(corrected);
-        score += 1;
-      }
-    }
-    if(score >= 5){
-      learn(ftype, corrected);
-      if(spanKey) traceEvent(spanKey,'clean.success',{ value: corrected, score });
-      return { value: corrected, raw, corrected, conf, code, shape, score, correctionsApplied, digit };
-    }
-    bumpDebugBlank();
-    if(spanKey) traceEvent(spanKey,'clean.fail',{ raw, score });
-    return { value: raw, raw, corrected, conf: Math.min(conf, 0.3), code, shape, score, correctionsApplied, digit };
+    let score=0;
+    if(dom.code && dom.code===code) score++;
+    if(dom.shape && dom.shape===shape) score++;
+    if(dom.len && dom.len===txt.length) score++;
+    if(dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
+    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score });
+    return { value:txt, raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit };
   }
 
   function exportPatterns(){ return patterns; }
   function importPatterns(p){ Object.assign(patterns, p || {}); }
 
-  return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns };
+  return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
 })();
 
 function groupIntoLines(tokens, tol=4){
@@ -1966,123 +1883,77 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 async function extractLineItems(profile){
   const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column);
   if(!colFields.length) return [];
-  if(state.modes.rawData){
-    const rows=[];
-    const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price'};
-    for(const f of colFields){
-      const pageIndex=(f.page||1)-1;
-      const vp=state.pageViewports[pageIndex];
-      if(!vp) continue;
-      const band=toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:f.column.yband?f.column.yband[1]:1,page:f.page});
-      const docId=state.currentFileId || state.currentFileName || 'doc';
-      const canvasW=(vp.width??vp.w)||1;
-      const canvasH=(vp.height??vp.h)||1;
-      const normBox=normalizeBox(band, canvasW, canvasH);
-      const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
-      if(meta.errors.length){ alert('OCR crop error: '+meta.errors.join(',')); continue; }
-      const probe=await runOcrProbes(cropBitmap);
-      const best=chooseBestProbe(probe);
-      traceEvent({docId,pageIndex,fieldKey:f.fieldKey},'column.raw',{ mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false, tokens: best.tokensLength });
-      const raw=(best.raw||'').trim();
-      const key=keyMap[f.fieldKey]||f.fieldKey;
-      const row={}; row[key]=raw; row.confidence=1; rows.push(row);
-    }
-    return rows;
-  }
-  const startPage = Math.min(...colFields.map(f=>f.page||1));
-  const rows=[];
+  const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount'};
+  const columns={};
   const guardWords = Array.from(new Set(colFields.flatMap(f=>f.column.bottomGuards||[])));
   const guardRe = guardWords.length ? new RegExp(guardWords.join('|'),'i') : null;
-
+  const startPage = Math.min(...colFields.map(f=>f.page||1));
+  for(const f of colFields){ columns[f.fieldKey]=[]; }
   for(let p=startPage; p<=state.numPages; p++){
-    const vp = state.pageViewports[p-1];
-    if(!vp) continue;
-    const tokens = await ensureTokensForPage(p);
-    const bands={};
-    const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: 'line_items' };
-    let headerBottom=0;
-    const headerBoxes=[];
-    colFields.forEach(f=>{
-      if(f.column?.header){
-        const hb=toPx(vp,{x0:f.column.header[0],y0:f.column.header[1],x1:f.column.header[2],y1:f.column.header[3],page:p});
-        headerBoxes.push({ key:f.fieldKey, box:hb });
-        headerBottom=Math.max(headerBottom,hb.y+hb.h);
-      } else {
-        const band = toPx(vp,{x0:f.column.xband[0],y0:f.column.yband?f.column.yband[0]:0,x1:f.column.xband[1],y1:1,page:p});
-        bands[f.fieldKey]=band;
-      }
-    });
-    if(headerBoxes.length){
-      headerBoxes.sort((a,b)=>(a.box.x+a.box.w/2)-(b.box.x+b.box.w/2));
-      const pageH = ((vp.h??vp.height)||1);
-      for(let i=0;i<headerBoxes.length;i++){
-        const cur=headerBoxes[i];
-        const prev=headerBoxes[i-1];
-        const next=headerBoxes[i+1];
-        const cx=cur.box.x+cur.box.w/2;
-        const left=prev ? (prev.box.x+prev.box.w/2+cx)/2 : cur.box.x;
-        const right=next ? (cx+next.box.x+next.box.w/2)/2 : cur.box.x+cur.box.w;
-        const pad=Math.max(4,cur.box.w*0.1);
-        bands[cur.key]={x:left-pad,y:0,w:right-left+pad*2,h:pageH};
+    const vp=state.pageViewports[p-1]; if(!vp) continue;
+    const tokens=await ensureTokensForPage(p);
+    const pageH=((vp.h??vp.height)||1);
+    for(const f of colFields){
+      const band=toPx(vp,{x0:f.column.xband[0],y0:0,x1:f.column.xband[1],y1:1,page:p});
+      const colTok=tokens.filter(t=>{const cx=t.x+t.w/2,cy=t.y+t.h/2;return cx>=band.x && cx<=band.x+band.w && cy>=band.y;}).sort((a,b)=>(a.y+a.h/2)-(b.y+b.h/2));
+      for(const t of colTok){
+        const lower=t.text.toLowerCase();
+        if(/^(sku|qty|quantity|price|amount|description)$/.test(lower)) continue;
+        if(guardRe && guardRe.test(lower)) break;
+        columns[f.fieldKey].push({y:(p-1)*pageH + t.y + t.h/2, page:p, text:t.text.trim(), conf:t.confidence||1, h:t.h, used:false});
       }
     }
-    traceEvent(spanKey,'column.detected',{ columns:Object.keys(bands) });
-    let pageTokens=tokens.filter(t=>Object.values(bands).some(b=>t.x+t.w/2>=b.x && t.x+t.w/2<=b.x+b.w && t.y+t.h/2>=b.y));
-    pageTokens = pageTokens.filter(t=>!/^(sku|qty|quantity|price|amount|description)$/i.test(t.text));
-    if(headerBottom) pageTokens = pageTokens.filter(t=>t.y+t.h/2>headerBottom);
-    const lineTol = Math.max(4, (colFields[0].column.lineHeightPct||0.02) * (((vp.h??vp.height)||1)*(window.devicePixelRatio||1)) * 0.75);
-    const lines = groupIntoLines(pageTokens, lineTol);
-    if(lines.length){
-      const first = lines[0].tokens.map(t=>t.text.toLowerCase()).join(' ');
-      if(/description|qty|quantity|price|amount|sku/.test(first)) lines.shift();
+  }
+  for(const key of Object.keys(columns)){
+    const list=columns[key];
+    const counts={};
+    list.forEach(tok=>{const s=FieldDataEngine.shapeOf(tok.text); tok.shape=s; counts[s]=(counts[s]||0)+1;});
+    const dom=Object.entries(counts).sort((a,b)=>b[1]-a[1])[0]?.[0];
+    if(dom){
+      const filtered=list.filter(tok=>tok.shape===dom || Math.abs(tok.shape.length-dom.length)<=1);
+      if(filtered.length>=Math.min(3,list.length)) columns[key]=filtered;
     }
-    const before=rows.length;
-    for(const L of lines){
-      const lower = L.tokens.map(t=>t.text.toLowerCase()).join(' ');
-      if(guardRe && guardRe.test(lower)){ p=state.numPages+1; break; }
-      const row={};
-      const used=new Set();
-      const colConfs=[]; const yCenters=[];
-      for(const f of colFields){
-        const band=bands[f.fieldKey];
-        const colT=L.tokens.filter(t=>t.x+t.w/2>=band.x && t.x+t.w/2<=band.x+band.w && !used.has(t));
-        if(!colT.length) continue;
-        const txt=colT.map(t=>t.text).join(' ').trim();
-        let colConf=1;
-        if(f.column.regexHint){
-          const rx=new RegExp(f.column.regexHint); if(!rx.test(txt)) colConf=0.5;
-        }
-        const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price'};
-        let val=txt;
-        const baseType=keyMap[f.fieldKey];
-        if(baseType) val=FieldDataEngine.clean(baseType, txt, state.mode, { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: p-1, fieldKey: baseType }).value;
-        if(val){
-          row[keyMap[f.fieldKey]]=val;
-          colConfs.push(colConf);
-          const yc=colT.reduce((s,t)=>s+(t.y+t.h/2),0)/colT.length;
-          yCenters.push(yc);
-          colT.forEach(t=>used.add(t));
-        }
+  }
+  const pref=['quantity_col','sku_col'];
+  let spineKey=pref.find(k=>columns[k]?.length) || Object.keys(columns).reduce((a,b)=> (columns[a]?.length||0) >= (columns[b]?.length||0) ? a : b);
+  const spine=columns[spineKey].sort((a,b)=>a.y-b.y);
+  const heights=spine.map(t=>t.h).sort((a,b)=>a-b);
+  const medianH=heights[Math.floor(heights.length/2)] || 10;
+  const lineTol=medianH*1.2;
+  const rows=[];
+  for(let i=0;i<spine.length;i++){
+    const spineTok=spine[i]; spineTok.used=true;
+    const y=spineTok.y; const nextY=spine[i+1]?.y || Infinity;
+    const row={ line_no:i+1 };
+    const baseType=keyMap[spineKey];
+    let baseVal=spineTok.text;
+    if(baseType) baseVal=FieldDataEngine.clean(baseType, baseVal, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:spineTok.page-1, fieldKey:baseType}).value;
+    if(baseType) row[baseType]=baseVal;
+    for(const key of Object.keys(columns)){
+      if(key===spineKey) continue;
+      const list=columns[key];
+      const cands=list.filter(t=>!t.used && Math.abs(t.y - y) <= lineTol);
+      if(!cands.length) continue;
+      cands.sort((a,b)=>Math.abs(a.y-y)-Math.abs(b.y-y) || b.conf - a.conf);
+      const tok=cands[0]; tok.used=true;
+      let val=tok.text; const outKey=keyMap[key];
+      if(outKey) val=FieldDataEngine.clean(outKey, val, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:tok.page-1, fieldKey:outKey}).value;
+      if(key==='product_description'){
+        const parts=[val];
+        const others=list.filter(t=>!t.used && t.y < nextY - lineTol);
+        for(const o of others){ parts.push(o.text); o.used=true; }
+        val=parts.join(' ').replace(/\s+/g,' ').trim();
       }
-      if(row.description && !row.quantity && rows.length){
-        rows[rows.length-1].description = (rows[rows.length-1].description + ' ' + row.description).trim();
-        continue;
-      }
-      if(Object.keys(row).length){
-        const base = colConfs.length ? Math.min(...colConfs) : 0;
-        const ySpread = yCenters.length ? Math.max(...yCenters) - Math.min(...yCenters) : 0;
-        const mis = ySpread > lineTol ? 0.2 : 0;
-        row.confidence = clamp(base - mis,0,1);
-        if(row.quantity && row.unit_price && row.amount){
-          const exp = parseFloat(row.quantity) * parseFloat(row.unit_price);
-          const diff = Math.abs(exp - parseFloat(row.amount));
-          if(!isNaN(diff) && diff > 0.02) row.confidence *= 0.8;
-        }
-        rows.push(row);
-      }
+      if(outKey) row[outKey]=val;
     }
-    const added=rows.length-before;
-    if(added) traceEvent(spanKey,'lineitems.parsed',{ rows:added });
+    if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
+    if(row.unit_price) row.unit_price = parseFloat(row.unit_price.replace(/[^0-9.-]/g,'')||0).toFixed(2);
+    if(row.amount) row.amount = parseFloat(row.amount.replace(/[^0-9.-]/g,'')||0).toFixed(2);
+    else if(row.quantity && row.unit_price){
+      const q=parseFloat(row.quantity), u=parseFloat(row.unit_price);
+      if(!isNaN(q) && !isNaN(u)) row.amount=(q*u).toFixed(2);
+    }
+    rows.push(row);
   }
   return rows;
 }
