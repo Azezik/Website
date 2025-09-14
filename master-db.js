@@ -38,6 +38,19 @@
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
   }
 
+  function normalizeArray(val){
+    if(Array.isArray(val)){
+      if(val.length === 1 && typeof val[0] === 'string' && /\n/.test(val[0])){
+        return val[0].split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      }
+      return val;
+    }
+    if(typeof val === 'string'){
+      return val.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
   function flatten(db){
     const rows = [HEADERS];
     (db||[]).forEach(inv => {
@@ -59,25 +72,26 @@
         payMethod: f.payment_method?.value || '',
         payStatus: f.payment_status?.value || ''
       };
-      let items = inv.lineItems && inv.lineItems.length ? inv.lineItems : null;
+      let items = Array.isArray(inv.lineItems) && inv.lineItems.length ? inv.lineItems : null;
       if(!items){
-        const codes = inv.item_code || [];
-        const descs = inv.item_description || [];
-        const qtys = inv.qty || inv.quantity || [];
-        const units = inv.unit_price || [];
-        const totals = inv.line_total || [];
-        const lens = [codes,descs,qtys,units,totals].filter(a=>a.length).map(a=>a.length);
-        const uniqueLens = Array.from(new Set(lens));
-        if(uniqueLens.length > 1){
-          throw new Error('Line-item columns misaligned (codes/descriptions/qty/prices). Please re-check Column Engine selection.');
+        const codes = normalizeArray(inv.item_code);
+        const descs = normalizeArray(inv.item_description);
+        const qtys = normalizeArray(inv.qty || inv.quantity);
+        const units = normalizeArray(inv.unit_price);
+        const totals = normalizeArray(inv.line_total);
+        const lineNos = normalizeArray(inv.line_number);
+        let N = lineNos.length;
+        if(!N){
+          const lens = [codes,descs,qtys,units,totals].filter(a=>a.length).map(a=>a.length);
+          N = lens.length ? Math.min(...lens) : 0;
         }
-        const N = uniqueLens[0] || 0;
         items = Array.from({length:N}).map((_,i)=>({
           sku: codes[i] || '',
           description: descs[i] || '',
           quantity: qtys[i] || '',
           unit_price: units[i] || '',
-          amount: totals[i] || ''
+          amount: totals[i] || '',
+          line_no: lineNos[i] !== undefined ? lineNos[i] : i+1
         }));
       }
       if(!items.length) items = [{}];
@@ -110,7 +124,7 @@
           base.total,
           base.payMethod,
           base.payStatus,
-          String(it.line_no || (idx+1))
+          String(it.line_no !== undefined ? it.line_no : (idx+1))
         ]);
       });
     });
