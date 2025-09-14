@@ -74,12 +74,12 @@
       };
       let items = Array.isArray(inv.lineItems) && inv.lineItems.length ? inv.lineItems : null;
       if(!items){
-        const codes = normalizeArray(inv.item_code);
-        const descs = normalizeArray(inv.item_description);
+        const codes = normalizeArray(inv.item_code || inv.sku);
+        const descs = normalizeArray(inv.item_description || inv.product_description);
         const qtys = normalizeArray(inv.qty || inv.quantity);
         const units = normalizeArray(inv.unit_price);
         const totals = normalizeArray(inv.line_total);
-        const lineNos = normalizeArray(inv.line_number);
+        const lineNos = normalizeArray(inv.line_number || inv.line_no);
         let N = lineNos.length;
         if(!N){
           const lens = [codes,descs,qtys,units,totals].filter(a=>a.length).map(a=>a.length);
