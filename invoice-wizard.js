@@ -160,9 +160,12 @@ function bumpDebugBlank(){
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
   profileKey: (u, d) => `wiz.profile.${u}.${d}`,
-  dbKey: () => `wiz.db.records`,
-  getDb() { const raw = localStorage.getItem(this.dbKey()); return raw ? JSON.parse(raw) : []; },
-  setDb(arr){ localStorage.setItem(this.dbKey(), JSON.stringify(arr)); },
+  dbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
+  getDb(u, d) {
+    const raw = localStorage.getItem(this.dbKey(u, d));
+    return raw ? JSON.parse(raw) : [];
+    },
+  setDb(u, d, arr){ localStorage.setItem(this.dbKey(u, d), JSON.stringify(arr)); },
   getProfile(u,d){ const raw = localStorage.getItem(this.profileKey(u,d)); return raw ? JSON.parse(raw, jsonReviver) : null; },
   setProfile(u,d,p){ localStorage.setItem(this.profileKey(u,d), serializeProfile(p)); },
   removeProfile(u,d){ localStorage.removeItem(this.profileKey(u,d)); }
@@ -2184,8 +2187,12 @@ async function openFile(file){
   state.matchPoints = [];
   state.telemetry = [];
   renderTelemetry();
+  const arrayBuffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   state.currentFileName = file.name || 'untitled';
-  state.currentFileId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  state.currentFileId = hashHex;
   fileMeta[state.currentFileId] = { fileName: state.currentFileName };
   rawStore.clear(state.currentFileId);
   const isImage = /^image\//.test(file.type || '');
@@ -2210,7 +2217,6 @@ async function openFile(file){
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
   try {
-    const arrayBuffer = await file.arrayBuffer();
     const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
     state.pdf = await loadingTask.promise;
 
@@ -2717,8 +2723,10 @@ function compileDocument(fileId, lineItems=[]){
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
+  const numbered = (lineItems||[]).map((it,i)=>({ line_no: i+1, ...it }));
   const compiled = {
     fileId,
+    fileHash: fileId,
     fileName: fileMeta[fileId]?.fileName || 'unnamed',
     processedAtISO: new Date().toISOString(),
     fields: byKey,
@@ -2734,13 +2742,14 @@ function compileDocument(fileId, lineItems=[]){
       total: byKey['invoice_total']?.value || '',
       discount: byKey['discounts_amount']?.value || ''
     },
-    lineItems,
+    lineItems: numbered,
     templateKey: `${state.username}:${state.docType}`
   };
-  const db = LS.getDb();
-  const idx = db.findIndex(r => r.fileName === compiled.fileName && r.templateKey === compiled.templateKey);
+  const db = LS.getDb(state.username, state.docType);
+  const invNum = compiled.invoice.number;
+  const idx = db.findIndex(r => r.fileId === compiled.fileId || (invNum && r.invoice?.number === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
-  LS.setDb(db);
+  LS.setDb(state.username, state.docType, db);
   renderResultsTable();
   renderTelemetry();
   renderReports();
@@ -2749,10 +2758,10 @@ function compileDocument(fileId, lineItems=[]){
 
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
-  let db = LS.getDb().filter(r => r.templateKey.startsWith(`${state.username}:`));
-  const filter = els.dataDocType?.value;
-  if(filter){ db = db.filter(r => r.templateKey.endsWith(':'+filter)); }
+  const dt = els.dataDocType?.value || state.docType;
+  let db = LS.getDb(state.username, dt);
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
+  db = db.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
 
   const keySet = new Set();
   db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
@@ -2779,7 +2788,8 @@ function renderResultsTable(){
     const fileId = inp.dataset.file;
     const field = inp.dataset.field;
     const prop = inp.dataset.prop || 'value';
-    const db = LS.getDb();
+    const dt = els.dataDocType?.value || state.docType;
+    const db = LS.getDb(state.username, dt);
     const rec = db.find(r=>r.fileId===fileId);
     if(rec && rec.fields?.[field]){
       rec.fields[field][prop] = inp.value;
@@ -2788,9 +2798,10 @@ function renderResultsTable(){
         if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
         if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
       }
-      LS.setDb(db);
+      LS.setDb(state.username, dt, db);
       renderResultsTable();
       renderReports();
+      renderSavedFieldsTable();
     }
   }));
 }
@@ -2814,7 +2825,8 @@ function renderTelemetry(){
 }
 
 function renderReports(){
-  let db = LS.getDb().filter(r => r.templateKey.startsWith(`${state.username}:`));
+  const dt = els.dataDocType?.value || state.docType;
+  let db = LS.getDb(state.username, dt);
   const totalRevenue = db.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
   const orders = db.length;
   const taxTotal = db.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
@@ -2887,45 +2899,57 @@ function ensureAnchorFor(fieldKey){
   }
 }
 function renderSavedFieldsTable(){
-  const fields = (state.profile?.fields||[]).filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+  const db = LS.getDb(state.username, state.docType);
+  const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+  const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
+    .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
   if(!fields.length){
     els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
   } else {
     const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
     const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
-    els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+    els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
   }
   els.savedJson.textContent = serializeProfile(state.profile);
-  renderConfirmedTables();
+  renderConfirmedTables(latest);
 }
 
 let confirmedRenderPending = false;
-function renderConfirmedTables(){
+function renderConfirmedTables(rec){
   if(confirmedRenderPending) return;
   confirmedRenderPending = true;
   requestAnimationFrame(()=>{
     confirmedRenderPending = false;
+    const latest = rec || LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
     const fDiv = document.getElementById('confirmedFields');
     const liDiv = document.getElementById('confirmedLineItems');
     if(fDiv){
-      const statics = (state.profile?.fields||[]).filter(f=>f.type==='static' && f.value);
+      const typeMap = {};
+      (state.profile?.fields||[]).forEach(f=>{ typeMap[f.fieldKey]=f.type; });
+      const statics = Object.entries(latest?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
       if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
       else {
-        const rows = statics.map(f=>{
-          const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length)
-            ? '<span class="warn">⚠️</span>' : '';
+        const rows = statics.map(([k,f])=>{
+          const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
           const conf = `<span class="confidence">${Math.round((f.confidence||0)*100)}%</span>`;
-          return `<tr><td>${f.fieldKey}</td><td><input class="confirmEdit" data-field="${f.fieldKey}" value="${f.value}"/>${warn}${conf}</td></tr>`;
+          return `<tr><td>${k}</td><td><input class="confirmEdit" data-field="${k}" value="${f.value}"/>${warn}${conf}</td></tr>`;
         }).join('');
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
         fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
-          const fld = state.profile.fields.find(x=>x.fieldKey===inp.dataset.field);
-          if(fld){ fld.value = inp.value; fld.confidence = 1; saveProfile(state.username, state.docType, state.profile); renderConfirmedTables(); }
+          const db = LS.getDb(state.username, state.docType);
+          const rec = db.find(r=>r.fileId===latest?.fileId);
+          if(rec && rec.fields?.[inp.dataset.field]){
+            rec.fields[inp.dataset.field].value = inp.value;
+            rec.fields[inp.dataset.field].confidence = 1;
+            LS.setDb(state.username, state.docType, db);
+            renderSavedFieldsTable();
+          }
         }));
       }
     }
     if(liDiv){
-      const items = state.currentLineItems || [];
+      const items = latest?.lineItems || [];
       if(!items.length){ liDiv.innerHTML = '<p class="sub">No line items.</p>'; }
       else {
         const rows = items.map(it=>{
@@ -2963,7 +2987,7 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   LS.removeProfile(state.username, state.docType);
   const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
   setModels(models);
-  localStorage.removeItem(LS.dbKey());
+  localStorage.removeItem(LS.dbKey(state.username, state.docType));
   state.profile = null;
   renderSavedFieldsTable();
   populateModelSelect();
@@ -3139,13 +3163,14 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
-  renderSavedFieldsTable();
 
   const fid = state.currentFileId;
   if(fid){
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     rawStore.upsert(fid, rec);
+    compileDocument(fid, state.currentLineItems);
   }
+  renderSavedFieldsTable();
 
   afterConfirmAdvance();
 });
