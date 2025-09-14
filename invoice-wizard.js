@@ -2735,7 +2735,16 @@ function compileDocument(fileId, lineItems=[]){
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
-  const numbered = (lineItems||[]).map((it,i)=>({ line_no: i+1, ...it }));
+  const enriched = (lineItems||[]).map((it,i)=>{
+    let amount = it.amount;
+    if(!amount && it.quantity && it.unit_price){
+      const q=parseFloat(it.quantity); const u=parseFloat(it.unit_price);
+      if(!isNaN(q) && !isNaN(u)) amount=(q*u).toFixed(2);
+    }
+    return { line_no:i+1, ...it, amount };
+  });
+  let lineSum=0; let allHave=true;
+  enriched.forEach(it=>{ if(it.amount){ lineSum+=parseFloat(it.amount); } else allHave=false; });
   const compiled = {
     fileId,
     fileHash: fileId,
@@ -2754,9 +2763,16 @@ function compileDocument(fileId, lineItems=[]){
       total: byKey['invoice_total']?.value || '',
       discount: byKey['discounts_amount']?.value || ''
     },
-    lineItems: numbered,
-    templateKey: `${state.username}:${state.docType}`
+    lineItems: enriched,
+    templateKey: `${state.username}:${state.docType}`,
+    warnings: []
   };
+  if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
+    compiled.warnings.push('line_totals_vs_subtotal');
+    if(byKey['subtotal_amount']){
+      byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
+    }
+  }
   const db = LS.getDb(state.username, state.docType);
   const invNum = compiled.invoice.number;
   const idx = db.findIndex(r => r.fileId === compiled.fileId || (invNum && r.invoice?.number === invNum));

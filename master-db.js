@@ -10,6 +10,7 @@
     'Salesperson',
     'Customer Name',
     'Customer Address',
+    'Line #',
     'Item Code (SKU)',
     'Item Description',
     'Quantity',
@@ -51,7 +52,7 @@
         payStatus: f.payment_status?.value || ''
       };
       const items = inv.lineItems && inv.lineItems.length ? inv.lineItems : [{}];
-      items.forEach(it => {
+      items.forEach((it, idx) => {
         const qty = it.quantity || '';
         const unit = it.unit_price || '';
         let lineTotal = it.amount || '';
@@ -69,6 +70,7 @@
           base.salesperson,
           base.customer,
           base.address,
+          String(it.line_no || (idx+1)),
           it.sku || '',
           it.description || '',
           qty,
