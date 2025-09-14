@@ -90,6 +90,7 @@ const els = {
 
   fieldsPreview:   document.getElementById('fieldsPreview'),
   savedJson:       document.getElementById('savedJson'),
+  exportMasterDbBtn: document.getElementById('exportMasterDbBtn'),
   exportBtn:       document.getElementById('exportBtn'),
   finishWizardBtn: document.getElementById('finishWizardBtn'),
 };
@@ -3182,6 +3183,19 @@ els.exportBtn?.addEventListener('click', ()=>{
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = `invoice-schema-${state.username}-${state.docType}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// Export flat Master Database CSV
+els.exportMasterDbBtn?.addEventListener('click', ()=>{
+  const dt = els.dataDocType?.value || state.docType;
+  const db = LS.getDb(state.username, dt);
+  const csv = MasterDB.toCsv(db);
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `masterdb-${state.username}-${dt}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
