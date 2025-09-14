@@ -62,4 +62,16 @@ assert.strictEqual(rows2[1][7], 'A1');
 assert.strictEqual(rows2[2][7], 'B2');
 assert.strictEqual(rows2[2][18], '2');
 
+const altFieldsDb = [{
+  invoice: { number: 'INV003', salesDateISO: '2024-03-01' },
+  sku: ['S1', 'S2'],
+  product_description: ['Thing 1', 'Thing 2'],
+  line_number: ['001', '002']
+}];
+const rows3 = MasterDB.flatten(altFieldsDb);
+assert.strictEqual(rows3.length, 3);
+assert.strictEqual(rows3[1][7], 'S1');
+assert.strictEqual(rows3[2][8], 'Thing 2');
+assert.strictEqual(rows3[2][18], '002');
+
 console.log('MasterDB tests passed.');
