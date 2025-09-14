@@ -16,14 +16,14 @@ const sampleDb = [{
     payment_status: { value: 'Paid' }
   },
   totals: {
-    subtotal: '100.00',
-    tax: '13.00',
-    total: '113.00',
+    subtotal: '1,240.00',
+    tax: '161.20',
+    total: '1,401.20',
     discount: '5.00'
   },
   lineItems: [
     { sku: 'SKU1', description: 'Item One', quantity: '2', unit_price: '20.00', amount: '40.00' },
-    { sku: 'SKU2', description: 'Item Two', quantity: '1', unit_price: '60.00' }
+    { sku: 'SKU2', description: 'Item Two', quantity: '1', unit_price: '1,200.00' }
   ]
 }];
 
@@ -31,12 +31,15 @@ const rows = MasterDB.flatten(sampleDb);
 assert.deepStrictEqual(rows[0], MasterDB.HEADERS);
 assert.strictEqual(rows.length, 3);
 assert.strictEqual(rows[1][0], 'My Store');
-assert.strictEqual(rows[1][7], '1');
-assert.strictEqual(rows[2][7], '2');
-assert.strictEqual(rows[1][8], 'SKU1');
-assert.strictEqual(rows[2][8], 'SKU2');
-assert.strictEqual(rows[2][12], '60.00'); // computed line total
-assert.strictEqual(rows[1][13], '100.00'); // subtotal repeated
+assert.strictEqual(rows[1][18], '1');
+assert.strictEqual(rows[2][18], '2');
+assert.strictEqual(rows[1][7], 'SKU1');
+assert.strictEqual(rows[2][7], 'SKU2');
+assert.strictEqual(rows[2][10], '1200.00'); // cleaned unit price
+assert.strictEqual(rows[2][11], '1200.00'); // computed line total
+assert.strictEqual(rows[1][12], '1240.00'); // subtotal repeated
+
+assert.throws(() => MasterDB.flatten([{ item_code: ['A'], item_description: ['B', 'C'], qty: ['1'], unit_price: ['10'] }]), /misaligned/);
 
 const csv = MasterDB.toCsv(sampleDb);
 assert.ok(csv.startsWith('Store / Business Name'));
