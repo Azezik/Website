@@ -721,7 +721,6 @@ function ensureProfile(){
     version: PROFILE_VERSION,
     fields: [],
     globals: [],
-    fieldPatterns: {},
     landmarks: [
       // General identifiers
       { landmarkKey:'sales_bill',     page:0, type:'text', text:'Sales Bill',  strategy:'fuzzy', threshold:0.86 },
@@ -810,8 +809,6 @@ function ensureProfile(){
       }
     });
   }
-  state.profile.fieldPatterns = existing?.fieldPatterns || state.profile.fieldPatterns || {};
-  FieldDataEngine.importPatterns(state.profile.fieldPatterns);
   saveProfile(state.username, state.docType, state.profile);
 }
 
@@ -885,6 +882,16 @@ const DEFAULT_FIELDS = [
   },
 
   // Line-Item Columns
+  {
+    fieldKey: 'line_number_col',
+    label: 'Line #',
+    prompt: 'Identify the Line # column (if shown).',
+    kind: 'block',
+    mode: 'column',
+    required: false,
+    regex: '[0-9]+',
+    type: 'column'
+  },
   {
     fieldKey: 'sku_col',
     label: 'Item Code (SKU)',
@@ -1757,7 +1764,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const hits = tokensInBox(tokens, searchBox);
     if(!hits.length) return null;
     const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
-    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     const cleaned = sel.cleaned || {};
     return {
       value: sel.value,
@@ -1781,7 +1787,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const hits = tokensInBox(tokens, state.snappedPx);
     const rawText = hits.length ? hits.map(t => t.text).join(' ') : (state.snappedText || '');
     const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : rawText, state.mode, spanKey);
-    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     const value = cleaned.value || cleaned.raw || rawText;
     result = {
       value,
@@ -1850,7 +1855,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
-      state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
       result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
     }
   }
@@ -1859,7 +1863,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     traceEvent(spanKey,'fallback.search',{});
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
     traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
-    state.profile.fieldPatterns = FieldDataEngine.exportPatterns();
     result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   if(!result.value && selectionRaw){
@@ -1881,9 +1884,10 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 }
 
 async function extractLineItems(profile){
+  FieldDataEngine.importPatterns({});
   const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column);
   if(!colFields.length) return [];
-  const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount'};
+  const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount',line_number_col:'line_no'};
   const columns={};
   const guardWords = Array.from(new Set(colFields.flatMap(f=>f.column.bottomGuards||[])));
   const guardRe = guardWords.length ? new RegExp(guardWords.join('|'),'i') : null;
@@ -1914,8 +1918,24 @@ async function extractLineItems(profile){
       if(filtered.length>=Math.min(3,list.length)) columns[key]=filtered;
     }
   }
-  const pref=['quantity_col','sku_col'];
-  let spineKey=pref.find(k=>columns[k]?.length) || Object.keys(columns).reduce((a,b)=> (columns[a]?.length||0) >= (columns[b]?.length||0) ? a : b);
+  let spineKey;
+  if(columns.line_number_col && columns.line_number_col.length){
+    const lns = columns.line_number_col.map(t=>({ ...t, num: parseInt(t.text.replace(/[^0-9]/g,''),10) })).filter(t=>Number.isFinite(t.num));
+    lns.sort((a,b)=>a.y-b.y);
+    const seq=[];
+    for(const tok of lns){
+      if(!seq.length || tok.num === seq[seq.length-1].num + 1) seq.push(tok);
+      else break;
+    }
+    if(seq.length){
+      columns.line_number_col = seq;
+      spineKey = 'line_number_col';
+    }
+  }
+  if(!spineKey){
+    const pref=['quantity_col','sku_col'];
+    spineKey=pref.find(k=>columns[k]?.length) || Object.keys(columns).reduce((a,b)=> (columns[a]?.length||0) >= (columns[b]?.length||0) ? a : b);
+  }
   const spine=columns[spineKey].sort((a,b)=>a.y-b.y);
   const heights=spine.map(t=>t.h).sort((a,b)=>a-b);
   const medianH=heights[Math.floor(heights.length/2)] || 10;
@@ -1924,11 +1944,12 @@ async function extractLineItems(profile){
   for(let i=0;i<spine.length;i++){
     const spineTok=spine[i]; spineTok.used=true;
     const y=spineTok.y; const nextY=spine[i+1]?.y || Infinity;
-    const row={ line_no:i+1 };
+    const row={ line_no: spineTok.num !== undefined ? spineTok.num : i+1 };
     const baseType=keyMap[spineKey];
-    let baseVal=spineTok.text;
-    if(baseType) baseVal=FieldDataEngine.clean(baseType, baseVal, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:spineTok.page-1, fieldKey:baseType}).value;
-    if(baseType) row[baseType]=baseVal;
+    if(baseType && baseType !== 'line_no'){
+      let baseVal=FieldDataEngine.clean(baseType, spineTok.text, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:spineTok.page-1, fieldKey:baseType}).value;
+      row[baseType]=baseVal;
+    }
     for(const key of Object.keys(columns)){
       if(key===spineKey) continue;
       const list=columns[key];
@@ -1938,6 +1959,7 @@ async function extractLineItems(profile){
       const tok=cands[0]; tok.used=true;
       let val=tok.text; const outKey=keyMap[key];
       if(outKey) val=FieldDataEngine.clean(outKey, val, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:tok.page-1, fieldKey:outKey}).value;
+      if(outKey === 'line_no'){ const n=parseInt(String(val).replace(/[^0-9]/g,''),10); val=isNaN(n)?'':n; }
       if(key==='product_description'){
         const parts=[val];
         const others=list.filter(t=>!t.used && t.y < nextY - lineTol);
@@ -3114,7 +3136,6 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
   state.profile = profile;
-  FieldDataEngine.importPatterns(profile.fieldPatterns || {});
   await openFile(file);
   for(const spec of (profile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
