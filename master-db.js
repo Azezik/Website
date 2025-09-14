@@ -10,7 +10,6 @@
     'Salesperson',
     'Customer Name',
     'Customer Address',
-    'Line #',
     'Item Code (SKU)',
     'Item Description',
     'Quantity',
@@ -21,8 +20,17 @@
     'Tax Amount',
     'Invoice Total',
     'Payment Method',
-    'Payment Status'
+    'Payment Status',
+    'Line No'
   ];
+
+  function cleanNumber(val, opts={}){
+    if(val === undefined || val === null || val === '') return '';
+    const num = parseFloat(String(val).replace(/,/g,''));
+    if(!isFinite(num)) return '';
+    if(opts.fixed === undefined) return String(num);
+    return num.toFixed(opts.fixed);
+  }
 
   function csvEscape(val){
     if(val === undefined || val === null) return '';
@@ -44,24 +52,45 @@
         salesperson: invoice.salesperson || f.salesperson_rep?.value || '',
         customer: f.customer_name?.value || '',
         address: f.customer_address?.value || '',
-        subtotal: totals.subtotal || '',
-        discount: totals.discount || '',
-        tax: totals.tax || '',
-        total: totals.total || '',
+        subtotal: cleanNumber(totals.subtotal, {fixed:2}),
+        discount: cleanNumber(totals.discount, {fixed:2}),
+        tax: cleanNumber(totals.tax, {fixed:2}),
+        total: cleanNumber(totals.total, {fixed:2}),
         payMethod: f.payment_method?.value || '',
         payStatus: f.payment_status?.value || ''
       };
-      const items = inv.lineItems && inv.lineItems.length ? inv.lineItems : [{}];
+      let items = inv.lineItems && inv.lineItems.length ? inv.lineItems : null;
+      if(!items){
+        const codes = inv.item_code || [];
+        const descs = inv.item_description || [];
+        const qtys = inv.qty || inv.quantity || [];
+        const units = inv.unit_price || [];
+        const totals = inv.line_total || [];
+        const lens = [codes,descs,qtys,units,totals].filter(a=>a.length).map(a=>a.length);
+        const uniqueLens = Array.from(new Set(lens));
+        if(uniqueLens.length > 1){
+          throw new Error('Line-item columns misaligned (codes/descriptions/qty/prices). Please re-check Column Engine selection.');
+        }
+        const N = uniqueLens[0] || 0;
+        items = Array.from({length:N}).map((_,i)=>({
+          sku: codes[i] || '',
+          description: descs[i] || '',
+          quantity: qtys[i] || '',
+          unit_price: units[i] || '',
+          amount: totals[i] || ''
+        }));
+      }
+      if(!items.length) items = [{}];
       items.forEach((it, idx) => {
-        const qty = it.quantity || '';
-        const unit = it.unit_price || '';
-        let lineTotal = it.amount || '';
+        const qty = cleanNumber(it.quantity, {});
+        const unit = cleanNumber(it.unit_price, {fixed:2});
+        let lineTotal = cleanNumber(it.amount, {fixed:2});
         if(!lineTotal && qty && unit){
           const q = parseFloat(qty);
           const u = parseFloat(unit);
           if(!isNaN(q) && !isNaN(u)) lineTotal = (q*u).toFixed(2);
         }
-        const discount = it.discount !== undefined ? it.discount : base.discount;
+        const discount = it.discount !== undefined ? cleanNumber(it.discount,{fixed:2}) : base.discount;
         rows.push([
           base.store,
           base.dept,
@@ -70,7 +99,6 @@
           base.salesperson,
           base.customer,
           base.address,
-          String(it.line_no || (idx+1)),
           it.sku || '',
           it.description || '',
           qty,
@@ -81,7 +109,8 @@
           base.tax,
           base.total,
           base.payMethod,
-          base.payStatus
+          base.payStatus,
+          String(it.line_no || (idx+1))
         ]);
       });
     });
