@@ -32,6 +32,11 @@
     return num.toFixed(opts.fixed);
   }
 
+  function cleanCell(val){
+    if(val === undefined || val === null) return '';
+    return String(val).replace(/\s+/g,' ').trim();
+  }
+
   function csvEscape(val){
     if(val === undefined || val === null) return '';
     const s = String(val);
@@ -58,19 +63,19 @@
       const invoice = inv.invoice || {};
       const totals = inv.totals || {};
       const base = {
-        store: invoice.store || f.store_name?.value || '',
-        dept: f.department_division?.value || '',
-        number: invoice.number || '',
-        date: invoice.salesDateISO || '',
-        salesperson: invoice.salesperson || f.salesperson_rep?.value || '',
-        customer: f.customer_name?.value || '',
-        address: f.customer_address?.value || '',
+        store: cleanCell(invoice.store || f.store_name?.value || ''),
+        dept: cleanCell(f.department_division?.value || ''),
+        number: cleanCell(invoice.number || ''),
+        date: cleanCell(invoice.salesDateISO || ''),
+        salesperson: cleanCell(invoice.salesperson || f.salesperson_rep?.value || ''),
+        customer: cleanCell(f.customer_name?.value || ''),
+        address: cleanCell(f.customer_address?.value || ''),
         subtotal: cleanNumber(totals.subtotal, {fixed:2}),
         discount: cleanNumber(totals.discount, {fixed:2}),
         tax: cleanNumber(totals.tax, {fixed:2}),
         total: cleanNumber(totals.total, {fixed:2}),
-        payMethod: f.payment_method?.value || '',
-        payStatus: f.payment_status?.value || ''
+        payMethod: cleanCell(f.payment_method?.value || ''),
+        payStatus: cleanCell(f.payment_status?.value || '')
       };
       let items = Array.isArray(inv.lineItems) && inv.lineItems.length ? inv.lineItems : null;
       if(!items){
@@ -113,8 +118,8 @@
           base.salesperson,
           base.customer,
           base.address,
-          it.sku || '',
-          it.description || '',
+          cleanCell(it.sku || ''),
+          cleanCell(it.description || ''),
           qty,
           unit,
           lineTotal || '',

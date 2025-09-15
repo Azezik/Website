@@ -74,4 +74,35 @@ assert.strictEqual(rows3[1][7], 'S1');
 assert.strictEqual(rows3[2][8], 'Thing 2');
 assert.strictEqual(rows3[2][18], '002');
 
+const messyDb = [{
+  invoice: {
+    number: ' INV004 ',
+    salesDateISO: '2024-04-01\n',
+    salesperson: '  Jane Doe  ',
+    store: 'STORE\nNAME'
+  },
+  fields: {
+    department_division: { value: 'North\nRegion' },
+    customer_name: { value: 'Customer\nName' },
+    customer_address: { value: '50 CLUB\nPISCINE NEPEAN' },
+    payment_method: { value: 'Pay\nLater' },
+    payment_status: { value: 'Paid\n' }
+  },
+  lineItems: [
+    { sku: ' 001 ', description: 'Widget\nLarge', quantity: '2', unit_price: '5', amount: '10' }
+  ]
+}];
+const messyRows = MasterDB.flatten(messyDb);
+assert.strictEqual(messyRows.length, 2);
+assert.strictEqual(messyRows[1][0], 'STORE NAME');
+assert.strictEqual(messyRows[1][1], 'North Region');
+assert.strictEqual(messyRows[1][2], 'INV004');
+assert.strictEqual(messyRows[1][3], '2024-04-01');
+assert.strictEqual(messyRows[1][5], 'Customer Name');
+assert.strictEqual(messyRows[1][6], '50 CLUB PISCINE NEPEAN');
+assert.strictEqual(messyRows[1][7], '001');
+assert.strictEqual(messyRows[1][8], 'Widget Large');
+assert.strictEqual(messyRows[1][16], 'Pay Later');
+assert.ok(!/\n/.test(messyRows[1].join('')));
+
 console.log('MasterDB tests passed.');
