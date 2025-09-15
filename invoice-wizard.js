@@ -2611,13 +2611,18 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function compileDocument(fileId, lineItems=[]){
+function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
   (state.profile?.fields||[]).forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
   });
+  const cleanScalar = val => {
+    if(val === undefined || val === null) return '';
+    if(typeof val === 'string') return val.replace(/\s+/g,' ').trim();
+    return String(val);
+  };
   const sub = parseFloat(byKey['subtotal_amount']?.value);
   const tax = parseFloat(byKey['tax_amount']?.value);
   const tot = parseFloat(byKey['invoice_total']?.value);
@@ -2628,7 +2633,23 @@ function compileDocument(fileId, lineItems=[]){
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
-  const enriched = (lineItems||[]).map((it,i)=>{
+  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
+  const db = LS.getDb(state.username, state.docType);
+  const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
+  const hasExplicitLineItems = arguments.length >= 2;
+  let items = Array.isArray(lineItems) ? lineItems : [];
+  if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileId && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
+    items = state.currentLineItems;
+  }
+  let existingIdx = findExistingIndex();
+  if((!items || !items.length) && existingIdx >= 0){
+    const prevItems = db[existingIdx]?.lineItems;
+    if(Array.isArray(prevItems) && prevItems.length){
+      items = prevItems;
+    }
+  }
+  if(!Array.isArray(items)) items = [];
+  const enriched = items.map((it,i)=>{
     let amount = it.amount;
     if(!amount && it.quantity && it.unit_price){
       const q=parseFloat(it.quantity); const u=parseFloat(it.unit_price);
@@ -2645,10 +2666,10 @@ function compileDocument(fileId, lineItems=[]){
     processedAtISO: new Date().toISOString(),
     fields: byKey,
     invoice: {
-      number: byKey['invoice_number']?.value || '',
-      salesDateISO: byKey['invoice_date']?.value || '',
-      salesperson: byKey['salesperson_rep']?.value || '',
-      store: byKey['store_name']?.value || ''
+      number: invoiceNumber,
+      salesDateISO: cleanScalar(byKey['invoice_date']?.value),
+      salesperson: cleanScalar(byKey['salesperson_rep']?.value),
+      store: cleanScalar(byKey['store_name']?.value)
     },
     totals: {
       subtotal: byKey['subtotal_amount']?.value || '',
@@ -2666,9 +2687,9 @@ function compileDocument(fileId, lineItems=[]){
       byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
     }
   }
-  const db = LS.getDb(state.username, state.docType);
+  existingIdx = findExistingIndex();
   const invNum = compiled.invoice.number;
-  const idx = db.findIndex(r => r.fileId === compiled.fileId || (invNum && r.invoice?.number === invNum));
+  const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(state.username, state.docType, db);
   renderResultsTable();
