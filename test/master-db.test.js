@@ -40,9 +40,12 @@ assert.strictEqual(rows[2][11], '1200.00'); // computed line total
 assert.strictEqual(rows[1][12], '1240.00'); // subtotal repeated
 
 const misaligned = MasterDB.flatten([{ item_code: ['A'], item_description: ['B', 'C'], qty: ['1'], unit_price: ['10'] }]);
-assert.strictEqual(misaligned.length, 2);
+assert.strictEqual(misaligned.length, 3);
 assert.strictEqual(misaligned[1][7], 'A');
 assert.strictEqual(misaligned[1][8], 'B');
+assert.strictEqual(misaligned[2][8], 'C');
+assert.strictEqual(misaligned[1][18], '1');
+assert.strictEqual(misaligned[2][18], '2');
 
 const csv = MasterDB.toCsv(sampleDb);
 assert.ok(csv.startsWith('Store / Business Name'));
@@ -73,6 +76,23 @@ assert.strictEqual(rows3.length, 3);
 assert.strictEqual(rows3[1][7], 'S1');
 assert.strictEqual(rows3[2][8], 'Thing 2');
 assert.strictEqual(rows3[2][18], '002');
+
+const columnObjectDb = [{
+  invoice: { number: 'INV004', salesDateISO: '2024-03-02' },
+  lineItems: {
+    item_code: ['C1', 'C2', 'C3'],
+    item_description: ['First', 'Second', 'Third'],
+    qty: ['1', '2', '3'],
+    unit_price: ['5', '6', '7'],
+    line_total: ['5', '12', '21']
+  }
+}];
+const rows4 = MasterDB.flatten(columnObjectDb);
+assert.strictEqual(rows4.length, 4);
+assert.strictEqual(rows4[1][7], 'C1');
+assert.strictEqual(rows4[3][8], 'Third');
+assert.strictEqual(rows4[3][11], '21.00');
+assert.strictEqual(rows4[2][18], '2');
 
 const messyDb = [{
   invoice: {
