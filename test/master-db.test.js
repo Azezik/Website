@@ -1,128 +1,99 @@
 const assert = require('assert');
 const MasterDB = require('../master-db.js');
 
-const sampleDb = [{
-  invoice: {
-    number: 'INV001',
-    salesDateISO: '2024-01-05',
-    salesperson: 'Alice',
-    store: 'My Store'
-  },
+const ssot = {
   fields: {
-    department_division: { value: 'Electronics' },
-    customer_name: { value: 'Bob' },
-    customer_address: { value: '123 Main St' },
-    payment_method: { value: 'Credit Card' },
-    payment_status: { value: 'Paid' }
-  },
-  totals: {
-    subtotal: '1,240.00',
-    tax: '161.20',
-    total: '1,401.20',
-    discount: '5.00'
-  },
-  lineItems: [
-    { sku: 'SKU1', description: 'Item One', quantity: '2', unit_price: '20.00', amount: '40.00' },
-    { sku: 'SKU2', description: 'Item Two', quantity: '1', unit_price: '1,200.00' }
-  ]
-}];
-
-const rows = MasterDB.flatten(sampleDb);
-assert.deepStrictEqual(rows[0], MasterDB.HEADERS);
-assert.strictEqual(rows.length, 3);
-assert.strictEqual(rows[1][0], 'My Store');
-assert.strictEqual(rows[1][18], '1');
-assert.strictEqual(rows[2][18], '2');
-assert.strictEqual(rows[1][7], 'SKU1');
-assert.strictEqual(rows[2][7], 'SKU2');
-assert.strictEqual(rows[2][10], '1200.00'); // cleaned unit price
-assert.strictEqual(rows[2][11], '1200.00'); // computed line total
-assert.strictEqual(rows[1][12], '1240.00'); // subtotal repeated
-
-const misaligned = MasterDB.flatten([{ item_code: ['A'], item_description: ['B', 'C'], qty: ['1'], unit_price: ['10'] }]);
-assert.strictEqual(misaligned.length, 3);
-assert.strictEqual(misaligned[1][7], 'A');
-assert.strictEqual(misaligned[1][8], 'B');
-assert.strictEqual(misaligned[2][8], 'C');
-assert.strictEqual(misaligned[1][18], '1');
-assert.strictEqual(misaligned[2][18], '2');
-
-const csv = MasterDB.toCsv(sampleDb);
-assert.ok(csv.startsWith('Store / Business Name'));
-assert.ok(csv.split('\n').length === 3);
-
-const textDb = [{
-  invoice: { number: 'INV002', salesDateISO: '2024-02-10' },
-  item_code: ['A1\nB2'],
-  item_description: ['First item\nSecond item'],
-  qty: ['1\n2'],
-  unit_price: ['10\n20'],
-  line_number: ['1\n2']
-}];
-const rows2 = MasterDB.flatten(textDb);
-assert.strictEqual(rows2.length, 3);
-assert.strictEqual(rows2[1][7], 'A1');
-assert.strictEqual(rows2[2][7], 'B2');
-assert.strictEqual(rows2[2][18], '2');
-
-const altFieldsDb = [{
-  invoice: { number: 'INV003', salesDateISO: '2024-03-01' },
-  sku: ['S1', 'S2'],
-  product_description: ['Thing 1', 'Thing 2'],
-  line_number: ['001', '002']
-}];
-const rows3 = MasterDB.flatten(altFieldsDb);
-assert.strictEqual(rows3.length, 3);
-assert.strictEqual(rows3[1][7], 'S1');
-assert.strictEqual(rows3[2][8], 'Thing 2');
-assert.strictEqual(rows3[2][18], '002');
-
-const columnObjectDb = [{
-  invoice: { number: 'INV004', salesDateISO: '2024-03-02' },
-  lineItems: {
-    item_code: ['C1', 'C2', 'C3'],
-    item_description: ['First', 'Second', 'Third'],
-    qty: ['1', '2', '3'],
-    unit_price: ['5', '6', '7'],
-    line_total: ['5', '12', '21']
+    store_name: { value: ' My Store ' },
+    department_division: { value: 'Electronics\nDivision' },
+    invoice_number: { value: 'INV-001 ' },
+    invoice_date: { value: '2024-01-05' },
+    salesperson_rep: { value: ' Alice Smith ' },
+    customer_name: { value: 'Bob Buyer' },
+    customer_address: { value: '123 Main St\nSuite 5' },
+    subtotal_amount: { value: '1050' },
+    discounts_amount: { value: '10.5' },
+    tax_amount: { value: '135.75' },
+    invoice_total: { value: '1175.25' },
+    payment_method: { value: 'Credit\nCard' },
+    payment_status: { value: 'Paid' },
+    line_number_col: { value: ['0001', ''] },
+    sku_col: { value: ['0001', '0002'] },
+    product_description: { value: ['Widget A\nLarge', 'Widget B'] },
+    quantity_col: { value: ['2', '3'] },
+    unit_price_col: { value: ['100.5', '50'] },
+    line_total_col: { value: ['201', ''] }
   }
-}];
-const rows4 = MasterDB.flatten(columnObjectDb);
-assert.strictEqual(rows4.length, 4);
-assert.strictEqual(rows4[1][7], 'C1');
-assert.strictEqual(rows4[3][8], 'Third');
-assert.strictEqual(rows4[3][11], '21.00');
-assert.strictEqual(rows4[2][18], '2');
+};
 
-const messyDb = [{
-  invoice: {
-    number: ' INV004 ',
-    salesDateISO: '2024-04-01\n',
-    salesperson: '  Jane Doe  ',
-    store: 'STORE\nNAME'
-  },
+const originalWarn = console.warn;
+const warnings = [];
+console.warn = (...args) => { warnings.push(args); };
+
+try {
+  const rows = MasterDB.flatten(ssot);
+  assert.deepStrictEqual(rows[0], MasterDB.HEADERS);
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows[1][0], 'My Store');
+  assert.strictEqual(rows[1][1], 'Electronics Division');
+  assert.strictEqual(rows[1][2], 'INV-001');
+  assert.strictEqual(rows[1][3], '2024-01-05');
+  assert.strictEqual(rows[1][4], 'Alice Smith');
+  assert.strictEqual(rows[1][6], '123 Main St Suite 5');
+  assert.strictEqual(rows[1][7], '0001');
+  assert.strictEqual(rows[1][8], 'Widget A Large');
+  assert.strictEqual(rows[1][9], '2.00');
+  assert.strictEqual(rows[1][10], '100.50');
+  assert.strictEqual(rows[1][11], '201.00');
+  assert.strictEqual(rows[1][12], '1050.00');
+  assert.strictEqual(rows[1][13], '10.50');
+  assert.strictEqual(rows[1][14], '135.75');
+  assert.strictEqual(rows[1][15], '1175.25');
+  assert.strictEqual(rows[1][16], 'Credit Card');
+  assert.strictEqual(rows[1][17], 'Paid');
+  assert.strictEqual(rows[1][18], '0001');
+
+  assert.strictEqual(rows[2][7], '0002');
+  assert.strictEqual(rows[2][9], '3.00');
+  assert.strictEqual(rows[2][10], '50.00');
+  assert.strictEqual(rows[2][11], '150.00');
+  assert.strictEqual(rows[2][18], '2');
+
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(warnings[0][0], '[MasterDB] count mismatch');
+  assert.deepStrictEqual(warnings[0][1].missing.line_no, [2]);
+
+  warnings.length = 0;
+
+  const csv1 = MasterDB.toCsv(ssot);
+  const csv2 = MasterDB.toCsv(ssot);
+  assert.strictEqual(csv1, csv2);
+  assert.strictEqual(csv1.split('\n').length, rows.length);
+} finally {
+  console.warn = originalWarn;
+}
+
+const legacy = {
   fields: {
-    department_division: { value: 'North\nRegion' },
-    customer_name: { value: 'Customer\nName' },
-    customer_address: { value: '50 CLUB\nPISCINE NEPEAN' },
-    payment_method: { value: 'Pay\nLater' },
-    payment_status: { value: 'Paid\n' }
+    store_name: { value: 'Legacy Store' },
+    invoice_number: { value: 'LEG-100' },
+    invoice_date: { value: '2024-02-01' }
   },
   lineItems: [
-    { sku: ' 001 ', description: 'Widget\nLarge', quantity: '2', unit_price: '5', amount: '10' }
+    { sku: 'A1', description: 'Legacy Item', quantity: '1', unit_price: '9.99', amount: '', line_no: '001' }
   ]
-}];
-const messyRows = MasterDB.flatten(messyDb);
-assert.strictEqual(messyRows.length, 2);
-assert.strictEqual(messyRows[1][0], 'STORE NAME');
-assert.strictEqual(messyRows[1][1], 'North Region');
-assert.strictEqual(messyRows[1][2], 'INV004');
-assert.strictEqual(messyRows[1][3], '2024-04-01');
-assert.strictEqual(messyRows[1][5], 'Customer Name');
-assert.strictEqual(messyRows[1][6], '50 CLUB PISCINE NEPEAN');
-assert.strictEqual(messyRows[1][7], '001');
-assert.strictEqual(messyRows[1][8], 'Widget Large');
-assert.strictEqual(messyRows[1][16], 'Pay Later');
-assert.ok(!/\n/.test(messyRows[1].join('')));
+};
+
+const legacyRows = MasterDB.flatten(legacy);
+assert.strictEqual(legacyRows.length, 2);
+assert.strictEqual(legacyRows[1][0], 'Legacy Store');
+assert.strictEqual(legacyRows[1][2], 'LEG-100');
+assert.strictEqual(legacyRows[1][3], '2024-02-01');
+assert.strictEqual(legacyRows[1][7], 'A1');
+assert.strictEqual(legacyRows[1][9], '1.00');
+assert.strictEqual(legacyRows[1][10], '9.99');
+assert.strictEqual(legacyRows[1][11], '9.99');
+assert.strictEqual(legacyRows[1][18], '001');
+
+assert.throws(() => MasterDB.toCsv({ fields: {} }), /Exporter input empty—SSOT not wired./);
 
 console.log('MasterDB tests passed.');

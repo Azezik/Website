@@ -140,6 +140,7 @@ let state = {
   currentFileName: '',
   currentFileId: '',        // unique id per opened file
   currentLineItems: [],
+  savedFieldsRecord: null,
   lastOcrCropPx: null,
   cropAudits: [],
   cropHashes: {},        // per page hash map for duplicate detection
@@ -2846,6 +2847,7 @@ function ensureAnchorFor(fieldKey){
 function renderSavedFieldsTable(){
   const db = LS.getDb(state.username, state.docType);
   const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  state.savedFieldsRecord = latest || null;
   const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
   const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
     .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
@@ -3135,14 +3137,18 @@ els.exportBtn?.addEventListener('click', ()=>{
 // Export flat Master Database CSV
 els.exportMasterDbBtn?.addEventListener('click', ()=>{
   const dt = els.dataDocType?.value || state.docType;
-  const db = LS.getDb(state.username, dt);
-  const csv = MasterDB.toCsv(db);
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `masterdb-${state.username}-${dt}.csv`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  try {
+    const csv = MasterDB.toCsv(state.savedFieldsRecord);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `masterdb-${state.username}-${dt}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch(err){
+    console.error('MasterDB export failed', err);
+    alert(err?.message || 'Failed to export MasterDB CSV');
+  }
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
