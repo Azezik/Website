@@ -1241,19 +1241,38 @@ async function calibrateIfNeeded(){
 function buildColumnModel(step, norm, boxPx, tokens){
   const dpr = window.devicePixelRatio || 1;
   const vp = state.viewport;
-  const colTokens = tokens.filter(t=> intersect(t, boxPx));
+  const colTokens = tokens
+    .filter(t=> intersect(t, boxPx))
+    .map(t => ({ ...t, cy: t.y + t.h/2 }));
   const avgH = colTokens.length ? colTokens.reduce((s,t)=>s+t.h,0)/colTokens.length : 0;
   const lineHeightPct = avgH / Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
   const right = boxPx.x + boxPx.w;
   const rightAligned = colTokens.filter(t => Math.abs((t.x + t.w) - right) < boxPx.w*0.1).length;
   const align = rightAligned > (colTokens.length/2) ? 'right' : 'left';
-  const headerTokens = colTokens.filter(t => (t.y + t.h/2) < boxPx.y + avgH*1.5);
+  let headerTokens = colTokens.filter(t => t.cy < boxPx.y + avgH*1.5);
+  const headerLooksNumeric = headerTokens.length && headerTokens.every(tok => {
+    const text = (tok.text || '').trim();
+    return text && /[0-9]/.test(text) && !/[A-Za-z]/.test(text);
+  });
+  if(headerLooksNumeric){
+    headerTokens = [];
+  }
+  const sortedTokens = colTokens.slice().sort((a,b)=> a.cy - b.cy || a.x - b.x || a.y - b.y);
+  const earliestToken = sortedTokens[0];
+  let headerBottomPx = headerTokens.length
+    ? Math.max(...headerTokens.map(t=>t.y + t.h))
+    : boxPx.y + Math.max(avgH || 0, 6) * 0.75;
+  if(earliestToken){
+    headerBottomPx = Math.min(headerBottomPx, earliestToken.y);
+  }
+  const dataPad = Math.max(avgH || 0, 6) * (headerTokens.length ? 0.3 : 0.18);
+  let dataTokens = sortedTokens.filter(t => t.cy > headerBottomPx + dataPad);
+  if(!dataTokens.length){
+    dataTokens = sortedTokens;
+  }
   const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
   const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1) * dpr);
-  const headerBottomPx = headerTokens.length ? Math.max(...headerTokens.map(t=>t.y + t.h)) : boxPx.y + (avgH || 0)*1.5;
-  const dataTokens = colTokens
-    .filter(t => (t.y + t.h/2) > headerBottomPx + Math.max(avgH || 0, 6) * 0.3)
-    .sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
+  headerBottomPx = Math.max(boxPx.y, Math.min(headerBottomPx, boxPx.y + boxPx.h));
   const anchorToken = dataTokens[0];
   const anchorSample = anchorToken ? {
     cyNorm: (anchorToken.y + anchorToken.h/2) / pageHeightPx,
@@ -1933,9 +1952,10 @@ async function extractLineItems(profile){
 
   function buildRowBands(anchorTokens, pageHeight){
     if(!anchorTokens.length) return [];
+    const ordered = anchorTokens.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
     const groups=[];
     let current=null;
-    for(const tok of anchorTokens){
+    for(const tok of ordered){
       if(!current){
         current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
         continue;
@@ -1956,24 +1976,31 @@ async function extractLineItems(profile){
     }
     if(current) groups.push(current);
     return groups.map((row,idx)=>{
-      const prev=groups[idx-1];
       const next=groups[idx+1];
-      const baseHeight=Math.max(row.height,6);
-      let y0=prev ? (prev.cy + row.cy)/2 : row.cy - baseHeight*0.9;
-      let y1=next ? (row.cy + next.cy)/2 : row.cy + baseHeight*0.9;
-      const minBand=Math.max(baseHeight*1.2,12);
+      const rowTop=Math.min(...row.tokens.map(t=>t.y));
+      const rowBottom=Math.max(...row.tokens.map(t=>t.y + t.h));
+      const rowHeight=Math.max(rowBottom - rowTop, row.height, 6);
+      let y0=rowTop;
+      let y1=rowBottom;
+      const nextTop = next ? Math.min(...next.tokens.map(t=>t.y)) : Infinity;
+      if(Number.isFinite(nextTop)){
+        const boundary=(rowBottom + nextTop)/2;
+        if(Number.isFinite(boundary)){
+          y1 = Math.max(rowBottom, Math.min(boundary, nextTop));
+        }
+      }
+      const maxY1 = Number.isFinite(nextTop) ? Math.max(rowBottom, Math.min(nextTop, pageHeight)) : pageHeight;
+      const minBand=Math.max(rowHeight,8);
       if(y1 - y0 < minBand){
-        const expand=(minBand - (y1 - y0))/2;
-        y0 -= expand;
-        y1 += expand;
+        y1 = Math.min(maxY1, y0 + minBand);
       }
-      y0=Math.max(0,y0);
-      y1=Math.min(pageHeight,y1);
+      y0=Math.max(0, Math.min(y0, pageHeight));
+      y1=Math.max(y0 + 1, Math.min(y1, pageHeight));
       if(y1 <= y0){
-        y0=Math.max(0,row.cy - baseHeight);
-        y1=Math.min(pageHeight,row.cy + baseHeight);
+        y0=Math.max(0,rowTop);
+        y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
       }
-      return { index:idx, y0, y1, cy:row.cy, height:row.height, text:row.text.trim(), tokens:row.tokens };
+      return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
     });
   }
 
@@ -2041,7 +2068,8 @@ async function extractLineItems(profile){
       })) : [];
       const guardList = normalizeGuardList(field.column.guardWords || field.column.bottomGuards || []);
       guardList.forEach(g => guardWordsBase.add(g));
-      const headerPad = Math.max(4, (anchorSample?.h || lineHeightPx || 12) * 0.6);
+      const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
+      const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
       return {
         fieldKey: field.fieldKey,
         outKey: keyMap[field.fieldKey] || field.fieldKey,
@@ -2065,7 +2093,33 @@ async function extractLineItems(profile){
     const guardMatch = cleaned => cleaned && guardWordsBase.has(cleaned);
 
     const collectColumnTokens = desc => {
-      const headerLimit = desc.headerBottom + desc.headerPad;
+      let headerLimit = desc.headerBottom + desc.headerPad;
+      const sampleHeights=[];
+      let earliestTop=Infinity;
+      let earliestCenter=Infinity;
+      if(desc.anchorSample){
+        earliestTop = Math.min(earliestTop, desc.anchorSample.cy - desc.anchorSample.h/2);
+        earliestCenter = Math.min(earliestCenter, desc.anchorSample.cy);
+        sampleHeights.push(desc.anchorSample.h);
+      }
+      if(Array.isArray(desc.rowSamples)){
+        for(const sample of desc.rowSamples){
+          earliestTop = Math.min(earliestTop, sample.cy - sample.h/2);
+          earliestCenter = Math.min(earliestCenter, sample.cy);
+          sampleHeights.push(sample.h);
+        }
+      }
+      if(sampleHeights.length){
+        const avgSampleH = sampleHeights.reduce((s,h)=>s+h,0)/sampleHeights.length;
+        if(Number.isFinite(earliestTop)){
+          headerLimit = Math.min(headerLimit, earliestTop);
+        }
+        if(Number.isFinite(earliestCenter)){
+          const margin = Math.max(avgSampleH * 0.35, 2);
+          headerLimit = Math.min(headerLimit, earliestCenter - margin);
+        }
+      }
+      headerLimit = Math.max(0, headerLimit);
       const colToks=[];
       for(const tok of pageTokens){
         if(tok.page !== desc.page) continue;
