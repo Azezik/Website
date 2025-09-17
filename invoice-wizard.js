@@ -152,6 +152,7 @@ let state = {
   overlayMetrics: null,
   pendingSelection: null,
   lastOcrCropCss: null,
+  lineLayout: null,
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -762,7 +763,9 @@ function ensureProfile(){
     ],
     tableHints: {
       headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'],
-      rowBandHeightPx: 18
+      rowBandHeightPx: 18,
+      columns: {},
+      rowAnchor: null
     }
   };
 
@@ -810,6 +813,10 @@ function ensureProfile(){
       }
     });
   }
+
+  state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
+  state.profile.tableHints.columns = state.profile.tableHints.columns || {};
+  if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
   saveProfile(state.username, state.docType, state.profile);
 }
 
@@ -1236,12 +1243,28 @@ function buildColumnModel(step, norm, boxPx, tokens){
   const vp = state.viewport;
   const colTokens = tokens.filter(t=> intersect(t, boxPx));
   const avgH = colTokens.length ? colTokens.reduce((s,t)=>s+t.h,0)/colTokens.length : 0;
-  const lineHeightPct = avgH / (((vp.h ?? vp.height)||1) * dpr);
+  const lineHeightPct = avgH / Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
   const right = boxPx.x + boxPx.w;
   const rightAligned = colTokens.filter(t => Math.abs((t.x + t.w) - right) < boxPx.w*0.1).length;
   const align = rightAligned > (colTokens.length/2) ? 'right' : 'left';
   const headerTokens = colTokens.filter(t => (t.y + t.h/2) < boxPx.y + avgH*1.5);
   const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
+  const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1) * dpr);
+  const headerBottomPx = headerTokens.length ? Math.max(...headerTokens.map(t=>t.y + t.h)) : boxPx.y + (avgH || 0)*1.5;
+  const dataTokens = colTokens
+    .filter(t => (t.y + t.h/2) > headerBottomPx + Math.max(avgH || 0, 6) * 0.3)
+    .sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
+  const anchorToken = dataTokens[0];
+  const anchorSample = anchorToken ? {
+    cyNorm: (anchorToken.y + anchorToken.h/2) / pageHeightPx,
+    hNorm: anchorToken.h / pageHeightPx,
+    text: (anchorToken.text || '').trim()
+  } : null;
+  const rowSamples = dataTokens.slice(0, 8).map(t => ({
+    cyNorm: (t.y + t.h/2) / pageHeightPx,
+    hNorm: t.h / pageHeightPx
+  }));
+  const guardWords = ['subtotal','sub-total','total','tax','hst','gst','qst','balance','deposit','notes','amount','amountdue'];
   return {
     xband:[norm.x0, norm.x1],
     yband:[norm.y0, norm.y1],
@@ -1249,7 +1272,11 @@ function buildColumnModel(step, norm, boxPx, tokens){
     regexHint: step.regex || '',
     align,
     header: header ? [header.x0, header.y0, header.x1, header.y1] : null,
-    bottomGuards:['subtotal_amount','tax_amount','notes']
+    headerBottomPct: headerBottomPx / pageHeightPx,
+    anchorSample,
+    rowSamples,
+    guardWords,
+    bottomGuards: guardWords
   };
 }
 
@@ -1886,99 +1913,281 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 
 async function extractLineItems(profile){
   FieldDataEngine.importPatterns({});
-  const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column);
-  if(!colFields.length) return [];
+  const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column && Array.isArray(f.column.xband));
+  if(!colFields.length){
+    state.lineLayout = null;
+    drawOverlay();
+    return [];
+  }
+
   const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount',line_number_col:'line_no'};
-  const columns={};
-  const guardWords = Array.from(new Set(colFields.flatMap(f=>f.column.bottomGuards||[])));
-  const guardRe = guardWords.length ? new RegExp(guardWords.join('|'),'i') : null;
-  const startPage = Math.min(...colFields.map(f=>f.page||1));
-  for(const f of colFields){ columns[f.fieldKey]=[]; }
-  for(let p=startPage; p<=state.numPages; p++){
-    const vp=state.pageViewports[p-1]; if(!vp) continue;
-    const tokens=await ensureTokensForPage(p);
-    const pageH=((vp.h??vp.height)||1);
-    for(const f of colFields){
-      const band=toPx(vp,{x0:f.column.xband[0],y0:0,x1:f.column.xband[1],y1:1,page:p});
-      const colTok=tokens.filter(t=>{const cx=t.x+t.w/2,cy=t.y+t.h/2;return cx>=band.x && cx<=band.x+band.w && cy>=band.y;}).sort((a,b)=>(a.y+a.h/2)-(b.y+b.h/2));
-      for(const t of colTok){
-        const lower=t.text.toLowerCase();
-        if(/^(sku|qty|quantity|price|amount|description)$/.test(lower)) continue;
-        if(guardRe && guardRe.test(lower)) break;
-        columns[f.fieldKey].push({y:(p-1)*pageH + t.y + t.h/2, page:p, text:t.text.trim(), conf:t.confidence||1, h:t.h, used:false});
+  const tableHints = profile.tableHints || {};
+  const anchorHintKey = tableHints.rowAnchor?.fieldKey;
+  const columnPriority = ['line_number_col','product_description','sku_col','quantity_col','unit_price_col','line_total_col'];
+  const guardWordsBase = new Set(['subtotal','sub-total','total','grandtotal','balance','amount','amountdue','totaldue','tax','taxamount','hst','gst','qst','notes','deposit']);
+  const cleanedTokenText = str => String(str||'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+
+  function normalizeGuardList(list){
+    return Array.from(new Set((list||[]).map(w=>cleanedTokenText(w)).filter(Boolean)));
+  }
+
+  function buildRowBands(anchorTokens, pageHeight){
+    if(!anchorTokens.length) return [];
+    const groups=[];
+    let current=null;
+    for(const tok of anchorTokens){
+      if(!current){
+        current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
+        continue;
+      }
+      const gap=Math.abs(tok.cy - current.cy);
+      const threshold=Math.max(current.height, tok.h)*0.65;
+      if(gap <= threshold){
+        current.tokens.push(tok);
+        current.sumCy += tok.cy;
+        current.count += 1;
+        current.cy = current.sumCy/current.count;
+        current.height = Math.max(current.height, tok.h);
+        current.text = current.tokens.map(t=>t.text).join(' ');
+      } else {
+        groups.push(current);
+        current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
       }
     }
-  }
-  for(const key of Object.keys(columns)){
-    const list=columns[key];
-    const counts={};
-    list.forEach(tok=>{const s=FieldDataEngine.shapeOf(tok.text); tok.shape=s; counts[s]=(counts[s]||0)+1;});
-    const dom=Object.entries(counts).sort((a,b)=>b[1]-a[1])[0]?.[0];
-    if(dom){
-      const filtered=list.filter(tok=>tok.shape===dom || Math.abs(tok.shape.length-dom.length)<=1);
-      if(filtered.length>=Math.min(3,list.length)) columns[key]=filtered;
-    }
-  }
-  let spineKey;
-  if(columns.line_number_col && columns.line_number_col.length){
-    const lns = columns.line_number_col.map(t=>({ ...t, num: parseInt(t.text.replace(/[^0-9]/g,''),10) })).filter(t=>Number.isFinite(t.num));
-    lns.sort((a,b)=>a.y-b.y);
-    const seq=[];
-    for(const tok of lns){
-      if(!seq.length || tok.num === seq[seq.length-1].num + 1) seq.push(tok);
-      else break;
-    }
-    if(seq.length){
-      columns.line_number_col = seq;
-      spineKey = 'line_number_col';
-    }
-  }
-  if(!spineKey){
-    const pref=['quantity_col','sku_col'];
-    spineKey=pref.find(k=>columns[k]?.length) || Object.keys(columns).reduce((a,b)=> (columns[a]?.length||0) >= (columns[b]?.length||0) ? a : b);
-  }
-  const spine=columns[spineKey].sort((a,b)=>a.y-b.y);
-  const heights=spine.map(t=>t.h).sort((a,b)=>a-b);
-  const medianH=heights[Math.floor(heights.length/2)] || 10;
-  const lineTol=medianH*1.2;
-  const rows=[];
-  for(let i=0;i<spine.length;i++){
-    const spineTok=spine[i]; spineTok.used=true;
-    const y=spineTok.y; const nextY=spine[i+1]?.y || Infinity;
-    const row={ line_no: spineTok.num !== undefined ? spineTok.num : i+1 };
-    const baseType=keyMap[spineKey];
-    if(baseType && baseType !== 'line_no'){
-      let baseVal=FieldDataEngine.clean(baseType, spineTok.text, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:spineTok.page-1, fieldKey:baseType}).value;
-      row[baseType]=baseVal;
-    }
-    for(const key of Object.keys(columns)){
-      if(key===spineKey) continue;
-      const list=columns[key];
-      const cands=list.filter(t=>!t.used && Math.abs(t.y - y) <= lineTol);
-      if(!cands.length) continue;
-      cands.sort((a,b)=>Math.abs(a.y-y)-Math.abs(b.y-y) || b.conf - a.conf);
-      const tok=cands[0]; tok.used=true;
-      let val=tok.text; const outKey=keyMap[key];
-      if(outKey) val=FieldDataEngine.clean(outKey, val, state.mode, {docId:state.currentFileId || state.currentFileName || 'doc', pageIndex:tok.page-1, fieldKey:outKey}).value;
-      if(outKey === 'line_no'){ const n=parseInt(String(val).replace(/[^0-9]/g,''),10); val=isNaN(n)?'':n; }
-      if(key==='product_description'){
-        const parts=[val];
-        const others=list.filter(t=>!t.used && t.y < nextY - lineTol);
-        for(const o of others){ parts.push(o.text); o.used=true; }
-        val=parts.join(' ').replace(/\s+/g,' ').trim();
+    if(current) groups.push(current);
+    return groups.map((row,idx)=>{
+      const prev=groups[idx-1];
+      const next=groups[idx+1];
+      const baseHeight=Math.max(row.height,6);
+      let y0=prev ? (prev.cy + row.cy)/2 : row.cy - baseHeight*0.9;
+      let y1=next ? (row.cy + next.cy)/2 : row.cy + baseHeight*0.9;
+      const minBand=Math.max(baseHeight*1.2,12);
+      if(y1 - y0 < minBand){
+        const expand=(minBand - (y1 - y0))/2;
+        y0 -= expand;
+        y1 += expand;
       }
-      if(outKey) row[outKey]=val;
-    }
-    if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
-    if(row.unit_price) row.unit_price = parseFloat(row.unit_price.replace(/[^0-9.-]/g,'')||0).toFixed(2);
-    if(row.amount) row.amount = parseFloat(row.amount.replace(/[^0-9.-]/g,'')||0).toFixed(2);
-    else if(row.quantity && row.unit_price){
-      const q=parseFloat(row.quantity), u=parseFloat(row.unit_price);
-      if(!isNaN(q) && !isNaN(u)) row.amount=(q*u).toFixed(2);
-    }
-    rows.push(row);
+      y0=Math.max(0,y0);
+      y1=Math.min(pageHeight,y1);
+      if(y1 <= y0){
+        y0=Math.max(0,row.cy - baseHeight);
+        y1=Math.min(pageHeight,row.cy + baseHeight);
+      }
+      return { index:idx, y0, y1, cy:row.cy, height:row.height, text:row.text.trim(), tokens:row.tokens };
+    });
   }
-  return rows;
+
+  function tokensForCell(desc, band, pageTokens){
+    const headerLimit = desc.headerBottom + desc.headerPad;
+    const y0 = band.y0;
+    const y1 = band.y1;
+    const selected=[];
+    for(const tok of pageTokens){
+      if(tok.page !== desc.page) continue;
+      const cx = tok.x + tok.w/2;
+      if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
+      const cy = tok.y + tok.h/2;
+      if(cy <= headerLimit) continue;
+      const text=(tok.text||'').trim();
+      if(!text) continue;
+      const top=tok.y;
+      const bottom=tok.y + tok.h;
+      const overlap=Math.min(bottom, y1) - Math.max(top, y0);
+      const minOverlap=Math.min(tok.h, y1 - y0) * 0.35;
+      if(overlap < minOverlap) continue;
+      selected.push(tok);
+    }
+    selected.sort((a,b)=> (a.x - b.x) || (a.y - b.y));
+    return selected;
+  }
+
+  const results=[];
+  const layout={ pages:{} };
+  const pages = Array.from(new Set(colFields.map(f=>f.page||1))).sort((a,b)=>a-b);
+  const docId = state.currentFileId || state.currentFileName || 'doc';
+  let globalRowIndex = 0;
+
+  for(const page of pages){
+    const vp = state.pageViewports[page-1];
+    if(!vp){
+      layout.pages[page] = { page, columns: [], rows: [], top: 0, bottom: 0 };
+      continue;
+    }
+    const pageTokens = await ensureTokensForPage(page);
+    const dpr = window.devicePixelRatio || 1;
+    const pageHeight = Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
+    const fieldsOnPage = colFields.filter(f => (f.page||1) === page);
+    if(!fieldsOnPage.length){
+      layout.pages[page] = { page, columns: [], rows: [], top: 0, bottom: 0 };
+      continue;
+    }
+
+    const descriptors = fieldsOnPage.map(field => {
+      const bandPx = toPx(vp,{x0:field.column.xband[0], y0:0, x1:field.column.xband[1], y1:1, page});
+      const headerBox = field.column.header ? toPx(vp,{x0:field.column.header[0], y0:field.column.header[1], x1:field.column.header[2], y1:field.column.header[3], page}) : null;
+      const lineHeightPx = Math.max(0, (field.column.lineHeightPct || 0) * pageHeight);
+      let headerBottom = typeof field.column.headerBottomPct === 'number'
+        ? field.column.headerBottomPct * pageHeight
+        : headerBox ? headerBox.y + headerBox.h
+        : bandPx.y + Math.max(lineHeightPx*1.5, 12);
+      const anchorSample = field.column.anchorSample ? {
+        cy: field.column.anchorSample.cyNorm * pageHeight,
+        h: Math.max(field.column.anchorSample.hNorm * pageHeight, 1),
+        text: field.column.anchorSample.text || ''
+      } : null;
+      const rowSamples = Array.isArray(field.column.rowSamples) ? field.column.rowSamples.map(s => ({
+        cy: s.cyNorm * pageHeight,
+        h: Math.max(s.hNorm * pageHeight, 1)
+      })) : [];
+      const guardList = normalizeGuardList(field.column.guardWords || field.column.bottomGuards || []);
+      guardList.forEach(g => guardWordsBase.add(g));
+      const headerPad = Math.max(4, (anchorSample?.h || lineHeightPx || 12) * 0.6);
+      return {
+        fieldKey: field.fieldKey,
+        outKey: keyMap[field.fieldKey] || field.fieldKey,
+        page,
+        x0: bandPx.x,
+        x1: bandPx.x + bandPx.w,
+        headerBottom,
+        headerPad,
+        align: field.column.align || 'left',
+        regexHint: field.column.regexHint || '',
+        anchorSample,
+        rowSamples,
+        guardWords: guardList,
+        column: field.column
+      };
+    });
+
+    const order = columnPriority.filter(k => descriptors.some(d=>d.fieldKey===k))
+      .concat(descriptors.map(d=>d.fieldKey).filter(k => !columnPriority.includes(k)));
+    let anchor = descriptors.find(d=>d.fieldKey===anchorHintKey) || descriptors.find(d=>d.fieldKey===order[0]) || descriptors[0];
+    const guardMatch = cleaned => cleaned && guardWordsBase.has(cleaned);
+
+    const collectColumnTokens = desc => {
+      const headerLimit = desc.headerBottom + desc.headerPad;
+      const colToks=[];
+      for(const tok of pageTokens){
+        if(tok.page !== desc.page) continue;
+        const cx = tok.x + tok.w/2;
+        if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
+        const cy = tok.y + tok.h/2;
+        if(cy <= headerLimit) continue;
+        const text = (tok.text||'').trim();
+        if(!text) continue;
+        const cleaned = cleanedTokenText(text);
+        if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
+        colToks.push({ ...tok, cy, cleaned });
+      }
+      colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
+      return colToks;
+    };
+
+    let anchorTokens = collectColumnTokens(anchor);
+    if(!anchorTokens.length){
+      for(const key of order){
+        const cand = descriptors.find(d=>d.fieldKey===key);
+        if(!cand) continue;
+        const candidateTokens = collectColumnTokens(cand);
+        if(candidateTokens.length){ anchor = cand; anchorTokens = candidateTokens; break; }
+      }
+    }
+
+    if(!anchorTokens.length){
+      layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
+      continue;
+    }
+
+    const rowBands = buildRowBands(anchorTokens, pageHeight);
+    if(!rowBands.length){
+      layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
+      continue;
+    }
+
+    const pageRowEntries=[];
+    for(const band of rowBands){
+      const row={
+        line_no: '',
+        __page: page,
+        __rowIndex: globalRowIndex,
+        __rowNumber: globalRowIndex + 1,
+        __y0: band.y0,
+        __y1: band.y1,
+        __missing:{},
+        __cells:{},
+        __anchorField: anchor.fieldKey,
+        __anchorText: band.text
+      };
+
+      for(const desc of descriptors){
+        const cellTokens = tokensForCell(desc, band, pageTokens);
+        const raw = cellTokens.map(t=>t.text).join(' ').replace(/\s+/g,' ').trim();
+        const spanKey = { docId, pageIndex: page-1, fieldKey: desc.outKey };
+        let cleaned = null;
+        let value = '';
+        if(cellTokens.length){
+          cleaned = FieldDataEngine.clean(desc.outKey, cellTokens, state.mode, spanKey);
+          value = cleaned.value || cleaned.raw || raw;
+        }
+        if(desc.fieldKey === anchor.fieldKey && !value && band.text){
+          value = band.text.trim();
+        }
+        if(desc.outKey === 'line_no'){
+          const n=parseInt(String(value).replace(/[^0-9]/g,''),10);
+          if(Number.isFinite(n)) row.line_no = n; else row.__missing.line_no = true;
+        } else if(desc.outKey === 'description'){
+          row.description = value;
+        } else if(desc.outKey === 'sku'){
+          row.sku = value;
+        } else if(desc.outKey === 'quantity'){
+          row.quantity = value;
+        } else if(desc.outKey === 'unit_price'){
+          row.unit_price = value;
+        } else if(desc.outKey === 'amount'){
+          row.amount = value;
+        } else {
+          row[desc.outKey] = value;
+        }
+        row.__cells[desc.fieldKey] = { raw, tokens: cellTokens, cleaned };
+        if(!cellTokens.length) row.__missing[desc.outKey] = true;
+      }
+
+      row.description = row.description || '';
+      row.sku = row.sku || '';
+      row.quantity = row.quantity || '';
+      row.unit_price = row.unit_price || '';
+      row.amount = row.amount || '';
+      if(row.line_no === '' && !row.__missing.line_no){ row.__missing.line_no = true; }
+      if(row.line_no === '' || row.line_no === undefined){ row.line_no = row.__rowNumber; }
+
+      if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
+      if(row.unit_price){
+        const num=parseFloat(row.unit_price.replace(/[^0-9.-]/g,''));
+        row.unit_price = Number.isFinite(num) ? num.toFixed(2) : '';
+      }
+      if(row.amount){
+        const num=parseFloat(row.amount.replace(/[^0-9.-]/g,''));
+        row.amount = Number.isFinite(num) ? num.toFixed(2) : '';
+      }
+      if(!row.amount && row.quantity && row.unit_price){
+        const q=parseFloat(row.quantity), u=parseFloat(row.unit_price);
+        if(Number.isFinite(q) && Number.isFinite(u)) row.amount=(q*u).toFixed(2);
+      }
+
+      results.push(row);
+      pageRowEntries.push({ index: row.__rowIndex, y0: band.y0, y1: band.y1 });
+      globalRowIndex++;
+    }
+
+    const colLayout = descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 }));
+    const top = Math.min(...rowBands.map(r=>r.y0));
+    const bottom = Math.max(...rowBands.map(r=>r.y1));
+    layout.pages[page] = { page, columns: colLayout, rows: pageRowEntries, top, bottom };
+  }
+
+  state.lineLayout = Object.keys(layout.pages).length ? layout : null;
+  drawOverlay();
+  return results;
 }
 
 /* ---------------------- PDF/Image Loading ------------------------ */
@@ -2147,6 +2356,7 @@ function cleanupDoc(){
   state.pageOffsets = [];
   state.pageRenderPromises = [];
   state.pageRenderReady = [];
+  state.lineLayout = null;
   clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
@@ -2378,6 +2588,41 @@ els.viewer.addEventListener('scroll', ()=>{
 function drawOverlay(){
   syncOverlay();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  const layoutPage = state.lineLayout?.pages?.[state.pageNum];
+  if(layoutPage && (layoutPage.rows||[]).length){
+    const off = state.pageOffsets[state.pageNum-1] || 0;
+    const xPositions = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
+    const spanLeft = xPositions[0] ?? 0;
+    const spanRight = xPositions[xPositions.length-1] ?? els.overlayCanvas.width;
+    const top = (layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0))) + off;
+    const bottom = (layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1))) + off;
+    overlayCtx.save();
+    overlayCtx.lineWidth = 1;
+    overlayCtx.strokeStyle = 'rgba(68,210,255,0.35)';
+    xPositions.forEach(x => {
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(x, top);
+      overlayCtx.lineTo(x, bottom);
+      overlayCtx.stroke();
+    });
+    overlayCtx.strokeStyle = 'rgba(46,230,166,0.35)';
+    layoutPage.rows.forEach(row => {
+      const y = row.y0 + off;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(spanLeft, y);
+      overlayCtx.lineTo(spanRight, y);
+      overlayCtx.stroke();
+    });
+    const lastRow = layoutPage.rows[layoutPage.rows.length-1];
+    if(lastRow){
+      const yEnd = lastRow.y1 + off;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(spanLeft, yEnd);
+      overlayCtx.lineTo(spanRight, yEnd);
+      overlayCtx.stroke();
+    }
+    overlayCtx.restore();
+  }
   const { scaleY } = getScaleFactors();
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
@@ -2823,7 +3068,24 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     tokens
   };
   if(extras.landmark) entry.landmark = extras.landmark;
-  if(step.type === 'column' && extras.column) entry.column = extras.column;
+  if(step.type === 'column' && extras.column){
+    entry.column = extras.column;
+    state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
+    state.profile.tableHints.columns = state.profile.tableHints.columns || {};
+    state.profile.tableHints.columns[step.fieldKey] = {
+      fieldKey: step.fieldKey,
+      page,
+      xband: extras.column.xband,
+      header: extras.column.header || null,
+      anchorSample: extras.column.anchorSample || null,
+      rowSamples: extras.column.rowSamples || []
+    };
+    if(extras.column.anchorSample){
+      if(!state.profile.tableHints.rowAnchor || state.profile.tableHints.rowAnchor.fieldKey === step.fieldKey){
+        state.profile.tableHints.rowAnchor = { fieldKey: step.fieldKey, page, sample: extras.column.anchorSample };
+      }
+    }
+  }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   saveProfile(state.username, state.docType, state.profile);
 }
