@@ -77,7 +77,9 @@
       quantity: cleanNumeric(item?.quantity),
       unitPrice: cleanNumeric(item?.unit_price),
       amount: cleanNumeric(item?.amount),
-      lineNo: cleanLineNo(item?.line_no)
+      lineNo: cleanLineNo(item?.line_no),
+      missing: item?.__missing || {},
+      rowNumber: typeof item?.__rowNumber === 'number' ? item.__rowNumber : null
     }));
   }
 
@@ -114,10 +116,12 @@
 
     const missing = { sku: [], quantity: [], unit_price: [], line_no: [] };
     allItems.forEach((item, idx) => {
-      if(item.sku === '') missing.sku.push(idx + 1);
-      if(item.quantity === '') missing.quantity.push(idx + 1);
-      if(item.unitPrice === '') missing.unit_price.push(idx + 1);
-      if(item.lineNo === '') missing.line_no.push(idx + 1);
+      const rowIdx = item.rowNumber || (idx + 1);
+      const miss = item.missing || {};
+      if(item.sku === '' || miss.sku) missing.sku.push(rowIdx);
+      if(item.quantity === '' || miss.quantity) missing.quantity.push(rowIdx);
+      if(item.unitPrice === '' || miss.unit_price) missing.unit_price.push(rowIdx);
+      if(item.lineNo === '' || miss.line_no) missing.line_no.push(rowIdx);
     });
     if(missing.sku.length || missing.quantity.length || missing.unit_price.length || missing.line_no.length){
       console.warn('[MasterDB] count mismatch', { counts, missing });
@@ -132,7 +136,8 @@
           const u = parseFloat(item.unitPrice);
           if(!isNaN(q) && !isNaN(u)) lineTotal = (q * u).toFixed(2);
         }
-        const lineNo = item.lineNo || String(idx + 1);
+        const fallbackRow = item.rowNumber || (idx + 1);
+        const lineNo = item.lineNo || String(fallbackRow);
         rows.push([
           invoice.store,
           invoice.dept,
