@@ -532,6 +532,36 @@ function projectAnchorDistance(savedPct, savedPx, savedPageDim, targetPageDim){
   return null;
 }
 
+function projectColumnFera(fera, pageWidth, pageHeight){
+  if(!fera || !Number.isFinite(pageWidth) || !Number.isFinite(pageHeight) || pageWidth <= 0 || pageHeight <= 0){
+    return null;
+  }
+  const left = projectAnchorDistance(fera.leftPct, fera.leftPx, fera.pageWidthPx, pageWidth);
+  const right = projectAnchorDistance(fera.rightPct, fera.rightPx, fera.pageWidthPx, pageWidth);
+  const top = projectAnchorDistance(fera.topPct, fera.topPx, fera.pageHeightPx, pageHeight);
+  const bottom = projectAnchorDistance(fera.bottomPct, fera.bottomPx, fera.pageHeightPx, pageHeight);
+  const x0 = Number.isFinite(left) ? Math.max(0, left) : null;
+  const x1 = Number.isFinite(right) ? Math.min(pageWidth, pageWidth - right) : null;
+  const y0 = Number.isFinite(top) ? Math.max(0, top) : null;
+  const y1 = Number.isFinite(bottom) ? Math.min(pageHeight, pageHeight - bottom) : null;
+  const width = Number.isFinite(x0) && Number.isFinite(x1) && x1 > x0 ? x1 - x0 : null;
+  const height = Number.isFinite(y0) && Number.isFinite(y1) && y1 > y0 ? y1 - y0 : null;
+  const centerX = Number.isFinite(x0) && Number.isFinite(width) ? x0 + width/2 : null;
+  return {
+    left: Number.isFinite(left) ? left : null,
+    right: Number.isFinite(right) ? right : null,
+    top: Number.isFinite(top) ? top : null,
+    bottom: Number.isFinite(bottom) ? bottom : null,
+    x0: Number.isFinite(x0) ? x0 : null,
+    x1: Number.isFinite(x1) ? x1 : null,
+    y0: Number.isFinite(y0) ? y0 : null,
+    y1: Number.isFinite(y1) ? y1 : null,
+    width,
+    height,
+    centerX
+  };
+}
+
 function anchorMetricsSatisfied(saved, candidate){
   if(!saved || !candidate) return { ok: true, matches: 0, textMatch: false, tolerance: 0 };
   const targetHeight = candidate.pageHeightPx || 0;
@@ -1610,6 +1640,17 @@ function buildColumnModel(step, norm, boxPx, tokens){
     cyNorm: (t.y + t.h/2) / pageHeightPx,
     hNorm: t.h / pageHeightPx
   }));
+  const feraHeights = [];
+  if(anchorSample?.hNorm){ feraHeights.push(anchorSample.hNorm * pageHeightPx); }
+  rowSamples.forEach(s => { if(Number.isFinite(s.hNorm)) feraHeights.push(s.hNorm * pageHeightPx); });
+  const fallbackFeraHeight = feraHeights.length ? median(feraHeights) : (Number.isFinite(boxPx.h) ? boxPx.h : 0);
+  const fera = anchorMetricsFromBox(
+    { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h },
+    pageWidthPx,
+    pageHeightPx,
+    feraHeights,
+    fallbackFeraHeight || (Number.isFinite(boxPx.h) ? boxPx.h : 0)
+  );
   const guardWords = ['subtotal','sub-total','total','tax','hst','gst','qst','balance','deposit','notes','amount','amountdue'];
   return {
     xband:[norm.x0, norm.x1],
@@ -1622,6 +1663,7 @@ function buildColumnModel(step, norm, boxPx, tokens){
     anchorSample,
     anchorSampleMetrics,
     rowSamples,
+    fera,
     guardWords,
     bottomGuards: guardWords
   };
@@ -2360,7 +2402,15 @@ async function extractLineItems(profile){
     const headerLimit = desc.headerBottom + desc.headerPad;
     const y0 = band.y0;
     const y1 = band.y1;
-    const selected=[];
+    const expectedLeft = Number.isFinite(desc.expectedLeft) ? desc.expectedLeft : null;
+    const expectedRight = Number.isFinite(desc.expectedRight) ? desc.expectedRight : null;
+    const expectedCenter = Number.isFinite(desc.expectedCenter)
+      ? desc.expectedCenter
+      : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? (expectedLeft + expectedRight) / 2 : null);
+    const expectedWidth = Number.isFinite(desc.expectedWidth) ? desc.expectedWidth : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? Math.max(0, expectedRight - expectedLeft) : null);
+    const tolerance = Number.isFinite(desc.feraTolerance) ? desc.feraTolerance : null;
+    const align = desc.align || 'left';
+    const scored=[];
     for(const tok of pageTokens){
       if(tok.page !== desc.page) continue;
       const cx = tok.x + tok.w/2;
@@ -2374,10 +2424,63 @@ async function extractLineItems(profile){
       const overlap=Math.min(bottom, y1) - Math.max(top, y0);
       const minOverlap=Math.min(tok.h, y1 - y0) * 0.35;
       if(overlap < minOverlap) continue;
-      selected.push(tok);
+      const leftEdge = tok.x;
+      const rightEdge = tok.x + tok.w;
+      const center = leftEdge + tok.w/2;
+      let diff = 0;
+      if(align === 'right' && Number.isFinite(expectedRight)){
+        diff = Math.abs(rightEdge - expectedRight);
+      } else if(align === 'center' && Number.isFinite(expectedCenter)){
+        diff = Math.abs(center - expectedCenter);
+      } else if(Number.isFinite(expectedLeft)){
+        diff = Math.abs(leftEdge - expectedLeft);
+      } else if(Number.isFinite(expectedRight)){
+        diff = Math.abs(rightEdge - expectedRight);
+      } else if(Number.isFinite(expectedCenter)){
+        diff = Math.abs(center - expectedCenter);
+      } else {
+        diff = 0;
+      }
+      const tokenWithCy = { ...tok, cy };
+      scored.push({ token: tokenWithCy, diff });
     }
-    selected.sort((a,b)=> (a.x - b.x) || (a.y - b.y));
-    return selected;
+    scored.sort((a,b)=> (a.token.x - b.token.x) || (a.token.y - b.token.y));
+    let feraOk = true;
+    let feraReason = null;
+    let bestDiff = null;
+    let tokensOut = scored.map(s => s.token);
+    if(tolerance && scored.length){
+      const within = scored.filter(s => s.diff <= tolerance);
+      if(within.length){
+        within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
+        bestDiff = within[0].diff;
+        const closenessAllowance = Math.max(desc.typicalHeight || 0, tolerance * 0.3, 6);
+        const keepThreshold = Math.min(tolerance, bestDiff + closenessAllowance);
+        const keepSet = new Set(within.filter(s => s.diff <= keepThreshold).map(s => s.token));
+        tokensOut = scored
+          .filter(s => keepSet.has(s.token))
+          .sort((a,b)=> a.token.y - b.token.y || a.token.x - b.token.x)
+          .map(s => s.token);
+      } else {
+        feraOk = false;
+        feraReason = 'fera_tolerance_fail';
+        tokensOut = [];
+      }
+    }
+    return {
+      tokens: tokensOut,
+      feraOk,
+      feraReason,
+      feraTolerance: tolerance,
+      feraBestDiff: bestDiff,
+      feraExpected: {
+        left: expectedLeft,
+        right: expectedRight,
+        center: expectedCenter,
+        width: expectedWidth,
+        align
+      }
+    };
   }
 
   const results=[];
@@ -2423,21 +2526,68 @@ async function extractLineItems(profile){
       guardList.forEach(g => guardWordsBase.add(g));
       const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
       const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
+      const align = field.column.align || 'left';
+      const fallbackMargin = Math.max(2, typicalHeight * 0.4);
+      const baseLeft = bandPx.x;
+      const baseRight = bandPx.x + bandPx.w;
+      const fallbackX0 = Math.max(0, baseLeft - fallbackMargin);
+      const fallbackX1 = Math.min(pageWidth, baseRight + fallbackMargin);
+      const anchorFera = tableHints.rowAnchor?.fieldKey === field.fieldKey ? (tableHints.rowAnchor.fera || tableHints.rowAnchor.metrics || null) : null;
+      const savedFera = field.column.fera || field.anchorMetrics || anchorFera || null;
+      const feraProjection = projectColumnFera(savedFera, pageWidth, pageHeight);
+      let expectedLeft = Number.isFinite(feraProjection?.x0) ? feraProjection.x0 : null;
+      let expectedRight = Number.isFinite(feraProjection?.x1) ? feraProjection.x1 : null;
+      let expectedCenter = Number.isFinite(feraProjection?.centerX) ? feraProjection.centerX : null;
+      if(!Number.isFinite(expectedCenter) && Number.isFinite(expectedLeft) && Number.isFinite(expectedRight)){
+        expectedCenter = (expectedLeft + expectedRight) / 2;
+      }
+      let expectedWidth = Number.isFinite(feraProjection?.width) ? feraProjection.width : null;
+      if(!Number.isFinite(expectedWidth) && Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) && expectedRight > expectedLeft){
+        expectedWidth = expectedRight - expectedLeft;
+      }
+      if(!Number.isFinite(expectedWidth)){
+        expectedWidth = Math.max(1, baseRight - baseLeft);
+      }
+      const feraTolerance = savedFera
+        ? Math.max(6, typicalHeight * 0.9, expectedWidth * (align === 'right' ? 0.2 : align === 'center' ? 0.25 : 0.35))
+        : null;
+      const searchMargin = savedFera
+        ? Math.max(4, typicalHeight * 0.75, feraTolerance || 0)
+        : Math.max(2, typicalHeight * 0.4);
+      let searchX0 = Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
+      let searchX1 = Number.isFinite(expectedRight) ? expectedRight : baseRight;
+      searchX0 = Math.max(0, searchX0 - searchMargin);
+      searchX1 = Math.min(pageWidth, searchX1 + searchMargin);
+      if(searchX1 <= searchX0){
+        searchX0 = fallbackX0;
+        searchX1 = fallbackX1;
+      }
       return {
         fieldKey: field.fieldKey,
         outKey: keyMap[field.fieldKey] || field.fieldKey,
         page,
-        x0: bandPx.x,
-        x1: bandPx.x + bandPx.w,
+        x0: searchX0,
+        x1: searchX1,
+        fallbackX0,
+        fallbackX1,
         headerBottom,
         headerPad,
-        align: field.column.align || 'left',
+        align,
         regexHint: field.column.regexHint || '',
         anchorSample,
         anchorSampleMetrics: field.column.anchorSampleMetrics || null,
         rowSamples,
         guardWords: guardList,
-        column: field.column
+        column: field.column,
+        expectedLeft,
+        expectedRight,
+        expectedCenter,
+        expectedWidth,
+        feraTolerance,
+        feraActive: !!savedFera,
+        feraSource: savedFera || null,
+        feraProjection: feraProjection || null,
+        typicalHeight
       };
     });
 
@@ -2483,18 +2633,25 @@ async function extractLineItems(profile){
         }
       }
       headerLimit = Math.max(0, headerLimit);
-      const colToks=[];
-      for(const tok of pageTokens){
-        if(tok.page !== desc.page) continue;
-        const cx = tok.x + tok.w/2;
-        if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
-        const cy = tok.y + tok.h/2;
-        if(cy <= headerLimit) continue;
-        const text = (tok.text||'').trim();
-        if(!text) continue;
-        const cleaned = cleanedTokenText(text);
-        if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
-        colToks.push({ ...tok, cy, cleaned });
+      const gather = (x0, x1) => {
+        const hits=[];
+        for(const tok of pageTokens){
+          if(tok.page !== desc.page) continue;
+          const cx = tok.x + tok.w/2;
+          if(cx < x0 - 1 || cx > x1 + 1) continue;
+          const cy = tok.y + tok.h/2;
+          if(cy <= headerLimit) continue;
+          const text = (tok.text||'').trim();
+          if(!text) continue;
+          const cleaned = cleanedTokenText(text);
+          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
+          hits.push({ ...tok, cy, cleaned });
+        }
+        return hits;
+      };
+      let colToks = gather(desc.x0, desc.x1);
+      if(!colToks.length && desc.feraActive && Number.isFinite(desc.fallbackX0) && Number.isFinite(desc.fallbackX1)){
+        colToks = gather(desc.fallbackX0, desc.fallbackX1);
       }
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
       return colToks;
@@ -2544,7 +2701,8 @@ async function extractLineItems(profile){
       };
 
       for(const desc of descriptors){
-        const cellTokens = tokensForCell(desc, band, pageTokens);
+        const cellResult = tokensForCell(desc, band, pageTokens);
+        const cellTokens = cellResult.tokens;
         const raw = cellTokens.map(t=>t.text).join(' ').replace(/\s+/g,' ').trim();
         const spanKey = { docId, pageIndex: page-1, fieldKey: desc.outKey };
         let cleaned = null;
@@ -2578,8 +2736,27 @@ async function extractLineItems(profile){
         } else {
           row[desc.outKey] = value;
         }
-        row.__cells[desc.fieldKey] = { raw, tokens: cellTokens, cleaned, fingerprintOk };
-        if(!cellTokens.length || !fingerprintOk) row.__missing[desc.outKey] = true;
+        const cellMeta = {
+          raw,
+          tokens: cellTokens,
+          cleaned,
+          fingerprintOk,
+          fera: {
+            ok: cellResult.feraOk,
+            reason: cellResult.feraReason || null,
+            tolerance: cellResult.feraTolerance,
+            bestDiff: cellResult.feraBestDiff,
+            expected: cellResult.feraExpected || null
+          }
+        };
+        row.__cells[desc.fieldKey] = cellMeta;
+        let missingReason = null;
+        if(!cellTokens.length){
+          missingReason = cellResult.feraReason || 'no_tokens';
+        } else if(!fingerprintOk){
+          missingReason = 'fingerprint_mismatch';
+        }
+        if(missingReason){ row.__missing[desc.outKey] = missingReason; }
       }
 
       row.description = row.description || '';
@@ -3501,7 +3678,10 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(anchorMetrics) entry.anchorMetrics = anchorMetrics;
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column){
-    entry.column = { ...extras.column };
+    const columnExtras = clonePlain(extras.column);
+    const columnFera = columnExtras.fera || anchorMetrics || null;
+    if(columnFera){ columnExtras.fera = clonePlain(columnFera); }
+    entry.column = columnExtras;
     state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
     state.profile.tableHints.columns = state.profile.tableHints.columns || {};
     state.profile.tableHints.columns[step.fieldKey] = {
@@ -3511,14 +3691,21 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
       header: extras.column.header || null,
       anchorSample: extras.column.anchorSample || null,
       anchorSampleMetrics: extras.column.anchorSampleMetrics || null,
-      rowSamples: extras.column.rowSamples || []
+      rowSamples: extras.column.rowSamples || [],
+      fera: columnFera ? clonePlain(columnFera) : null
     };
     if(extras.column.anchorSampleMetrics){
       entry.column.anchorSampleMetrics = extras.column.anchorSampleMetrics;
     }
     if(extras.column.anchorSample){
       if(!state.profile.tableHints.rowAnchor || state.profile.tableHints.rowAnchor.fieldKey === step.fieldKey){
-        state.profile.tableHints.rowAnchor = { fieldKey: step.fieldKey, page, sample: extras.column.anchorSample, metrics: extras.column.anchorSampleMetrics || null };
+        state.profile.tableHints.rowAnchor = {
+          fieldKey: step.fieldKey,
+          page,
+          sample: extras.column.anchorSample,
+          metrics: extras.column.anchorSampleMetrics || null,
+          fera: columnFera ? clonePlain(columnFera) : null
+        };
       }
     }
   }
