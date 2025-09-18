@@ -89,6 +89,30 @@
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
   }
 
+  function normalizeMissingFlags(flag){
+    if(flag === undefined || flag === null || flag === false) return [];
+    const values = Array.isArray(flag) ? flag : [flag];
+    const unique = new Set();
+    values.forEach(val => {
+      if(val === undefined || val === null || val === false) return;
+      if(val === true){
+        unique.add('flagged');
+        return;
+      }
+      if(typeof val === 'string'){
+        const trimmed = val.trim();
+        unique.add(trimmed || 'flagged');
+        return;
+      }
+      try {
+        unique.add(String(val));
+      } catch(err){
+        unique.add('flagged');
+      }
+    });
+    return Array.from(unique);
+  }
+
   function flatten(ssot){
     const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
     const prepared = records.map(record => ({
@@ -114,17 +138,70 @@
       throw new Error('Exporter input empty—SSOT not wired.');
     }
 
-    const missing = { sku: [], quantity: [], unit_price: [], line_no: [] };
+    const missingSummarySets = {
+      sku: new Set(),
+      quantity: new Set(),
+      unit_price: new Set(),
+      line_no: new Set()
+    };
+    const missingDetailsByRow = {};
+    const noteMissing = (columnKey, rowIdx, reasons, flagged) => {
+      if(!reasons || !reasons.length) return;
+      missingSummarySets[columnKey].add(rowIdx);
+      const rowDetails = missingDetailsByRow[rowIdx] || (missingDetailsByRow[rowIdx] = {});
+      const uniqueReasons = Array.from(new Set(reasons)).sort();
+      const detail = flagged ? { reasons: uniqueReasons, flagged: true } : { reasons: uniqueReasons };
+      rowDetails[columnKey] = detail;
+    };
+
     allItems.forEach((item, idx) => {
       const rowIdx = item.rowNumber || (idx + 1);
       const miss = item.missing || {};
-      if(item.sku === '' || miss.sku) missing.sku.push(rowIdx);
-      if(item.quantity === '' || miss.quantity) missing.quantity.push(rowIdx);
-      if(item.unitPrice === '' || miss.unit_price) missing.unit_price.push(rowIdx);
-      if(item.lineNo === '' || miss.line_no) missing.line_no.push(rowIdx);
+
+      const inspect = (columnKey, value, missKey) => {
+        const missFlag = miss[missKey];
+        const reasons = normalizeMissingFlags(missFlag);
+        const isBlank = value === '';
+        if(isBlank && !reasons.includes('empty')) reasons.push('empty');
+        if(!reasons.length) return;
+        const flagged = missFlag !== undefined && missFlag !== null && missFlag !== false;
+        noteMissing(columnKey, rowIdx, reasons, flagged);
+      };
+
+      inspect('sku', item.sku, 'sku');
+      inspect('quantity', item.quantity, 'quantity');
+      inspect('unit_price', item.unitPrice, 'unit_price');
+      inspect('line_no', item.lineNo, 'line_no');
     });
-    if(missing.sku.length || missing.quantity.length || missing.unit_price.length || missing.line_no.length){
-      console.warn('[MasterDB] count mismatch', { counts, missing });
+
+    const missingSummary = Object.fromEntries(Object.entries(missingSummarySets).map(([key, set]) => [key, Array.from(set).sort((a,b) => a - b)]));
+    const missingColumns = {};
+    Object.entries(missingSummarySets).forEach(([columnKey, set]) => {
+      const rowsWithMissing = Array.from(set).sort((a,b) => a - b);
+      const details = {};
+      rowsWithMissing.forEach(rowIdx => {
+        const rowDetails = missingDetailsByRow[rowIdx];
+        if(rowDetails && rowDetails[columnKey]){
+          details[rowIdx] = rowDetails[columnKey];
+        }
+      });
+      missingColumns[columnKey] = { rows: rowsWithMissing, details };
+    });
+
+    const missingRows = Object.fromEntries(
+      Object.entries(missingDetailsByRow)
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+    );
+
+    const missingMap = { columns: missingColumns, rows: missingRows, summary: missingSummary };
+
+    if(
+      missingSummary.sku.length ||
+      missingSummary.quantity.length ||
+      missingSummary.unit_price.length ||
+      missingSummary.line_no.length
+    ){
+      console.warn('[MasterDB] count mismatch', { counts, missing: missingSummary, missingMap });
     }
 
     const rows = [HEADERS];
@@ -162,11 +239,12 @@
       });
     });
 
-    return rows;
+    return { rows, missingMap };
   }
 
   function toCsv(ssot){
-    return flatten(ssot).map(r => r.map(csvEscape).join(',')).join('\n');
+    const { rows } = flatten(ssot);
+    return rows.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
   return { HEADERS, flatten, toCsv };
