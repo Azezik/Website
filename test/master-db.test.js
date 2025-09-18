@@ -19,11 +19,11 @@ const ssot = {
   },
   lineItems: [
     { sku: '0001', description: 'Widget A\nLarge', quantity: '2', unit_price: '100.5', amount: '201', line_no: '0001' },
-    { sku: '0002', description: 'Widget B', quantity: '3', unit_price: '50', amount: '', line_no: ' ' }
+    { sku: '0002', description: 'Widget B', quantity: '3', unit_price: '50', amount: '', line_no: ' ', __missing: { line_no: true } }
   ]
 };
 
-const rows = MasterDB.flatten(ssot);
+const { rows, missingMap } = MasterDB.flatten(ssot);
 assert.deepStrictEqual(rows[0], MasterDB.HEADERS);
 assert.strictEqual(rows.length, 3);
 assert.strictEqual(rows[1][0], 'My Store');
@@ -50,6 +50,19 @@ assert.strictEqual(rows[2][9], '3.00');
 assert.strictEqual(rows[2][10], '50.00');
 assert.strictEqual(rows[2][11], '150.00');
 assert.strictEqual(rows[2][18], '2');
+
+assert.deepStrictEqual(missingMap.summary, {
+  sku: [],
+  quantity: [],
+  unit_price: [],
+  line_no: [2]
+});
+
+assert.ok(missingMap.rows['2']);
+assert.deepStrictEqual(missingMap.rows['2'].line_no.reasons, ['empty', 'flagged']);
+assert.strictEqual(missingMap.rows['2'].line_no.flagged, true);
+assert.deepStrictEqual(missingMap.columns.line_no.rows, [2]);
+assert.deepStrictEqual(missingMap.columns.line_no.details['2'], missingMap.rows['2'].line_no);
 
 assert.strictEqual(ssot.lineItems[1].line_no, ' ');
 

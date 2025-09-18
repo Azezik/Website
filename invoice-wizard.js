@@ -91,6 +91,7 @@ const els = {
   fieldsPreview:   document.getElementById('fieldsPreview'),
   savedJson:       document.getElementById('savedJson'),
   exportMasterDbBtn: document.getElementById('exportMasterDbBtn'),
+  exportMissingBtn: document.getElementById('exportMissingBtn'),
   exportBtn:       document.getElementById('exportBtn'),
   finishWizardBtn: document.getElementById('finishWizardBtn'),
 };
@@ -4050,6 +4051,22 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
   } catch(err){
     console.error('MasterDB export failed', err);
     alert(err?.message || 'Failed to export MasterDB CSV');
+  }
+});
+els.exportMissingBtn?.addEventListener('click', ()=>{
+  const dt = els.dataDocType?.value || state.docType;
+  try {
+    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
+    const json = JSON.stringify(missingMap, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `masterdb-missing-${state.username}-${dt}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch(err){
+    console.error('Missing cell export failed', err);
+    alert(err?.message || 'Failed to export missing-cell diagnostics');
   }
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
