@@ -1012,8 +1012,20 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
+  let finalBox = expanded;
+  if(state.mode === 'CONFIG' && hintPx){
+    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
+    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
+    if(needsWidth || needsHeight){
+      const unionLeft = Math.min(finalBox.x, hintPx.x);
+      const unionTop = Math.min(finalBox.y, hintPx.y);
+      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
+      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
+      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
+    }
+  }
   const text = lineTokens.map(t => t.text).join(' ').trim();
-  return { box: expanded, text };
+  return { box: finalBox, text };
 }
 
 /* ---------------------------- Regexes ----------------------------- */
