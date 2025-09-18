@@ -388,6 +388,7 @@ function loadModelById(id){
   const m = getModels().find(x => x.id === id);
   if(!m) return null;
   state.profile = migrateProfile(m.profile);
+  hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
   return m.profile;
 }
@@ -753,12 +754,14 @@ function applyOcrCorrections(txt, fieldKey=''){
 }
 
 function codeOf(str){
-  const q1 = /[A-Za-z]/.test(str) ? '1' : '2';
-  const q2 = /[0-9]/.test(str) ? '1' : '2';
-  const q3 = /\s/.test(str) ? '1' : '2';
-  const q4 = /[-\/()]/.test(str) ? '1' : '2';
-  const q5 = /[$€£¢%]/.test(str) || /\d+\.\d{2}/.test(str) ? '1' : '2';
-  return q1 + q2 + q3 + q4 + q5;
+  const text = String(str ?? '');
+  const hasLetters = /[A-Za-z]/.test(text);
+  const hasDigits = /[0-9]/.test(text);
+  const hasBoth = hasLetters && hasDigits;
+  const hasSeparators = /[-_/.,:]/.test(text) || /\s/.test(text);
+  const coreLength = text.replace(/[^A-Za-z0-9]/g, '').length;
+  const isShort = coreLength <= 10;
+  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '0')).join('');
 }
 
 function shapeOf(str){
@@ -779,6 +782,15 @@ function digitRatio(str){
   if(!str.length) return 0;
   const digits = (str.match(/[0-9]/g) || []).length;
   return digits / str.length;
+}
+
+function clonePlain(obj){
+  if(obj === null || typeof obj !== 'object') return obj;
+  if(typeof structuredClone === 'function'){
+    try { return structuredClone(obj); }
+    catch(err){ /* fall through */ }
+  }
+  return JSON.parse(JSON.stringify(obj));
 }
 
 const FieldDataEngine = (() => {
@@ -818,22 +830,117 @@ const FieldDataEngine = (() => {
     const code = codeOf(txt);
     const shape = shapeOf(txt);
     const digit = digitRatio(txt);
-    learn(ftype, txt);
-    const dom = dominant(ftype);
+    const before = dominant(ftype);
+    const fingerprintMatch = !before.code || before.code === code;
+    const shouldLearn = mode === 'CONFIG' || fingerprintMatch;
+    if(shouldLearn) learn(ftype, txt);
+    const dom = shouldLearn ? dominant(ftype) : before;
     let score=0;
     if(dom.code && dom.code===code) score++;
     if(dom.shape && dom.shape===shape) score++;
     if(dom.len && dom.len===txt.length) score++;
     if(dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
     if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score });
-    return { value:txt, raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit };
+    return { value:txt, raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch };
   }
 
   function exportPatterns(){ return patterns; }
-  function importPatterns(p){ Object.assign(patterns, p || {}); }
+  function importPatterns(p){
+    Object.keys(patterns).forEach(k => delete patterns[k]);
+    if(!p || typeof p !== 'object') return;
+    for(const [key, data] of Object.entries(p)){
+      if(data && typeof data === 'object'){
+        patterns[key] = clonePlain(data);
+      }
+    }
+  }
 
   return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
 })();
+
+function mostCommonKey(counts){
+  if(!counts || typeof counts !== 'object') return null;
+  let bestKey = null;
+  let bestCount = -Infinity;
+  for(const [key, value] of Object.entries(counts)){
+    const num = Number(value) || 0;
+    if(num > bestCount){
+      bestKey = key;
+      bestCount = num;
+    }
+  }
+  return bestKey;
+}
+
+function getProfileFieldEntry(fieldKey){
+  if(!fieldKey || !state.profile?.fields) return null;
+  return state.profile.fields.find(f => f.fieldKey === fieldKey) || null;
+}
+
+function getDominantFingerprintCode(ftype, profileKey){
+  const dom = ftype ? FieldDataEngine.dominant(ftype) : null;
+  if(dom?.code) return dom.code;
+  if(profileKey && profileKey !== ftype){
+    const altDom = FieldDataEngine.dominant(profileKey);
+    if(altDom?.code) return altDom.code;
+  }
+  const searchKeys = [];
+  if(profileKey) searchKeys.push(profileKey);
+  if(ftype && !searchKeys.includes(ftype)) searchKeys.push(ftype);
+  for(const key of searchKeys){
+    const entry = getProfileFieldEntry(key);
+    if(!entry?.fingerprints || typeof entry.fingerprints !== 'object') continue;
+    const fp = entry.fingerprints;
+    if(fp.code && typeof fp.code === 'object'){
+      const best = mostCommonKey(fp.code);
+      if(best) return best;
+    }
+    const direct = fp[key];
+    if(direct && typeof direct === 'object' && direct.code){
+      const best = mostCommonKey(direct.code);
+      if(best) return best;
+    }
+    for(const value of Object.values(fp)){
+      if(value && typeof value === 'object' && value.code){
+        const best = mostCommonKey(value.code);
+        if(best) return best;
+      }
+    }
+  }
+  return null;
+}
+
+function fingerprintMatches(ftype, code, mode = state.mode, profileKey){
+  if(mode === 'CONFIG') return true;
+  const expected = getDominantFingerprintCode(ftype, profileKey);
+  if(!expected) return true;
+  if(typeof code !== 'string') return false;
+  return code === expected;
+}
+
+function collectPersistedFingerprints(profile){
+  const out = {};
+  if(!profile?.fields) return out;
+  for(const field of profile.fields){
+    const prints = field?.fingerprints;
+    if(!prints || typeof prints !== 'object') continue;
+    if(prints.code || prints.shape || prints.len || prints.digit){
+      out[field.fieldKey] = clonePlain(prints);
+      continue;
+    }
+    for(const [key, data] of Object.entries(prints)){
+      if(data && typeof data === 'object'){
+        out[key] = clonePlain(data);
+      }
+    }
+  }
+  return out;
+}
+
+function hydrateFingerprintsFromProfile(profile){
+  const tallies = collectPersistedFingerprints(profile);
+  FieldDataEngine.importPatterns(tallies);
+}
 
 function groupIntoLines(tokens, tol=4){
   const sorted = [...tokens].sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
@@ -899,6 +1006,15 @@ const FIELD_ALIASES = {
   hst: 'tax_amount',
   qst: 'tax_amount',
   total: 'invoice_total'
+};
+
+const COLUMN_OUT_KEYS = {
+  product_description: 'description',
+  sku_col: 'sku',
+  quantity_col: 'quantity',
+  unit_price_col: 'unit_price',
+  line_total_col: 'amount',
+  line_number_col: 'line_no'
 };
 
 const ANCHOR_HINTS = {
@@ -1021,6 +1137,7 @@ function ensureProfile(){
   state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
+  hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
 }
 
@@ -2033,6 +2150,8 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(!hits.length) return null;
     const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     const cleaned = sel.cleaned || {};
+    const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
+    const cleanedOk = !!sel.cleanedOk && fingerprintOk;
     return {
       value: sel.value,
       raw: sel.raw,
@@ -2043,9 +2162,10 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
       boxPx: searchBox,
-      confidence: cleaned.conf || (sel.cleanedOk ? 1 : 0.1),
+      confidence: fingerprintOk ? (cleaned.conf || (sel.cleanedOk ? 1 : 0.1)) : 0,
       tokens: hits,
-      cleanedOk: sel.cleanedOk
+      cleanedOk,
+      fingerprintOk
     };
   }
 
@@ -2164,7 +2284,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 }
 
 async function extractLineItems(profile){
-  FieldDataEngine.importPatterns({});
   const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column && Array.isArray(f.column.xband));
   if(!colFields.length){
     state.lineLayout = null;
@@ -2172,7 +2291,7 @@ async function extractLineItems(profile){
     return [];
   }
 
-  const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount',line_number_col:'line_no'};
+  const keyMap = COLUMN_OUT_KEYS;
   const tableHints = profile.tableHints || {};
   const anchorHintKey = tableHints.rowAnchor?.fieldKey;
   const columnPriority = ['line_number_col','product_description','sku_col','quantity_col','unit_price_col','line_total_col'];
@@ -2430,9 +2549,15 @@ async function extractLineItems(profile){
         const spanKey = { docId, pageIndex: page-1, fieldKey: desc.outKey };
         let cleaned = null;
         let value = '';
+        let fingerprintOk = true;
         if(cellTokens.length){
           cleaned = FieldDataEngine.clean(desc.outKey, cellTokens, state.mode, spanKey);
           value = cleaned.value || cleaned.raw || raw;
+          fingerprintOk = fingerprintMatches(desc.outKey, cleaned.code, state.mode, desc.fieldKey);
+          if(cleaned) cleaned.fingerprintOk = fingerprintOk;
+          if(!fingerprintOk){
+            value = '';
+          }
         }
         if(desc.fieldKey === anchor.fieldKey && !value && band.text){
           value = band.text.trim();
@@ -2453,8 +2578,8 @@ async function extractLineItems(profile){
         } else {
           row[desc.outKey] = value;
         }
-        row.__cells[desc.fieldKey] = { raw, tokens: cellTokens, cleaned };
-        if(!cellTokens.length) row.__missing[desc.outKey] = true;
+        row.__cells[desc.fieldKey] = { raw, tokens: cellTokens, cleaned, fingerprintOk };
+        if(!cellTokens.length || !fingerprintOk) row.__missing[desc.outKey] = true;
       }
 
       row.description = row.description || '';
@@ -3397,6 +3522,20 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
       }
     }
   }
+  const patterns = FieldDataEngine.exportPatterns();
+  const nextFingerprints = (existing?.fingerprints && typeof existing.fingerprints === 'object') ? clonePlain(existing.fingerprints) : {};
+  const keysToPersist = new Set();
+  if(step.fieldKey) keysToPersist.add(step.fieldKey);
+  const altKey = COLUMN_OUT_KEYS[step.fieldKey];
+  if(altKey) keysToPersist.add(altKey);
+  for(const key of keysToPersist){
+    if(patterns && patterns[key]){
+      nextFingerprints[key] = clonePlain(patterns[key]);
+    }
+  }
+  if(Object.keys(nextFingerprints).length){
+    entry.fingerprints = nextFingerprints;
+  }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   saveProfile(state.username, state.docType, state.profile);
 }
@@ -3491,6 +3630,7 @@ els.loginForm?.addEventListener('submit', (e)=>{
   state.docType = els.docType?.value || 'invoice';
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
@@ -3510,6 +3650,7 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   setModels(models);
   localStorage.removeItem(LS.dbKey(state.username, state.docType));
   state.profile = null;
+  hydrateFingerprintsFromProfile(null);
   renderSavedFieldsTable();
   populateModelSelect();
   renderResultsTable();
@@ -3529,6 +3670,7 @@ els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
   renderSavedFieldsTable();
   populateModelSelect();
 });
@@ -3735,9 +3877,11 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 /* ---------------------------- Batch ------------------------------- */
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
-  state.profile = profile;
+  state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
+  hydrateFingerprintsFromProfile(state.profile);
+  const activeProfile = state.profile || profile || { fields: [] };
   await openFile(file);
-  for(const spec of (profile.fields || [])){
+  for(const spec of (activeProfile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
       state.pageNum = clamp(spec.page+1, 1, state.numPages);
       state.viewport = state.pageViewports[state.pageNum-1];
@@ -3770,7 +3914,7 @@ async function autoExtractFileWithProfile(file, profile){
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
   await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(profile);
+  const lineItems = await extractLineItems(activeProfile);
   compileDocument(state.currentFileId, lineItems);
 }
 
