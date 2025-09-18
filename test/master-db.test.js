@@ -73,4 +73,48 @@ assert.strictEqual(csv1.split('\n').length, rows.length);
 
 assert.throws(() => MasterDB.toCsv({ fields: {}, lineItems: [] }), /Exporter input empty—SSOT not wired./);
 
+const noisyLineItems = [];
+for(let i = 1; i <= 8; i++){
+  noisyLineItems.push({
+    sku: `SKU-${i}`,
+    description: `Item ${i}`,
+    quantity: String(i),
+    unit_price: (10 * i).toString(),
+    amount: (10 * i * i).toString(),
+    line_no: String(i).padStart(4, '0'),
+    __rowNumber: i
+  });
+}
+noisyLineItems.push({
+  sku: '',
+  description: '',
+  quantity: '',
+  unit_price: '',
+  amount: '',
+  line_no: '0099',
+  __rowNumber: 99
+});
+noisyLineItems.push({
+  sku: '',
+  description: '',
+  quantity: '',
+  unit_price: '',
+  amount: '',
+  line_no: '0100',
+  __rowNumber: 100
+});
+
+const noisySsot = { fields: ssot.fields, lineItems: noisyLineItems };
+const { rows: noisyRows, missingMap: noisyMissing } = MasterDB.flatten(noisySsot);
+
+assert.strictEqual(noisyRows.length, 9);
+assert.strictEqual(noisyRows.slice(1).length, 8);
+assert.strictEqual(noisyRows[noisyRows.length - 1][18], '0008');
+assert.deepStrictEqual(
+  noisyRows.slice(1).map(row => row[7]),
+  noisyLineItems.slice(0, 8).map(item => item.sku)
+);
+assert.ok(!('99' in noisyMissing.rows));
+assert.ok(!('100' in noisyMissing.rows));
+
 console.log('MasterDB tests passed.');
