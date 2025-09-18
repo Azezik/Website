@@ -175,7 +175,7 @@ const LS = {
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 4;
+const PROFILE_VERSION = 5;
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -227,6 +227,58 @@ const migrations = {
         f.boxError = 'invalid_box_input';
       }
     });
+  },
+  4: p => {
+    const fields = p.fields || [];
+    const ensureAnchorFromBox = bbox => {
+      if(!bbox) return null;
+      const x0 = Number.isFinite(bbox.x0) ? bbox.x0 : (Array.isArray(bbox) ? bbox[0] : null);
+      const y0 = Number.isFinite(bbox.y0) ? bbox.y0 : (Array.isArray(bbox) ? bbox[1] : null);
+      const x1 = Number.isFinite(bbox.x1) ? bbox.x1 : (Array.isArray(bbox) ? bbox[2] : null);
+      const y1 = Number.isFinite(bbox.y1) ? bbox.y1 : (Array.isArray(bbox) ? bbox[3] : null);
+      if(![x0,y0,x1,y1].every(v => Number.isFinite(v))) return null;
+      const box = { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+      const fallback = box.h ? box.h/2 : 0;
+      return anchorMetricsFromBox(box, 1, 1, [], fallback);
+    };
+    fields.forEach(f => {
+      if(!f.anchorMetrics){
+        const source = f.bboxPct || (Array.isArray(f.bbox) ? { x0:f.bbox[0], y0:f.bbox[1], x1:f.bbox[2], y1:f.bbox[3] } : (f.normBox ? { x0:f.normBox.x0n, y0:f.normBox.y0n, x1:f.normBox.x0n + f.normBox.wN, y1:f.normBox.y0n + f.normBox.hN } : null));
+        const metrics = ensureAnchorFromBox(source);
+        if(metrics) f.anchorMetrics = metrics;
+      }
+      if(f.type === 'column'){
+        f.column = f.column || {};
+        if(f.column.anchorSample && !f.column.anchorSampleMetrics){
+          const sample = f.column.anchorSample;
+          const cy = Number.isFinite(sample.cyNorm) ? sample.cyNorm : 0;
+          const hNorm = Number.isFinite(sample.hNorm) ? Math.max(0, sample.hNorm) : 0;
+          const y = Math.max(0, cy - hNorm/2);
+          const x0 = Number.isFinite(sample.x0Norm) ? Math.max(0, sample.x0Norm) : 0;
+          const x1 = Number.isFinite(sample.x1Norm) ? Math.max(x0, sample.x1Norm) : x0;
+          const box = { x: x0, y, w: Math.max(0, x1 - x0), h: hNorm };
+          const metrics = anchorMetricsFromBox(box, 1, 1, [hNorm], hNorm);
+          if(metrics) f.column.anchorSampleMetrics = metrics;
+        }
+      }
+    });
+    if(p.tableHints){
+      const cols = p.tableHints.columns || {};
+      Object.values(cols).forEach(col => {
+        if(col && !col.anchorSampleMetrics){
+          const field = fields.find(f => f.fieldKey === col.fieldKey);
+          if(field?.column?.anchorSampleMetrics){
+            col.anchorSampleMetrics = field.column.anchorSampleMetrics;
+          }
+        }
+      });
+      if(p.tableHints.rowAnchor && !p.tableHints.rowAnchor.metrics){
+        const field = fields.find(f => f.fieldKey === p.tableHints.rowAnchor.fieldKey);
+        if(field?.column?.anchorSampleMetrics){
+          p.tableHints.rowAnchor.metrics = field.column.anchorSampleMetrics;
+        }
+      }
+    }
   }
 };
 
@@ -380,6 +432,158 @@ const denormalizeBox = (normBox, W, H) => ({
   sw: Math.max(1, Math.round(normBox.wN * W)),
   sh: Math.max(1, Math.round(normBox.hN * H))
 });
+
+function getCanvasDimensions(viewport){
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, (((viewport?.width ?? viewport?.w) || 0) * dpr) || 1);
+  const height = Math.max(1, (((viewport?.height ?? viewport?.h) || 0) * dpr) || 1);
+  return { width, height };
+}
+
+function getPageCanvasSize(page){
+  const vp = state.pageViewports[(page||1)-1] || state.viewport || {};
+  return getCanvasDimensions(vp);
+}
+
+function median(values){
+  if(!values?.length) return 0;
+  const sorted = values.slice().sort((a,b)=>a-b);
+  const mid = Math.floor(sorted.length/2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+}
+
+function anchorMetricsFromBox(box, canvasW, canvasH, heights=[], fallbackHeight=0){
+  if(!box || !Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0){
+    return null;
+  }
+  const x = Number.isFinite(box.x) ? box.x : null;
+  const y = Number.isFinite(box.y) ? box.y : null;
+  const w = Number.isFinite(box.w) ? box.w : null;
+  const h = Number.isFinite(box.h) ? box.h : null;
+  if([x,y,w,h].some(v => !Number.isFinite(v))){
+    return null;
+  }
+  const leftPx = Math.max(0, x);
+  const topPx = Math.max(0, y);
+  const widthPx = Math.max(0, w);
+  const heightPx = Math.max(0, h);
+  const rightPx = Math.max(0, canvasW - (leftPx + widthPx));
+  const bottomPx = Math.max(0, canvasH - (topPx + heightPx));
+  const cleanHeights = (heights || []).map(v => Number.isFinite(v) ? v : null).filter(v => Number.isFinite(v) && v > 0);
+  let textHeightPx = cleanHeights.length ? median(cleanHeights) : 0;
+  if(!textHeightPx && Number.isFinite(fallbackHeight) && fallbackHeight > 0){
+    textHeightPx = fallbackHeight;
+  }
+  const clampPct = (val, denom) => denom ? Math.max(0, Math.min(1, val / denom)) : 0;
+  return {
+    topPx,
+    bottomPx,
+    leftPx,
+    rightPx,
+    pageWidthPx: canvasW,
+    pageHeightPx: canvasH,
+    topPct: clampPct(topPx, canvasH),
+    bottomPct: clampPct(bottomPx, canvasH),
+    leftPct: clampPct(leftPx, canvasW),
+    rightPct: clampPct(rightPx, canvasW),
+    textHeightPx,
+    textHeightPct: clampPct(textHeightPx, canvasH)
+  };
+}
+
+function computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras }){
+  const rb = rawBox || {};
+  let { canvasW, canvasH } = rb;
+  if(!Number.isFinite(canvasW) || canvasW <= 0 || !Number.isFinite(canvasH) || canvasH <= 0){
+    const dims = getPageCanvasSize(page);
+    canvasW = dims.width;
+    canvasH = dims.height;
+  }
+  const box = (Number.isFinite(rb.x) && Number.isFinite(rb.y) && Number.isFinite(rb.w) && Number.isFinite(rb.h))
+    ? { x: rb.x, y: rb.y, w: rb.w, h: rb.h }
+    : normBox
+      ? { x: normBox.x0n * canvasW, y: normBox.y0n * canvasH, w: normBox.wN * canvasW, h: normBox.hN * canvasH }
+      : null;
+  if(!box) return null;
+  const heights = (tokens || []).map(t => Number.isFinite(t?.h) ? t.h : null).filter(v => Number.isFinite(v) && v > 0);
+  let fallbackHeight = heights.length ? median(heights) : 0;
+  if(!fallbackHeight && extras?.column){
+    const samples=[];
+    if(extras.column.anchorSample && Number.isFinite(extras.column.anchorSample.hNorm)){
+      samples.push(extras.column.anchorSample.hNorm * canvasH);
+    }
+    if(Array.isArray(extras.column.rowSamples)){
+      extras.column.rowSamples.forEach(s => {
+        if(Number.isFinite(s.hNorm)) samples.push(s.hNorm * canvasH);
+      });
+    }
+    if(samples.length){ fallbackHeight = median(samples); }
+  }
+  if(!fallbackHeight && Number.isFinite(box.h)){ fallbackHeight = box.h / 2; }
+  return anchorMetricsFromBox(box, canvasW, canvasH, heights, fallbackHeight);
+}
+
+function projectAnchorDistance(savedPct, savedPx, savedPageDim, targetPageDim){
+  if(Number.isFinite(savedPct)){ return savedPct * targetPageDim; }
+  if(Number.isFinite(savedPx) && Number.isFinite(savedPageDim) && savedPageDim > 0){
+    return (savedPx / savedPageDim) * targetPageDim;
+  }
+  return null;
+}
+
+function anchorMetricsSatisfied(saved, candidate){
+  if(!saved || !candidate) return { ok: true, matches: 0, textMatch: false, tolerance: 0 };
+  const targetHeight = candidate.pageHeightPx || 0;
+  const targetWidth = candidate.pageWidthPx || 0;
+  const expectedTop = projectAnchorDistance(saved.topPct, saved.topPx, saved.pageHeightPx, targetHeight);
+  const expectedBottom = projectAnchorDistance(saved.bottomPct, saved.bottomPx, saved.pageHeightPx, targetHeight);
+  const expectedLeft = projectAnchorDistance(saved.leftPct, saved.leftPx, saved.pageWidthPx, targetWidth);
+  const expectedRight = projectAnchorDistance(saved.rightPct, saved.rightPx, saved.pageWidthPx, targetWidth);
+  const expectedText = projectAnchorDistance(saved.textHeightPct, saved.textHeightPx, saved.pageHeightPx, targetHeight);
+  const distances = [
+    { expected: expectedTop, actual: candidate.topPx },
+    { expected: expectedBottom, actual: candidate.bottomPx },
+    { expected: expectedLeft, actual: candidate.leftPx },
+    { expected: expectedRight, actual: candidate.rightPx }
+  ];
+  const available = distances.filter(d => Number.isFinite(d.expected) && Number.isFinite(d.actual));
+  let toleranceBase = Number.isFinite(expectedText) ? expectedText : candidate.textHeightPx;
+  if(!Number.isFinite(toleranceBase) || toleranceBase <= 0){
+    toleranceBase = Math.min(targetHeight || 0, targetWidth || 0) * 0.02;
+  }
+  if(!Number.isFinite(toleranceBase) || toleranceBase <= 0){ toleranceBase = 4; }
+  const tolerance = Math.max(4, toleranceBase * 1.35);
+  const matches = available.filter(d => Math.abs(d.actual - d.expected) <= tolerance).length;
+  const textMatch = Number.isFinite(expectedText) && Number.isFinite(candidate.textHeightPx)
+    ? Math.abs(candidate.textHeightPx - expectedText) <= tolerance
+    : false;
+  if(!available.length){
+    const ok = !Number.isFinite(expectedText) || textMatch;
+    return { ok, matches: 0, textMatch, tolerance };
+  }
+  const required = Math.min(2, available.length);
+  let ok = matches >= required;
+  if(!ok){
+    if(required === 1){
+      ok = matches === 1 || (matches === 0 && textMatch);
+    } else if(matches === required - 1 && textMatch){
+      ok = true;
+    }
+  }
+  return { ok, matches, textMatch, tolerance };
+}
+
+function anchorMatchForBox(savedMetrics, box, tokens, canvasW, canvasH){
+  if(!savedMetrics) return true;
+  if(!box || !Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0){
+    return false;
+  }
+  const heights = (tokens || []).map(t => Number.isFinite(t?.h) ? t.h : null).filter(v => Number.isFinite(v) && v > 0);
+  const fallbackHeight = heights.length ? median(heights) : (Number.isFinite(box.h) ? box.h : 0);
+  const metrics = anchorMetricsFromBox(box, canvasW, canvasH, heights, fallbackHeight);
+  if(!metrics) return false;
+  return anchorMetricsSatisfied(savedMetrics, metrics).ok;
+}
 
 function validateNormBox(nb){
   if(!nb) return { ok:false, reason:'invalid_box_input' };
@@ -1241,11 +1445,13 @@ async function calibrateIfNeeded(){
 function buildColumnModel(step, norm, boxPx, tokens){
   const dpr = window.devicePixelRatio || 1;
   const vp = state.viewport;
+  const pageWidthPx = Math.max(1, ((vp.w ?? vp.width) || 1) * dpr);
+  const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1) * dpr);
   const colTokens = tokens
     .filter(t=> intersect(t, boxPx))
     .map(t => ({ ...t, cy: t.y + t.h/2 }));
   const avgH = colTokens.length ? colTokens.reduce((s,t)=>s+t.h,0)/colTokens.length : 0;
-  const lineHeightPct = avgH / Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
+  const lineHeightPct = avgH / pageHeightPx;
   const right = boxPx.x + boxPx.w;
   const rightAligned = colTokens.filter(t => Math.abs((t.x + t.w) - right) < boxPx.w*0.1).length;
   const align = rightAligned > (colTokens.length/2) ? 'right' : 'left';
@@ -1271,14 +1477,18 @@ function buildColumnModel(step, norm, boxPx, tokens){
     dataTokens = sortedTokens;
   }
   const header = headerTokens.length ? toPct(vp, bboxOfTokens(headerTokens)) : null;
-  const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1) * dpr);
   headerBottomPx = Math.max(boxPx.y, Math.min(headerBottomPx, boxPx.y + boxPx.h));
   const anchorToken = dataTokens[0];
   const anchorSample = anchorToken ? {
     cyNorm: (anchorToken.y + anchorToken.h/2) / pageHeightPx,
     hNorm: anchorToken.h / pageHeightPx,
-    text: (anchorToken.text || '').trim()
+    text: (anchorToken.text || '').trim(),
+    x0Norm: anchorToken.x / pageWidthPx,
+    x1Norm: (anchorToken.x + anchorToken.w) / pageWidthPx
   } : null;
+  const anchorSampleMetrics = anchorToken
+    ? anchorMetricsFromBox({ x: anchorToken.x, y: anchorToken.y, w: anchorToken.w, h: anchorToken.h }, pageWidthPx, pageHeightPx, [anchorToken.h], anchorToken.h)
+    : null;
   const rowSamples = dataTokens.slice(0, 8).map(t => ({
     cyNorm: (t.y + t.h/2) / pageHeightPx,
     hNorm: t.h / pageHeightPx
@@ -1293,6 +1503,7 @@ function buildColumnModel(step, norm, boxPx, tokens){
     header: header ? [header.x0, header.y0, header.x1, header.y1] : null,
     headerBottomPct: headerBottomPx / pageHeightPx,
     anchorSample,
+    anchorSampleMetrics,
     rowSamples,
     guardWords,
     bottomGuards: guardWords
@@ -1765,6 +1976,16 @@ function labelValueHeuristic(fieldSpec, tokens){
 async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
+  let viewportDims = getCanvasDimensions(viewportPx);
+  if(!viewportDims.width || !viewportDims.height){
+    viewportDims = getPageCanvasSize(fieldSpec.page || state.pageNum || 1);
+  }
+  const enforceAnchors = state.mode === 'RUN' && !!fieldSpec.anchorMetrics;
+  const anchorMatchesCandidate = cand => {
+    if(!enforceAnchors) return true;
+    if(!cand || !cand.boxPx) return false;
+    return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height);
+  };
 
   if(state.modes.rawData){
     let boxPx = null;
@@ -1857,7 +2078,13 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
-    firstAttempt = await attempt(basePx);
+    const initialAttempt = await attempt(basePx);
+    if(initialAttempt && !anchorMatchesCandidate(initialAttempt)){ initialAttempt.cleanedOk = false; }
+    if(initialAttempt && initialAttempt.cleanedOk){
+      firstAttempt = initialAttempt;
+    } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
+      firstAttempt = initialAttempt;
+    }
     selectionRaw = firstAttempt?.raw || '';
     if(firstAttempt && firstAttempt.cleanedOk){
       result = firstAttempt; method='bbox';
@@ -1866,6 +2093,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       for(const pad of pads){
         const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
         const r = await attempt(search);
+        if(r && !anchorMatchesCandidate(r)){ continue; }
         if(r && r.cleanedOk){ result = r; method='bbox'; break; }
       }
     }
@@ -1876,13 +2104,13 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(m){
       const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
       const r = await attempt(box);
-      if(r && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+      if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
     }
     if(!result){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
     if(!result){
@@ -1893,7 +2121,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
           const r = await attempt(box);
           const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
           const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-          if(r && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+          if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
         }
       }
     }
@@ -1902,7 +2130,12 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
-      result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor' };
+      let candidateTokens = [];
+      if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox); }
+      const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
+      if(boxOk){
+        result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
+      }
     }
   }
 
@@ -2042,6 +2275,7 @@ async function extractLineItems(profile){
     }
     const pageTokens = await ensureTokensForPage(page);
     const dpr = window.devicePixelRatio || 1;
+    const pageWidth = Math.max(1, ((vp.w ?? vp.width)||1) * dpr);
     const pageHeight = Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
     const fieldsOnPage = colFields.filter(f => (f.page||1) === page);
     if(!fieldsOnPage.length){
@@ -2081,6 +2315,7 @@ async function extractLineItems(profile){
         align: field.column.align || 'left',
         regexHint: field.column.regexHint || '',
         anchorSample,
+        anchorSampleMetrics: field.column.anchorSampleMetrics || null,
         rowSamples,
         guardWords: guardList,
         column: field.column
@@ -2091,6 +2326,15 @@ async function extractLineItems(profile){
       .concat(descriptors.map(d=>d.fieldKey).filter(k => !columnPriority.includes(k)));
     let anchor = descriptors.find(d=>d.fieldKey===anchorHintKey) || descriptors.find(d=>d.fieldKey===order[0]) || descriptors[0];
     const guardMatch = cleaned => cleaned && guardWordsBase.has(cleaned);
+
+    const applyAnchorGuard = (desc, tokList=[]) => {
+      if(state.mode !== 'RUN') return { tokens: tokList, bandTokens: tokList };
+      const saved = desc.anchorSampleMetrics || (tableHints.rowAnchor?.fieldKey === desc.fieldKey ? tableHints.rowAnchor.metrics : null);
+      if(!saved) return { tokens: tokList, bandTokens: tokList };
+      const filtered = (tokList || []).filter(tok => anchorMatchForBox(saved, { x: tok.x, y: tok.y, w: tok.w, h: tok.h }, [tok], pageWidth, pageHeight));
+      if(filtered.length) return { tokens: tokList, bandTokens: filtered };
+      return { tokens: [], bandTokens: [] };
+    };
 
     const collectColumnTokens = desc => {
       let headerLimit = desc.headerBottom + desc.headerPad;
@@ -2138,12 +2382,19 @@ async function extractLineItems(profile){
     };
 
     let anchorTokens = collectColumnTokens(anchor);
+    let anchorBandTokens = anchorTokens;
+    if(anchorTokens.length){
+      const guarded = applyAnchorGuard(anchor, anchorTokens);
+      anchorTokens = guarded.tokens;
+      anchorBandTokens = guarded.bandTokens;
+    }
     if(!anchorTokens.length){
       for(const key of order){
         const cand = descriptors.find(d=>d.fieldKey===key);
         if(!cand) continue;
         const candidateTokens = collectColumnTokens(cand);
-        if(candidateTokens.length){ anchor = cand; anchorTokens = candidateTokens; break; }
+        const guarded = applyAnchorGuard(cand, candidateTokens);
+        if(guarded.tokens.length){ anchor = cand; anchorTokens = guarded.tokens; anchorBandTokens = guarded.bandTokens; break; }
       }
     }
 
@@ -2152,7 +2403,7 @@ async function extractLineItems(profile){
       continue;
     }
 
-    const rowBands = buildRowBands(anchorTokens, pageHeight);
+    const rowBands = buildRowBands(anchorBandTokens, pageHeight);
     if(!rowBands.length){
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
@@ -3121,9 +3372,11 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     correctionsApplied: corrections,
     tokens
   };
+  const anchorMetrics = computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras });
+  if(anchorMetrics) entry.anchorMetrics = anchorMetrics;
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column){
-    entry.column = extras.column;
+    entry.column = { ...extras.column };
     state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
     state.profile.tableHints.columns = state.profile.tableHints.columns || {};
     state.profile.tableHints.columns[step.fieldKey] = {
@@ -3132,11 +3385,15 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
       xband: extras.column.xband,
       header: extras.column.header || null,
       anchorSample: extras.column.anchorSample || null,
+      anchorSampleMetrics: extras.column.anchorSampleMetrics || null,
       rowSamples: extras.column.rowSamples || []
     };
+    if(extras.column.anchorSampleMetrics){
+      entry.column.anchorSampleMetrics = extras.column.anchorSampleMetrics;
+    }
     if(extras.column.anchorSample){
       if(!state.profile.tableHints.rowAnchor || state.profile.tableHints.rowAnchor.fieldKey === step.fieldKey){
-        state.profile.tableHints.rowAnchor = { fieldKey: step.fieldKey, page, sample: extras.column.anchorSample };
+        state.profile.tableHints.rowAnchor = { fieldKey: step.fieldKey, page, sample: extras.column.anchorSample, metrics: extras.column.anchorSampleMetrics || null };
       }
     }
   }
@@ -3488,7 +3745,15 @@ async function autoExtractFileWithProfile(file, profile){
       els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
     }
     const tokens = await ensureTokensForPage(state.pageNum);
-    const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, anchor: spec.anchor, bbox: spec.bbox, page: spec.page };
+    const fieldSpec = {
+      fieldKey: spec.fieldKey,
+      regex: spec.regex,
+      landmark: spec.landmark,
+      bbox: spec.bbox,
+      page: spec.page,
+      type: spec.type,
+      anchorMetrics: spec.anchorMetrics || null
+    };
     state.snappedPx = null; state.snappedText = '';
     const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
     if(value){
