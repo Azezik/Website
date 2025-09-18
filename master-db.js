@@ -44,6 +44,8 @@
   const cleanDescription = cleanText;
   const cleanLineNo = cleanText;
 
+  const DYNAMIC_ITEM_KEYS = ['sku', 'description', 'quantity', 'unitPrice', 'amount'];
+
   function extractFieldValue(record, key){
     const field = record?.fields?.[key];
     if(field && typeof field === 'object' && 'value' in field) return field.value;
@@ -81,6 +83,77 @@
       missing: item?.__missing || {},
       rowNumber: typeof item?.__rowNumber === 'number' ? item.__rowNumber : null
     }));
+  }
+
+  function summarizeDynamicCounts(items){
+    const counts = {};
+    DYNAMIC_ITEM_KEYS.forEach(key => {
+      counts[key] = items.reduce((acc, item) => acc + (item[key] !== '' ? 1 : 0), 0);
+    });
+    return counts;
+  }
+
+  function computeMajorityRowCount(counts, totalItems){
+    const positiveCounts = DYNAMIC_ITEM_KEYS.map(key => counts[key]).filter(count => count > 0);
+    if(!positiveCounts.length) return null;
+
+    const frequency = new Map();
+    positiveCounts.forEach(count => {
+      frequency.set(count, (frequency.get(count) || 0) + 1);
+    });
+
+    let bestCount = null;
+    let bestFrequency = 0;
+    frequency.forEach((freq, count) => {
+      if(freq > bestFrequency || (freq === bestFrequency && (bestCount === null || count > bestCount))){
+        bestFrequency = freq;
+        bestCount = count;
+      }
+    });
+
+    if(bestCount === null) return null;
+    return Math.min(bestCount, totalItems);
+  }
+
+  function selectMajorityRows(items){
+    const dynamicCounts = summarizeDynamicCounts(items);
+    const majorityCount = computeMajorityRowCount(dynamicCounts, items.length);
+    if(!majorityCount || majorityCount >= items.length){
+      return { items, majorityCount: majorityCount || items.length, dynamicCounts };
+    }
+
+    const annotated = items.map((item, idx) => {
+      const rowIdx = typeof item.rowNumber === 'number' ? item.rowNumber : (idx + 1);
+      const filledCount = DYNAMIC_ITEM_KEYS.reduce((acc, key) => acc + (item[key] !== '' ? 1 : 0), 0);
+      return { item, idx, rowIdx, filledCount };
+    });
+
+    const sorted = annotated.slice().sort((a, b) => {
+      if(a.rowIdx !== b.rowIdx) return a.rowIdx - b.rowIdx;
+      return a.idx - b.idx;
+    });
+
+    const chosenIndices = new Set();
+
+    sorted.forEach(entry => {
+      if(chosenIndices.size >= majorityCount) return;
+      if(entry.filledCount === 0) return;
+      chosenIndices.add(entry.idx);
+    });
+
+    if(chosenIndices.size < majorityCount){
+      sorted.forEach(entry => {
+        if(chosenIndices.size >= majorityCount) return;
+        chosenIndices.add(entry.idx);
+      });
+    }
+
+    const selected = annotated
+      .filter(entry => chosenIndices.has(entry.idx))
+      .sort((a, b) => a.idx - b.idx)
+      .map(entry => entry.item);
+
+    return { items: selected, majorityCount, dynamicCounts };
   }
 
   function csvEscape(val){
@@ -121,7 +194,17 @@
       items: prepareItems(record)
     }));
 
-    const allItems = prepared.flatMap(r => r.items);
+    const selected = prepared.map(entry => {
+      const selection = selectMajorityRows(entry.items);
+      return {
+        record: entry.record,
+        invoice: entry.invoice,
+        items: selection.items,
+        selection
+      };
+    });
+
+    const allItems = selected.flatMap(r => r.items);
 
     const counts = {
       sku_count: allItems.filter(it => it.sku !== '').length,
@@ -132,7 +215,14 @@
 
     const firstItem = allItems[0]?.original || null;
     const lastItem = allItems.length ? allItems[allItems.length-1].original : null;
-    console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem });
+    const rowMajority = selected.map(({ selection }, idx) => ({
+      index: idx,
+      original_rows: prepared[idx].items.length,
+      selected_rows: selection.items.length,
+      majority: selection.majorityCount,
+      dynamic_counts: selection.dynamicCounts
+    }));
+    console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem, row_majority: rowMajority });
 
     if(counts.sku_count === 0){
       throw new Error('Exporter input empty—SSOT not wired.');
@@ -205,7 +295,7 @@
     }
 
     const rows = [HEADERS];
-    prepared.forEach(({ invoice, items }) => {
+    selected.forEach(({ invoice, items }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
         if(lineTotal === '' && item.quantity && item.unitPrice){
