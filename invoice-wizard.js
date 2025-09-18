@@ -1629,6 +1629,13 @@ const DEFAULT_FIELDS = [
   }
 ];
 
+function refreshPromptElements(){
+  const stepEl = document.getElementById('stepLabel');
+  const questionEl = document.getElementById('questionText');
+  if(stepEl) els.stepLabel = stepEl;
+  if(questionEl) els.questionText = questionEl;
+}
+
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
@@ -1644,10 +1651,16 @@ function initStepsFromProfile(){
     type: d.type
   }));
   state.stepIdx = 0;
+  refreshPromptElements();
   updatePrompt();
+  if(els.confirmBtn) els.confirmBtn.disabled = false;
+  if(els.skipBtn) els.skipBtn.disabled = false;
+  if(els.backBtn) els.backBtn.disabled = state.stepIdx <= 0;
 }
 function updatePrompt(){
+  refreshPromptElements();
   const step = state.steps[state.stepIdx];
+  if(!els.stepLabel || !els.questionText) return;
   els.stepLabel.textContent = `Step ${state.stepIdx+1}/${state.steps.length}`;
   els.questionText.textContent = step?.prompt || 'Highlight field';
 }
@@ -1668,6 +1681,7 @@ function finishWizard(){
   document.getElementById('promptBar').innerHTML =
     `<span id="stepLabel">Wizard complete</span>
      <strong id="questionText">Click “Save & Return” or export JSON.</strong>`;
+  refreshPromptElements();
 }
 
 function afterConfirmAdvance(){
@@ -4197,7 +4211,7 @@ function ensureAnchorFor(fieldKey){
     }
   }
 }
-function renderSavedFieldsTable(){
+function renderSavedFieldsTable(latestOverride=null){
   const wizardId = state.activeWizardId;
   const preview = els.fieldsPreview;
   const label = wizardId ? formatWizardLabel(LS.getWizardMeta(state.username, wizardId)) : null;
@@ -4211,7 +4225,10 @@ function renderSavedFieldsTable(){
     return;
   }
   const db = LS.getDb(state.username, wizardId);
-  const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  let latest = latestOverride || null;
+  if(!latest){
+    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  }
   state.savedFieldsRecord = latest || null;
   const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
   const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
@@ -4562,12 +4579,13 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   state.currentLineItems = await extractLineItems(state.profile);
 
   const fid = state.currentFileId;
+  let compiledDoc = null;
   if(fid){
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     rawStore.upsert(fid, rec);
-    compileDocument(fid, state.currentLineItems);
+    compiledDoc = compileDocument(fid, state.currentLineItems);
   }
-  renderSavedFieldsTable();
+  renderSavedFieldsTable(compiledDoc);
 
   afterConfirmAdvance();
 });
@@ -4619,15 +4637,180 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
   if(state.activeWizardId && state.profile){
     saveProfile(state.username, state.activeWizardId, state.profile);
   }
-  compileDocument(state.currentFileId);
+  const compiled = compileDocument(state.currentFileId);
   els.wizardSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('extracted-data');
   populateModelSelect();
   populateDataDocTypeSelect();
+  renderSavedFieldsTable(compiled);
 });
 
 /* ---------------------------- Batch ------------------------------- */
+function computeSavedSelectionPx(fieldSpec, viewportOverride=null){
+  if(!fieldSpec) return null;
+  const totalPages = state.numPages || 1;
+  const targetPage = clamp(fieldSpec.page || 1, 1, totalPages);
+  const viewport = viewportOverride || state.pageViewports[targetPage-1] || state.viewport;
+  if(!viewport) return null;
+  let rawBox = null;
+  if(fieldSpec.bboxPct && typeof fieldSpec.bboxPct === 'object'){
+    rawBox = toPx(viewport, {
+      x0: fieldSpec.bboxPct.x0,
+      y0: fieldSpec.bboxPct.y0,
+      x1: fieldSpec.bboxPct.x1,
+      y1: fieldSpec.bboxPct.y1,
+      page: targetPage
+    });
+  } else if(Array.isArray(fieldSpec.bbox) && fieldSpec.bbox.length === 4){
+    rawBox = toPx(viewport, {
+      x0: fieldSpec.bbox[0],
+      y0: fieldSpec.bbox[1],
+      x1: fieldSpec.bbox[2],
+      y1: fieldSpec.bbox[3],
+      page: targetPage
+    });
+  } else if(fieldSpec.normBox && typeof fieldSpec.normBox === 'object'){
+    const { x0n, y0n, wN, hN } = fieldSpec.normBox;
+    if([x0n, y0n, wN, hN].every(v => typeof v === 'number' && Number.isFinite(v))){
+      const dims = getCanvasDimensions(viewport);
+      rawBox = {
+        x: x0n * dims.width,
+        y: y0n * dims.height,
+        w: wN * dims.width,
+        h: hN * dims.height,
+        page: targetPage
+      };
+    }
+  }
+  if(!rawBox) return null;
+  if(!Number.isFinite(rawBox.w) || !Number.isFinite(rawBox.h) || rawBox.w <= 0 || rawBox.h <= 0){
+    return null;
+  }
+  const applied = applyTransform({ x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h, page: targetPage });
+  applied.page = targetPage;
+  return applied;
+}
+
+async function autoAnswerStep(fieldSpec, stepIndex){
+  if(!fieldSpec || !fieldSpec.fieldKey) return;
+  state.stepIdx = stepIndex;
+  updatePrompt();
+  if(els.backBtn) els.backBtn.disabled = stepIndex <= 0;
+  if(els.skipBtn) els.skipBtn.disabled = false;
+
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.snappedPx = null;
+  state.snappedCss = null;
+  state.snappedText = '';
+  drawOverlay();
+
+  const totalPages = state.numPages || 1;
+  const targetPage = clamp(fieldSpec.page || state.pageNum || 1, 1, totalPages);
+  if(targetPage !== state.pageNum){
+    state.pageNum = targetPage;
+    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
+    updatePageIndicator();
+    const top = state.pageOffsets[state.pageNum-1] || 0;
+    if(els.viewer){
+      try {
+        els.viewer.scrollTo({ top, behavior: 'auto' });
+      } catch(err){
+        els.viewer.scrollTop = top;
+      }
+    }
+  } else {
+    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
+  }
+
+  const tokens = await ensureTokensForPage(state.pageNum);
+  const viewport = state.pageViewports[state.pageNum-1] || state.viewport || {};
+  const baseBox = computeSavedSelectionPx(fieldSpec, viewport);
+  if(baseBox){
+    const snap = snapToLine(tokens, baseBox);
+    state.snappedPx = snap.box;
+    state.snappedText = snap.text;
+    const { scaleX, scaleY } = getScaleFactors();
+    state.snappedCss = {
+      x: snap.box.x / scaleX,
+      y: snap.box.y / scaleY,
+      w: snap.box.w / scaleX,
+      h: snap.box.h / scaleY,
+      page: snap.box.page
+    };
+    drawOverlay();
+  } else {
+    state.snappedPx = null;
+    state.snappedCss = null;
+    state.snappedText = '';
+    drawOverlay();
+  }
+
+  let value = '';
+  let boxPx = state.snappedPx || baseBox || null;
+  let confidence = 0;
+  let raw = '';
+  let corrections = [];
+  let fieldTokens = [];
+
+  if(fieldSpec.kind === 'landmark'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else if(fieldSpec.kind === 'block'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else {
+    const res = await extractFieldValue(fieldSpec, tokens, viewport);
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
+    boxPx = res.boxPx || state.snappedPx || baseBox || null;
+    confidence = res.confidence || 0;
+    raw = res.raw || (state.snappedText || '').trim() || value || '';
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
+  }
+
+  if(!raw && value){
+    raw = value;
+  }
+
+  const vp = viewport || { width: 1, height: 1 };
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const nb = boxPx ? normalizeBox(boxPx, canvasW, canvasH) : null;
+  const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
+
+  const fileId = state.currentFileId;
+  if(fileId){
+    const arr = rawStore.get(fileId);
+    let conf = confidence;
+    if(value && ['subtotal_amount','tax_amount','invoice_total'].includes(fieldSpec.fieldKey)){
+      const dup = arr.find(r => r.fieldKey !== fieldSpec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value === value);
+      if(dup){ conf *= 0.5; }
+    }
+    const rec = {
+      fieldKey: fieldSpec.fieldKey,
+      raw,
+      value,
+      confidence: conf,
+      correctionsApplied: corrections,
+      page: state.pageNum,
+      bboxPct: pct,
+      ts: Date.now(),
+      tokens: fieldTokens
+    };
+    rawStore.upsert(fileId, rec);
+  }
+
+  if(typeof requestAnimationFrame === 'function'){
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+}
+
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
   if(profile){
@@ -4636,43 +4819,35 @@ async function autoExtractFileWithProfile(file, profile){
     ensureProfile();
   }
   hydrateFingerprintsFromProfile(state.profile);
-  const activeProfile = state.profile || profile || { fields: [] };
+  initStepsFromProfile();
+  renderSavedFieldsTable();
+
   await openFile(file);
-  for(const spec of (activeProfile.fields || [])){
-    if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
-      state.pageNum = clamp(spec.page+1, 1, state.numPages);
-      state.viewport = state.pageViewports[state.pageNum-1];
-      updatePageIndicator();
-      els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
-    }
-    const tokens = await ensureTokensForPage(state.pageNum);
-    const fieldSpec = {
-      fieldKey: spec.fieldKey,
-      regex: spec.regex,
-      landmark: spec.landmark,
-      bbox: spec.bbox,
-      page: spec.page,
-      type: spec.type,
-      anchorMetrics: spec.anchorMetrics || null
-    };
-    state.snappedPx = null; state.snappedText = '';
-    const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
-    if(value){
-      const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
-      const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-      const arr = rawStore.get(state.currentFileId);
-      let conf = confidence;
-      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
-      if(dup) conf *= 0.5;
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
-      rawStore.upsert(state.currentFileId, rec);
-    }
-    if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
+
+  const map = new Map((state.profile?.fields || []).map(f => [f.fieldKey, f]));
+  for(let i=0; i<state.steps.length; i++){
+    const step = state.steps[i];
+    if(!step?.fieldKey) continue;
+    const baseSpec = map.get(step.fieldKey);
+    if(!baseSpec) continue;
+    const fieldSpec = { ...baseSpec, ...step };
+    state.steps[i] = fieldSpec;
+    await autoAnswerStep(fieldSpec, i);
   }
+
   await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(activeProfile);
-  compileDocument(state.currentFileId, lineItems);
+  const lineItems = await extractLineItems(state.profile || { fields: [] });
+  state.currentLineItems = lineItems;
+  const compiled = compileDocument(state.currentFileId, lineItems);
+  finishWizard();
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.snappedPx = null;
+  state.snappedCss = null;
+  state.snappedText = '';
+  drawOverlay();
+  renderSavedFieldsTable(compiled);
+  return compiled;
 }
 
 async function processBatch(files){
