@@ -113,42 +113,34 @@ function showTab(id){
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
-let state = {
-  username: null,
-  docType: 'invoice',
-  activeWizardId: null,
-  activeWizardMeta: null,
-  wizardIndex: [],
-  mode: 'CONFIG',
-  modes: { rawData: false },
-  profile: null,             // Vendor profile (landmarks + fields + tableHints)
-  pdf: null,                 // pdf.js document
+const MODE_BASE_DEFAULTS = {
+  pdf: null,
   isImage: false,
   pageNum: 1,
   numPages: 1,
   viewport: { w: 0, h: 0, scale: 1 },
-  pageViewports: [],       // viewport per page
-  pageOffsets: [],         // y-offset of each page within pdfCanvas
-  tokensByPage: {},          // {page:number: Token[] in px}
-  selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
-  selectionPx: null,         // current user-drawn selection (px, page-relative)
-  snappedCss: null,          // snapped line box (CSS units, page-relative)
-  snappedPx: null,           // snapped line box (px, page-relative)
-  snappedText: '',           // snapped line text
-  pageTransform: { scale:1, rotation:0 }, // calibration transform per page
-  telemetry: [],            // extraction telemetry
-  grayCanvases: {},         // cached grayscale canvases by page
-  matchPoints: [],          // ring/anchor match points
-  steps: [],                 // wizard steps
+  pageViewports: [],
+  pageOffsets: [],
+  tokensByPage: {},
+  selectionCss: null,
+  selectionPx: null,
+  snappedCss: null,
+  snappedPx: null,
+  snappedText: '',
+  pageTransform: { scale: 1, rotation: 0 },
+  telemetry: [],
+  grayCanvases: {},
+  matchPoints: [],
+  steps: [],
   stepIdx: 0,
   currentFileName: '',
-  currentFileId: '',        // unique id per opened file
+  currentFileId: '',
   currentLineItems: [],
   savedFieldsRecord: null,
   lastOcrCropPx: null,
   cropAudits: [],
-  cropHashes: {},        // per page hash map for duplicate detection
-  pageSnapshots: {},     // tracks saved full-page debug PNGs
+  cropHashes: {},
+  pageSnapshots: {},
   pageRenderPromises: [],
   pageRenderReady: [],
   currentTraceId: null,
@@ -157,7 +149,288 @@ let state = {
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
+  perFieldCandidates: {},
+  columnMasks: {},
 };
+
+const CONFIG_MODE_DEFAULTS = {
+  fields: [],
+  questionOrder: [],
+  bboxMap: {},
+  edgeAnchors: {},
+  textHeights: {},
+  fingerprints: {},
+  landmarks: {},
+  columnBands: {},
+  ui: { selection: null, activeQuestion: null, overlays: [], savedFieldsPreview: null },
+  caches: { ocrCache: {} },
+};
+
+const RUN_MODE_DEFAULTS = {
+  resolvedFields: [],
+  rowBoxes: [],
+  perColumnValues: {},
+  extractedRows: [],
+  ui: { docHash: null, status: null, extractedData: null },
+  caches: { ocrCache: {} },
+  docHash: null,
+  status: null,
+};
+
+function cloneDefault(val){
+  if(val === null || typeof val !== 'object') return val;
+  if(Array.isArray(val)) return [];
+  if(val instanceof Map) return new Map();
+  if(val instanceof Set) return new Set();
+  const out = {};
+  for(const [k, v] of Object.entries(val)){
+    out[k] = cloneDefault(v);
+  }
+  return out;
+}
+
+function createConfigModeState(){
+  const base = cloneDefault(MODE_BASE_DEFAULTS);
+  const extras = cloneDefault(CONFIG_MODE_DEFAULTS);
+  return Object.assign(base, extras);
+}
+
+function createRunModeState(){
+  const base = cloneDefault(MODE_BASE_DEFAULTS);
+  const extras = cloneDefault(RUN_MODE_DEFAULTS);
+  return Object.assign(base, extras);
+}
+
+let appliedRoute = { mode: null, wizardId: null };
+let pendingRoute = null;
+
+let state = {
+  username: null,
+  docType: 'invoice',
+  activeWizardId: null,
+  activeWizardMeta: null,
+  wizardIndex: [],
+  mode: 'CONFIG',
+  modes: { rawData: false, boxMode: true },
+  profile: null,             // Vendor profile (landmarks + fields + tableHints)
+  configMode: createConfigModeState(),
+  runMode: createRunModeState(),
+};
+
+function activeModeState(mode = state.mode){
+  return mode === 'RUN' ? state.runMode : state.configMode;
+}
+
+const MODE_PROXY_KEYS = Object.keys(MODE_BASE_DEFAULTS);
+MODE_PROXY_KEYS.forEach(key => {
+  Object.defineProperty(state, key, {
+    get(){ return activeModeState()[key]; },
+    set(val){ activeModeState()[key] = val; },
+    enumerable: true,
+  });
+});
+
+function releaseDocumentResources(store){
+  if(!store) return;
+  try {
+    if(store.pdf && typeof store.pdf.destroy === 'function'){ store.pdf.destroy(); }
+    else if(store.pdf && typeof store.pdf.cleanup === 'function'){ store.pdf.cleanup(); }
+  } catch(err){ console.warn('pdf cleanup failed', err); }
+  store.pdf = null;
+  if(Array.isArray(store.pageRenderPromises)){
+    store.pageRenderPromises.forEach(p => {
+      try { if(p && typeof p.cancel === 'function') p.cancel(); }
+      catch(err){ console.warn('render promise cancel failed', err); }
+    });
+  }
+  store.pageRenderPromises = [];
+  store.pageRenderReady = [];
+}
+
+function clearOverlayCanvas(){
+  const canvas = els.overlayCanvas;
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if(ctx){ ctx.clearRect(0, 0, canvas.width || 0, canvas.height || 0); }
+}
+
+function clearModeUi(mode){
+  if(mode === 'CONFIG'){
+    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No preview yet.</p>';
+    if(els.savedJson) els.savedJson.textContent = '';
+  }
+  if(mode === 'RUN'){
+    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No extracted rows yet.</p>';
+    if(els.savedJson) els.savedJson.textContent = '';
+  }
+  const cf = document.getElementById('confirmedFields');
+  if(cf) cf.innerHTML = '<p class="sub">No data.</p>';
+  const cl = document.getElementById('confirmedLineItems');
+  if(cl) cl.innerHTML = '<p class="sub">No data.</p>';
+}
+
+function resetModeState(mode, opts={}){
+  const store = mode === 'RUN' ? state.runMode : state.configMode;
+  releaseDocumentResources(store);
+  const fresh = mode === 'RUN' ? createRunModeState() : createConfigModeState();
+  Object.keys(store).forEach(k => delete store[k]);
+  Object.assign(store, fresh);
+  if(opts.clearUi !== false && state.mode === mode){
+    clearOverlayCanvas();
+    clearModeUi(mode);
+  }
+}
+
+function routesEqual(a, b){
+  if(!a && !b) return true;
+  if(!a || !b) return false;
+  return (a.mode || null) === (b.mode || null) && (a.wizardId || null) === (b.wizardId || null);
+}
+
+function showWizardSection(){
+  if(els.app) els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'block';
+}
+
+function showDashboard(){
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  if(els.app) els.app.style.display = 'block';
+}
+
+function logButtonAction(action, extra={}){
+  const payload = Object.assign({
+    mode: state.mode,
+    wizardId: state.activeWizardId || null,
+    action
+  }, extra || {});
+  try {
+    console.log('[ui]', JSON.stringify(payload));
+  } catch(err){
+    console.log('[ui]', action, payload);
+  }
+}
+
+function syncInteractionModes(){
+  if(els.overlayCanvas){
+    els.overlayCanvas.style.pointerEvents = state.modes.boxMode ? 'auto' : 'none';
+  }
+  if(els.boxModeBtn){
+    els.boxModeBtn.classList.toggle('active', !!state.modes.boxMode);
+    els.boxModeBtn.setAttribute('aria-pressed', state.modes.boxMode ? 'true' : 'false');
+  }
+  if(els.rawDataToggle){
+    els.rawDataToggle.checked = !!state.modes.rawData;
+  }
+  if(els.rawDataBtn){
+    els.rawDataBtn.classList.toggle('active', !!state.modes.rawData);
+  }
+}
+
+function parseRoute(hash){
+  const clean = (hash || '').replace(/^#/, '');
+  if(!clean){
+    return { mode: null, wizardId: null };
+  }
+  const parts = clean.split('/').filter(Boolean);
+  if(parts.length >= 2){
+    const wizardId = decodeURIComponent(parts[1]);
+    if(parts[0] === 'configure') return { mode: 'CONFIG', wizardId };
+    if(parts[0] === 'run') return { mode: 'RUN', wizardId };
+  }
+  return { mode: null, wizardId: null };
+}
+
+function enterConfigMode(wizardId, opts={}){
+  if(!state.username){
+    pendingRoute = { mode: 'CONFIG', wizardId: wizardId || null };
+    return false;
+  }
+  const id = wizardId || state.activeWizardId;
+  if(!id){
+    pendingRoute = { mode: 'CONFIG', wizardId: null };
+    showDashboard();
+    appliedRoute = { mode: null, wizardId: null };
+    return false;
+  }
+  if(opts.skipHash !== true){
+    const hash = `#/configure/${encodeURIComponent(id)}`;
+    if(location.hash !== hash){ location.hash = hash; }
+  }
+  const shouldReset = opts.forceReset || state.mode !== 'CONFIG' || !routesEqual(appliedRoute, { mode:'CONFIG', wizardId:id });
+  if(shouldReset){ resetModeState('CONFIG'); }
+  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
+  state.mode = 'CONFIG';
+  showWizardSection();
+  ensureProfile();
+  initStepsFromProfile();
+  updatePrompt();
+  renderSavedFieldsTable();
+  syncInteractionModes();
+  appliedRoute = { mode: 'CONFIG', wizardId: id };
+  pendingRoute = null;
+  return true;
+}
+
+function enterRunMode(wizardId, opts={}){
+  if(!state.username){
+    pendingRoute = { mode: 'RUN', wizardId: wizardId || null };
+    return false;
+  }
+  const id = wizardId || state.activeWizardId;
+  if(!id){
+    pendingRoute = { mode: 'RUN', wizardId: null };
+    alert('Select or configure a wizard before running extraction.');
+    return false;
+  }
+  if(opts.skipHash !== true){
+    const hash = `#/run/${encodeURIComponent(id)}`;
+    if(location.hash !== hash){ location.hash = hash; }
+  }
+  const shouldReset = opts.forceReset || state.mode !== 'RUN' || !routesEqual(appliedRoute, { mode:'RUN', wizardId:id });
+  if(shouldReset){ resetModeState('RUN'); }
+  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
+  state.mode = 'RUN';
+  showWizardSection();
+  ensureProfile();
+  initStepsFromProfile();
+  updatePrompt();
+  renderSavedFieldsTable();
+  syncInteractionModes();
+  appliedRoute = { mode: 'RUN', wizardId: id };
+  pendingRoute = null;
+  return true;
+}
+
+function leaveWizardMode(){
+  const prevMode = state.mode;
+  if(prevMode === 'RUN'){ resetModeState('RUN'); }
+  if(prevMode === 'CONFIG'){ resetModeState('CONFIG'); }
+  state.mode = 'CONFIG';
+  showDashboard();
+  appliedRoute = { mode: null, wizardId: null };
+  syncInteractionModes();
+}
+
+function handleRouteChange(){
+  const route = parseRoute(location.hash);
+  if(!state.username){
+    pendingRoute = route;
+    appliedRoute = { mode: null, wizardId: null };
+    return;
+  }
+  pendingRoute = null;
+  if(route.mode === 'CONFIG'){
+    enterConfigMode(route.wizardId, { skipHash: true, forceReset: true });
+    return;
+  }
+  if(route.mode === 'RUN'){
+    enterRunMode(route.wizardId, { skipHash: true, forceReset: true });
+    return;
+  }
+  leaveWizardMode();
+}
+
+window.addEventListener('hashchange', handleRouteChange);
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
@@ -3892,6 +4165,43 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
+function buildPreviewRecordFromRaw(fileId, lineItems){
+  if(!fileId) return null;
+  const raw = rawStore.get(fileId) || [];
+  const fields = {};
+  raw.forEach(rec => {
+    if(!rec?.fieldKey) return;
+    fields[rec.fieldKey] = {
+      value: rec.value || '',
+      raw: rec.raw || '',
+      confidence: rec.confidence ?? 0,
+      correctionsApplied: Array.isArray(rec.correctionsApplied) ? rec.correctionsApplied.slice() : [],
+      tokens: Array.isArray(rec.tokens) ? rec.tokens.slice() : []
+    };
+  });
+  (state.profile?.fields || []).forEach(f => {
+    if(!fields[f.fieldKey]){
+      fields[f.fieldKey] = { value: '', raw: '', confidence: 0, correctionsApplied: [], tokens: [] };
+    }
+  });
+  const items = Array.isArray(lineItems) ? lineItems.map((item, idx) => ({
+    ...item,
+    line_no: item?.line_no || item?.line_no === 0 ? item.line_no : idx + 1
+  })) : [];
+  const label = state.activeWizardMeta ? formatWizardLabel(state.activeWizardMeta) : (state.activeWizardId || 'wizard');
+  return {
+    fileId,
+    fileHash: fileId,
+    fileName: fileMeta[fileId]?.fileName || 'sample-document',
+    processedAtISO: new Date().toISOString(),
+    fields,
+    lineItems: items,
+    wizardId: state.activeWizardId,
+    wizardLabel: label,
+    templateKey: `${state.username || 'user'}:${state.activeWizardId || 'wizard'}`
+  };
+}
+
 function compileDocument(fileId, lineItems){
   if(!state.username || !state.activeWizardId){
     console.warn('No active wizard selected; skipping compile.');
@@ -4065,15 +4375,12 @@ function renderResultsTable(){
 }
 
 function syncRawModeUI(){
-  const on = state.modes.rawData;
+  state.modes.rawData = !!state.modes.rawData;
   if(els.showRawToggle){
-    els.showRawToggle.checked = true;
-    els.showRawToggle.disabled = on;
-    if(!on) els.showRawToggle.checked = false;
+    els.showRawToggle.disabled = state.modes.rawData;
+    els.showRawToggle.checked = state.modes.rawData;
   }
-  if(els.rawDataBtn){
-    els.rawDataBtn.classList.toggle('active', on);
-  }
+  syncInteractionModes();
   renderResultsTable();
 }
 
@@ -4215,25 +4522,52 @@ function renderSavedFieldsTable(latestOverride=null){
   const wizardId = state.activeWizardId;
   const preview = els.fieldsPreview;
   const label = wizardId ? formatWizardLabel(LS.getWizardMeta(state.username, wizardId)) : null;
+  const savedJsonEl = els.savedJson;
   if(!wizardId){
     if(preview) preview.innerHTML = '<p class="sub">Select a wizard to preview its saved fields.</p>';
-    if(els.savedJson){
-      els.savedJson.textContent = state.profile ? serializeProfile(state.profile) : '';
-    }
+    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
     state.savedFieldsRecord = null;
     renderConfirmedTables(null);
     return;
   }
+
+  if(state.mode === 'CONFIG'){
+    const fileId = latestOverride?.fileId || state.currentFileId || null;
+    const previewRecord = latestOverride || (fileId ? buildPreviewRecordFromRaw(fileId, state.currentLineItems) : null);
+    state.savedFieldsRecord = previewRecord || null;
+    if(preview){
+      if(!previewRecord){
+        const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
+        preview.innerHTML = `<p class="sub">${msg}</p>`;
+      } else {
+        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+        const rows = order.map(k => ({ fieldKey:k, value: previewRecord.fields?.[k]?.value }))
+          .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+        if(!rows.length){
+          const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
+          preview.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const thead = `<tr>${rows.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+          const row = `<tr>${rows.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
+          preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+        }
+      }
+    }
+    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
+    renderConfirmedTables(previewRecord);
+    return;
+  }
+
   const db = LS.getDb(state.username, wizardId);
   let latest = latestOverride || null;
   if(!latest){
     latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
   }
   state.savedFieldsRecord = latest || null;
-  const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
-  const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
-    .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
   if(preview){
+    const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+    const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
+      .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
     if(!fields.length){
       const msg = label ? `${label}: No fields yet.` : 'No fields yet.';
       preview.innerHTML = `<p class="sub">${msg}</p>`;
@@ -4243,9 +4577,7 @@ function renderSavedFieldsTable(latestOverride=null){
       preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
     }
   }
-  if(els.savedJson){
-    els.savedJson.textContent = state.profile ? serializeProfile(state.profile) : '';
-  }
+  if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
   renderConfirmedTables(latest);
 }
 
@@ -4264,11 +4596,49 @@ function renderConfirmedTables(rec){
       if(liDiv) liDiv.innerHTML = '<p class="sub">Select a wizard to review line items.</p>';
       return;
     }
-    const latest = rec || LS.getDb(state.username, wizardId).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+    const mode = state.mode;
+    const latest = rec || (mode === 'RUN'
+      ? LS.getDb(state.username, wizardId).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0]
+      : state.savedFieldsRecord);
+
+    if(mode === 'CONFIG'){
+      if(fDiv){
+        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+        const rows = order.map(key => ({ key, field: latest?.fields?.[key] }))
+          .filter(entry => entry.field && String(entry.field.value || '').trim() !== '');
+        if(!rows.length){
+          const msg = meta ? `${formatWizardLabel(meta)}: No sample fields.` : 'No sample fields yet.';
+          fDiv.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const html = rows.map(({ key, field }) => {
+            const warn = (field.confidence || 0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
+            const conf = `<span class="confidence">${Math.round((field.confidence||0)*100)}%</span>`;
+            return `<tr><td>${key}</td><td>${(field.value||'').toString().replace(/</g,'&lt;')}${warn}${conf}</td></tr>`;
+          }).join('');
+          fDiv.innerHTML = `<table class="line-items-table"><tbody>${html}</tbody></table>`;
+        }
+      }
+      if(liDiv){
+        const items = Array.isArray(latest?.lineItems) ? latest.lineItems : [];
+        if(!items.length){
+          const msg = meta ? `${formatWizardLabel(meta)}: No sample line items.` : 'No sample line items yet.';
+          liDiv.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const rows = items.map(it=>{
+            const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
+            return `<tr><td>${(it.description||'')}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
+          }).join('');
+          liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${rows}</tbody></table>`;
+        }
+      }
+      return;
+    }
+
+    const latestRun = latest;
     if(fDiv){
       const typeMap = {};
       (state.profile?.fields||[]).forEach(f=>{ typeMap[f.fieldKey]=f.type; });
-      const statics = Object.entries(latest?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
+      const statics = Object.entries(latestRun?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
       if(!statics.length){
         const msg = meta ? `${formatWizardLabel(meta)}: No fields yet.` : 'No fields yet.';
         fDiv.innerHTML = `<p class="sub">${msg}</p>`;
@@ -4282,7 +4652,7 @@ function renderConfirmedTables(rec){
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
         fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
           const db = LS.getDb(state.username, wizardId);
-          const record = db.find(r=>r.fileId===latest?.fileId);
+          const record = db.find(r=>r.fileId===latestRun?.fileId);
           if(record && record.fields?.[inp.dataset.field]){
             record.fields[inp.dataset.field].value = inp.value;
             record.fields[inp.dataset.field].confidence = 1;
@@ -4293,7 +4663,7 @@ function renderConfirmedTables(rec){
       }
     }
     if(liDiv){
-      const items = latest?.lineItems || [];
+      const items = latestRun?.lineItems || [];
       if(!items.length){
         const msg = meta ? `${formatWizardLabel(meta)}: No line items.` : 'No line items.';
         liDiv.innerHTML = `<p class="sub">${msg}</p>`;
@@ -4314,85 +4684,119 @@ function renderConfirmedTables(rec){
 // Auth
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
-  state.username = (els.username?.value || 'demo').trim();
+  const username = (els.username?.value || 'demo').trim();
+  if(!username){
+    alert('Enter a username to continue.');
+    return;
+  }
+  state.username = username;
   state.docType = els.docType?.value || 'invoice';
   state.profile = null;
   state.activeWizardId = null;
   state.activeWizardMeta = null;
+  state.wizardIndex = [];
+  state.mode = 'CONFIG';
+  state.modes.rawData = false;
+  state.modes.boxMode = true;
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
   hydrateFingerprintsFromProfile(null);
   try { LS.migrateLegacy(state.username); } catch(err){ console.warn('Legacy migration skipped', err); }
+  logButtonAction('loginSubmit', { username: state.username });
+  refreshWizardIndex();
+  populateModelSelect();
+  populateDataDocTypeSelect();
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
-  refreshWizardIndex();
-  populateModelSelect();
-  renderSavedFieldsTable();
-  renderResultsTable();
+  handleRouteChange();
+  if(!appliedRoute.mode){
+    renderSavedFieldsTable();
+    syncInteractionModes();
+  }
   renderReports();
+  syncRawModeUI();
 });
 els.logoutBtn?.addEventListener('click', ()=>{
+  logButtonAction('logout');
+  leaveWizardMode();
   state.username = null;
   state.activeWizardId = null;
   state.activeWizardMeta = null;
   state.profile = null;
   state.wizardIndex = [];
-  state.mode = 'CONFIG';
   state.docType = 'invoice';
+  state.mode = 'CONFIG';
+  state.modes.rawData = false;
+  state.modes.boxMode = true;
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
   hydrateFingerprintsFromProfile(null);
   if(els.docType) els.docType.value = 'invoice';
   populateModelSelect();
   populateDataDocTypeSelect();
   renderSavedFieldsTable();
-  renderResultsTable();
   renderReports();
+  syncRawModeUI();
   els.app.style.display = 'none';
-  els.wizardSection.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
+  appliedRoute = { mode: null, wizardId: null };
+  pendingRoute = null;
+  if(location.hash){ location.hash = ''; }
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
+  logButtonAction('resetWizardClick', { wizardId: state.activeWizardId || null });
   if(!state.username || !state.activeWizardId){
     alert('Select a wizard to reset.');
     return;
   }
   if(!confirm('Clear saved wizard and extracted records?')) return;
-  LS.removeWizard(state.username, state.activeWizardId);
+  const wizardId = state.activeWizardId;
+  LS.removeWizard(state.username, wizardId);
+  logButtonAction('resetWizardConfirmed', { wizardId });
+  leaveWizardMode();
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
   state.profile = null;
   state.activeWizardId = null;
   state.activeWizardMeta = null;
   hydrateFingerprintsFromProfile(null);
   refreshWizardIndex();
   populateModelSelect();
+  populateDataDocTypeSelect();
   renderSavedFieldsTable();
-  renderResultsTable();
   renderReports();
+  syncRawModeUI();
+  appliedRoute = { mode: null, wizardId: null };
+  pendingRoute = null;
+  if(location.hash){ location.hash = ''; }
   alert('Wizard and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
+  logButtonAction('enterConfigClicked', { wizardId: state.activeWizardId || null });
   if(!state.username){
     alert('Please log in first.');
     return;
   }
-  if(!state.activeWizardId){
+  let wizardId = state.activeWizardId;
+  if(!wizardId){
     const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
     const name = prompt('Name this wizard', defaultLabel) || defaultLabel;
-    const id = createWizard(state.docType, name);
+    wizardId = createWizard(state.docType, name);
     populateModelSelect();
     populateDataDocTypeSelect();
-    if(!id){
+    if(!wizardId){
       alert('Unable to create wizard.');
       return;
     }
   }
-  state.mode = 'CONFIG';
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'block';
-  ensureProfile();
-  initStepsFromProfile();
-  renderSavedFieldsTable();
+  enterConfigMode(wizardId, { forceReset: true });
 });
 if(els.newWizardBtn){
   els.newWizardBtn.style.display = '';
   els.newWizardBtn.addEventListener('click', ()=>{
+    logButtonAction('newWizard');
     if(!state.username){
       alert('Please log in first.');
       return;
@@ -4400,46 +4804,65 @@ if(els.newWizardBtn){
     const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
     const name = prompt('Name for the new wizard', defaultLabel);
     if(name === null) return;
-    const id = createWizard(state.docType, name);
+    const wizardId = createWizard(state.docType, name);
     populateModelSelect();
     populateDataDocTypeSelect();
-    if(id){
-      setActiveWizard(id, { skipSelectUpdate: false, skipPreview: true, refreshResults: false });
-      renderSavedFieldsTable();
-      renderResultsTable();
+    if(wizardId){
+      setActiveWizard(wizardId, { skipSelectUpdate: false, skipPreview: true, refreshResults: false });
       renderReports();
+      syncRawModeUI();
+      enterConfigMode(wizardId, { forceReset: true });
       alert('Wizard created. Configure it to begin extracting.');
     }
   });
 }
-els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
+els.demoBtn?.addEventListener('click', ()=>{
+  logButtonAction('demoFilePicker');
+  els.wizardFile?.click();
+});
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
+  logButtonAction('changeDocType', { value: state.docType });
   populateModelSelect();
 });
 
-els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
-els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
+els.dataDocType?.addEventListener('change', ()=>{
+  logButtonAction('changeDataDocType', { value: els.dataDocType.value || '__all__' });
+  renderResultsTable();
+  renderReports();
+});
+els.showRawToggle?.addEventListener('change', ()=>{
+  logButtonAction('toggleShowRaw', { value: !!els.showRawToggle.checked });
+  renderResultsTable();
+});
 els.rawDataToggle?.addEventListener('change', ()=>{
   state.modes.rawData = !!els.rawDataToggle.checked;
+  logButtonAction('toggleRawData', { source: 'toggle', value: state.modes.rawData });
   syncRawModeUI();
 });
 els.rawDataBtn?.addEventListener('click', ()=>{
   state.modes.rawData = !state.modes.rawData;
+  logButtonAction('toggleRawData', { source: 'button', value: state.modes.rawData });
   if(els.rawDataToggle) els.rawDataToggle.checked = state.modes.rawData;
   syncRawModeUI();
+});
+els.boxModeBtn?.addEventListener('click', ()=>{
+  state.modes.boxMode = !state.modes.boxMode;
+  logButtonAction('toggleBoxMode', { value: state.modes.boxMode });
+  syncInteractionModes();
 });
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
   modelSelect.addEventListener('change', ()=>{
     const id = modelSelect.value;
+    logButtonAction('selectWizard', { wizardId: id || null });
     if(!id){
       setActiveWizard(null, { skipSelectUpdate: true });
       renderSavedFieldsTable();
-      renderResultsTable();
       renderReports();
+      syncRawModeUI();
       return;
     }
     setActiveWizard(id, { skipSelectUpdate: true });
@@ -4474,7 +4897,10 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length) processBatch(files);
+      if (files.length){
+        logButtonAction('dropzoneFiles', { count: files.length });
+        processBatch(files);
+      }
     }
   });
 });
@@ -4482,7 +4908,31 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length) processBatch(files);
+  if (files.length){
+    logButtonAction('fileInputSelected', { count: files.length });
+    processBatch(files);
+  }
+  e.target.value = '';
+});
+
+els.uploadBtn?.addEventListener('click', ()=>{
+  if(!state.username){ alert('Log in first.'); return; }
+  if(!state.activeWizardId){ alert('Select a wizard first.'); return; }
+  logButtonAction('uploadSingleFile');
+  els.wizardFile?.click();
+});
+
+els.wizardFile?.addEventListener('change', async e=>{
+  const file = e.target.files?.[0];
+  if(!file) return;
+  logButtonAction('wizardFileSelected', { name: file.name, size: file.size });
+  try {
+    await openFile(file);
+  } catch(err){
+    console.error('wizardFile open failed', err);
+  } finally {
+    e.target.value = '';
+  }
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
@@ -4490,15 +4940,10 @@ els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
-// Single-file open (wizard)
-els.wizardFile?.addEventListener('change', async e=>{
-  const f = e.target.files?.[0]; if(!f) return;
-  await openFile(f);
-});
-
 // Paging
 els.prevPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum<=1) return;
+  logButtonAction('prevPage', { page: state.pageNum - 1 });
   state.pageNum--; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -4506,6 +4951,7 @@ els.prevPageBtn?.addEventListener('click', ()=>{
 });
 els.nextPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum>=state.numPages) return;
+  logButtonAction('nextPage', { page: state.pageNum + 1 });
   state.pageNum++; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -4514,20 +4960,29 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
+  logButtonAction('clearSelection');
   state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx > 0) goToStep(state.stepIdx - 1);
+  if(state.stepIdx <= 0) return;
+  logButtonAction('backStep', { to: state.stepIdx - 1 });
+  goToStep(state.stepIdx - 1);
 });
 
 els.skipBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx < state.steps.length - 1) goToStep(state.stepIdx + 1);
-  else finishWizard();
+  if(state.stepIdx < state.steps.length - 1){
+    logButtonAction('skipStep', { to: state.stepIdx + 1 });
+    goToStep(state.stepIdx + 1);
+  } else {
+    logButtonAction('skipToFinish');
+    finishWizard();
+  }
 });
 
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
+  logButtonAction('confirmStep', { step: state.stepIdx, fieldKey: state.steps[state.stepIdx]?.fieldKey || null });
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
@@ -4583,7 +5038,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   if(fid){
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     rawStore.upsert(fid, rec);
-    compiledDoc = compileDocument(fid, state.currentLineItems);
+    if(state.mode === 'RUN'){
+      compiledDoc = compileDocument(fid, state.currentLineItems);
+    } else {
+      compiledDoc = buildPreviewRecordFromRaw(fid, state.currentLineItems);
+    }
   }
   renderSavedFieldsTable(compiledDoc);
 
@@ -4592,6 +5051,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
 
 // Export JSON (profile)
 els.exportBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportProfile');
   ensureProfile();
   const blob = new Blob([serializeProfile(state.profile)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -4603,9 +5063,14 @@ els.exportBtn?.addEventListener('click', ()=>{
 
 // Export flat Master Database CSV
 els.exportMasterDbBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportMasterDb');
+  const wizardId = state.activeWizardId;
+  if(!wizardId){ alert('Select a wizard before exporting.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const csv = MasterDB.toCsv(state.savedFieldsRecord);
+    const records = LS.getDb(state.username, wizardId);
+    if(!records.length){ alert('No extracted records to export.'); return; }
+    const csv = MasterDB.toCsv(records);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -4618,9 +5083,14 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
   }
 });
 els.exportMissingBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportMissingCells');
+  const wizardId = state.activeWizardId;
+  if(!wizardId){ alert('Select a wizard before exporting diagnostics.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
+    const records = LS.getDb(state.username, wizardId);
+    if(!records.length){ alert('No extracted records to analyse.'); return; }
+    const { missingMap } = MasterDB.flatten(records);
     const json = JSON.stringify(missingMap, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -4634,16 +5104,19 @@ els.exportMissingBtn?.addEventListener('click', ()=>{
   }
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
+  logButtonAction('finishWizard');
   if(state.activeWizardId && state.profile){
     saveProfile(state.username, state.activeWizardId, state.profile);
   }
   const compiled = compileDocument(state.currentFileId);
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
+  leaveWizardMode();
   populateModelSelect();
   populateDataDocTypeSelect();
   renderSavedFieldsTable(compiled);
+  renderReports();
+  syncRawModeUI();
+  showTab('extracted-data');
+  if(location.hash){ location.hash = ''; }
 });
 
 /* ---------------------------- Batch ------------------------------- */
@@ -4852,6 +5325,7 @@ async function autoExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
+  logButtonAction('processBatchStart', { count: files.length });
   if(!state.username){
     alert('Please log in first.');
     return;
@@ -4875,9 +5349,11 @@ async function processBatch(files){
     return;
   }
 
-  state.mode = 'RUN';
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'block';
+  const entered = enterRunMode(wizardId, { forceReset: true, skipSelectUpdate: true, refreshResults: false });
+  if(!entered){
+    logButtonAction('processBatchAborted', { wizardId });
+    return;
+  }
 
   state.profile = migrateProfile(clonePlain(profile));
   hydrateFingerprintsFromProfile(state.profile);
@@ -4888,14 +5364,13 @@ async function processBatch(files){
     await autoExtractFileWithProfile(f, state.profile);
   }
 
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
   renderResultsTable();
   renderReports();
+  logButtonAction('processBatchComplete', { count: files.length, wizardId });
 }
 
 /* ------------------------ Init on load ---------------------------- */
-renderResultsTable();
 renderReports();
 syncRawModeUI();
+handleRouteChange();
+
