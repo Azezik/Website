@@ -2522,6 +2522,76 @@ async function extractLineItems(profile){
     };
   }
 
+  function computeTrimmedAverage(counts){
+    if(!Array.isArray(counts) || !counts.length) return null;
+    if(counts.length < 3){
+      const sum = counts.reduce((acc, val) => acc + val, 0);
+      return counts.length ? sum / counts.length : null;
+    }
+    const sorted = counts.slice().sort((a,b)=>a-b);
+    const trimmed = sorted.slice(1, sorted.length - 1);
+    if(!trimmed.length){
+      const sum = counts.reduce((acc, val) => acc + val, 0);
+      return counts.length ? sum / counts.length : null;
+    }
+    const sum = trimmed.reduce((acc, val) => acc + val, 0);
+    return trimmed.length ? sum / trimmed.length : null;
+  }
+
+  function pickRowTarget(counts, fallback){
+    if(!Array.isArray(counts) || !counts.length) return fallback;
+    const trimmed = computeTrimmedAverage(counts);
+    if(Number.isFinite(trimmed) && trimmed > 0){
+      return Math.round(trimmed);
+    }
+    const sum = counts.reduce((acc, val) => acc + val, 0);
+    const avg = counts.length ? sum / counts.length : null;
+    if(Number.isFinite(avg) && avg > 0){
+      return Math.round(avg);
+    }
+    return fallback;
+  }
+
+  function pruneRowsBySupport(rows, target){
+    if(!Array.isArray(rows) || rows.length <= target) return rows;
+    const buckets = new Map();
+    rows.forEach((row, idx) => {
+      const support = row.__columnHits || 0;
+      if(!buckets.has(support)) buckets.set(support, []);
+      buckets.get(support).push({ row, idx });
+    });
+    const toDrop = new Set();
+    let remaining = rows.length;
+    const supportLevels = Array.from(buckets.keys()).sort((a,b)=>a-b);
+    for(const level of supportLevels){
+      const entries = buckets.get(level);
+      entries.sort((a,b)=>{
+        const aTokens = a.row.__totalTokens || 0;
+        const bTokens = b.row.__totalTokens || 0;
+        if(aTokens !== bTokens) return aTokens - bTokens;
+        const aAnchor = a.row.__anchorTokens || 0;
+        const bAnchor = b.row.__anchorTokens || 0;
+        if(aAnchor !== bAnchor) return aAnchor - bAnchor;
+        return b.idx - a.idx;
+      });
+      for(const entry of entries){
+        if(remaining <= target) break;
+        toDrop.add(entry.idx);
+        remaining--;
+      }
+      if(remaining <= target) break;
+    }
+    if(remaining > target){
+      for(let i=rows.length-1; i>=0 && remaining>target; i--){
+        if(!toDrop.has(i)){
+          toDrop.add(i);
+          remaining--;
+        }
+      }
+    }
+    return rows.filter((row, idx) => !toDrop.has(idx));
+  }
+
   const results=[];
   const layout={ pages:{} };
   const configuredPages = Array.from(new Set(colFields.map(f=>f.page||1))).sort((a,b)=>a-b);
@@ -2741,19 +2811,21 @@ async function extractLineItems(profile){
       continue;
     }
 
-    const pageRowEntries=[];
+    const columnRowCounts = new Map();
+    const pageRows = [];
     for(const band of rowBands){
       const row={
         line_no: '',
         __page: page,
-        __rowIndex: globalRowIndex,
-        __rowNumber: globalRowIndex + 1,
         __y0: band.y0,
         __y1: band.y1,
         __missing:{},
         __cells:{},
         __anchorField: anchor.fieldKey,
-        __anchorText: band.text
+        __anchorText: band.text,
+        __columnHits: 0,
+        __totalTokens: 0,
+        __anchorTokens: 0
       };
 
       for(const desc of descriptors){
@@ -2782,6 +2854,14 @@ async function extractLineItems(profile){
           if(!fingerprintOk){
             value = '';
           }
+          row.__totalTokens += cellTokens.length;
+          if(desc.fieldKey === anchor.fieldKey){
+            row.__anchorTokens += cellTokens.length;
+          } else {
+            row.__columnHits += 1;
+          }
+          const prevCount = columnRowCounts.get(desc.fieldKey) || 0;
+          columnRowCounts.set(desc.fieldKey, prevCount + 1);
         }
         if(desc.fieldKey === anchor.fieldKey && !value && band.text){
           value = band.text.trim();
@@ -2833,7 +2913,6 @@ async function extractLineItems(profile){
       row.unit_price = row.unit_price || '';
       row.amount = row.amount || '';
       if(row.line_no === '' && !row.__missing.line_no){ row.__missing.line_no = true; }
-      if(row.line_no === '' || row.line_no === undefined){ row.line_no = row.__rowNumber; }
 
       if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
       if(row.unit_price){
@@ -2849,14 +2928,39 @@ async function extractLineItems(profile){
         if(Number.isFinite(q) && Number.isFinite(u)) row.amount=(q*u).toFixed(2);
       }
 
+      pageRows.push(row);
+    }
+
+    const allCounts = descriptors.map(d => columnRowCounts.get(d.fieldKey) || 0).filter(c => c > 0);
+    const nonAnchorCounts = descriptors
+      .filter(d => d.fieldKey !== anchor.fieldKey)
+      .map(d => columnRowCounts.get(d.fieldKey) || 0)
+      .filter(c => c > 0);
+    // Prefer consensus from supporting columns; fall back to all columns (including the anchor)
+    // when they're the only ones with data.
+    const countsForAverage = nonAnchorCounts.length ? nonAnchorCounts : allCounts;
+    let targetRowCount = pageRows.length;
+    if(countsForAverage.length){
+      const desired = pickRowTarget(countsForAverage, pageRows.length);
+      if(Number.isFinite(desired) && desired > 0){
+        targetRowCount = Math.min(pageRows.length, Math.max(1, desired));
+      }
+    }
+
+    const filteredRows = targetRowCount < pageRows.length ? pruneRowsBySupport(pageRows, targetRowCount) : pageRows;
+    const pageRowEntries=[];
+    for(const row of filteredRows){
+      row.__rowIndex = globalRowIndex;
+      row.__rowNumber = globalRowIndex + 1;
+      if(row.line_no === '' || row.line_no === undefined){ row.line_no = row.__rowNumber; }
       results.push(row);
-      pageRowEntries.push({ index: row.__rowIndex, y0: band.y0, y1: band.y1 });
+      pageRowEntries.push({ index: row.__rowIndex, y0: row.__y0, y1: row.__y1 });
       globalRowIndex++;
     }
 
     const colLayout = descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 }));
-    const top = Math.min(...rowBands.map(r=>r.y0));
-    const bottom = pageHeight;
+    const top = filteredRows.length ? Math.min(...filteredRows.map(r=>r.__y0)) : Math.min(...rowBands.map(r=>r.y0));
+    const bottom = filteredRows.length ? Math.max(...filteredRows.map(r=>r.__y1)) : pageHeight;
     layout.pages[page] = { page, columns: colLayout, rows: pageRowEntries, top, bottom };
   }
 
