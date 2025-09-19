@@ -375,8 +375,9 @@ function enterRunMode(wizardId){
   renderResultsTable();
   renderReports();
   if(els.loginSection) els.loginSection.style.display = 'none';
-  if(els.app) els.app.style.display = 'none';
-  if(els.wizardSection) els.wizardSection.style.display = 'block';
+  if(els.app) els.app.style.display = 'block';
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  showTab('document-dashboard');
   drawOverlay();
   renderCropAuditPanel();
   renderTelemetry();
@@ -386,7 +387,7 @@ function handleRouteChange(force = false){
   const parsed = parseRoute(window.location.hash);
   if(!parsed){
     const fallbackId = state.configMode.wizardId || state.runMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-    navigateToRoute('CONFIG', fallbackId, { replace: true, force: true });
+    navigateToRoute('RUN', fallbackId, { replace: true, force: true });
     return;
   }
   const key = `${parsed.mode}:${sanitizeWizardId(parsed.wizardId)}`;
