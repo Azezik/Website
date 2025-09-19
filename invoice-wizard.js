@@ -2918,11 +2918,19 @@ async function extractLineItems(profile){
       const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
       const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
       const align = field.column.align || 'left';
-      const fallbackMargin = Math.max(2, typicalHeight * 0.4);
-      const baseLeft = bandPx.x;
-      const baseRight = bandPx.x + bandPx.w;
-      const fallbackX0 = Math.max(0, baseLeft - fallbackMargin);
-      const fallbackX1 = Math.min(pageWidth, baseRight + fallbackMargin);
+      const baseLeftRaw = bandPx.x;
+      const baseRightRaw = bandPx.x + bandPx.w;
+      let baseLeft = Number.isFinite(baseLeftRaw) ? baseLeftRaw : 0;
+      let baseRight = Number.isFinite(baseRightRaw) ? baseRightRaw : baseLeft + 1;
+      const minBandWidth = Math.max(1, Math.abs(bandPx.w) || 1);
+      baseLeft = Math.max(0, Math.min(pageWidth, baseLeft));
+      baseRight = Math.max(baseLeft, Math.min(pageWidth, baseRight));
+      if(baseRight - baseLeft < 1){
+        baseLeft = Math.max(0, Math.min(pageWidth - 1, baseLeft));
+        baseRight = Math.min(pageWidth, Math.max(baseLeft + 1, baseLeft + minBandWidth));
+      }
+      const fallbackX0 = baseLeft;
+      const fallbackX1 = baseRight;
       const anchorFera = tableHints.rowAnchor?.fieldKey === field.fieldKey ? (tableHints.rowAnchor.fera || tableHints.rowAnchor.metrics || null) : null;
       const savedFera = field.column.fera || field.anchorMetrics || anchorFera || null;
       const feraProjection = projectColumnFera(savedFera, pageWidth, pageHeight);
@@ -2942,17 +2950,17 @@ async function extractLineItems(profile){
       const feraTolerance = savedFera
         ? Math.max(6, typicalHeight * 0.9, expectedWidth * (align === 'right' ? 0.2 : align === 'center' ? 0.25 : 0.35))
         : null;
-      const searchMargin = savedFera
-        ? Math.max(4, typicalHeight * 0.75, feraTolerance || 0)
-        : Math.max(2, typicalHeight * 0.4);
-      let searchX0 = Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
-      let searchX1 = Number.isFinite(expectedRight) ? expectedRight : baseRight;
-      searchX0 = Math.max(0, searchX0 - searchMargin);
-      searchX1 = Math.min(pageWidth, searchX1 + searchMargin);
-      if(searchX1 <= searchX0){
-        searchX0 = fallbackX0;
-        searchX1 = fallbackX1;
+      let searchX0 = Number.isFinite(feraProjection?.x0) ? feraProjection.x0 : Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
+      let searchX1 = Number.isFinite(feraProjection?.x1) ? feraProjection.x1 : Number.isFinite(expectedRight) ? expectedRight : baseRight;
+      if(Number.isFinite(expectedWidth) && (!Number.isFinite(searchX1) || searchX1 <= searchX0)){
+        searchX1 = Number.isFinite(searchX0) ? searchX0 + expectedWidth : searchX1;
       }
+      if(!Number.isFinite(searchX0) || !Number.isFinite(searchX1) || searchX1 <= searchX0){
+        searchX0 = baseLeft;
+        searchX1 = baseRight;
+      }
+      searchX0 = Math.max(0, Math.min(pageWidth, searchX0));
+      searchX1 = Math.max(searchX0, Math.min(pageWidth, searchX1));
       const sourcePage = field.__sourcePage || field.page || page;
       return {
         fieldKey: field.fieldKey,
@@ -3047,16 +3055,49 @@ async function extractLineItems(profile){
         }
         return { hits, guardStopped };
       };
+      const filterByFeraTolerance = list => {
+        if(!Array.isArray(list) || !list.length) return [];
+        if(!desc.feraActive || !Number.isFinite(desc.feraTolerance) || desc.feraTolerance <= 0) return list.slice();
+        const align = desc.align || 'left';
+        const scored = list.map(token => {
+          const leftEdge = token.x;
+          const rightEdge = token.x + token.w;
+          const center = leftEdge + token.w/2;
+          let diff = null;
+          if(align === 'right' && Number.isFinite(desc.expectedRight)){
+            diff = Math.abs(rightEdge - desc.expectedRight);
+          } else if(align === 'center' && Number.isFinite(desc.expectedCenter)){
+            diff = Math.abs(center - desc.expectedCenter);
+          } else if(Number.isFinite(desc.expectedLeft)){
+            diff = Math.abs(leftEdge - desc.expectedLeft);
+          } else if(Number.isFinite(desc.expectedRight)){
+            diff = Math.abs(rightEdge - desc.expectedRight);
+          } else if(Number.isFinite(desc.expectedCenter)){
+            diff = Math.abs(center - desc.expectedCenter);
+          }
+          return { token, diff };
+        }).filter(entry => Number.isFinite(entry.diff));
+        if(!scored.length) return list.slice();
+        const within = scored.filter(entry => entry.diff <= desc.feraTolerance);
+        if(!within.length) return [];
+        within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
+        const bestDiff = within[0].diff;
+        const closenessAllowance = Math.max(desc.typicalHeight || 0, desc.feraTolerance * 0.3, 6);
+        const keepThreshold = Math.min(desc.feraTolerance, bestDiff + closenessAllowance);
+        const keepSet = new Set(within.filter(entry => entry.diff <= keepThreshold).map(entry => entry.token));
+        return list.filter(token => keepSet.has(token));
+      };
       const primary = gather(desc.x0, desc.x1);
       let guardStopped = primary.guardStopped || null;
-      let colToks = primary.hits;
+      let colToks = filterByFeraTolerance(primary.hits);
       let usedFallbackWindow = false;
       if(!colToks.length && desc.feraActive && Number.isFinite(desc.fallbackX0) && Number.isFinite(desc.fallbackX1)){
         const fallback = gather(desc.fallbackX0, desc.fallbackX1);
         usedFallbackWindow = true;
-        colToks = fallback.hits;
+        colToks = filterByFeraTolerance(fallback.hits);
         if(!guardStopped) guardStopped = fallback.guardStopped || null;
       }
+      if(!Array.isArray(colToks)) colToks = [];
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
       return { tokens: colToks, usedFallbackWindow, guardStopped };
     };
