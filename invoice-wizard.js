@@ -113,48 +113,273 @@ function showTab(id){
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
-let state = {
-  username: null,
-  docType: 'invoice',
-  mode: 'CONFIG',
-  modes: { rawData: false },
-  profile: null,             // Vendor profile (landmarks + fields + tableHints)
-  pdf: null,                 // pdf.js document
-  isImage: false,
-  pageNum: 1,
-  numPages: 1,
-  viewport: { w: 0, h: 0, scale: 1 },
-  pageViewports: [],       // viewport per page
-  pageOffsets: [],         // y-offset of each page within pdfCanvas
-  tokensByPage: {},          // {page:number: Token[] in px}
-  selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
-  selectionPx: null,         // current user-drawn selection (px, page-relative)
-  snappedCss: null,          // snapped line box (CSS units, page-relative)
-  snappedPx: null,           // snapped line box (px, page-relative)
-  snappedText: '',           // snapped line text
-  pageTransform: { scale:1, rotation:0 }, // calibration transform per page
-  telemetry: [],            // extraction telemetry
-  grayCanvases: {},         // cached grayscale canvases by page
-  matchPoints: [],          // ring/anchor match points
-  steps: [],                 // wizard steps
+const createConfigModeState = () => ({
+  wizardId: '',
+  steps: [],
   stepIdx: 0,
-  currentFileName: '',
-  currentFileId: '',        // unique id per opened file
+  selectionCss: null,
+  selectionPx: null,
+  snappedCss: null,
+  snappedPx: null,
+  snappedText: '',
+  matchPoints: [],
   currentLineItems: [],
-  savedFieldsRecord: null,
   lastOcrCropPx: null,
+  lastOcrCropCss: null,
   cropAudits: [],
-  cropHashes: {},        // per page hash map for duplicate detection
-  pageSnapshots: {},     // tracks saved full-page debug PNGs
+  cropHashes: {},
+  pageSnapshots: {},
   pageRenderPromises: [],
   pageRenderReady: [],
-  currentTraceId: null,
-  overlayPinned: false,
-  overlayMetrics: null,
-  pendingSelection: null,
+  ocrCache: {},
+});
+
+const createRunModeState = () => ({
+  wizardId: '',
+  selectionCss: null,
+  selectionPx: null,
+  snappedCss: null,
+  snappedPx: null,
+  snappedText: '',
+  matchPoints: [],
+  currentLineItems: [],
+  lastOcrCropPx: null,
   lastOcrCropCss: null,
-  lineLayout: null,
+  cropAudits: [],
+  cropHashes: {},
+  pageSnapshots: {},
+  pageRenderPromises: [],
+  pageRenderReady: [],
+  resolvedFields: {},
+  rowBoxes: [],
+  extractedRows: [],
+  ocrCache: {},
+});
+
+const state = {
+  shared: {
+    username: null,
+    docType: 'invoice',
+    mode: 'CONFIG',
+    modes: { rawData: false },
+    profile: null,             // Vendor profile (landmarks + fields + tableHints)
+    pdf: null,                 // pdf.js document
+    isImage: false,
+    pageNum: 1,
+    numPages: 1,
+    viewport: { w: 0, h: 0, scale: 1 },
+    pageViewports: [],       // viewport per page
+    pageOffsets: [],         // y-offset of each page within pdfCanvas
+    tokensByPage: {},          // {page:number: Token[] in px}
+    pageTransform: { scale:1, rotation:0 }, // calibration transform per page
+    telemetry: [],            // extraction telemetry
+    grayCanvases: {},         // cached grayscale canvases by page
+    currentFileName: '',
+    currentFileId: '',        // unique id per opened file
+    savedFieldsRecord: null,
+    currentTraceId: null,
+    overlayPinned: false,
+    overlayMetrics: null,
+    pendingSelection: null,
+    lineLayout: null,
+  },
+  configMode: createConfigModeState(),
+  runMode: createRunModeState(),
 };
+
+function getModeState(mode = state.shared.mode){
+  return mode === 'RUN' ? state.runMode : state.configMode;
+}
+
+const sharedKeys = ['username','docType','mode','modes','profile','pdf','isImage','pageNum','numPages','viewport','pageViewports','pageOffsets','tokensByPage','pageTransform','telemetry','grayCanvases','currentFileName','currentFileId','savedFieldsRecord','currentTraceId','overlayPinned','overlayMetrics','pendingSelection','lineLayout'];
+sharedKeys.forEach(key => {
+  Object.defineProperty(state, key, {
+    get(){ return state.shared[key]; },
+    set(v){ state.shared[key] = v; },
+  });
+});
+['steps','stepIdx'].forEach(key => {
+  Object.defineProperty(state, key, {
+    get(){ return state.configMode[key]; },
+    set(v){ state.configMode[key] = v; },
+  });
+});
+const modeScopedKeys = ['selectionCss','selectionPx','snappedCss','snappedPx','snappedText','matchPoints','currentLineItems','lastOcrCropPx','lastOcrCropCss','cropAudits','cropHashes','pageSnapshots','pageRenderPromises','pageRenderReady'];
+modeScopedKeys.forEach(key => {
+  Object.defineProperty(state, key, {
+    get(){ return getModeState()[key]; },
+    set(v){ getModeState()[key] = v; },
+  });
+});
+
+function resetConfigMode(wizardId = state.configMode.wizardId){
+  const preserved = typeof wizardId === 'string' ? wizardId : '';
+  clearCropThumbs(state.configMode);
+  Object.assign(state.configMode, createConfigModeState());
+  state.configMode.wizardId = preserved;
+  if(state.shared.mode === 'CONFIG'){
+    state.overlayPinned = false;
+    state.overlayMetrics = null;
+    state.pendingSelection = null;
+  }
+}
+
+function resetRunMode(wizardId = state.runMode.wizardId){
+  const preserved = typeof wizardId === 'string' ? wizardId : '';
+  clearCropThumbs(state.runMode);
+  Object.assign(state.runMode, createRunModeState());
+  state.runMode.wizardId = preserved;
+  if(state.shared.mode === 'RUN'){
+    state.overlayPinned = false;
+    state.overlayMetrics = null;
+    state.pendingSelection = null;
+  }
+}
+
+const DEFAULT_WIZARD_ID = 'invoice';
+
+function sanitizeWizardId(raw){
+  return (String(raw ?? '')).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+
+function resolveDocTypeFromWizard(wizardId){
+  const sanitized = sanitizeWizardId(wizardId);
+  const options = Array.from(els.docType?.options || []).map(opt => opt.value);
+  if(sanitized && options.includes(sanitized)) return sanitized;
+  if(options.includes(state.docType)) return state.docType;
+  return options[0] || DEFAULT_WIZARD_ID;
+}
+
+function routeHash(mode, wizardId){
+  const seg = mode === 'RUN' ? 'run' : 'configure';
+  const sanitized = sanitizeWizardId(wizardId);
+  const id = sanitized || resolveDocTypeFromWizard(wizardId) || DEFAULT_WIZARD_ID;
+  return `#/${seg}/${id}`;
+}
+
+function navigateToRoute(mode, wizardId, { replace = false, force = false } = {}){
+  const target = routeHash(mode, wizardId);
+  if(force || window.location.hash !== target){
+    if(replace) window.location.replace(target);
+    else window.location.hash = target;
+    handleRouteChange(true);
+  } else {
+    handleRouteChange(true);
+  }
+}
+
+function parseRoute(hash){
+  const cleaned = (hash || '').replace(/^#/, '');
+  const parts = cleaned.split('/').filter(Boolean);
+  if(parts.length >= 2){
+    const modeSeg = parts[0];
+    const wizardId = parts.slice(1).join('/');
+    if(modeSeg === 'configure') return { mode: 'CONFIG', wizardId };
+    if(modeSeg === 'run') return { mode: 'RUN', wizardId };
+  }
+  return null;
+}
+
+let currentRouteKey = '';
+
+function enterConfigMode(wizardId){
+  const sanitized = sanitizeWizardId(wizardId) || sanitizeWizardId(state.configMode.wizardId) || sanitizeWizardId(state.docType) || DEFAULT_WIZARD_ID;
+  resetConfigMode(sanitized);
+  state.configMode.wizardId = sanitized;
+  state.mode = 'CONFIG';
+  const docType = resolveDocTypeFromWizard(sanitized);
+  state.docType = docType;
+  if(els.docType){
+    const hasOption = Array.from(els.docType.options || []).some(opt => opt.value === docType);
+    if(hasOption) els.docType.value = docType;
+  }
+  if(!state.username){
+    if(els.loginSection) els.loginSection.style.display = 'block';
+    if(els.app) els.app.style.display = 'none';
+    if(els.wizardSection) els.wizardSection.style.display = 'none';
+    return;
+  }
+  cleanupDoc();
+  state.tokensByPage = {};
+  state.grayCanvases = {};
+  state.telemetry = [];
+  state.pageViewports = [];
+  state.pageOffsets = [];
+  state.lineLayout = null;
+  state.currentTraceId = null;
+  state.overlayPinned = false;
+  state.overlayMetrics = null;
+  state.pendingSelection = null;
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
+  ensureProfile();
+  initStepsFromProfile();
+  renderSavedFieldsTable();
+  populateModelSelect();
+  renderResultsTable();
+  renderReports();
+  if(els.loginSection) els.loginSection.style.display = 'none';
+  if(els.app) els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'block';
+  drawOverlay();
+  renderCropAuditPanel();
+  renderTelemetry();
+}
+
+function enterRunMode(wizardId){
+  const sanitized = sanitizeWizardId(wizardId) || sanitizeWizardId(state.runMode.wizardId) || sanitizeWizardId(state.docType) || DEFAULT_WIZARD_ID;
+  resetRunMode(sanitized);
+  state.runMode.wizardId = sanitized;
+  state.mode = 'RUN';
+  const docType = resolveDocTypeFromWizard(sanitized);
+  state.docType = docType;
+  if(els.docType){
+    const hasOption = Array.from(els.docType.options || []).some(opt => opt.value === docType);
+    if(hasOption) els.docType.value = docType;
+  }
+  if(!state.username){
+    if(els.loginSection) els.loginSection.style.display = 'block';
+    if(els.app) els.app.style.display = 'none';
+    if(els.wizardSection) els.wizardSection.style.display = 'none';
+    return;
+  }
+  cleanupDoc();
+  state.tokensByPage = {};
+  state.grayCanvases = {};
+  state.telemetry = [];
+  state.pageViewports = [];
+  state.pageOffsets = [];
+  state.lineLayout = null;
+  state.currentTraceId = null;
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
+  renderSavedFieldsTable();
+  populateModelSelect();
+  renderResultsTable();
+  renderReports();
+  if(els.loginSection) els.loginSection.style.display = 'none';
+  if(els.app) els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'block';
+  drawOverlay();
+  renderCropAuditPanel();
+  renderTelemetry();
+}
+
+function handleRouteChange(force = false){
+  const parsed = parseRoute(window.location.hash);
+  if(!parsed){
+    const fallbackId = state.configMode.wizardId || state.runMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
+    navigateToRoute('CONFIG', fallbackId, { replace: true, force: true });
+    return;
+  }
+  const key = `${parsed.mode}:${sanitizeWizardId(parsed.wizardId)}`;
+  if(!force && key === currentRouteKey) return;
+  currentRouteKey = key;
+  if(parsed.mode === 'CONFIG') enterConfigMode(parsed.wizardId);
+  else enterRunMode(parsed.wizardId);
+}
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
@@ -3481,8 +3706,9 @@ function drawOverlay(){
 
 function renderCropAuditPanel(){
   if(!els.ocrCropList) return;
+  const modeState = getModeState();
   els.ocrCropList.innerHTML = '';
-  state.cropAudits.forEach(a => {
+  (modeState.cropAudits || []).forEach(a => {
     const row = document.createElement('div');
     row.className = 'ocrCropRow';
     if(a.thumbUrl){
@@ -3543,34 +3769,38 @@ function renderCropAuditPanel(){
   });
 }
 
-function clearCropThumbs(){
-  (state.cropAudits||[]).forEach(a=>{
+function clearCropThumbs(targetState = getModeState()){
+  if(!targetState) return;
+  (targetState.cropAudits||[]).forEach(a=>{
     if(a.thumbUrl) URL.revokeObjectURL(a.thumbUrl);
   });
-  state.cropAudits = [];
-  if(els.ocrCropList) els.ocrCropList.innerHTML = '';
+  targetState.cropAudits = [];
+  if(targetState === getModeState() && els.ocrCropList){
+    els.ocrCropList.innerHTML = '';
+  }
 }
 
 async function refreshCropAuditThumbs(){
-  const existing = state.cropAudits.slice();
-  clearCropThumbs();
+  const modeState = getModeState();
+  const existing = (modeState.cropAudits || []).slice();
+  clearCropThumbs(modeState);
   for(const a of existing){
     const meta = a.meta || {};
-    if(!meta.normBox){ state.cropAudits.push(a); continue; }
+    if(!meta.normBox){ modeState.cropAudits.push(a); continue; }
     const { cropBitmap, meta: m2 } = getOcrCropForSelection({ docId: meta.docId || '', pageIndex: meta.pageIndex, normBox: meta.normBox });
     m2.question = a.question;
     if(m2.errors.length){
-      state.cropAudits.push({ question:a.question, reason:m2.errors[0], ocrProbe:{}, best:{}, thumbUrl:'', meta:m2 });
+      modeState.cropAudits.push({ question:a.question, reason:m2.errors[0], ocrProbe:{}, best:{}, thumbUrl:'', meta: m2 });
       continue;
     }
     let blob; try{ blob = await new Promise(res=>cropBitmap.toBlob(res,'image/png')); }catch(e){ blob=null; }
     if(!blob){
       m2.errors.push('blob_or_image_failed');
-      state.cropAudits.push({ question:a.question, reason:'blob_or_image_failed', ocrProbe:{}, best:{}, thumbUrl:'', meta:m2 });
+      modeState.cropAudits.push({ question:a.question, reason:'blob_or_image_failed', ocrProbe:{}, best:{}, thumbUrl:'', meta: m2 });
       continue;
     }
     const url = URL.createObjectURL(blob);
-    state.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
+    modeState.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
   }
   renderCropAuditPanel();
 }
@@ -3994,20 +4224,43 @@ function renderConfirmedTables(rec){
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
   state.username = (els.username?.value || 'demo').trim();
-  state.docType = els.docType?.value || 'invoice';
+  const selectedDocType = els.docType?.value || resolveDocTypeFromWizard(DEFAULT_WIZARD_ID);
+  state.docType = selectedDocType;
+  const wizardKey = sanitizeWizardId(selectedDocType) || selectedDocType;
+  state.configMode.wizardId = wizardKey;
+  state.runMode.wizardId = wizardKey;
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
-  els.loginSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('document-dashboard');
+  if(els.loginSection) els.loginSection.style.display = 'none';
   populateModelSelect();
   renderResultsTable();
+  renderReports();
+  handleRouteChange(true);
 });
 els.logoutBtn?.addEventListener('click', ()=>{
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'none';
-  els.loginSection.style.display = 'block';
+  const configWizard = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  const runWizard = state.runMode.wizardId || configWizard;
+  resetConfigMode(configWizard);
+  resetRunMode(runWizard);
+  state.username = null;
+  state.profile = null;
+  hydrateFingerprintsFromProfile(null);
+  state.tokensByPage = {};
+  state.grayCanvases = {};
+  state.telemetry = [];
+  state.overlayPinned = false;
+  state.overlayMetrics = null;
+  state.pendingSelection = null;
+  if(els.ocrCropList) els.ocrCropList.innerHTML = '';
+  if(els.telemetryPanel) els.telemetryPanel.textContent = '';
+  drawOverlay();
+  if(els.app) els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  if(els.loginSection) els.loginSection.style.display = 'block';
+  renderResultsTable();
+  renderReports();
+  navigateToRoute('CONFIG', configWizard, { replace: true, force: true });
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   if(!state.username) return;
@@ -4018,28 +4271,48 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   localStorage.removeItem(LS.dbKey(state.username, state.docType));
   state.profile = null;
   hydrateFingerprintsFromProfile(null);
+  const configWizard = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  const runWizard = state.runMode.wizardId || configWizard;
+  resetConfigMode(configWizard);
+  resetRunMode(runWizard);
+  cleanupDoc();
+  drawOverlay();
+  renderTelemetry();
+  renderCropAuditPanel();
   renderSavedFieldsTable();
   populateModelSelect();
   renderResultsTable();
+  renderReports();
   alert('Model and records reset.');
+  handleRouteChange(true);
 });
 els.configureBtn?.addEventListener('click', ()=>{
-  state.mode = 'CONFIG';
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'block';
-  ensureProfile();
-  initStepsFromProfile();
-  renderSavedFieldsTable();
+  const wizardKey = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  navigateToRoute('CONFIG', wizardKey, { force: true });
 });
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 
 els.docType?.addEventListener('change', ()=>{
-  state.docType = els.docType.value || 'invoice';
-  const existing = loadProfile(state.username, state.docType);
-  state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
+  const nextDocType = els.docType.value || DEFAULT_WIZARD_ID;
+  state.docType = nextDocType;
+  const wizardKey = sanitizeWizardId(nextDocType) || nextDocType;
+  state.configMode.wizardId = wizardKey;
+  state.runMode.wizardId = wizardKey;
+  if(state.username){
+    const existing = loadProfile(state.username, state.docType);
+    state.profile = existing || null;
+    hydrateFingerprintsFromProfile(state.profile);
+  } else {
+    state.profile = null;
+    hydrateFingerprintsFromProfile(null);
+  }
   renderSavedFieldsTable();
   populateModelSelect();
+  renderResultsTable();
+  renderReports();
+  if(state.mode === 'CONFIG'){
+    navigateToRoute('CONFIG', wizardKey, { force: true });
+  }
 });
 
 els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
@@ -4303,10 +4576,14 @@ async function autoExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
-  state.mode = 'RUN';
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'block';
-  ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
+  const wizardKey = state.runMode.wizardId || state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  navigateToRoute('RUN', wizardKey, { force: true });
+  if(!state.profile){
+    alert('No saved wizard profile found. Configure the wizard before running extraction.');
+    return;
+  }
+  initStepsFromProfile();
+  renderSavedFieldsTable();
   const modelId = document.getElementById('model-select')?.value || '';
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
 
@@ -4314,8 +4591,8 @@ async function processBatch(files){
     if(model){ await autoExtractFileWithProfile(f, model.profile); }
     else { await openFile(f); }
   }
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  if(els.app) els.app.style.display = 'block';
   showTab('extracted-data');
 }
 
@@ -4323,3 +4600,5 @@ async function processBatch(files){
 renderResultsTable();
 renderReports();
 syncRawModeUI();
+window.addEventListener('hashchange', () => handleRouteChange());
+handleRouteChange(true);
