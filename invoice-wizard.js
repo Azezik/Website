@@ -132,6 +132,9 @@ const createConfigModeState = () => ({
   pageRenderPromises: [],
   pageRenderReady: [],
   ocrCache: {},
+  previewRaw: {},
+  previewLineItems: [],
+  previewRecord: null,
 });
 
 const createRunModeState = () => ({
@@ -3305,6 +3308,14 @@ async function openFile(file){
     return;
   }
 
+  if(state.mode === 'CONFIG'){
+    state.configMode.previewRaw = {};
+    state.configMode.previewLineItems = [];
+    state.configMode.previewRecord = null;
+    state.savedFieldsRecord = null;
+    renderSavedFieldsTable();
+  }
+
   cleanupDoc();
   state.pdf = null;
   state.grayCanvases = {};
@@ -3874,10 +3885,20 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function compileDocument(fileId, lineItems){
-  const raw = rawStore.get(fileId);
+function buildDocumentSnapshot(fileId, lineItems, records, opts = {}){
+  const fileKey = fileId || 'preview';
+  const recs = Array.isArray(records) ? records : [];
   const byKey = {};
-  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
+  recs.forEach(r => {
+    if(!r || !r.fieldKey) return;
+    byKey[r.fieldKey] = {
+      value: r.value,
+      raw: r.raw,
+      correctionsApplied: clonePlain(r.correctionsApplied || r.corrections || []),
+      confidence: r.confidence || 0,
+      tokens: clonePlain(r.tokens || [])
+    };
+  });
   (state.profile?.fields||[]).forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
   });
@@ -3896,36 +3917,27 @@ function compileDocument(fileId, lineItems){
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
-  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
-  const db = LS.getDb(state.username, state.docType);
-  const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
-  const hasExplicitLineItems = arguments.length >= 2;
-  let items = Array.isArray(lineItems) ? lineItems : [];
-  if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileId && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
-    items = state.currentLineItems;
+  const hasExplicitLineItems = !!opts.hasExplicitLineItems;
+  let items = Array.isArray(lineItems) ? clonePlain(lineItems) : [];
+  if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileKey && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
+    items = clonePlain(state.currentLineItems);
   }
-  let existingIdx = findExistingIndex();
-  if((!items || !items.length) && existingIdx >= 0){
-    const prevItems = db[existingIdx]?.lineItems;
-    if(Array.isArray(prevItems) && prevItems.length){
-      items = prevItems;
-    }
-  }
-  if(!Array.isArray(items)) items = [];
   const enriched = items.map((it,i)=>{
-    let amount = it.amount;
-    if(!amount && it.quantity && it.unit_price){
-      const q=parseFloat(it.quantity); const u=parseFloat(it.unit_price);
+    const copy = { ...it };
+    let amount = copy.amount;
+    if(!amount && copy.quantity && copy.unit_price){
+      const q=parseFloat(copy.quantity); const u=parseFloat(copy.unit_price);
       if(!isNaN(q) && !isNaN(u)) amount=(q*u).toFixed(2);
     }
-    return { line_no:i+1, ...it, amount };
+    return { line_no:i+1, ...copy, amount };
   });
   let lineSum=0; let allHave=true;
   enriched.forEach(it=>{ if(it.amount){ lineSum+=parseFloat(it.amount); } else allHave=false; });
+  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
   const compiled = {
-    fileId,
-    fileHash: fileId,
-    fileName: fileMeta[fileId]?.fileName || 'unnamed',
+    fileId: fileKey,
+    fileHash: fileKey,
+    fileName: opts.fileName || fileMeta[fileKey]?.fileName || 'unnamed',
     processedAtISO: new Date().toISOString(),
     fields: byKey,
     invoice: {
@@ -3941,23 +3953,77 @@ function compileDocument(fileId, lineItems){
       discount: byKey['discounts_amount']?.value || ''
     },
     lineItems: enriched,
-    templateKey: `${state.username}:${state.docType}`,
+    templateKey: opts.templateKey || `${state.username}:${state.docType}`,
     warnings: []
   };
+  if(opts.preview) compiled.isPreview = true;
   if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
     compiled.warnings.push('line_totals_vs_subtotal');
     if(byKey['subtotal_amount']){
       byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
     }
   }
+  return { compiled, invoiceNumber };
+}
+
+function buildConfigPreviewRecord(){
+  const records = Object.values(state.configMode?.previewRaw || {});
+  const items = state.configMode?.previewLineItems || [];
+  if(!records.length && !items.length) return null;
+  const fileId = state.currentFileId || 'config-preview';
+  const username = state.username || 'preview';
+  const docType = state.docType || 'invoice';
+  const snapshot = buildDocumentSnapshot(fileId, items, records, {
+    fileName: state.currentFileName || 'Config Preview',
+    templateKey: `${username}:${docType}`,
+    hasExplicitLineItems: true,
+    preview: true
+  });
+  return snapshot.compiled;
+}
+
+function updateConfigPreviewStore(fieldKey, record, lineItems){
+  if(!state.configMode) return;
+  if(!state.configMode.previewRaw) state.configMode.previewRaw = {};
+  state.configMode.previewRaw[fieldKey] = clonePlain(record);
+  state.configMode.previewLineItems = Array.isArray(lineItems) ? clonePlain(lineItems) : [];
+  state.configMode.previewRecord = buildConfigPreviewRecord();
+  state.savedFieldsRecord = state.configMode.previewRecord;
+}
+
+function compileDocument(fileId, lineItems){
+  const hasExplicitLineItems = arguments.length >= 2;
+  const snapshot = buildDocumentSnapshot(fileId, lineItems, rawStore.get(fileId), {
+    fileName: fileMeta[fileId]?.fileName || 'unnamed',
+    hasExplicitLineItems
+  });
+  const compiled = snapshot.compiled;
+  const invoiceNumber = snapshot.invoiceNumber;
+  const cleanScalar = val => {
+    if(val === undefined || val === null) return '';
+    if(typeof val === 'string') return val.replace(/\s+/g,' ').trim();
+    return String(val);
+  };
+  const db = LS.getDb(state.username, state.docType);
+  const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
+  let existingIdx = findExistingIndex();
+  if((!compiled.lineItems || !compiled.lineItems.length) && existingIdx >= 0){
+    const prevItems = db[existingIdx]?.lineItems;
+    if(Array.isArray(prevItems) && prevItems.length){
+      compiled.lineItems = prevItems;
+    }
+  }
+  if(!Array.isArray(compiled.lineItems)) compiled.lineItems = [];
   existingIdx = findExistingIndex();
   const invNum = compiled.invoice.number;
   const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(state.username, state.docType, db);
+  state.savedFieldsRecord = compiled;
   renderResultsTable();
   renderTelemetry();
   renderReports();
+  renderSavedFieldsTable();
   return compiled;
 }
 
@@ -4154,8 +4220,13 @@ function ensureAnchorFor(fieldKey){
   }
 }
 function renderSavedFieldsTable(){
-  const db = LS.getDb(state.username, state.docType);
-  const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  let latest = null;
+  if(state.mode === 'CONFIG' && state.configMode?.previewRecord){
+    latest = state.configMode.previewRecord;
+  } else {
+    const db = LS.getDb(state.username, state.docType);
+    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+  }
   state.savedFieldsRecord = latest || null;
   const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
   const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
@@ -4178,6 +4249,7 @@ function renderConfirmedTables(rec){
   requestAnimationFrame(()=>{
     confirmedRenderPending = false;
     const latest = rec || LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+    const isPreview = !!latest?.isPreview || (state.mode === 'CONFIG' && rec === state.configMode?.previewRecord);
     const fDiv = document.getElementById('confirmedFields');
     const liDiv = document.getElementById('confirmedLineItems');
     if(fDiv){
@@ -4192,16 +4264,23 @@ function renderConfirmedTables(rec){
           return `<tr><td>${k}</td><td><input class="confirmEdit" data-field="${k}" value="${f.value}"/>${warn}${conf}</td></tr>`;
         }).join('');
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
-        fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
-          const db = LS.getDb(state.username, state.docType);
-          const rec = db.find(r=>r.fileId===latest?.fileId);
-          if(rec && rec.fields?.[inp.dataset.field]){
-            rec.fields[inp.dataset.field].value = inp.value;
-            rec.fields[inp.dataset.field].confidence = 1;
-            LS.setDb(state.username, state.docType, db);
-            renderSavedFieldsTable();
+        fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>{
+          if(isPreview){
+            inp.disabled = true;
+            return;
           }
-        }));
+          inp.disabled = false;
+          inp.addEventListener('change',()=>{
+            const db = LS.getDb(state.username, state.docType);
+            const rec = db.find(r=>r.fileId===latest?.fileId);
+            if(rec && rec.fields?.[inp.dataset.field]){
+              rec.fields[inp.dataset.field].value = inp.value;
+              rec.fields[inp.dataset.field].confidence = 1;
+              LS.setDb(state.username, state.docType, db);
+              renderSavedFieldsTable();
+            }
+          });
+        });
       }
     }
     if(liDiv){
@@ -4420,6 +4499,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
+  const isConfigMode = state.mode === 'CONFIG';
 
   let value = '', boxPx = state.snappedPx;
   let confidence = 0, raw = '', corrections=[];
@@ -4468,12 +4548,14 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   state.currentLineItems = await extractLineItems(state.profile);
 
   const fid = state.currentFileId;
-  if(fid){
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
+  const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
+  if(isConfigMode){
+    updateConfigPreviewStore(step.fieldKey, rec, state.currentLineItems);
+    renderSavedFieldsTable();
+  } else if(fid){
     rawStore.upsert(fid, rec);
     compileDocument(fid, state.currentLineItems);
   }
-  renderSavedFieldsTable();
 
   afterConfirmAdvance();
 });
