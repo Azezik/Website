@@ -44,8 +44,6 @@
   const cleanDescription = cleanText;
   const cleanLineNo = cleanText;
 
-  const DYNAMIC_ITEM_KEYS = ['sku', 'description', 'quantity', 'unitPrice', 'amount'];
-
   function extractFieldValue(record, key){
     const field = record?.fields?.[key];
     if(field && typeof field === 'object' && 'value' in field) return field.value;
@@ -85,105 +83,10 @@
     }));
   }
 
-  function summarizeDynamicCounts(items){
-    const counts = {};
-    DYNAMIC_ITEM_KEYS.forEach(key => {
-      counts[key] = items.reduce((acc, item) => acc + (item[key] !== '' ? 1 : 0), 0);
-    });
-    return counts;
-  }
-
-  function computeMajorityRowCount(counts, totalItems){
-    const positiveCounts = DYNAMIC_ITEM_KEYS.map(key => counts[key]).filter(count => count > 0);
-    if(!positiveCounts.length) return null;
-
-    const frequency = new Map();
-    positiveCounts.forEach(count => {
-      frequency.set(count, (frequency.get(count) || 0) + 1);
-    });
-
-    let bestCount = null;
-    let bestFrequency = 0;
-    frequency.forEach((freq, count) => {
-      if(freq > bestFrequency || (freq === bestFrequency && (bestCount === null || count > bestCount))){
-        bestFrequency = freq;
-        bestCount = count;
-      }
-    });
-
-    if(bestCount === null) return null;
-    return Math.min(bestCount, totalItems);
-  }
-
-  function selectMajorityRows(items){
-    const dynamicCounts = summarizeDynamicCounts(items);
-    const majorityCount = computeMajorityRowCount(dynamicCounts, items.length);
-    if(!majorityCount || majorityCount >= items.length){
-      return { items, majorityCount: majorityCount || items.length, dynamicCounts };
-    }
-
-    const annotated = items.map((item, idx) => {
-      const rowIdx = typeof item.rowNumber === 'number' ? item.rowNumber : (idx + 1);
-      const filledCount = DYNAMIC_ITEM_KEYS.reduce((acc, key) => acc + (item[key] !== '' ? 1 : 0), 0);
-      return { item, idx, rowIdx, filledCount };
-    });
-
-    const sorted = annotated.slice().sort((a, b) => {
-      if(a.rowIdx !== b.rowIdx) return a.rowIdx - b.rowIdx;
-      return a.idx - b.idx;
-    });
-
-    const chosenIndices = new Set();
-
-    sorted.forEach(entry => {
-      if(chosenIndices.size >= majorityCount) return;
-      if(entry.filledCount === 0) return;
-      chosenIndices.add(entry.idx);
-    });
-
-    if(chosenIndices.size < majorityCount){
-      sorted.forEach(entry => {
-        if(chosenIndices.size >= majorityCount) return;
-        chosenIndices.add(entry.idx);
-      });
-    }
-
-    const selected = annotated
-      .filter(entry => chosenIndices.has(entry.idx))
-      .sort((a, b) => a.idx - b.idx)
-      .map(entry => entry.item);
-
-    return { items: selected, majorityCount, dynamicCounts };
-  }
-
   function csvEscape(val){
     if(val === undefined || val === null) return '';
     const s = String(val);
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
-  }
-
-  function normalizeMissingFlags(flag){
-    if(flag === undefined || flag === null || flag === false) return [];
-    const values = Array.isArray(flag) ? flag : [flag];
-    const unique = new Set();
-    values.forEach(val => {
-      if(val === undefined || val === null || val === false) return;
-      if(val === true){
-        unique.add('flagged');
-        return;
-      }
-      if(typeof val === 'string'){
-        const trimmed = val.trim();
-        unique.add(trimmed || 'flagged');
-        return;
-      }
-      try {
-        unique.add(String(val));
-      } catch(err){
-        unique.add('flagged');
-      }
-    });
-    return Array.from(unique);
   }
 
   function flatten(ssot){
@@ -194,17 +97,7 @@
       items: prepareItems(record)
     }));
 
-    const selected = prepared.map(entry => {
-      const selection = selectMajorityRows(entry.items);
-      return {
-        record: entry.record,
-        invoice: entry.invoice,
-        items: selection.items,
-        selection
-      };
-    });
-
-    const allItems = selected.flatMap(r => r.items);
+    const allItems = prepared.flatMap(r => r.items);
 
     const counts = {
       sku_count: allItems.filter(it => it.sku !== '').length,
@@ -215,87 +108,27 @@
 
     const firstItem = allItems[0]?.original || null;
     const lastItem = allItems.length ? allItems[allItems.length-1].original : null;
-    const rowMajority = selected.map(({ selection }, idx) => ({
-      index: idx,
-      original_rows: prepared[idx].items.length,
-      selected_rows: selection.items.length,
-      majority: selection.majorityCount,
-      dynamic_counts: selection.dynamicCounts
-    }));
-    console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem, row_majority: rowMajority });
+    console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem });
 
     if(counts.sku_count === 0){
       throw new Error('Exporter input empty—SSOT not wired.');
     }
 
-    const missingSummarySets = {
-      sku: new Set(),
-      quantity: new Set(),
-      unit_price: new Set(),
-      line_no: new Set()
-    };
-    const missingDetailsByRow = {};
-    const noteMissing = (columnKey, rowIdx, reasons, flagged) => {
-      if(!reasons || !reasons.length) return;
-      missingSummarySets[columnKey].add(rowIdx);
-      const rowDetails = missingDetailsByRow[rowIdx] || (missingDetailsByRow[rowIdx] = {});
-      const uniqueReasons = Array.from(new Set(reasons)).sort();
-      const detail = flagged ? { reasons: uniqueReasons, flagged: true } : { reasons: uniqueReasons };
-      rowDetails[columnKey] = detail;
-    };
-
+    const missing = { sku: [], quantity: [], unit_price: [], line_no: [] };
     allItems.forEach((item, idx) => {
       const rowIdx = item.rowNumber || (idx + 1);
       const miss = item.missing || {};
-
-      const inspect = (columnKey, value, missKey) => {
-        const missFlag = miss[missKey];
-        const reasons = normalizeMissingFlags(missFlag);
-        const isBlank = value === '';
-        if(isBlank && !reasons.includes('empty')) reasons.push('empty');
-        if(!reasons.length) return;
-        const flagged = missFlag !== undefined && missFlag !== null && missFlag !== false;
-        noteMissing(columnKey, rowIdx, reasons, flagged);
-      };
-
-      inspect('sku', item.sku, 'sku');
-      inspect('quantity', item.quantity, 'quantity');
-      inspect('unit_price', item.unitPrice, 'unit_price');
-      inspect('line_no', item.lineNo, 'line_no');
+      if(item.sku === '' || miss.sku) missing.sku.push(rowIdx);
+      if(item.quantity === '' || miss.quantity) missing.quantity.push(rowIdx);
+      if(item.unitPrice === '' || miss.unit_price) missing.unit_price.push(rowIdx);
+      if(item.lineNo === '' || miss.line_no) missing.line_no.push(rowIdx);
     });
-
-    const missingSummary = Object.fromEntries(Object.entries(missingSummarySets).map(([key, set]) => [key, Array.from(set).sort((a,b) => a - b)]));
-    const missingColumns = {};
-    Object.entries(missingSummarySets).forEach(([columnKey, set]) => {
-      const rowsWithMissing = Array.from(set).sort((a,b) => a - b);
-      const details = {};
-      rowsWithMissing.forEach(rowIdx => {
-        const rowDetails = missingDetailsByRow[rowIdx];
-        if(rowDetails && rowDetails[columnKey]){
-          details[rowIdx] = rowDetails[columnKey];
-        }
-      });
-      missingColumns[columnKey] = { rows: rowsWithMissing, details };
-    });
-
-    const missingRows = Object.fromEntries(
-      Object.entries(missingDetailsByRow)
-        .sort((a, b) => Number(a[0]) - Number(b[0]))
-    );
-
-    const missingMap = { columns: missingColumns, rows: missingRows, summary: missingSummary };
-
-    if(
-      missingSummary.sku.length ||
-      missingSummary.quantity.length ||
-      missingSummary.unit_price.length ||
-      missingSummary.line_no.length
-    ){
-      console.warn('[MasterDB] count mismatch', { counts, missing: missingSummary, missingMap });
+    if(missing.sku.length || missing.quantity.length || missing.unit_price.length || missing.line_no.length){
+      console.warn('[MasterDB] count mismatch', { counts, missing });
     }
 
     const rows = [HEADERS];
-    selected.forEach(({ invoice, items }) => {
+    prepared.forEach(({ invoice, items }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
         if(lineTotal === '' && item.quantity && item.unitPrice){
@@ -329,12 +162,11 @@
       });
     });
 
-    return { rows, missingMap };
+    return rows;
   }
 
   function toCsv(ssot){
-    const { rows } = flatten(ssot);
-    return rows.map(r => r.map(csvEscape).join(',')).join('\n');
+    return flatten(ssot).map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
   return { HEADERS, flatten, toCsv };

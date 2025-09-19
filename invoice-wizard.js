@@ -91,7 +91,6 @@ const els = {
   fieldsPreview:   document.getElementById('fieldsPreview'),
   savedJson:       document.getElementById('savedJson'),
   exportMasterDbBtn: document.getElementById('exportMasterDbBtn'),
-  exportMissingBtn: document.getElementById('exportMissingBtn'),
   exportBtn:       document.getElementById('exportBtn'),
   finishWizardBtn: document.getElementById('finishWizardBtn'),
 };
@@ -389,7 +388,6 @@ function loadModelById(id){
   const m = getModels().find(x => x.id === id);
   if(!m) return null;
   state.profile = migrateProfile(m.profile);
-  hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
   return m.profile;
 }
@@ -531,36 +529,6 @@ function projectAnchorDistance(savedPct, savedPx, savedPageDim, targetPageDim){
     return (savedPx / savedPageDim) * targetPageDim;
   }
   return null;
-}
-
-function projectColumnFera(fera, pageWidth, pageHeight){
-  if(!fera || !Number.isFinite(pageWidth) || !Number.isFinite(pageHeight) || pageWidth <= 0 || pageHeight <= 0){
-    return null;
-  }
-  const left = projectAnchorDistance(fera.leftPct, fera.leftPx, fera.pageWidthPx, pageWidth);
-  const right = projectAnchorDistance(fera.rightPct, fera.rightPx, fera.pageWidthPx, pageWidth);
-  const top = projectAnchorDistance(fera.topPct, fera.topPx, fera.pageHeightPx, pageHeight);
-  const bottom = projectAnchorDistance(fera.bottomPct, fera.bottomPx, fera.pageHeightPx, pageHeight);
-  const x0 = Number.isFinite(left) ? Math.max(0, left) : null;
-  const x1 = Number.isFinite(right) ? Math.min(pageWidth, pageWidth - right) : null;
-  const y0 = Number.isFinite(top) ? Math.max(0, top) : null;
-  const y1 = Number.isFinite(bottom) ? Math.min(pageHeight, pageHeight - bottom) : null;
-  const width = Number.isFinite(x0) && Number.isFinite(x1) && x1 > x0 ? x1 - x0 : null;
-  const height = Number.isFinite(y0) && Number.isFinite(y1) && y1 > y0 ? y1 - y0 : null;
-  const centerX = Number.isFinite(x0) && Number.isFinite(width) ? x0 + width/2 : null;
-  return {
-    left: Number.isFinite(left) ? left : null,
-    right: Number.isFinite(right) ? right : null,
-    top: Number.isFinite(top) ? top : null,
-    bottom: Number.isFinite(bottom) ? bottom : null,
-    x0: Number.isFinite(x0) ? x0 : null,
-    x1: Number.isFinite(x1) ? x1 : null,
-    y0: Number.isFinite(y0) ? y0 : null,
-    y1: Number.isFinite(y1) ? y1 : null,
-    width,
-    height,
-    centerX
-  };
 }
 
 function anchorMetricsSatisfied(saved, candidate){
@@ -785,14 +753,12 @@ function applyOcrCorrections(txt, fieldKey=''){
 }
 
 function codeOf(str){
-  const text = String(str ?? '');
-  const hasLetters = /[A-Za-z]/.test(text);
-  const hasDigits = /[0-9]/.test(text);
-  const hasBoth = hasLetters && hasDigits;
-  const hasSeparators = /[-_/.,:]/.test(text) || /\s/.test(text);
-  const coreLength = text.replace(/[^A-Za-z0-9]/g, '').length;
-  const isShort = coreLength <= 10;
-  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '0')).join('');
+  const q1 = /[A-Za-z]/.test(str) ? '1' : '2';
+  const q2 = /[0-9]/.test(str) ? '1' : '2';
+  const q3 = /\s/.test(str) ? '1' : '2';
+  const q4 = /[-\/()]/.test(str) ? '1' : '2';
+  const q5 = /[$€£¢%]/.test(str) || /\d+\.\d{2}/.test(str) ? '1' : '2';
+  return q1 + q2 + q3 + q4 + q5;
 }
 
 function shapeOf(str){
@@ -813,15 +779,6 @@ function digitRatio(str){
   if(!str.length) return 0;
   const digits = (str.match(/[0-9]/g) || []).length;
   return digits / str.length;
-}
-
-function clonePlain(obj){
-  if(obj === null || typeof obj !== 'object') return obj;
-  if(typeof structuredClone === 'function'){
-    try { return structuredClone(obj); }
-    catch(err){ /* fall through */ }
-  }
-  return JSON.parse(JSON.stringify(obj));
 }
 
 const FieldDataEngine = (() => {
@@ -853,148 +810,30 @@ const FieldDataEngine = (() => {
     const raw = lineStrs.join(' ').trim();
     if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
     let txt = raw.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
-    let isValid = true;
-    let invalidReason = null;
     if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       const n=txt.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
-    } else if(/sku|product_code/.test(ftype)){
-      txt = txt.replace(/\s+/g,'').toUpperCase();
-      const sanitized = txt.replace(/[^A-Z0-9\-_.\/]/g,'');
-      const upperRaw = raw.toUpperCase();
-      const digitsSeparatorsOnly = /^[0-9\s:\/\-.]+$/.test(upperRaw);
-      const slashCount = (upperRaw.match(/\//g)||[]).length;
-      const dashCount = (upperRaw.match(/-/g)||[]).length;
-      const colonCount = (upperRaw.match(/:/g)||[]).length;
-      const hasTime = /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(upperRaw);
-      const hasMonthWord = /\b(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)\b/.test(upperRaw);
-      const isoDate = /\b(?:19|20)\d{2}[\/-]\d{1,2}[\/-]\d{1,2}\b/.test(upperRaw);
-      const euroDate = /\b\d{1,2}[\/-]\d{1,2}[\/-](?:19|20)\d{2}\b/.test(upperRaw);
-      const containsAlpha = /[A-Z]/.test(sanitized);
-      const looksLikeDate = digitsSeparatorsOnly && (isoDate || euroDate);
-      const looksLikeTimestamp = digitsSeparatorsOnly && hasTime && (slashCount || dashCount || colonCount >= 2);
-      const mixedSlashColon = digitsSeparatorsOnly && slashCount && colonCount;
-      if(hasMonthWord || looksLikeTimestamp || (looksLikeDate && !containsAlpha) || mixedSlashColon){
-        isValid = false;
-        invalidReason = 'looks_like_date';
-      }
-      txt = isValid ? sanitized : '';
-    }
+    } else if(/sku|product_code/.test(ftype)){ txt = txt.replace(/\s+/g,'').toUpperCase(); }
     const conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
     const code = codeOf(txt);
     const shape = shapeOf(txt);
     const digit = digitRatio(txt);
-    const before = dominant(ftype);
-    const fingerprintMatch = isValid && (!before.code || before.code === code);
-    const shouldLearn = isValid && (mode === 'CONFIG' || fingerprintMatch);
-    if(shouldLearn) learn(ftype, txt);
-    const dom = shouldLearn ? dominant(ftype) : before;
+    learn(ftype, txt);
+    const dom = dominant(ftype);
     let score=0;
-    if(isValid && dom.code && dom.code===code) score++;
-    if(isValid && dom.shape && dom.shape===shape) score++;
-    if(isValid && dom.len && dom.len===txt.length) score++;
-    if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
-    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason });
-    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch, isValid, invalidReason };
+    if(dom.code && dom.code===code) score++;
+    if(dom.shape && dom.shape===shape) score++;
+    if(dom.len && dom.len===txt.length) score++;
+    if(dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
+    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score });
+    return { value:txt, raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit };
   }
 
   function exportPatterns(){ return patterns; }
-  function importPatterns(p){
-    Object.keys(patterns).forEach(k => delete patterns[k]);
-    if(!p || typeof p !== 'object') return;
-    for(const [key, data] of Object.entries(p)){
-      if(data && typeof data === 'object'){
-        patterns[key] = clonePlain(data);
-      }
-    }
-  }
+  function importPatterns(p){ Object.assign(patterns, p || {}); }
 
   return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
 })();
-
-function mostCommonKey(counts){
-  if(!counts || typeof counts !== 'object') return null;
-  let bestKey = null;
-  let bestCount = -Infinity;
-  for(const [key, value] of Object.entries(counts)){
-    const num = Number(value) || 0;
-    if(num > bestCount){
-      bestKey = key;
-      bestCount = num;
-    }
-  }
-  return bestKey;
-}
-
-function getProfileFieldEntry(fieldKey){
-  if(!fieldKey || !state.profile?.fields) return null;
-  return state.profile.fields.find(f => f.fieldKey === fieldKey) || null;
-}
-
-function getDominantFingerprintCode(ftype, profileKey){
-  const dom = ftype ? FieldDataEngine.dominant(ftype) : null;
-  if(dom?.code) return dom.code;
-  if(profileKey && profileKey !== ftype){
-    const altDom = FieldDataEngine.dominant(profileKey);
-    if(altDom?.code) return altDom.code;
-  }
-  const searchKeys = [];
-  if(profileKey) searchKeys.push(profileKey);
-  if(ftype && !searchKeys.includes(ftype)) searchKeys.push(ftype);
-  for(const key of searchKeys){
-    const entry = getProfileFieldEntry(key);
-    if(!entry?.fingerprints || typeof entry.fingerprints !== 'object') continue;
-    const fp = entry.fingerprints;
-    if(fp.code && typeof fp.code === 'object'){
-      const best = mostCommonKey(fp.code);
-      if(best) return best;
-    }
-    const direct = fp[key];
-    if(direct && typeof direct === 'object' && direct.code){
-      const best = mostCommonKey(direct.code);
-      if(best) return best;
-    }
-    for(const value of Object.values(fp)){
-      if(value && typeof value === 'object' && value.code){
-        const best = mostCommonKey(value.code);
-        if(best) return best;
-      }
-    }
-  }
-  return null;
-}
-
-function fingerprintMatches(ftype, code, mode = state.mode, profileKey){
-  if(mode === 'CONFIG') return true;
-  const expected = getDominantFingerprintCode(ftype, profileKey);
-  if(!expected) return true;
-  if(typeof code !== 'string') return false;
-  return code === expected;
-}
-
-function collectPersistedFingerprints(profile){
-  const out = {};
-  if(!profile?.fields) return out;
-  for(const field of profile.fields){
-    const prints = field?.fingerprints;
-    if(!prints || typeof prints !== 'object') continue;
-    if(prints.code || prints.shape || prints.len || prints.digit){
-      out[field.fieldKey] = clonePlain(prints);
-      continue;
-    }
-    for(const [key, data] of Object.entries(prints)){
-      if(data && typeof data === 'object'){
-        out[key] = clonePlain(data);
-      }
-    }
-  }
-  return out;
-}
-
-function hydrateFingerprintsFromProfile(profile){
-  const tallies = collectPersistedFingerprints(profile);
-  FieldDataEngine.importPatterns(tallies);
-}
 
 function groupIntoLines(tokens, tol=4){
   const sorted = [...tokens].sort((a,b)=> (a.y + a.h/2) - (b.y + b.h/2));
@@ -1035,20 +874,8 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
-  let finalBox = expanded;
-  if(state.mode === 'CONFIG' && hintPx){
-    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
-    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
-    if(needsWidth || needsHeight){
-      const unionLeft = Math.min(finalBox.x, hintPx.x);
-      const unionTop = Math.min(finalBox.y, hintPx.y);
-      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
-      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
-      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
-    }
-  }
   const text = lineTokens.map(t => t.text).join(' ').trim();
-  return { box: finalBox, text };
+  return { box: expanded, text };
 }
 
 /* ---------------------------- Regexes ----------------------------- */
@@ -1072,15 +899,6 @@ const FIELD_ALIASES = {
   hst: 'tax_amount',
   qst: 'tax_amount',
   total: 'invoice_total'
-};
-
-const COLUMN_OUT_KEYS = {
-  product_description: 'description',
-  sku_col: 'sku',
-  quantity_col: 'quantity',
-  unit_price_col: 'unit_price',
-  line_total_col: 'amount',
-  line_number_col: 'line_no'
 };
 
 const ANCHOR_HINTS = {
@@ -1203,7 +1021,6 @@ function ensureProfile(){
   state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
-  hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
 }
 
@@ -1676,17 +1493,6 @@ function buildColumnModel(step, norm, boxPx, tokens){
     cyNorm: (t.y + t.h/2) / pageHeightPx,
     hNorm: t.h / pageHeightPx
   }));
-  const feraHeights = [];
-  if(anchorSample?.hNorm){ feraHeights.push(anchorSample.hNorm * pageHeightPx); }
-  rowSamples.forEach(s => { if(Number.isFinite(s.hNorm)) feraHeights.push(s.hNorm * pageHeightPx); });
-  const fallbackFeraHeight = feraHeights.length ? median(feraHeights) : (Number.isFinite(boxPx.h) ? boxPx.h : 0);
-  const fera = anchorMetricsFromBox(
-    { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h },
-    pageWidthPx,
-    pageHeightPx,
-    feraHeights,
-    fallbackFeraHeight || (Number.isFinite(boxPx.h) ? boxPx.h : 0)
-  );
   const guardWords = ['subtotal','sub-total','total','tax','hst','gst','qst','balance','deposit','notes','amount','amountdue'];
   return {
     xband:[norm.x0, norm.x1],
@@ -1699,7 +1505,6 @@ function buildColumnModel(step, norm, boxPx, tokens){
     anchorSample,
     anchorSampleMetrics,
     rowSamples,
-    fera,
     guardWords,
     bottomGuards: guardWords
   };
@@ -2228,8 +2033,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(!hits.length) return null;
     const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     const cleaned = sel.cleaned || {};
-    const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
-    const cleanedOk = !!sel.cleanedOk && fingerprintOk;
     return {
       value: sel.value,
       raw: sel.raw,
@@ -2240,10 +2043,9 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
       boxPx: searchBox,
-      confidence: fingerprintOk ? (cleaned.conf || (sel.cleanedOk ? 1 : 0.1)) : 0,
+      confidence: cleaned.conf || (sel.cleanedOk ? 1 : 0.1),
       tokens: hits,
-      cleanedOk,
-      fingerprintOk
+      cleanedOk: sel.cleanedOk
     };
   }
 
@@ -2362,6 +2164,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 }
 
 async function extractLineItems(profile){
+  FieldDataEngine.importPatterns({});
   const colFields = (profile.fields||[]).filter(f=>f.type==='column' && f.column && Array.isArray(f.column.xband));
   if(!colFields.length){
     state.lineLayout = null;
@@ -2369,7 +2172,7 @@ async function extractLineItems(profile){
     return [];
   }
 
-  const keyMap = COLUMN_OUT_KEYS;
+  const keyMap={product_description:'description',sku_col:'sku',quantity_col:'quantity',unit_price_col:'unit_price',line_total_col:'amount',line_number_col:'line_no'};
   const tableHints = profile.tableHints || {};
   const anchorHintKey = tableHints.rowAnchor?.fieldKey;
   const columnPriority = ['line_number_col','product_description','sku_col','quantity_col','unit_price_col','line_total_col'];
@@ -2430,9 +2233,6 @@ async function extractLineItems(profile){
         y0=Math.max(0,rowTop);
         y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
       }
-      if(!Number.isFinite(nextTop)){
-        y1 = pageHeight;
-      }
       return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
     });
   }
@@ -2441,15 +2241,7 @@ async function extractLineItems(profile){
     const headerLimit = desc.headerBottom + desc.headerPad;
     const y0 = band.y0;
     const y1 = band.y1;
-    const expectedLeft = Number.isFinite(desc.expectedLeft) ? desc.expectedLeft : null;
-    const expectedRight = Number.isFinite(desc.expectedRight) ? desc.expectedRight : null;
-    const expectedCenter = Number.isFinite(desc.expectedCenter)
-      ? desc.expectedCenter
-      : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? (expectedLeft + expectedRight) / 2 : null);
-    const expectedWidth = Number.isFinite(desc.expectedWidth) ? desc.expectedWidth : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? Math.max(0, expectedRight - expectedLeft) : null);
-    const tolerance = Number.isFinite(desc.feraTolerance) ? desc.feraTolerance : null;
-    const align = desc.align || 'left';
-    const scored=[];
+    const selected=[];
     for(const tok of pageTokens){
       if(tok.page !== desc.page) continue;
       const cx = tok.x + tok.w/2;
@@ -2463,140 +2255,15 @@ async function extractLineItems(profile){
       const overlap=Math.min(bottom, y1) - Math.max(top, y0);
       const minOverlap=Math.min(tok.h, y1 - y0) * 0.35;
       if(overlap < minOverlap) continue;
-      const leftEdge = tok.x;
-      const rightEdge = tok.x + tok.w;
-      const center = leftEdge + tok.w/2;
-      let diff = 0;
-      if(align === 'right' && Number.isFinite(expectedRight)){
-        diff = Math.abs(rightEdge - expectedRight);
-      } else if(align === 'center' && Number.isFinite(expectedCenter)){
-        diff = Math.abs(center - expectedCenter);
-      } else if(Number.isFinite(expectedLeft)){
-        diff = Math.abs(leftEdge - expectedLeft);
-      } else if(Number.isFinite(expectedRight)){
-        diff = Math.abs(rightEdge - expectedRight);
-      } else if(Number.isFinite(expectedCenter)){
-        diff = Math.abs(center - expectedCenter);
-      } else {
-        diff = 0;
-      }
-      const tokenWithCy = { ...tok, cy };
-      scored.push({ token: tokenWithCy, diff });
+      selected.push(tok);
     }
-    scored.sort((a,b)=> (a.token.x - b.token.x) || (a.token.y - b.token.y));
-    let feraOk = true;
-    let feraReason = null;
-    let bestDiff = null;
-    let tokensOut = scored.map(s => s.token);
-    if(tolerance && scored.length){
-      const within = scored.filter(s => s.diff <= tolerance);
-      if(within.length){
-        within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
-        bestDiff = within[0].diff;
-        const closenessAllowance = Math.max(desc.typicalHeight || 0, tolerance * 0.3, 6);
-        const keepThreshold = Math.min(tolerance, bestDiff + closenessAllowance);
-        const keepSet = new Set(within.filter(s => s.diff <= keepThreshold).map(s => s.token));
-        tokensOut = scored
-          .filter(s => keepSet.has(s.token))
-          .sort((a,b)=> a.token.y - b.token.y || a.token.x - b.token.x)
-          .map(s => s.token);
-      } else {
-        feraOk = false;
-        feraReason = 'fera_tolerance_fail';
-        tokensOut = [];
-      }
-    }
-    return {
-      tokens: tokensOut,
-      feraOk,
-      feraReason,
-      feraTolerance: tolerance,
-      feraBestDiff: bestDiff,
-      feraExpected: {
-        left: expectedLeft,
-        right: expectedRight,
-        center: expectedCenter,
-        width: expectedWidth,
-        align
-      }
-    };
-  }
-
-  function computeTrimmedAverage(counts){
-    if(!Array.isArray(counts) || !counts.length) return null;
-    if(counts.length < 3){
-      const sum = counts.reduce((acc, val) => acc + val, 0);
-      return counts.length ? sum / counts.length : null;
-    }
-    const sorted = counts.slice().sort((a,b)=>a-b);
-    const trimmed = sorted.slice(1, sorted.length - 1);
-    if(!trimmed.length){
-      const sum = counts.reduce((acc, val) => acc + val, 0);
-      return counts.length ? sum / counts.length : null;
-    }
-    const sum = trimmed.reduce((acc, val) => acc + val, 0);
-    return trimmed.length ? sum / trimmed.length : null;
-  }
-
-  function pickRowTarget(counts, fallback){
-    if(!Array.isArray(counts) || !counts.length) return fallback;
-    const trimmed = computeTrimmedAverage(counts);
-    if(Number.isFinite(trimmed) && trimmed > 0){
-      return Math.round(trimmed);
-    }
-    const sum = counts.reduce((acc, val) => acc + val, 0);
-    const avg = counts.length ? sum / counts.length : null;
-    if(Number.isFinite(avg) && avg > 0){
-      return Math.round(avg);
-    }
-    return fallback;
-  }
-
-  function pruneRowsBySupport(rows, target){
-    if(!Array.isArray(rows) || rows.length <= target) return rows;
-    const buckets = new Map();
-    rows.forEach((row, idx) => {
-      const support = row.__columnHits || 0;
-      if(!buckets.has(support)) buckets.set(support, []);
-      buckets.get(support).push({ row, idx });
-    });
-    const toDrop = new Set();
-    let remaining = rows.length;
-    const supportLevels = Array.from(buckets.keys()).sort((a,b)=>a-b);
-    for(const level of supportLevels){
-      const entries = buckets.get(level);
-      entries.sort((a,b)=>{
-        const aTokens = a.row.__totalTokens || 0;
-        const bTokens = b.row.__totalTokens || 0;
-        if(aTokens !== bTokens) return aTokens - bTokens;
-        const aAnchor = a.row.__anchorTokens || 0;
-        const bAnchor = b.row.__anchorTokens || 0;
-        if(aAnchor !== bAnchor) return aAnchor - bAnchor;
-        return b.idx - a.idx;
-      });
-      for(const entry of entries){
-        if(remaining <= target) break;
-        toDrop.add(entry.idx);
-        remaining--;
-      }
-      if(remaining <= target) break;
-    }
-    if(remaining > target){
-      for(let i=rows.length-1; i>=0 && remaining>target; i--){
-        if(!toDrop.has(i)){
-          toDrop.add(i);
-          remaining--;
-        }
-      }
-    }
-    return rows.filter((row, idx) => !toDrop.has(idx));
+    selected.sort((a,b)=> (a.x - b.x) || (a.y - b.y));
+    return selected;
   }
 
   const results=[];
   const layout={ pages:{} };
-  const configuredPages = Array.from(new Set(colFields.map(f=>f.page||1))).sort((a,b)=>a-b);
-  const totalPages = state.numPages || state.pdf?.numPages || configuredPages[configuredPages.length-1] || 1;
-  const pages = Array.from({ length: totalPages }, (_,i)=>i+1);
+  const pages = Array.from(new Set(colFields.map(f=>f.page||1))).sort((a,b)=>a-b);
   const docId = state.currentFileId || state.currentFileName || 'doc';
   let globalRowIndex = 0;
 
@@ -2610,19 +2277,7 @@ async function extractLineItems(profile){
     const dpr = window.devicePixelRatio || 1;
     const pageWidth = Math.max(1, ((vp.w ?? vp.width)||1) * dpr);
     const pageHeight = Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
-    const mapFieldToPage = (field, targetPage) => {
-      const columnClone = field.column ? clonePlain(field.column) : null;
-      return {
-        ...field,
-        page: targetPage,
-        __sourcePage: field.page || targetPage,
-        column: columnClone || null
-      };
-    };
-    let fieldsOnPage = colFields.filter(f => (f.page||1) === page).map(f => mapFieldToPage(f, page));
-    if(!fieldsOnPage.length){
-      fieldsOnPage = colFields.map(f => mapFieldToPage(f, page));
-    }
+    const fieldsOnPage = colFields.filter(f => (f.page||1) === page);
     if(!fieldsOnPage.length){
       layout.pages[page] = { page, columns: [], rows: [], top: 0, bottom: 0 };
       continue;
@@ -2649,70 +2304,21 @@ async function extractLineItems(profile){
       guardList.forEach(g => guardWordsBase.add(g));
       const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
       const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
-      const align = field.column.align || 'left';
-      const fallbackMargin = Math.max(2, typicalHeight * 0.4);
-      const baseLeft = bandPx.x;
-      const baseRight = bandPx.x + bandPx.w;
-      const fallbackX0 = Math.max(0, baseLeft - fallbackMargin);
-      const fallbackX1 = Math.min(pageWidth, baseRight + fallbackMargin);
-      const anchorFera = tableHints.rowAnchor?.fieldKey === field.fieldKey ? (tableHints.rowAnchor.fera || tableHints.rowAnchor.metrics || null) : null;
-      const savedFera = field.column.fera || field.anchorMetrics || anchorFera || null;
-      const feraProjection = projectColumnFera(savedFera, pageWidth, pageHeight);
-      let expectedLeft = Number.isFinite(feraProjection?.x0) ? feraProjection.x0 : null;
-      let expectedRight = Number.isFinite(feraProjection?.x1) ? feraProjection.x1 : null;
-      let expectedCenter = Number.isFinite(feraProjection?.centerX) ? feraProjection.centerX : null;
-      if(!Number.isFinite(expectedCenter) && Number.isFinite(expectedLeft) && Number.isFinite(expectedRight)){
-        expectedCenter = (expectedLeft + expectedRight) / 2;
-      }
-      let expectedWidth = Number.isFinite(feraProjection?.width) ? feraProjection.width : null;
-      if(!Number.isFinite(expectedWidth) && Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) && expectedRight > expectedLeft){
-        expectedWidth = expectedRight - expectedLeft;
-      }
-      if(!Number.isFinite(expectedWidth)){
-        expectedWidth = Math.max(1, baseRight - baseLeft);
-      }
-      const feraTolerance = savedFera
-        ? Math.max(6, typicalHeight * 0.9, expectedWidth * (align === 'right' ? 0.2 : align === 'center' ? 0.25 : 0.35))
-        : null;
-      const searchMargin = savedFera
-        ? Math.max(4, typicalHeight * 0.75, feraTolerance || 0)
-        : Math.max(2, typicalHeight * 0.4);
-      let searchX0 = Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
-      let searchX1 = Number.isFinite(expectedRight) ? expectedRight : baseRight;
-      searchX0 = Math.max(0, searchX0 - searchMargin);
-      searchX1 = Math.min(pageWidth, searchX1 + searchMargin);
-      if(searchX1 <= searchX0){
-        searchX0 = fallbackX0;
-        searchX1 = fallbackX1;
-      }
-      const sourcePage = field.__sourcePage || field.page || page;
       return {
         fieldKey: field.fieldKey,
         outKey: keyMap[field.fieldKey] || field.fieldKey,
         page,
-        sourcePage,
-        x0: searchX0,
-        x1: searchX1,
-        fallbackX0,
-        fallbackX1,
+        x0: bandPx.x,
+        x1: bandPx.x + bandPx.w,
         headerBottom,
         headerPad,
-        align,
+        align: field.column.align || 'left',
         regexHint: field.column.regexHint || '',
         anchorSample,
         anchorSampleMetrics: field.column.anchorSampleMetrics || null,
         rowSamples,
         guardWords: guardList,
-        column: field.column,
-        expectedLeft,
-        expectedRight,
-        expectedCenter,
-        expectedWidth,
-        feraTolerance,
-        feraActive: !!savedFera,
-        feraSource: savedFera || null,
-        feraProjection: feraProjection || null,
-        typicalHeight
+        column: field.column
       };
     });
 
@@ -2721,9 +2327,8 @@ async function extractLineItems(profile){
     let anchor = descriptors.find(d=>d.fieldKey===anchorHintKey) || descriptors.find(d=>d.fieldKey===order[0]) || descriptors[0];
     const guardMatch = cleaned => cleaned && guardWordsBase.has(cleaned);
 
-    const applyAnchorGuard = (desc, tokList=[], pageNum=page) => {
+    const applyAnchorGuard = (desc, tokList=[]) => {
       if(state.mode !== 'RUN') return { tokens: tokList, bandTokens: tokList };
-      if(desc.sourcePage && desc.sourcePage !== pageNum) return { tokens: tokList, bandTokens: tokList };
       const saved = desc.anchorSampleMetrics || (tableHints.rowAnchor?.fieldKey === desc.fieldKey ? tableHints.rowAnchor.metrics : null);
       if(!saved) return { tokens: tokList, bandTokens: tokList };
       const filtered = (tokList || []).filter(tok => anchorMatchForBox(saved, { x: tok.x, y: tok.y, w: tok.w, h: tok.h }, [tok], pageWidth, pageHeight));
@@ -2759,25 +2364,18 @@ async function extractLineItems(profile){
         }
       }
       headerLimit = Math.max(0, headerLimit);
-      const gather = (x0, x1) => {
-        const hits=[];
-        for(const tok of pageTokens){
-          if(tok.page !== desc.page) continue;
-          const cx = tok.x + tok.w/2;
-          if(cx < x0 - 1 || cx > x1 + 1) continue;
-          const cy = tok.y + tok.h/2;
-          if(cy <= headerLimit) continue;
-          const text = (tok.text||'').trim();
-          if(!text) continue;
-          const cleaned = cleanedTokenText(text);
-          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
-          hits.push({ ...tok, cy, cleaned });
-        }
-        return hits;
-      };
-      let colToks = gather(desc.x0, desc.x1);
-      if(!colToks.length && desc.feraActive && Number.isFinite(desc.fallbackX0) && Number.isFinite(desc.fallbackX1)){
-        colToks = gather(desc.fallbackX0, desc.fallbackX1);
+      const colToks=[];
+      for(const tok of pageTokens){
+        if(tok.page !== desc.page) continue;
+        const cx = tok.x + tok.w/2;
+        if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
+        const cy = tok.y + tok.h/2;
+        if(cy <= headerLimit) continue;
+        const text = (tok.text||'').trim();
+        if(!text) continue;
+        const cleaned = cleanedTokenText(text);
+        if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
+        colToks.push({ ...tok, cy, cleaned });
       }
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
       return colToks;
@@ -2786,7 +2384,7 @@ async function extractLineItems(profile){
     let anchorTokens = collectColumnTokens(anchor);
     let anchorBandTokens = anchorTokens;
     if(anchorTokens.length){
-      const guarded = applyAnchorGuard(anchor, anchorTokens, page);
+      const guarded = applyAnchorGuard(anchor, anchorTokens);
       anchorTokens = guarded.tokens;
       anchorBandTokens = guarded.bandTokens;
     }
@@ -2795,7 +2393,7 @@ async function extractLineItems(profile){
         const cand = descriptors.find(d=>d.fieldKey===key);
         if(!cand) continue;
         const candidateTokens = collectColumnTokens(cand);
-        const guarded = applyAnchorGuard(cand, candidateTokens, page);
+        const guarded = applyAnchorGuard(cand, candidateTokens);
         if(guarded.tokens.length){ anchor = cand; anchorTokens = guarded.tokens; anchorBandTokens = guarded.bandTokens; break; }
       }
     }
@@ -2811,57 +2409,30 @@ async function extractLineItems(profile){
       continue;
     }
 
-    const columnRowCounts = new Map();
-    const pageRows = [];
+    const pageRowEntries=[];
     for(const band of rowBands){
       const row={
         line_no: '',
         __page: page,
+        __rowIndex: globalRowIndex,
+        __rowNumber: globalRowIndex + 1,
         __y0: band.y0,
         __y1: band.y1,
         __missing:{},
         __cells:{},
         __anchorField: anchor.fieldKey,
-        __anchorText: band.text,
-        __columnHits: 0,
-        __totalTokens: 0,
-        __anchorTokens: 0
+        __anchorText: band.text
       };
 
       for(const desc of descriptors){
-        const cellResult = tokensForCell(desc, band, pageTokens);
-        const cellTokens = cellResult.tokens;
+        const cellTokens = tokensForCell(desc, band, pageTokens);
         const raw = cellTokens.map(t=>t.text).join(' ').replace(/\s+/g,' ').trim();
         const spanKey = { docId, pageIndex: page-1, fieldKey: desc.outKey };
         let cleaned = null;
         let value = '';
-        let fingerprintOk = true;
         if(cellTokens.length){
           cleaned = FieldDataEngine.clean(desc.outKey, cellTokens, state.mode, spanKey);
-          const isValid = cleaned?.isValid !== false;
           value = cleaned.value || cleaned.raw || raw;
-          if(!isValid){
-            value = '';
-          }
-          fingerprintOk = isValid && fingerprintMatches(desc.outKey, cleaned.code, state.mode, desc.fieldKey);
-          if(cleaned){
-            cleaned.fingerprintOk = fingerprintOk;
-            cleaned.isValid = isValid;
-          }
-          if(!isValid){
-            row.__missing[desc.outKey] = true;
-          }
-          if(!fingerprintOk){
-            value = '';
-          }
-          row.__totalTokens += cellTokens.length;
-          if(desc.fieldKey === anchor.fieldKey){
-            row.__anchorTokens += cellTokens.length;
-          } else {
-            row.__columnHits += 1;
-          }
-          const prevCount = columnRowCounts.get(desc.fieldKey) || 0;
-          columnRowCounts.set(desc.fieldKey, prevCount + 1);
         }
         if(desc.fieldKey === anchor.fieldKey && !value && band.text){
           value = band.text.trim();
@@ -2882,29 +2453,8 @@ async function extractLineItems(profile){
         } else {
           row[desc.outKey] = value;
         }
-        const cellMeta = {
-          raw,
-          tokens: cellTokens,
-          cleaned,
-          fingerprintOk,
-          isValid: cleaned?.isValid !== false,
-          invalidReason: cleaned?.invalidReason || null,
-          fera: {
-            ok: cellResult.feraOk,
-            reason: cellResult.feraReason || null,
-            tolerance: cellResult.feraTolerance,
-            bestDiff: cellResult.feraBestDiff,
-            expected: cellResult.feraExpected || null
-          }
-        };
-        row.__cells[desc.fieldKey] = cellMeta;
-        let missingReason = null;
-        if(!cellTokens.length){
-          missingReason = cellResult.feraReason || 'no_tokens';
-        } else if(!fingerprintOk){
-          missingReason = 'fingerprint_mismatch';
-        }
-        if(missingReason){ row.__missing[desc.outKey] = missingReason; }
+        row.__cells[desc.fieldKey] = { raw, tokens: cellTokens, cleaned };
+        if(!cellTokens.length) row.__missing[desc.outKey] = true;
       }
 
       row.description = row.description || '';
@@ -2913,6 +2463,7 @@ async function extractLineItems(profile){
       row.unit_price = row.unit_price || '';
       row.amount = row.amount || '';
       if(row.line_no === '' && !row.__missing.line_no){ row.__missing.line_no = true; }
+      if(row.line_no === '' || row.line_no === undefined){ row.line_no = row.__rowNumber; }
 
       if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
       if(row.unit_price){
@@ -2928,39 +2479,14 @@ async function extractLineItems(profile){
         if(Number.isFinite(q) && Number.isFinite(u)) row.amount=(q*u).toFixed(2);
       }
 
-      pageRows.push(row);
-    }
-
-    const allCounts = descriptors.map(d => columnRowCounts.get(d.fieldKey) || 0).filter(c => c > 0);
-    const nonAnchorCounts = descriptors
-      .filter(d => d.fieldKey !== anchor.fieldKey)
-      .map(d => columnRowCounts.get(d.fieldKey) || 0)
-      .filter(c => c > 0);
-    // Prefer consensus from supporting columns; fall back to all columns (including the anchor)
-    // when they're the only ones with data.
-    const countsForAverage = nonAnchorCounts.length ? nonAnchorCounts : allCounts;
-    let targetRowCount = pageRows.length;
-    if(countsForAverage.length){
-      const desired = pickRowTarget(countsForAverage, pageRows.length);
-      if(Number.isFinite(desired) && desired > 0){
-        targetRowCount = Math.min(pageRows.length, Math.max(1, desired));
-      }
-    }
-
-    const filteredRows = targetRowCount < pageRows.length ? pruneRowsBySupport(pageRows, targetRowCount) : pageRows;
-    const pageRowEntries=[];
-    for(const row of filteredRows){
-      row.__rowIndex = globalRowIndex;
-      row.__rowNumber = globalRowIndex + 1;
-      if(row.line_no === '' || row.line_no === undefined){ row.line_no = row.__rowNumber; }
       results.push(row);
-      pageRowEntries.push({ index: row.__rowIndex, y0: row.__y0, y1: row.__y1 });
+      pageRowEntries.push({ index: row.__rowIndex, y0: band.y0, y1: band.y1 });
       globalRowIndex++;
     }
 
     const colLayout = descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 }));
-    const top = filteredRows.length ? Math.min(...filteredRows.map(r=>r.__y0)) : Math.min(...rowBands.map(r=>r.y0));
-    const bottom = filteredRows.length ? Math.max(...filteredRows.map(r=>r.__y1)) : pageHeight;
+    const top = Math.min(...rowBands.map(r=>r.y0));
+    const bottom = Math.max(...rowBands.map(r=>r.y1));
     layout.pages[page] = { page, columns: colLayout, rows: pageRowEntries, top, bottom };
   }
 
@@ -3850,10 +3376,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(anchorMetrics) entry.anchorMetrics = anchorMetrics;
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column){
-    const columnExtras = clonePlain(extras.column);
-    const columnFera = columnExtras.fera || anchorMetrics || null;
-    if(columnFera){ columnExtras.fera = clonePlain(columnFera); }
-    entry.column = columnExtras;
+    entry.column = { ...extras.column };
     state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
     state.profile.tableHints.columns = state.profile.tableHints.columns || {};
     state.profile.tableHints.columns[step.fieldKey] = {
@@ -3863,37 +3386,16 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
       header: extras.column.header || null,
       anchorSample: extras.column.anchorSample || null,
       anchorSampleMetrics: extras.column.anchorSampleMetrics || null,
-      rowSamples: extras.column.rowSamples || [],
-      fera: columnFera ? clonePlain(columnFera) : null
+      rowSamples: extras.column.rowSamples || []
     };
     if(extras.column.anchorSampleMetrics){
       entry.column.anchorSampleMetrics = extras.column.anchorSampleMetrics;
     }
     if(extras.column.anchorSample){
       if(!state.profile.tableHints.rowAnchor || state.profile.tableHints.rowAnchor.fieldKey === step.fieldKey){
-        state.profile.tableHints.rowAnchor = {
-          fieldKey: step.fieldKey,
-          page,
-          sample: extras.column.anchorSample,
-          metrics: extras.column.anchorSampleMetrics || null,
-          fera: columnFera ? clonePlain(columnFera) : null
-        };
+        state.profile.tableHints.rowAnchor = { fieldKey: step.fieldKey, page, sample: extras.column.anchorSample, metrics: extras.column.anchorSampleMetrics || null };
       }
     }
-  }
-  const patterns = FieldDataEngine.exportPatterns();
-  const nextFingerprints = (existing?.fingerprints && typeof existing.fingerprints === 'object') ? clonePlain(existing.fingerprints) : {};
-  const keysToPersist = new Set();
-  if(step.fieldKey) keysToPersist.add(step.fieldKey);
-  const altKey = COLUMN_OUT_KEYS[step.fieldKey];
-  if(altKey) keysToPersist.add(altKey);
-  for(const key of keysToPersist){
-    if(patterns && patterns[key]){
-      nextFingerprints[key] = clonePlain(patterns[key]);
-    }
-  }
-  if(Object.keys(nextFingerprints).length){
-    entry.fingerprints = nextFingerprints;
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   saveProfile(state.username, state.docType, state.profile);
@@ -3989,7 +3491,6 @@ els.loginForm?.addEventListener('submit', (e)=>{
   state.docType = els.docType?.value || 'invoice';
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
@@ -4009,7 +3510,6 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   setModels(models);
   localStorage.removeItem(LS.dbKey(state.username, state.docType));
   state.profile = null;
-  hydrateFingerprintsFromProfile(null);
   renderSavedFieldsTable();
   populateModelSelect();
   renderResultsTable();
@@ -4029,7 +3529,6 @@ els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
   renderSavedFieldsTable();
   populateModelSelect();
 });
@@ -4224,22 +3723,6 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
     alert(err?.message || 'Failed to export MasterDB CSV');
   }
 });
-els.exportMissingBtn?.addEventListener('click', ()=>{
-  const dt = els.dataDocType?.value || state.docType;
-  try {
-    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
-    const json = JSON.stringify(missingMap, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `masterdb-missing-${state.username}-${dt}.json`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  } catch(err){
-    console.error('Missing cell export failed', err);
-    alert(err?.message || 'Failed to export missing-cell diagnostics');
-  }
-});
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
   compileDocument(state.currentFileId);
@@ -4252,11 +3735,9 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 /* ---------------------------- Batch ------------------------------- */
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
-  state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
-  hydrateFingerprintsFromProfile(state.profile);
-  const activeProfile = state.profile || profile || { fields: [] };
+  state.profile = profile;
   await openFile(file);
-  for(const spec of (activeProfile.fields || [])){
+  for(const spec of (profile.fields || [])){
     if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
       state.pageNum = clamp(spec.page+1, 1, state.numPages);
       state.viewport = state.pageViewports[state.pageNum-1];
@@ -4289,7 +3770,7 @@ async function autoExtractFileWithProfile(file, profile){
     if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
   await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(activeProfile);
+  const lineItems = await extractLineItems(profile);
   compileDocument(state.currentFileId, lineItems);
 }
 

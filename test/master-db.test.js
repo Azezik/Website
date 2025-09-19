@@ -19,11 +19,11 @@ const ssot = {
   },
   lineItems: [
     { sku: '0001', description: 'Widget A\nLarge', quantity: '2', unit_price: '100.5', amount: '201', line_no: '0001' },
-    { sku: '0002', description: 'Widget B', quantity: '3', unit_price: '50', amount: '', line_no: ' ', __missing: { line_no: true } }
+    { sku: '0002', description: 'Widget B', quantity: '3', unit_price: '50', amount: '', line_no: ' ' }
   ]
 };
 
-const { rows, missingMap } = MasterDB.flatten(ssot);
+const rows = MasterDB.flatten(ssot);
 assert.deepStrictEqual(rows[0], MasterDB.HEADERS);
 assert.strictEqual(rows.length, 3);
 assert.strictEqual(rows[1][0], 'My Store');
@@ -51,19 +51,6 @@ assert.strictEqual(rows[2][10], '50.00');
 assert.strictEqual(rows[2][11], '150.00');
 assert.strictEqual(rows[2][18], '2');
 
-assert.deepStrictEqual(missingMap.summary, {
-  sku: [],
-  quantity: [],
-  unit_price: [],
-  line_no: [2]
-});
-
-assert.ok(missingMap.rows['2']);
-assert.deepStrictEqual(missingMap.rows['2'].line_no.reasons, ['empty', 'flagged']);
-assert.strictEqual(missingMap.rows['2'].line_no.flagged, true);
-assert.deepStrictEqual(missingMap.columns.line_no.rows, [2]);
-assert.deepStrictEqual(missingMap.columns.line_no.details['2'], missingMap.rows['2'].line_no);
-
 assert.strictEqual(ssot.lineItems[1].line_no, ' ');
 
 const csv1 = MasterDB.toCsv(ssot);
@@ -72,49 +59,5 @@ assert.strictEqual(csv1, csv2);
 assert.strictEqual(csv1.split('\n').length, rows.length);
 
 assert.throws(() => MasterDB.toCsv({ fields: {}, lineItems: [] }), /Exporter input empty—SSOT not wired./);
-
-const noisyLineItems = [];
-for(let i = 1; i <= 8; i++){
-  noisyLineItems.push({
-    sku: `SKU-${i}`,
-    description: `Item ${i}`,
-    quantity: String(i),
-    unit_price: (10 * i).toString(),
-    amount: (10 * i * i).toString(),
-    line_no: String(i).padStart(4, '0'),
-    __rowNumber: i
-  });
-}
-noisyLineItems.push({
-  sku: '',
-  description: '',
-  quantity: '',
-  unit_price: '',
-  amount: '',
-  line_no: '0099',
-  __rowNumber: 99
-});
-noisyLineItems.push({
-  sku: '',
-  description: '',
-  quantity: '',
-  unit_price: '',
-  amount: '',
-  line_no: '0100',
-  __rowNumber: 100
-});
-
-const noisySsot = { fields: ssot.fields, lineItems: noisyLineItems };
-const { rows: noisyRows, missingMap: noisyMissing } = MasterDB.flatten(noisySsot);
-
-assert.strictEqual(noisyRows.length, 9);
-assert.strictEqual(noisyRows.slice(1).length, 8);
-assert.strictEqual(noisyRows[noisyRows.length - 1][18], '0008');
-assert.deepStrictEqual(
-  noisyRows.slice(1).map(row => row[7]),
-  noisyLineItems.slice(0, 8).map(item => item.sku)
-);
-assert.ok(!('99' in noisyMissing.rows));
-assert.ok(!('100' in noisyMissing.rows));
 
 console.log('MasterDB tests passed.');
