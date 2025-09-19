@@ -2380,9 +2380,20 @@ async function extractLineItems(profile){
     return Array.from(new Set((list||[]).map(w=>cleanedTokenText(w)).filter(Boolean)));
   }
 
-  function buildRowBands(anchorTokens, pageHeight){
-    if(!anchorTokens.length) return [];
-    const ordered = anchorTokens.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
+  function buildRowBands(anchorTokens, pageHeight, allTokens=[]){
+    const primary = Array.isArray(anchorTokens) ? anchorTokens.slice() : [];
+    const fallbackList = Array.isArray(allTokens) ? allTokens : [];
+    if(fallbackList.length){
+      const seen = new Set(primary);
+      for(const tok of fallbackList){
+        if(!seen.has(tok)){
+          primary.push(tok);
+          seen.add(tok);
+        }
+      }
+    }
+    if(!primary.length) return [];
+    const ordered = primary.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
     const groups=[];
     let current=null;
     for(const tok of ordered){
@@ -2429,9 +2440,6 @@ async function extractLineItems(profile){
       if(y1 <= y0){
         y0=Math.max(0,rowTop);
         y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
-      }
-      if(!Number.isFinite(nextTop)){
-        y1 = pageHeight;
       }
       return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
     });
@@ -2805,7 +2813,7 @@ async function extractLineItems(profile){
       continue;
     }
 
-    const rowBands = buildRowBands(anchorBandTokens, pageHeight);
+    const rowBands = buildRowBands(anchorBandTokens, pageHeight, anchorTokens);
     if(!rowBands.length){
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
