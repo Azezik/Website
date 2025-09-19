@@ -3966,10 +3966,95 @@ function buildDocumentSnapshot(fileId, lineItems, records, opts = {}){
   return { compiled, invoiceNumber };
 }
 
+function tokenToPreviewText(token){
+  if(token === null || token === undefined) return '';
+  if(typeof token === 'string') return token;
+  if(typeof token.text === 'string') return token.text;
+  if(typeof token.raw === 'string') return token.raw;
+  if(typeof token.corrected === 'string') return token.corrected;
+  return '';
+}
+
+function tokensToPreviewText(tokens){
+  if(!Array.isArray(tokens) || !tokens.length) return '';
+  return tokens.map(tokenToPreviewText).filter(Boolean).join(' ').trim();
+}
+
+function normalizePreviewEntry(entry){
+  if(!entry || !entry.fieldKey) return null;
+  const copy = clonePlain(entry);
+  if(!Array.isArray(copy.tokens)) copy.tokens = [];
+  if(copy.raw === undefined || copy.raw === null){
+    copy.raw = tokensToPreviewText(copy.tokens);
+  }
+  if(copy.value === undefined || copy.value === null){
+    copy.value = copy.raw || '';
+  }
+  if(copy.correctionsApplied === undefined && copy.corrections !== undefined){
+    copy.correctionsApplied = clonePlain(copy.corrections);
+  }
+  if(copy.corrections === undefined && copy.correctionsApplied !== undefined){
+    copy.corrections = clonePlain(copy.correctionsApplied);
+  }
+  if(typeof copy.confidence !== 'number'){
+    const num = Number(copy.confidence);
+    copy.confidence = Number.isFinite(num) ? num : 1;
+  }
+  return copy;
+}
+
 function buildConfigPreviewRecord(){
-  const records = Object.values(state.configMode?.previewRaw || {});
-  const items = state.configMode?.previewLineItems || [];
+  const previewRaw = state.configMode?.previewRaw || {};
+  const records = [];
+  const seen = new Set();
+
+  (state.profile?.fields || []).forEach(field => {
+    if(!field || !field.fieldKey) return;
+    const key = field.fieldKey;
+    const rawEntry = previewRaw[key];
+    let entry = rawEntry ? normalizePreviewEntry(rawEntry) : null;
+    if(!entry){
+      const tokens = Array.isArray(field.tokens) ? clonePlain(field.tokens) : [];
+      let raw = typeof field.raw === 'string' ? field.raw : '';
+      if(!raw) raw = tokensToPreviewText(tokens);
+      let value = field.value;
+      if(value === undefined || value === null) value = raw || '';
+      const corrections = clonePlain(field.correctionsApplied || []);
+      entry = normalizePreviewEntry({
+        fieldKey: key,
+        value,
+        raw,
+        confidence: typeof field.confidence === 'number' ? field.confidence : 1,
+        correctionsApplied: corrections,
+        corrections,
+        tokens
+      });
+    }
+    if(entry){
+      records.push(entry);
+      seen.add(key);
+    }
+  });
+
+  Object.values(previewRaw).forEach(rawEntry => {
+    if(!rawEntry || !rawEntry.fieldKey || seen.has(rawEntry.fieldKey)) return;
+    const normalized = normalizePreviewEntry(rawEntry);
+    if(normalized){
+      records.push(normalized);
+      seen.add(normalized.fieldKey);
+    }
+  });
+
+  const previewItems = Array.isArray(state.configMode?.previewLineItems)
+    ? clonePlain(state.configMode.previewLineItems)
+    : [];
+  const fallbackItems = (!previewItems.length && Array.isArray(state.currentLineItems))
+    ? clonePlain(state.currentLineItems)
+    : [];
+  const items = previewItems.length ? previewItems : fallbackItems;
+
   if(!records.length && !items.length) return null;
+
   const fileId = state.currentFileId || 'config-preview';
   const username = state.username || 'preview';
   const docType = state.docType || 'invoice';
@@ -4221,11 +4306,14 @@ function ensureAnchorFor(fieldKey){
 }
 function renderSavedFieldsTable(){
   let latest = null;
-  if(state.mode === 'CONFIG' && state.configMode?.previewRecord){
-    latest = state.configMode.previewRecord;
+  if(state.mode === 'CONFIG'){
+    latest = buildConfigPreviewRecord();
+    if(state.configMode){
+      state.configMode.previewRecord = latest || null;
+    }
   } else {
     const db = LS.getDb(state.username, state.docType);
-    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0] || null;
   }
   state.savedFieldsRecord = latest || null;
   const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
@@ -4248,7 +4336,9 @@ function renderConfirmedTables(rec){
   confirmedRenderPending = true;
   requestAnimationFrame(()=>{
     confirmedRenderPending = false;
-    const latest = rec || LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
+    const latest = rec || (state.mode === 'CONFIG'
+      ? null
+      : LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0]);
     const isPreview = !!latest?.isPreview || (state.mode === 'CONFIG' && rec === state.configMode?.previewRecord);
     const fDiv = document.getElementById('confirmedFields');
     const liDiv = document.getElementById('confirmedLineItems');
