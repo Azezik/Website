@@ -1023,27 +1023,15 @@ function codeOf(str){
   const hasSeparators = /[-_/.,:]/.test(text) || /\s/.test(text);
   const coreLength = text.replace(/[^A-Za-z0-9]/g, '').length;
   const isShort = coreLength <= 10;
-  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '0')).join('');
+  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '2')).join('');
 }
 
-function shapeOf(str){
-  let out = '';
-  for(const ch of str){
-    if(/[A-Z]/.test(ch)) out += 'A';
-    else if(/[0-9]/.test(ch)) out += '9';
-    else if(ch === '-') out += '-';
-    else if(ch === '/') out += '/';
-    else if(ch === '.') out += '.';
-    else if(/\s/.test(ch)) out += '_';
-    else out += '?';
-  }
-  return out;
-}
-
-function digitRatio(str){
-  if(!str.length) return 0;
-  const digits = (str.match(/[0-9]/g) || []).length;
-  return digits / str.length;
+function normalizeFingerprintCode(code){
+  if(code === undefined || code === null) return null;
+  const normalized = String(code).trim().replace(/0/g, '2');
+  if(normalized.length !== 5) return null;
+  if(!/^[12]{5}$/.test(normalized)) return null;
+  return normalized;
 }
 
 function clonePlain(obj){
@@ -1060,22 +1048,17 @@ const FieldDataEngine = (() => {
 
   function learn(ftype, value){
     if(!value) return;
-    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}, digit:{}});
-    const c = codeOf(value);
-    const s = shapeOf(value);
-    const l = value.length;
-    const d = digitRatio(value).toFixed(2);
-    p.code[c] = (p.code[c] || 0) + 1;
-    p.shape[s] = (p.shape[s] || 0) + 1;
-    p.len[l] = (p.len[l] || 0) + 1;
-    p.digit[d] = (p.digit[d] || 0) + 1;
+    const code = normalizeFingerprintCode(codeOf(value));
+    if(!code) return;
+    const p = patterns[ftype] || (patterns[ftype] = { code: {} });
+    p.code[code] = (p.code[code] || 0) + 1;
   }
 
   function dominant(ftype){
     const p = patterns[ftype];
-    if(!p) return {};
-    const maxKey = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1])[0]?.[0];
-    return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len), digit: parseFloat(maxKey(p.digit)) };
+    if(!p || !p.code) return {};
+    const best = normalizeFingerprintCode(mostCommonKey(p.code));
+    return best ? { code: best } : {};
   }
 
   function clean(ftype, input, mode='RUN', spanKey){
@@ -1112,35 +1095,48 @@ const FieldDataEngine = (() => {
       txt = isValid ? sanitized : '';
     }
     const conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
-    const code = codeOf(txt);
-    const shape = shapeOf(txt);
-    const digit = digitRatio(txt);
+    const code = normalizeFingerprintCode(codeOf(txt));
     const before = dominant(ftype);
-    const fingerprintMatch = isValid && (!before.code || before.code === code);
+    const fingerprintMatch = isValid && (!before.code || (code && before.code === code));
     const shouldLearn = isValid && (mode === 'CONFIG' || fingerprintMatch);
-    if(shouldLearn) learn(ftype, txt);
+    if(shouldLearn && code) learn(ftype, txt);
     const dom = shouldLearn ? dominant(ftype) : before;
-    let score=0;
-    if(isValid && dom.code && dom.code===code) score++;
-    if(isValid && dom.shape && dom.shape===shape) score++;
-    if(isValid && dom.len && dom.len===txt.length) score++;
-    if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
+    const score = isValid && code && dom.code && dom.code === code ? 1 : 0;
     if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason });
-    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch, isValid, invalidReason };
+    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, score, correctionsApplied:[], fingerprintMatch, isValid, invalidReason };
   }
 
   function exportPatterns(){ return patterns; }
   function importPatterns(p){
     Object.keys(patterns).forEach(k => delete patterns[k]);
     if(!p || typeof p !== 'object') return;
+    const ingest = (key, data) => {
+      if(!data || typeof data !== 'object') return;
+      const source = data.code && typeof data.code === 'object' ? data.code : data;
+      const tallies = {};
+      for(const [rawCode, count] of Object.entries(source)){
+        const normalized = normalizeFingerprintCode(rawCode);
+        if(!normalized) continue;
+        const num = Number(count) || 0;
+        tallies[normalized] = (tallies[normalized] || 0) + num;
+      }
+      if(Object.keys(tallies).length){
+        patterns[key] = { code: tallies };
+      }
+    };
     for(const [key, data] of Object.entries(p)){
-      if(data && typeof data === 'object'){
-        patterns[key] = clonePlain(data);
+      if(!data || typeof data !== 'object') continue;
+      if(data.code){
+        ingest(key, data);
+        continue;
+      }
+      for(const [nestedKey, nestedVal] of Object.entries(data)){
+        ingest(nestedKey, nestedVal);
       }
     }
   }
 
-  return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
+  return { codeOf, clean, exportPatterns, importPatterns, dominant };
 })();
 
 function mostCommonKey(counts){
@@ -1164,10 +1160,16 @@ function getProfileFieldEntry(fieldKey){
 
 function getDominantFingerprintCode(ftype, profileKey){
   const dom = ftype ? FieldDataEngine.dominant(ftype) : null;
-  if(dom?.code) return dom.code;
+  if(dom?.code){
+    const normalized = normalizeFingerprintCode(dom.code);
+    if(normalized) return normalized;
+  }
   if(profileKey && profileKey !== ftype){
     const altDom = FieldDataEngine.dominant(profileKey);
-    if(altDom?.code) return altDom.code;
+    if(altDom?.code){
+      const normalized = normalizeFingerprintCode(altDom.code);
+      if(normalized) return normalized;
+    }
   }
   const searchKeys = [];
   if(profileKey) searchKeys.push(profileKey);
@@ -1176,20 +1178,16 @@ function getDominantFingerprintCode(ftype, profileKey){
     const entry = getProfileFieldEntry(key);
     if(!entry?.fingerprints || typeof entry.fingerprints !== 'object') continue;
     const fp = entry.fingerprints;
-    if(fp.code && typeof fp.code === 'object'){
-      const best = mostCommonKey(fp.code);
-      if(best) return best;
-    }
-    const direct = fp[key];
-    if(direct && typeof direct === 'object' && direct.code){
-      const best = mostCommonKey(direct.code);
-      if(best) return best;
-    }
+    const direct = sanitizeFingerprintRecord(fp);
+    const directBest = bestFingerprintCode(direct?.code);
+    if(directBest) return directBest;
+    const keyed = key ? sanitizeFingerprintRecord(fp[key]) : null;
+    const keyedBest = bestFingerprintCode(keyed?.code);
+    if(keyedBest) return keyedBest;
     for(const value of Object.values(fp)){
-      if(value && typeof value === 'object' && value.code){
-        const best = mostCommonKey(value.code);
-        if(best) return best;
-      }
+      const nested = sanitizeFingerprintRecord(value);
+      const nestedBest = bestFingerprintCode(nested?.code);
+      if(nestedBest) return nestedBest;
     }
   }
   return null;
@@ -1197,10 +1195,29 @@ function getDominantFingerprintCode(ftype, profileKey){
 
 function fingerprintMatches(ftype, code, mode = state.mode, profileKey){
   if(mode === 'CONFIG') return true;
-  const expected = getDominantFingerprintCode(ftype, profileKey);
+  const expected = normalizeFingerprintCode(getDominantFingerprintCode(ftype, profileKey));
   if(!expected) return true;
-  if(typeof code !== 'string') return false;
-  return code === expected;
+  const candidate = normalizeFingerprintCode(code);
+  if(!candidate) return false;
+  return candidate === expected;
+}
+
+function sanitizeFingerprintRecord(record){
+  if(!record || typeof record !== 'object') return null;
+  const source = record.code && typeof record.code === 'object' ? record.code : record;
+  const tallies = {};
+  for(const [rawCode, count] of Object.entries(source)){
+    const normalized = normalizeFingerprintCode(rawCode);
+    if(!normalized) continue;
+    const num = Number(count) || 0;
+    tallies[normalized] = (tallies[normalized] || 0) + num;
+  }
+  return Object.keys(tallies).length ? { code: tallies } : null;
+}
+
+function bestFingerprintCode(tallies){
+  if(!tallies || typeof tallies !== 'object') return null;
+  return normalizeFingerprintCode(mostCommonKey(tallies));
 }
 
 function collectPersistedFingerprints(profile){
@@ -1209,13 +1226,17 @@ function collectPersistedFingerprints(profile){
   for(const field of profile.fields){
     const prints = field?.fingerprints;
     if(!prints || typeof prints !== 'object') continue;
-    if(prints.code || prints.shape || prints.len || prints.digit){
-      out[field.fieldKey] = clonePlain(prints);
-      continue;
+    const direct = sanitizeFingerprintRecord(prints);
+    if(direct){
+      if(field.fieldKey){
+        out[field.fieldKey] = direct;
+        continue;
+      }
     }
     for(const [key, data] of Object.entries(prints)){
-      if(data && typeof data === 'object'){
-        out[key] = clonePlain(data);
+      const sanitized = sanitizeFingerprintRecord(data);
+      if(sanitized){
+        out[key] = sanitized;
       }
     }
   }
@@ -2444,7 +2465,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       return { value:'', raw:'', confidence:0, boxPx, tokens:[], method:'raw' };
     }
     const tokensOut = best.tokens.map(t=>({ text:t }));
-    const result = { value: rawText, raw: rawText, corrected: rawText, code:null, shape:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
+    const result = { value: rawText, raw: rawText, corrected: rawText, code:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
     traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method:'raw', mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false });
     return result;
   }
@@ -2466,7 +2487,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       raw: sel.raw,
       corrected: cleaned.corrected,
       code: cleaned.code,
-      shape: cleaned.shape,
       score: cleaned.score,
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
@@ -2490,7 +2510,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       raw: cleaned.raw || rawText,
       corrected: cleaned.corrected,
       code: cleaned.code,
-      shape: cleaned.shape,
       score: cleaned.score,
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
@@ -2563,7 +2582,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox); }
       const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
       if(boxOk){
-        result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
+        result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
       }
     }
   }
@@ -2572,7 +2591,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     traceEvent(spanKey,'fallback.search',{});
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
     traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
-    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   if(!result.value && selectionRaw){
     bumpDebugBlank();
