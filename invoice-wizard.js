@@ -139,6 +139,8 @@ const createConfigModeState = () => ({
 
 const createRunModeState = () => ({
   wizardId: '',
+  steps: [],
+  stepIdx: 0,
   selectionCss: null,
   selectionPx: null,
   snappedCss: null,
@@ -203,8 +205,8 @@ sharedKeys.forEach(key => {
 });
 ['steps','stepIdx'].forEach(key => {
   Object.defineProperty(state, key, {
-    get(){ return state.configMode[key]; },
-    set(v){ state.configMode[key] = v; },
+    get(){ return getModeState()[key]; },
+    set(v){ getModeState()[key] = v; },
   });
 });
 const modeScopedKeys = ['selectionCss','selectionPx','snappedCss','snappedPx','snappedText','matchPoints','currentLineItems','lastOcrCropPx','lastOcrCropCss','cropAudits','cropHashes','pageSnapshots','pageRenderPromises','pageRenderReady'];
@@ -358,6 +360,7 @@ function enterRunMode(wizardId){
   const existing = loadProfile(state.username, state.docType);
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
+  initStepsFromProfile();
   renderSavedFieldsTable();
   populateModelSelect();
   renderResultsTable();
@@ -4175,6 +4178,9 @@ function syncRawModeUI(){
   if(els.rawDataBtn){
     els.rawDataBtn.classList.toggle('active', on);
   }
+  if(els.boxModeBtn){
+    els.boxModeBtn.classList.toggle('active', !on);
+  }
   renderResultsTable();
 }
 
@@ -4389,6 +4395,172 @@ function renderConfirmedTables(rec){
 }
 
 /* --------------------------- Events ------------------------------ */
+function getActiveWizardId(mode = state.mode){
+  if(mode === 'RUN'){
+    return state.runMode?.wizardId || state.configMode?.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  }
+  return state.configMode?.wizardId || state.docType || DEFAULT_WIZARD_ID;
+}
+
+function logWizardAction(action){
+  const payload = { mode: state.mode, wizardId: getActiveWizardId(state.mode), action };
+  try {
+    console.log('[wizard-action]', payload);
+  } catch(err){
+    console.warn('wizard-action logging failed', err);
+  }
+  return payload;
+}
+
+function executeWizardAction(action, configHandler, runHandler){
+  logWizardAction(action);
+  const handler = state.mode === 'RUN' ? (runHandler || configHandler) : configHandler;
+  if(typeof handler === 'function'){
+    return handler();
+  }
+  return undefined;
+}
+
+function setWizardRawMode(enabled){
+  state.modes.rawData = !!enabled;
+  if(els.rawDataToggle){
+    els.rawDataToggle.checked = state.modes.rawData;
+  }
+  syncRawModeUI();
+}
+
+function clearSelectionFor(mode){
+  const modeState = getModeState(mode);
+  if(!modeState) return;
+  modeState.selectionPx = null;
+  modeState.snappedPx = null;
+  modeState.snappedText = '';
+  drawOverlay();
+}
+
+function handleBackFor(mode){
+  const modeState = getModeState(mode);
+  if(!modeState) return;
+  if(modeState.stepIdx > 0){
+    goToStep(modeState.stepIdx - 1);
+  }
+}
+
+function handleSkipFor(mode){
+  const modeState = getModeState(mode);
+  if(!modeState) return;
+  const steps = Array.isArray(modeState.steps) ? modeState.steps : [];
+  if(modeState.stepIdx < steps.length - 1){
+    goToStep(modeState.stepIdx + 1);
+  } else {
+    finishWizard();
+  }
+}
+
+function enterBoxModeFor(mode){
+  setWizardRawMode(false);
+  drawOverlay();
+}
+
+function enterRawModeFor(mode){
+  setWizardRawMode(true);
+  drawOverlay();
+}
+
+async function handleConfirmForMode(mode){
+  const modeState = getModeState(mode);
+  if(!modeState?.snappedPx){
+    alert('Draw a box first.');
+    return;
+  }
+  const tokens = await ensureTokensForPage(state.pageNum);
+  const steps = Array.isArray(modeState.steps) && modeState.steps.length ? modeState.steps : DEFAULT_FIELDS;
+  const idx = Math.max(0, Math.min(modeState.stepIdx || 0, steps.length - 1));
+  const step = steps[idx] || DEFAULT_FIELDS[idx] || DEFAULT_FIELDS[0];
+  const isConfigMode = mode === 'CONFIG';
+
+  let value = '';
+  let boxPx = modeState.snappedPx;
+  let confidence = 0;
+  let raw = '';
+  let corrections = [];
+  let fieldTokens = [];
+
+  if(step.kind === 'landmark'){
+    value = (modeState.snappedText || '').trim();
+    raw = value;
+  } else if(step.kind === 'block'){
+    value = (modeState.snappedText || '').trim();
+    raw = value;
+  } else {
+    const res = await extractFieldValue(step, tokens, state.viewport);
+    value = res.value;
+    if(!value && modeState.snappedText){
+      bumpDebugBlank();
+      value = (modeState.snappedText || '').trim();
+    }
+    boxPx = res.boxPx || modeState.snappedPx;
+    confidence = res.confidence || 0;
+    raw = res.raw || (modeState.snappedText || '').trim();
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
+  }
+
+  if(els.ocrToggle?.checked){
+    try {
+      await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx);
+    } catch(err){
+      console.error('auditCropSelfTest failed', err);
+    }
+  }
+
+  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+  const extras = {};
+  if(step.type === 'static'){
+    const lm = captureRingLandmark(boxPx);
+    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+    extras.landmark = lm;
+  } else if(step.type === 'column'){
+    extras.column = buildColumnModel(step, pct, boxPx, tokens);
+  }
+
+  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
+  ensureAnchorFor(step.fieldKey);
+
+  const lineItems = await extractLineItems(state.profile);
+  modeState.currentLineItems = lineItems;
+
+  const fid = state.currentFileId;
+  const rec = {
+    fieldKey: step.fieldKey,
+    raw,
+    value,
+    confidence,
+    correctionsApplied: corrections,
+    page: state.pageNum,
+    bboxPct: pct,
+    ts: Date.now(),
+    tokens: fieldTokens
+  };
+  if(isConfigMode){
+    updateConfigPreviewStore(step.fieldKey, rec, lineItems);
+    renderSavedFieldsTable();
+  } else if(fid){
+    rawStore.upsert(fid, rec);
+    compileDocument(fid, lineItems);
+  }
+
+  afterConfirmAdvance();
+}
+
+const handleConfigConfirm = () => handleConfirmForMode('CONFIG');
+const handleRunConfirm = () => handleConfirmForMode('RUN');
+
 // Auth
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
@@ -4487,13 +4659,13 @@ els.docType?.addEventListener('change', ()=>{
 els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
 els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
 els.rawDataToggle?.addEventListener('change', ()=>{
-  state.modes.rawData = !!els.rawDataToggle.checked;
-  syncRawModeUI();
+  setWizardRawMode(!!els.rawDataToggle.checked);
+});
+els.boxModeBtn?.addEventListener('click', ()=>{
+  executeWizardAction('boxMode', () => enterBoxModeFor('CONFIG'), () => enterBoxModeFor('RUN'));
 });
 els.rawDataBtn?.addEventListener('click', ()=>{
-  state.modes.rawData = !state.modes.rawData;
-  if(els.rawDataToggle) els.rawDataToggle.checked = state.modes.rawData;
-  syncRawModeUI();
+  executeWizardAction('rawData', () => enterRawModeFor('CONFIG'), () => enterRawModeFor('RUN'));
 });
 
 const modelSelect = document.getElementById('model-select');
@@ -4572,82 +4744,20 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
+  executeWizardAction('clearSelection', () => clearSelectionFor('CONFIG'), () => clearSelectionFor('RUN'));
 });
 
 els.backBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx > 0) goToStep(state.stepIdx - 1);
+  executeWizardAction('back', () => handleBackFor('CONFIG'), () => handleBackFor('RUN'));
 });
 
 els.skipBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx < state.steps.length - 1) goToStep(state.stepIdx + 1);
-  else finishWizard();
+  executeWizardAction('skip', () => handleSkipFor('CONFIG'), () => handleSkipFor('RUN'));
 });
 
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
-  if(!state.snappedPx){ alert('Draw a box first.'); return; }
-  const tokens = await ensureTokensForPage(state.pageNum);
-  const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
-  const isConfigMode = state.mode === 'CONFIG';
-
-  let value = '', boxPx = state.snappedPx;
-  let confidence = 0, raw = '', corrections=[];
-  let fieldTokens = [];
-  if(step.kind === 'landmark'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else if (step.kind === 'block'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else {
-    const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value;
-    if(!value && state.snappedText){
-      bumpDebugBlank();
-      value = (state.snappedText || '').trim();
-    }
-    boxPx = res.boxPx || state.snappedPx;
-    confidence = res.confidence || 0;
-    raw = res.raw || (state.snappedText || '').trim();
-    corrections = res.correctionsApplied || res.corrections || [];
-    fieldTokens = res.tokens || [];
-  }
-
-  if(els.ocrToggle?.checked){
-    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
-    catch(err){ console.error('auditCropSelfTest failed', err); }
-  }
-
-  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-  const canvasW = (vp.width ?? vp.w) || 1;
-  const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
-  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
-  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
-  const extras = {};
-  if(step.type === 'static'){
-    const lm = captureRingLandmark(boxPx);
-    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
-    extras.landmark = lm;
-  } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, pct, boxPx, tokens);
-  }
-  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
-  ensureAnchorFor(step.fieldKey);
-  state.currentLineItems = await extractLineItems(state.profile);
-
-  const fid = state.currentFileId;
-  const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
-  if(isConfigMode){
-    updateConfigPreviewStore(step.fieldKey, rec, state.currentLineItems);
-    renderSavedFieldsTable();
-  } else if(fid){
-    rawStore.upsert(fid, rec);
-    compileDocument(fid, state.currentLineItems);
-  }
-
-  afterConfirmAdvance();
+  await executeWizardAction('confirm', handleConfigConfirm, handleRunConfirm);
 });
 
 // Export JSON (profile)
