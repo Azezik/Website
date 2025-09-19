@@ -247,6 +247,15 @@ function sanitizeWizardId(raw){
   return (String(raw ?? '')).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
 }
 
+function getWizardTraceSpanKey(suffix = 'wizard'){
+  const docId = state.currentFileId || state.currentFileName || 'doc';
+  const modeState = state.mode === 'RUN' ? state.runMode : state.configMode;
+  const wizardIdRaw = modeState?.wizardId || state.docType || DEFAULT_WIZARD_ID;
+  const sanitized = sanitizeWizardId(wizardIdRaw) || wizardIdRaw || DEFAULT_WIZARD_ID;
+  const fieldKey = suffix ? `${sanitized}:${suffix}` : sanitized;
+  return { docId, pageIndex: 0, fieldKey };
+}
+
 function resolveDocTypeFromWizard(wizardId){
   const sanitized = sanitizeWizardId(wizardId);
   const options = Array.from(els.docType?.options || []).map(opt => opt.value);
@@ -2856,6 +2865,7 @@ async function extractLineItems(profile){
   const totalPages = state.numPages || state.pdf?.numPages || configuredPages[configuredPages.length-1] || 1;
   const pages = Array.from({ length: totalPages }, (_,i)=>i+1);
   const docId = state.currentFileId || state.currentFileName || 'doc';
+  const rowSpanKey = getWizardTraceSpanKey('line_items');
   let globalRowIndex = 0;
 
   for(const page of pages){
@@ -3019,6 +3029,7 @@ async function extractLineItems(profile){
       headerLimit = Math.max(0, headerLimit);
       const gather = (x0, x1) => {
         const hits=[];
+        let guardStopped = null;
         for(const tok of pageTokens){
           if(tok.page !== desc.page) continue;
           const cx = tok.x + tok.w/2;
@@ -3028,43 +3039,114 @@ async function extractLineItems(profile){
           const text = (tok.text||'').trim();
           if(!text) continue;
           const cleaned = cleanedTokenText(text);
-          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
+          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))){
+            guardStopped = cleaned;
+            break;
+          }
           hits.push({ ...tok, cy, cleaned });
         }
-        return hits;
+        return { hits, guardStopped };
       };
-      let colToks = gather(desc.x0, desc.x1);
+      const primary = gather(desc.x0, desc.x1);
+      let guardStopped = primary.guardStopped || null;
+      let colToks = primary.hits;
+      let usedFallbackWindow = false;
       if(!colToks.length && desc.feraActive && Number.isFinite(desc.fallbackX0) && Number.isFinite(desc.fallbackX1)){
-        colToks = gather(desc.fallbackX0, desc.fallbackX1);
+        const fallback = gather(desc.fallbackX0, desc.fallbackX1);
+        usedFallbackWindow = true;
+        colToks = fallback.hits;
+        if(!guardStopped) guardStopped = fallback.guardStopped || null;
       }
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
-      return colToks;
+      return { tokens: colToks, usedFallbackWindow, guardStopped };
     };
 
-    let anchorTokens = collectColumnTokens(anchor);
-    let anchorBandTokens = anchorTokens;
-    if(anchorTokens.length){
-      const guarded = applyAnchorGuard(anchor, anchorTokens, page);
-      anchorTokens = guarded.tokens;
-      anchorBandTokens = guarded.bandTokens;
-    }
+    const requestedAnchorField = anchor?.fieldKey || null;
+    const anchorAttempts = [];
+    const evaluateAnchorCandidate = desc => {
+      if(!desc) return { tokens: [], bandTokens: [], collect: { tokens: [], usedFallbackWindow: false, guardStopped: null } };
+      const collect = collectColumnTokens(desc);
+      let tokens = collect.tokens;
+      let bandTokens = collect.tokens;
+      if(tokens.length){
+        const guarded = applyAnchorGuard(desc, tokens, page);
+        tokens = guarded.tokens;
+        bandTokens = guarded.bandTokens;
+      }
+      anchorAttempts.push({
+        fieldKey: desc.fieldKey,
+        tokens: collect.tokens.length,
+        bandTokens: Array.isArray(bandTokens) ? bandTokens.length : 0,
+        usedFallbackWindow: collect.usedFallbackWindow || false,
+        guardStopped: collect.guardStopped || null
+      });
+      return { tokens, bandTokens, collect };
+    };
+
+    let { tokens: anchorTokens, bandTokens: anchorBandTokens, collect: anchorCollect } = evaluateAnchorCandidate(anchor);
+    let fallbackAnchorField = null;
     if(!anchorTokens.length){
       for(const key of order){
         const cand = descriptors.find(d=>d.fieldKey===key);
-        if(!cand) continue;
-        const candidateTokens = collectColumnTokens(cand);
-        const guarded = applyAnchorGuard(cand, candidateTokens, page);
-        if(guarded.tokens.length){ anchor = cand; anchorTokens = guarded.tokens; anchorBandTokens = guarded.bandTokens; break; }
+        if(!cand || cand.fieldKey === (anchor?.fieldKey || null)) continue;
+        const { tokens, bandTokens, collect } = evaluateAnchorCandidate(cand);
+        if(tokens.length){
+          anchor = cand;
+          anchorTokens = tokens;
+          anchorBandTokens = bandTokens;
+          anchorCollect = collect;
+          fallbackAnchorField = cand.fieldKey;
+          break;
+        }
       }
     }
 
+    const rawAnchorTokenCount = Array.isArray(anchorCollect?.tokens) ? anchorCollect.tokens.length : (Array.isArray(anchorTokens) ? anchorTokens.length : 0);
+    const bandTokenCount = Array.isArray(anchorBandTokens) ? anchorBandTokens.length : 0;
+    const lineSpanKey = rowSpanKey;
+    if(typeof traceEvent === 'function' && lineSpanKey){
+      traceEvent(lineSpanKey,'rows.anchor',{
+        page,
+        requestedField: requestedAnchorField,
+        resolvedField: anchorTokens.length ? anchor?.fieldKey || null : null,
+        matched: !!anchorTokens.length,
+        anchorHint: anchorHintKey || null,
+        tokenCount: rawAnchorTokenCount,
+        bandTokenCount,
+        guardFiltered: bandTokenCount > 0 && rawAnchorTokenCount > bandTokenCount,
+        usedFallbackWindow: !!(anchorCollect?.usedFallbackWindow),
+        guardStopped: anchorCollect?.guardStopped || null,
+        fallbackField: fallbackAnchorField,
+        attempts: anchorAttempts
+      });
+    }
     if(!anchorTokens.length){
+      if(typeof traceEvent === 'function' && lineSpanKey){
+        traceEvent(lineSpanKey,'rows.detected',{
+          page,
+          anchorField: requestedAnchorField,
+          anchorMatched: false,
+          rowBands: 0,
+          rowsDetected: 0,
+          reason: 'anchor_unmatched'
+        });
+      }
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
     }
 
     const rowBands = buildRowBands(anchorBandTokens, pageHeight, anchorTokens);
     if(!rowBands.length){
+      if(typeof traceEvent === 'function' && lineSpanKey){
+        traceEvent(lineSpanKey,'rows.detected',{
+          page,
+          anchorField: anchor?.fieldKey || requestedAnchorField,
+          anchorMatched: true,
+          rowBands: 0,
+          rowsDetected: 0,
+          reason: 'no_row_bands'
+        });
+      }
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
     }
@@ -3072,6 +3154,7 @@ async function extractLineItems(profile){
     const columnRowCounts = new Map();
     const pageRows = [];
     for(const band of rowBands){
+      const candidateRowIndex = pageRows.length;
       const row={
         line_no: '',
         __page: page,
@@ -3094,6 +3177,7 @@ async function extractLineItems(profile){
         let cleaned = null;
         let value = '';
         let fingerprintOk = true;
+        let needsAnchorTextFallback = false;
         if(cellTokens.length){
           cleaned = FieldDataEngine.clean(desc.outKey, cellTokens, state.mode, spanKey);
           const isValid = cleaned?.isValid !== false;
@@ -3121,7 +3205,8 @@ async function extractLineItems(profile){
           const prevCount = columnRowCounts.get(desc.fieldKey) || 0;
           columnRowCounts.set(desc.fieldKey, prevCount + 1);
         }
-        if(desc.fieldKey === anchor.fieldKey && !value && band.text){
+        needsAnchorTextFallback = desc.fieldKey === anchor.fieldKey && !value && band.text;
+        if(needsAnchorTextFallback){
           value = band.text.trim();
         }
         if(desc.outKey === 'line_no'){
@@ -3163,6 +3248,31 @@ async function extractLineItems(profile){
           missingReason = 'fingerprint_mismatch';
         }
         if(missingReason){ row.__missing[desc.outKey] = missingReason; }
+        if(typeof traceEvent === 'function' && lineSpanKey){
+          traceEvent(lineSpanKey,'rows.cell',{
+            page,
+            bandIndex: band.index,
+            candidateRowIndex,
+            columnField: desc.fieldKey,
+            columnKey: desc.outKey,
+            raw,
+            value,
+            tokenCount: cellTokens.length,
+            missingReason: missingReason || null,
+            fingerprintOk,
+            isValid: cleaned?.isValid !== false,
+            fallbackFlags: {
+              anchorText: needsAnchorTextFallback,
+              cleanedInvalid: cleaned?.isValid === false,
+              feraOk: cellResult.feraOk,
+              feraReason: cellResult.feraReason || null,
+              fingerprintMismatch: !fingerprintOk && cellTokens.length > 0
+            },
+            cleanedValue: cleaned?.value || '',
+            cleanedRaw: cleaned?.raw || '',
+            fera: cellMeta.fera
+          });
+        }
       }
 
       row.description = row.description || '';
@@ -3206,6 +3316,21 @@ async function extractLineItems(profile){
     }
 
     const filteredRows = targetRowCount < pageRows.length ? pruneRowsBySupport(pageRows, targetRowCount) : pageRows;
+    if(typeof traceEvent === 'function' && lineSpanKey){
+      traceEvent(lineSpanKey,'rows.detected',{
+        page,
+        anchorField: anchor?.fieldKey || requestedAnchorField,
+        anchorMatched: true,
+        rowBands: rowBands.length,
+        rowsDetected: pageRows.length,
+        rowsKept: filteredRows.length,
+        targetRowCount,
+        columnCounts: descriptors.map(d=>({ fieldKey: d.fieldKey, outKey: d.outKey, rows: columnRowCounts.get(d.fieldKey) || 0 })),
+        consensusSource: nonAnchorCounts.length ? 'supporting_columns' : 'all_columns',
+        pruned: filteredRows.length !== pageRows.length,
+        reason: 'summary'
+      });
+    }
     const pageRowEntries=[];
     for(const row of filteredRows){
       row.__rowIndex = globalRowIndex;
@@ -4127,6 +4252,27 @@ function compileDocument(fileId, lineItems){
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
   LS.setDb(state.username, state.docType, db);
   state.savedFieldsRecord = compiled;
+  if(typeof traceEvent === 'function'){
+    const spanKey = getWizardTraceSpanKey('line_items');
+    if(spanKey){
+      const rows = (compiled.lineItems || []).map((row, index) => ({
+        index,
+        line_no: row.line_no ?? index + 1,
+        description: (row.description || '').slice(0, 120),
+        quantity: row.quantity || '',
+        unit_price: row.unit_price || '',
+        amount: row.amount || ''
+      }));
+      traceEvent(spanKey,'rows.appended',{
+        fileId: compiled.fileId,
+        rowCount: rows.length,
+        replacedExisting: idx >= 0,
+        hasExplicitLineItems,
+        invoiceNumber,
+        rows
+      });
+    }
+  }
   renderResultsTable();
   renderTelemetry();
   renderReports();
