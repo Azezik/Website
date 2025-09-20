@@ -1317,17 +1317,7 @@ function snapToLine(tokens, hintPx, optsOrMargin){
     page: hintPx.page
   };
   let finalBox = expanded;
-  if(state.mode === 'CONFIG' && hintPx && !clampToHint){
-    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
-    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
-    if(needsWidth || needsHeight){
-      const unionLeft = Math.min(finalBox.x, hintPx.x);
-      const unionTop = Math.min(finalBox.y, hintPx.y);
-      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
-      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
-      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
-    }
-  } else if(clampToHint && hintPx){
+  if(clampToHint && hintPx){
     const hintLeft = hintPx.x;
     const hintRight = hintPx.x + (hintPx.w || 0);
     const buffer = edgeBufferPx || 0;
@@ -1345,6 +1335,21 @@ function snapToLine(tokens, hintPx, optsOrMargin){
       h: expanded.h,
       page: hintPx.page
     };
+  }
+  if(state.mode === 'CONFIG' && hintPx){
+    const minCoverageRatio = 0.9;
+    if(hintPx.w > 0 && finalBox.w < hintPx.w * minCoverageRatio){
+      const unionLeft = Math.min(finalBox.x, hintPx.x);
+      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
+      finalBox.x = unionLeft;
+      finalBox.w = unionRight - unionLeft;
+    }
+    if(hintPx.h > 0 && finalBox.h < hintPx.h * minCoverageRatio){
+      const unionTop = Math.min(finalBox.y, hintPx.y);
+      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
+      finalBox.y = unionTop;
+      finalBox.h = unionBottom - unionTop;
+    }
   }
   const text = lineTokens.map(t => t.text).join(' ').trim();
   return { box: finalBox, text };
@@ -2999,7 +3004,45 @@ async function extractLineItems(profile){
       }
       searchX0 = Math.max(0, Math.min(pageWidth, searchX0));
       searchX1 = Math.max(searchX0, Math.min(pageWidth, searchX1));
+      if(state.mode === 'CONFIG'){
+        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+        const originalLeft = baseLeft;
+        const originalRight = baseRight;
+        const originalWidth = Math.max(1, originalRight - originalLeft);
+        const guardMargin = Math.max(4, originalWidth * 0.1);
+        const minWidth = Math.max(1, originalWidth * 0.9);
+        const leftMin = Math.max(0, originalLeft - guardMargin);
+        const leftMax = Math.max(leftMin, Math.min(pageWidth - minWidth, originalLeft + guardMargin));
+        let guardedLeft = clamp(searchX0, leftMin, leftMax);
+        const rightMax = Math.min(pageWidth, originalRight + guardMargin);
+        const rightMinBase = Math.max(guardedLeft + minWidth, originalRight - guardMargin);
+        const rightMin = Math.min(rightMax, rightMinBase);
+        let guardedRight = clamp(searchX1, rightMin, rightMax);
+        if(guardedRight - guardedLeft < minWidth){
+          const deficit = minWidth - (guardedRight - guardedLeft);
+          const leftAllowance = guardedLeft - leftMin;
+          const useLeft = Math.min(deficit, leftAllowance);
+          guardedLeft -= useLeft;
+          let remaining = deficit - useLeft;
+          if(remaining > 0){
+            const rightAllowance = rightMax - guardedRight;
+            const useRight = Math.min(remaining, rightAllowance);
+            guardedRight += useRight;
+            remaining -= useRight;
+          }
+          if(remaining > 0){
+            guardedLeft = Math.max(leftMin, guardedLeft - remaining);
+          }
+          if(guardedRight - guardedLeft < minWidth){
+            guardedRight = Math.min(rightMax, Math.max(guardedRight, guardedLeft + minWidth));
+          }
+        }
+        searchX0 = guardedLeft;
+        searchX1 = Math.max(searchX0 + 0.5, guardedRight);
+      }
       const sourcePage = field.__sourcePage || field.page || page;
+      const fallbackX0Out = state.mode === 'CONFIG' ? searchX0 : fallbackX0;
+      const fallbackX1Out = state.mode === 'CONFIG' ? searchX1 : fallbackX1;
       return {
         fieldKey: field.fieldKey,
         outKey: keyMap[field.fieldKey] || field.fieldKey,
@@ -3007,8 +3050,8 @@ async function extractLineItems(profile){
         sourcePage,
         x0: searchX0,
         x1: searchX1,
-        fallbackX0,
-        fallbackX1,
+        fallbackX0: fallbackX0Out,
+        fallbackX1: fallbackX1Out,
         headerBottom,
         headerPad,
         align,
