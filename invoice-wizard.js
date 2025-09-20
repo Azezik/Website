@@ -1317,17 +1317,7 @@ function snapToLine(tokens, hintPx, optsOrMargin){
     page: hintPx.page
   };
   let finalBox = expanded;
-  if(state.mode === 'CONFIG' && hintPx && !clampToHint){
-    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
-    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
-    if(needsWidth || needsHeight){
-      const unionLeft = Math.min(finalBox.x, hintPx.x);
-      const unionTop = Math.min(finalBox.y, hintPx.y);
-      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
-      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
-      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
-    }
-  } else if(clampToHint && hintPx){
+  if(clampToHint && hintPx){
     const hintLeft = hintPx.x;
     const hintRight = hintPx.x + (hintPx.w || 0);
     const buffer = edgeBufferPx || 0;
@@ -1345,6 +1335,21 @@ function snapToLine(tokens, hintPx, optsOrMargin){
       h: expanded.h,
       page: hintPx.page
     };
+  }
+  if(state.mode === 'CONFIG' && hintPx){
+    const minCoverageRatio = 0.9;
+    if(hintPx.w > 0 && finalBox.w < hintPx.w * minCoverageRatio){
+      const unionLeft = Math.min(finalBox.x, hintPx.x);
+      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
+      finalBox.x = unionLeft;
+      finalBox.w = unionRight - unionLeft;
+    }
+    if(hintPx.h > 0 && finalBox.h < hintPx.h * minCoverageRatio){
+      const unionTop = Math.min(finalBox.y, hintPx.y);
+      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
+      finalBox.y = unionTop;
+      finalBox.h = unionBottom - unionTop;
+    }
   }
   const text = lineTokens.map(t => t.text).join(' ').trim();
   return { box: finalBox, text };
