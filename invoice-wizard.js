@@ -1284,7 +1284,19 @@ function tokensInBox(tokens, box){
     return ay === by ? a.x - b.x : ay - by;
   });
 }
-function snapToLine(tokens, hintPx, marginPx=6){
+function snapToLine(tokens, hintPx, optsOrMargin){
+  let marginPx = 6;
+  let clampToHint = false;
+  let edgeBufferPx = 0;
+  if(typeof optsOrMargin === 'number'){
+    if(Number.isFinite(optsOrMargin)) marginPx = optsOrMargin;
+  } else if(optsOrMargin && typeof optsOrMargin === 'object'){
+    if(Number.isFinite(optsOrMargin.marginPx)) marginPx = optsOrMargin.marginPx;
+    clampToHint = !!optsOrMargin.clampToHint;
+    if(Number.isFinite(optsOrMargin.edgeBufferPx)){
+      edgeBufferPx = Math.max(0, optsOrMargin.edgeBufferPx);
+    }
+  }
   const hits = tokensInBox(tokens, hintPx);
   if(!hits.length) return { box: hintPx, text: '' };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
@@ -1296,9 +1308,16 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const top    = Math.min(...lineTokens.map(t => t.y));
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
-  const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
+  const horizontalMargin = clampToHint ? 0 : marginPx;
+  const expanded = {
+    x: box.x - horizontalMargin,
+    y: box.y - marginPx,
+    w: box.w + horizontalMargin*2,
+    h: box.h + marginPx*2,
+    page: hintPx.page
+  };
   let finalBox = expanded;
-  if(state.mode === 'CONFIG' && hintPx){
+  if(state.mode === 'CONFIG' && hintPx && !clampToHint){
     const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
     const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
     if(needsWidth || needsHeight){
@@ -1308,6 +1327,24 @@ function snapToLine(tokens, hintPx, marginPx=6){
       const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
       finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
     }
+  } else if(clampToHint && hintPx){
+    const hintLeft = hintPx.x;
+    const hintRight = hintPx.x + (hintPx.w || 0);
+    const buffer = edgeBufferPx || 0;
+    let leftEdge = Math.max(0, hintLeft - buffer);
+    let rightEdge = hintRight + buffer;
+    if(rightEdge <= leftEdge){
+      const fallbackWidth = Math.max(hintPx.w || 0, box.w || 0, 1);
+      rightEdge = leftEdge + fallbackWidth;
+    }
+    const width = Math.max(0.5, rightEdge - leftEdge);
+    finalBox = {
+      x: leftEdge,
+      y: expanded.y,
+      w: width,
+      h: expanded.h,
+      page: hintPx.page
+    };
   }
   const text = lineTokens.map(t => t.text).join(' ').trim();
   return { box: finalBox, text };
@@ -3760,7 +3797,13 @@ async function finalizeSelection(e) {
   state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
-  const snap = snapToLine(tokens, state.selectionPx);
+  const step = (state.steps && state.steps[state.stepIdx]) || {};
+  const clampColumns = state.mode === 'CONFIG' && step?.type === 'column';
+  const snap = snapToLine(tokens, state.selectionPx, {
+    marginPx: 6,
+    clampToHint: clampColumns,
+    edgeBufferPx: 0
+  });
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
   const { scaleX, scaleY } = getScaleFactors();
@@ -3771,7 +3814,6 @@ async function finalizeSelection(e) {
     h: state.snappedPx.h/scaleY,
     page: state.snappedPx.page
   };
-  const step = state.steps[state.stepIdx] || {};
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
   const vp = state.pageViewports[state.pageNum - 1] || { width: state.viewport.w, height: state.viewport.h };
   const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
