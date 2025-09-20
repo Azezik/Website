@@ -4784,7 +4784,7 @@ els.loginForm?.addEventListener('submit', (e)=>{
   populateModelSelect();
   renderResultsTable();
   renderReports();
-  handleRouteChange(true);
+  navigateToRoute('RUN', wizardKey, { replace: true, force: true });
 });
 els.logoutBtn?.addEventListener('click', ()=>{
   const configWizard = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
