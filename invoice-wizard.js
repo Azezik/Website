@@ -2653,6 +2653,9 @@ async function extractLineItems(profile){
       const fallbackMargin = Math.max(2, typicalHeight * 0.4);
       const baseLeft = bandPx.x;
       const baseRight = bandPx.x + bandPx.w;
+      const userLeft = baseLeft;
+      const userRight = baseRight;
+      const userWidth = Math.max(1, baseRight - baseLeft);
       const fallbackX0 = Math.max(0, baseLeft - fallbackMargin);
       const fallbackX1 = Math.min(pageWidth, baseRight + fallbackMargin);
       const anchorFera = tableHints.rowAnchor?.fieldKey === field.fieldKey ? (tableHints.rowAnchor.fera || tableHints.rowAnchor.metrics || null) : null;
@@ -2685,6 +2688,17 @@ async function extractLineItems(profile){
         searchX0 = fallbackX0;
         searchX1 = fallbackX1;
       }
+      const minSearchWidth = Math.max(1, userWidth * 0.9);
+      if((searchX1 - searchX0) < minSearchWidth){
+        const deficit = minSearchWidth - (searchX1 - searchX0);
+        const extendLeft = Math.min(deficit/2, searchX0);
+        searchX0 = Math.max(0, searchX0 - extendLeft);
+        searchX1 = Math.min(pageWidth, searchX1 + (deficit - extendLeft));
+        if((searchX1 - searchX0) < minSearchWidth){
+          searchX0 = Math.max(0, Math.min(searchX0, userLeft));
+          searchX1 = Math.min(pageWidth, Math.max(searchX1, userRight));
+        }
+      }
       const sourcePage = field.__sourcePage || field.page || page;
       return {
         fieldKey: field.fieldKey,
@@ -2693,6 +2707,9 @@ async function extractLineItems(profile){
         sourcePage,
         x0: searchX0,
         x1: searchX1,
+        userLeft,
+        userRight,
+        userWidth,
         fallbackX0,
         fallbackX1,
         headerBottom,
@@ -2731,7 +2748,12 @@ async function extractLineItems(profile){
       return { tokens: [], bandTokens: [] };
     };
 
+    const tokenCache = new Map();
+    const cacheKeyFor = desc => `${desc.fieldKey || ''}@${desc.page || page}`;
+
     const collectColumnTokens = desc => {
+      const cacheKey = cacheKeyFor(desc);
+      if(tokenCache.has(cacheKey)) return tokenCache.get(cacheKey);
       let headerLimit = desc.headerBottom + desc.headerPad;
       const sampleHeights=[];
       let earliestTop=Infinity;
@@ -2780,7 +2802,106 @@ async function extractLineItems(profile){
         colToks = gather(desc.fallbackX0, desc.fallbackX1);
       }
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
+      tokenCache.set(cacheKey, colToks);
       return colToks;
+    };
+
+    const computeVisualColumnLayout = () => {
+      if(!descriptors.length) return new Map();
+      const sorted = descriptors.slice().sort((a,b)=>{
+        if(a.userLeft !== b.userLeft) return a.userLeft - b.userLeft;
+        return a.userRight - b.userRight;
+      });
+      const meta = sorted.map(desc => {
+        const tokens = collectColumnTokens(desc);
+        let textLeft = desc.userLeft;
+        let textRight = desc.userRight;
+        if(tokens.length){
+          let minX = Infinity;
+          let maxX = -Infinity;
+          for(const tok of tokens){
+            minX = Math.min(minX, tok.x);
+            maxX = Math.max(maxX, tok.x + tok.w);
+          }
+          if(Number.isFinite(minX)) textLeft = Math.min(textLeft, minX);
+          if(Number.isFinite(maxX)) textRight = Math.max(textRight, maxX);
+        }
+        return { desc, textLeft, textRight };
+      });
+      const boundaries = new Array(meta.length + 1);
+      boundaries[0] = clamp(Math.min(meta[0].desc.userLeft, meta[0].textLeft), 0, pageWidth);
+      for(let i=0; i<meta.length-1; i++){
+        const leftMeta = meta[i];
+        const rightMeta = meta[i+1];
+        const leftEdge = Math.max(leftMeta.desc.userRight, leftMeta.textRight);
+        const rightEdge = Math.min(rightMeta.desc.userLeft, rightMeta.textLeft);
+        let boundary;
+        if(Number.isFinite(leftEdge) && Number.isFinite(rightEdge)){
+          boundary = (leftEdge + rightEdge) / 2;
+        } else if(Number.isFinite(leftEdge)){
+          boundary = leftEdge;
+        } else if(Number.isFinite(rightEdge)){
+          boundary = rightEdge;
+        } else {
+          boundary = boundaries[i] ?? 0;
+        }
+        const base = boundaries[i] ?? 0;
+        boundary = clamp(boundary, base, pageWidth);
+        boundaries[i+1] = boundary;
+      }
+      const lastMeta = meta[meta.length-1];
+      const lastPrev = boundaries[meta.length-1] ?? 0;
+      const lastRight = Math.max(lastMeta.desc.userRight, lastMeta.textRight);
+      boundaries[meta.length] = clamp(lastRight, lastPrev, pageWidth);
+
+      for(let i=1; i<boundaries.length; i++){
+        if(!Number.isFinite(boundaries[i])){
+          boundaries[i] = boundaries[i-1];
+        } else if(boundaries[i] < boundaries[i-1]){
+          boundaries[i] = boundaries[i-1];
+        }
+      }
+
+      const result = new Map();
+      for(let i=0; i<meta.length; i++){
+        let left = boundaries[i];
+        let right = boundaries[i+1];
+        const minWidth = Math.max(1, meta[i].desc.userWidth * 0.9);
+        if(right - left < minWidth){
+          const deficit = minWidth - (right - left);
+          const shiftLeft = Math.min(deficit/2, left);
+          left -= shiftLeft;
+          right += (deficit - shiftLeft);
+          if(right > pageWidth){
+            const overflow = right - pageWidth;
+            right = pageWidth;
+            left = Math.max(0, left - overflow);
+          }
+          if(right - left < minWidth){
+            right = Math.min(pageWidth, left + minWidth);
+            if(right - left < minWidth){
+              left = Math.max(0, right - minWidth);
+            }
+          }
+        }
+        left = clamp(left, 0, pageWidth);
+        right = clamp(right, left + 1, pageWidth);
+        boundaries[i] = left;
+        boundaries[i+1] = right;
+        result.set(meta[i].desc.fieldKey, { x0: left, x1: right });
+      }
+      return result;
+    };
+
+    const buildColumnLayout = () => {
+      const visualColumns = computeVisualColumnLayout();
+      return descriptors.map(d => {
+        const visual = visualColumns.get(d.fieldKey);
+        if(visual){
+          return { fieldKey: d.fieldKey, x0: visual.x0, x1: visual.x1 };
+        }
+        return { fieldKey: d.fieldKey, x0: d.userLeft, x1: d.userRight };
+      });
     };
 
     let anchorTokens = collectColumnTokens(anchor);
@@ -2801,13 +2922,13 @@ async function extractLineItems(profile){
     }
 
     if(!anchorTokens.length){
-      layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
+      layout.pages[page] = { page, columns: buildColumnLayout(), rows: [], top: 0, bottom: 0 };
       continue;
     }
 
     const rowBands = buildRowBands(anchorBandTokens, pageHeight);
     if(!rowBands.length){
-      layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
+      layout.pages[page] = { page, columns: buildColumnLayout(), rows: [], top: 0, bottom: 0 };
       continue;
     }
 
@@ -2958,7 +3079,7 @@ async function extractLineItems(profile){
       globalRowIndex++;
     }
 
-    const colLayout = descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 }));
+    const colLayout = buildColumnLayout();
     const top = filteredRows.length ? Math.min(...filteredRows.map(r=>r.__y0)) : Math.min(...rowBands.map(r=>r.y0));
     const bottom = filteredRows.length ? Math.max(...filteredRows.map(r=>r.__y1)) : pageHeight;
     layout.pages[page] = { page, columns: colLayout, rows: pageRowEntries, top, bottom };
