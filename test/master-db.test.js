@@ -117,4 +117,31 @@ assert.deepStrictEqual(
 assert.ok(!('99' in noisyMissing.rows));
 assert.ok(!('100' in noisyMissing.rows));
 
+const inflatedNoise = [];
+for(let i = 0; i < 6; i++){
+  const idx = i + 9;
+  inflatedNoise.push({
+    sku: '',
+    description: `Noise row ${idx}`,
+    quantity: '',
+    unit_price: String(5 * idx),
+    amount: String(7 * idx),
+    line_no: String(idx).padStart(4, '0'),
+    __rowNumber: idx
+  });
+}
+
+const inflatedSsot = {
+  fields: ssot.fields,
+  lineItems: noisyLineItems.slice(0, 8).concat(inflatedNoise)
+};
+
+const { rows: inflatedRows } = MasterDB.flatten(inflatedSsot);
+
+assert.strictEqual(inflatedRows.length, 9);
+assert.deepStrictEqual(
+  inflatedRows.slice(1).map(row => row[7]),
+  noisyLineItems.slice(0, 8).map(item => item.sku)
+);
+
 console.log('MasterDB tests passed.');
