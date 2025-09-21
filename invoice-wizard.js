@@ -113,289 +113,324 @@ function showTab(id){
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
-const createConfigModeState = () => ({
-  wizardId: '',
-  steps: [],
-  stepIdx: 0,
+const MODE_BASE_DEFAULTS = {
+  pdf: null,
+  isImage: false,
+  pageNum: 1,
+  numPages: 1,
+  viewport: { w: 0, h: 0, scale: 1 },
+  pageViewports: [],
+  pageOffsets: [],
+  tokensByPage: {},
   selectionCss: null,
   selectionPx: null,
   snappedCss: null,
   snappedPx: null,
   snappedText: '',
+  pageTransform: { scale: 1, rotation: 0 },
+  telemetry: [],
+  grayCanvases: {},
   matchPoints: [],
+  steps: [],
+  stepIdx: 0,
+  currentFileName: '',
+  currentFileId: '',
   currentLineItems: [],
+  savedFieldsRecord: null,
   lastOcrCropPx: null,
-  lastOcrCropCss: null,
   cropAudits: [],
   cropHashes: {},
   pageSnapshots: {},
   pageRenderPromises: [],
   pageRenderReady: [],
-  ocrCache: {},
-  previewRaw: {},
-  previewLineItems: [],
-  previewRecord: null,
-});
+  currentTraceId: null,
+  overlayPinned: false,
+  overlayMetrics: null,
+  pendingSelection: null,
+  lastOcrCropCss: null,
+  lineLayout: null,
+  perFieldCandidates: {},
+  columnMasks: {},
+};
 
-const createRunModeState = () => ({
-  wizardId: '',
-  steps: [],
-  stepIdx: 0,
-  selectionCss: null,
-  selectionPx: null,
-  snappedCss: null,
-  snappedPx: null,
-  snappedText: '',
-  matchPoints: [],
-  currentLineItems: [],
-  lastOcrCropPx: null,
-  lastOcrCropCss: null,
-  cropAudits: [],
-  cropHashes: {},
-  pageSnapshots: {},
-  pageRenderPromises: [],
-  pageRenderReady: [],
-  resolvedFields: {},
+const CONFIG_MODE_DEFAULTS = {
+  fields: [],
+  questionOrder: [],
+  bboxMap: {},
+  edgeAnchors: {},
+  textHeights: {},
+  fingerprints: {},
+  landmarks: {},
+  columnBands: {},
+  ui: { selection: null, activeQuestion: null, overlays: [], savedFieldsPreview: null },
+  caches: { ocrCache: {} },
+};
+
+const RUN_MODE_DEFAULTS = {
+  resolvedFields: [],
   rowBoxes: [],
+  perColumnValues: {},
   extractedRows: [],
-  ocrCache: {},
-});
+  ui: { docHash: null, status: null, extractedData: null },
+  caches: { ocrCache: {} },
+  docHash: null,
+  status: null,
+};
 
-const state = {
-  shared: {
-    username: null,
-    docType: 'invoice',
-    mode: 'CONFIG',
-    modes: { rawData: false },
-    profile: null,             // Vendor profile (landmarks + fields + tableHints)
-    pdf: null,                 // pdf.js document
-    isImage: false,
-    pageNum: 1,
-    numPages: 1,
-    viewport: { w: 0, h: 0, scale: 1 },
-    pageViewports: [],       // viewport per page
-    pageOffsets: [],         // y-offset of each page within pdfCanvas
-    tokensByPage: {},          // {page:number: Token[] in px}
-    pageTransform: { scale:1, rotation:0 }, // calibration transform per page
-    telemetry: [],            // extraction telemetry
-    grayCanvases: {},         // cached grayscale canvases by page
-    currentFileName: '',
-    currentFileId: '',        // unique id per opened file
-    savedFieldsRecord: null,
-    currentTraceId: null,
-    overlayPinned: false,
-    overlayMetrics: null,
-    pendingSelection: null,
-    lineLayout: null,
-  },
+function cloneDefault(val){
+  if(val === null || typeof val !== 'object') return val;
+  if(Array.isArray(val)) return [];
+  if(val instanceof Map) return new Map();
+  if(val instanceof Set) return new Set();
+  const out = {};
+  for(const [k, v] of Object.entries(val)){
+    out[k] = cloneDefault(v);
+  }
+  return out;
+}
+
+function createConfigModeState(){
+  const base = cloneDefault(MODE_BASE_DEFAULTS);
+  const extras = cloneDefault(CONFIG_MODE_DEFAULTS);
+  return Object.assign(base, extras);
+}
+
+function createRunModeState(){
+  const base = cloneDefault(MODE_BASE_DEFAULTS);
+  const extras = cloneDefault(RUN_MODE_DEFAULTS);
+  return Object.assign(base, extras);
+}
+
+let appliedRoute = { mode: null, wizardId: null };
+let pendingRoute = null;
+
+let state = {
+  username: null,
+  docType: 'invoice',
+  activeWizardId: null,
+  activeWizardMeta: null,
+  wizardIndex: [],
+  mode: 'CONFIG',
+  modes: { rawData: false, boxMode: true },
+  profile: null,             // Vendor profile (landmarks + fields + tableHints)
   configMode: createConfigModeState(),
   runMode: createRunModeState(),
 };
 
-function getModeState(mode = state.shared.mode){
+function activeModeState(mode = state.mode){
   return mode === 'RUN' ? state.runMode : state.configMode;
 }
 
-const sharedKeys = ['username','docType','mode','modes','profile','pdf','isImage','pageNum','numPages','viewport','pageViewports','pageOffsets','tokensByPage','pageTransform','telemetry','grayCanvases','currentFileName','currentFileId','savedFieldsRecord','currentTraceId','overlayPinned','overlayMetrics','pendingSelection','lineLayout'];
-sharedKeys.forEach(key => {
+const MODE_PROXY_KEYS = Object.keys(MODE_BASE_DEFAULTS);
+MODE_PROXY_KEYS.forEach(key => {
   Object.defineProperty(state, key, {
-    get(){ return state.shared[key]; },
-    set(v){ state.shared[key] = v; },
-  });
-});
-['steps','stepIdx'].forEach(key => {
-  Object.defineProperty(state, key, {
-    get(){ return getModeState()[key]; },
-    set(v){ getModeState()[key] = v; },
-  });
-});
-const modeScopedKeys = ['selectionCss','selectionPx','snappedCss','snappedPx','snappedText','matchPoints','currentLineItems','lastOcrCropPx','lastOcrCropCss','cropAudits','cropHashes','pageSnapshots','pageRenderPromises','pageRenderReady'];
-modeScopedKeys.forEach(key => {
-  Object.defineProperty(state, key, {
-    get(){ return getModeState()[key]; },
-    set(v){ getModeState()[key] = v; },
+    get(){ return activeModeState()[key]; },
+    set(val){ activeModeState()[key] = val; },
+    enumerable: true,
   });
 });
 
-function resetConfigMode(wizardId = state.configMode.wizardId){
-  const preserved = typeof wizardId === 'string' ? wizardId : '';
-  clearCropThumbs(state.configMode);
-  Object.assign(state.configMode, createConfigModeState());
-  state.configMode.wizardId = preserved;
-  if(state.shared.mode === 'CONFIG'){
-    state.overlayPinned = false;
-    state.overlayMetrics = null;
-    state.pendingSelection = null;
+function releaseDocumentResources(store){
+  if(!store) return;
+  try {
+    if(store.pdf && typeof store.pdf.destroy === 'function'){ store.pdf.destroy(); }
+    else if(store.pdf && typeof store.pdf.cleanup === 'function'){ store.pdf.cleanup(); }
+  } catch(err){ console.warn('pdf cleanup failed', err); }
+  store.pdf = null;
+  if(Array.isArray(store.pageRenderPromises)){
+    store.pageRenderPromises.forEach(p => {
+      try { if(p && typeof p.cancel === 'function') p.cancel(); }
+      catch(err){ console.warn('render promise cancel failed', err); }
+    });
+  }
+  store.pageRenderPromises = [];
+  store.pageRenderReady = [];
+}
+
+function clearOverlayCanvas(){
+  const canvas = els.overlayCanvas;
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if(ctx){ ctx.clearRect(0, 0, canvas.width || 0, canvas.height || 0); }
+}
+
+function clearModeUi(mode){
+  if(mode === 'CONFIG'){
+    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No preview yet.</p>';
+    if(els.savedJson) els.savedJson.textContent = '';
+  }
+  if(mode === 'RUN'){
+    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No extracted rows yet.</p>';
+    if(els.savedJson) els.savedJson.textContent = '';
+  }
+  const cf = document.getElementById('confirmedFields');
+  if(cf) cf.innerHTML = '<p class="sub">No data.</p>';
+  const cl = document.getElementById('confirmedLineItems');
+  if(cl) cl.innerHTML = '<p class="sub">No data.</p>';
+}
+
+function resetModeState(mode, opts={}){
+  const store = mode === 'RUN' ? state.runMode : state.configMode;
+  releaseDocumentResources(store);
+  const fresh = mode === 'RUN' ? createRunModeState() : createConfigModeState();
+  Object.keys(store).forEach(k => delete store[k]);
+  Object.assign(store, fresh);
+  if(opts.clearUi !== false && state.mode === mode){
+    clearOverlayCanvas();
+    clearModeUi(mode);
   }
 }
 
-function resetRunMode(wizardId = state.runMode.wizardId){
-  const preserved = typeof wizardId === 'string' ? wizardId : '';
-  clearCropThumbs(state.runMode);
-  Object.assign(state.runMode, createRunModeState());
-  state.runMode.wizardId = preserved;
-  if(state.shared.mode === 'RUN'){
-    state.overlayPinned = false;
-    state.overlayMetrics = null;
-    state.pendingSelection = null;
+function routesEqual(a, b){
+  if(!a && !b) return true;
+  if(!a || !b) return false;
+  return (a.mode || null) === (b.mode || null) && (a.wizardId || null) === (b.wizardId || null);
+}
+
+function showWizardSection(){
+  if(els.app) els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'block';
+}
+
+function showDashboard(){
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  if(els.app) els.app.style.display = 'block';
+}
+
+function logButtonAction(action, extra={}){
+  const payload = Object.assign({
+    mode: state.mode,
+    wizardId: state.activeWizardId || null,
+    action
+  }, extra || {});
+  try {
+    console.log('[ui]', JSON.stringify(payload));
+  } catch(err){
+    console.log('[ui]', action, payload);
   }
 }
 
-const DEFAULT_WIZARD_ID = 'invoice';
-
-function sanitizeWizardId(raw){
-  return (String(raw ?? '')).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-}
-
-function getWizardTraceSpanKey(suffix = 'wizard'){
-  const docId = state.currentFileId || state.currentFileName || 'doc';
-  const modeState = state.mode === 'RUN' ? state.runMode : state.configMode;
-  const wizardIdRaw = modeState?.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  const sanitized = sanitizeWizardId(wizardIdRaw) || wizardIdRaw || DEFAULT_WIZARD_ID;
-  const fieldKey = suffix ? `${sanitized}:${suffix}` : sanitized;
-  return { docId, pageIndex: 0, fieldKey };
-}
-
-function resolveDocTypeFromWizard(wizardId){
-  const sanitized = sanitizeWizardId(wizardId);
-  const options = Array.from(els.docType?.options || []).map(opt => opt.value);
-  if(sanitized && options.includes(sanitized)) return sanitized;
-  if(options.includes(state.docType)) return state.docType;
-  return options[0] || DEFAULT_WIZARD_ID;
-}
-
-function routeHash(mode, wizardId){
-  const seg = mode === 'RUN' ? 'run' : 'configure';
-  const sanitized = sanitizeWizardId(wizardId);
-  const id = sanitized || resolveDocTypeFromWizard(wizardId) || DEFAULT_WIZARD_ID;
-  return `#/${seg}/${id}`;
-}
-
-function navigateToRoute(mode, wizardId, { replace = false, force = false } = {}){
-  const target = routeHash(mode, wizardId);
-  if(force || window.location.hash !== target){
-    if(replace) window.location.replace(target);
-    else window.location.hash = target;
-    handleRouteChange(true);
-  } else {
-    handleRouteChange(true);
+function syncInteractionModes(){
+  if(els.overlayCanvas){
+    els.overlayCanvas.style.pointerEvents = state.modes.boxMode ? 'auto' : 'none';
+  }
+  if(els.boxModeBtn){
+    els.boxModeBtn.classList.toggle('active', !!state.modes.boxMode);
+    els.boxModeBtn.setAttribute('aria-pressed', state.modes.boxMode ? 'true' : 'false');
+  }
+  if(els.rawDataToggle){
+    els.rawDataToggle.checked = !!state.modes.rawData;
+  }
+  if(els.rawDataBtn){
+    els.rawDataBtn.classList.toggle('active', !!state.modes.rawData);
   }
 }
 
 function parseRoute(hash){
-  const cleaned = (hash || '').replace(/^#/, '');
-  const parts = cleaned.split('/').filter(Boolean);
-  if(parts.length >= 2){
-    const modeSeg = parts[0];
-    const wizardId = parts.slice(1).join('/');
-    if(modeSeg === 'configure') return { mode: 'CONFIG', wizardId };
-    if(modeSeg === 'run') return { mode: 'RUN', wizardId };
+  const clean = (hash || '').replace(/^#/, '');
+  if(!clean){
+    return { mode: null, wizardId: null };
   }
-  return null;
+  const parts = clean.split('/').filter(Boolean);
+  if(parts.length >= 2){
+    const wizardId = decodeURIComponent(parts[1]);
+    if(parts[0] === 'configure') return { mode: 'CONFIG', wizardId };
+    if(parts[0] === 'run') return { mode: 'RUN', wizardId };
+  }
+  return { mode: null, wizardId: null };
 }
 
-let currentRouteKey = '';
-
-function enterConfigMode(wizardId){
-  const sanitized = sanitizeWizardId(wizardId) || sanitizeWizardId(state.configMode.wizardId) || sanitizeWizardId(state.docType) || DEFAULT_WIZARD_ID;
-  resetConfigMode(sanitized);
-  state.configMode.wizardId = sanitized;
-  state.mode = 'CONFIG';
-  const docType = resolveDocTypeFromWizard(sanitized);
-  state.docType = docType;
-  if(els.docType){
-    const hasOption = Array.from(els.docType.options || []).some(opt => opt.value === docType);
-    if(hasOption) els.docType.value = docType;
-  }
+function enterConfigMode(wizardId, opts={}){
   if(!state.username){
-    if(els.loginSection) els.loginSection.style.display = 'block';
-    if(els.app) els.app.style.display = 'none';
-    if(els.wizardSection) els.wizardSection.style.display = 'none';
-    return;
+    pendingRoute = { mode: 'CONFIG', wizardId: wizardId || null };
+    return false;
   }
-  cleanupDoc();
-  state.tokensByPage = {};
-  state.grayCanvases = {};
-  state.telemetry = [];
-  state.pageViewports = [];
-  state.pageOffsets = [];
-  state.lineLayout = null;
-  state.currentTraceId = null;
-  state.overlayPinned = false;
-  state.overlayMetrics = null;
-  state.pendingSelection = null;
-  const existing = loadProfile(state.username, state.docType);
-  state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
+  const id = wizardId || state.activeWizardId;
+  if(!id){
+    pendingRoute = { mode: 'CONFIG', wizardId: null };
+    showDashboard();
+    appliedRoute = { mode: null, wizardId: null };
+    return false;
+  }
+  if(opts.skipHash !== true){
+    const hash = `#/configure/${encodeURIComponent(id)}`;
+    if(location.hash !== hash){ location.hash = hash; }
+  }
+  const shouldReset = opts.forceReset || state.mode !== 'CONFIG' || !routesEqual(appliedRoute, { mode:'CONFIG', wizardId:id });
+  if(shouldReset){ resetModeState('CONFIG'); }
+  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
+  state.mode = 'CONFIG';
+  showWizardSection();
   ensureProfile();
   initStepsFromProfile();
+  updatePrompt();
   renderSavedFieldsTable();
-  populateModelSelect();
-  renderResultsTable();
-  renderReports();
-  if(els.loginSection) els.loginSection.style.display = 'none';
-  if(els.app) els.app.style.display = 'none';
-  if(els.wizardSection) els.wizardSection.style.display = 'block';
-  drawOverlay();
-  renderCropAuditPanel();
-  renderTelemetry();
+  syncInteractionModes();
+  appliedRoute = { mode: 'CONFIG', wizardId: id };
+  pendingRoute = null;
+  return true;
 }
 
-function enterRunMode(wizardId){
-  const sanitized = sanitizeWizardId(wizardId) || sanitizeWizardId(state.runMode.wizardId) || sanitizeWizardId(state.docType) || DEFAULT_WIZARD_ID;
-  resetRunMode(sanitized);
-  state.runMode.wizardId = sanitized;
-  state.mode = 'RUN';
-  const docType = resolveDocTypeFromWizard(sanitized);
-  state.docType = docType;
-  if(els.docType){
-    const hasOption = Array.from(els.docType.options || []).some(opt => opt.value === docType);
-    if(hasOption) els.docType.value = docType;
-  }
+function enterRunMode(wizardId, opts={}){
   if(!state.username){
-    if(els.loginSection) els.loginSection.style.display = 'block';
-    if(els.app) els.app.style.display = 'none';
-    if(els.wizardSection) els.wizardSection.style.display = 'none';
-    return;
+    pendingRoute = { mode: 'RUN', wizardId: wizardId || null };
+    return false;
   }
-  cleanupDoc();
-  state.tokensByPage = {};
-  state.grayCanvases = {};
-  state.telemetry = [];
-  state.pageViewports = [];
-  state.pageOffsets = [];
-  state.lineLayout = null;
-  state.currentTraceId = null;
-  const existing = loadProfile(state.username, state.docType);
-  state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
+  const id = wizardId || state.activeWizardId;
+  if(!id){
+    pendingRoute = { mode: 'RUN', wizardId: null };
+    alert('Select or configure a wizard before running extraction.');
+    return false;
+  }
+  if(opts.skipHash !== true){
+    const hash = `#/run/${encodeURIComponent(id)}`;
+    if(location.hash !== hash){ location.hash = hash; }
+  }
+  const shouldReset = opts.forceReset || state.mode !== 'RUN' || !routesEqual(appliedRoute, { mode:'RUN', wizardId:id });
+  if(shouldReset){ resetModeState('RUN'); }
+  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
+  state.mode = 'RUN';
+  showWizardSection();
+  ensureProfile();
   initStepsFromProfile();
+  updatePrompt();
   renderSavedFieldsTable();
-  populateModelSelect();
-  renderResultsTable();
-  renderReports();
-  if(els.loginSection) els.loginSection.style.display = 'none';
-  if(els.app) els.app.style.display = 'block';
-  if(els.wizardSection) els.wizardSection.style.display = 'none';
-  showTab('document-dashboard');
-  drawOverlay();
-  renderCropAuditPanel();
-  renderTelemetry();
+  syncInteractionModes();
+  appliedRoute = { mode: 'RUN', wizardId: id };
+  pendingRoute = null;
+  return true;
 }
 
-function handleRouteChange(force = false){
-  const parsed = parseRoute(window.location.hash);
-  if(!parsed){
-    const fallbackId = state.configMode.wizardId || state.runMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-    navigateToRoute('RUN', fallbackId, { replace: true, force: true });
+function leaveWizardMode(){
+  const prevMode = state.mode;
+  if(prevMode === 'RUN'){ resetModeState('RUN'); }
+  if(prevMode === 'CONFIG'){ resetModeState('CONFIG'); }
+  state.mode = 'CONFIG';
+  showDashboard();
+  appliedRoute = { mode: null, wizardId: null };
+  syncInteractionModes();
+}
+
+function handleRouteChange(){
+  const route = parseRoute(location.hash);
+  if(!state.username){
+    pendingRoute = route;
+    appliedRoute = { mode: null, wizardId: null };
     return;
   }
-  const key = `${parsed.mode}:${sanitizeWizardId(parsed.wizardId)}`;
-  if(!force && key === currentRouteKey) return;
-  currentRouteKey = key;
-  if(parsed.mode === 'CONFIG') enterConfigMode(parsed.wizardId);
-  else enterRunMode(parsed.wizardId);
+  pendingRoute = null;
+  if(route.mode === 'CONFIG'){
+    enterConfigMode(route.wizardId, { skipHash: true, forceReset: true });
+    return;
+  }
+  if(route.mode === 'RUN'){
+    enterRunMode(route.wizardId, { skipHash: true, forceReset: true });
+    return;
+  }
+  leaveWizardMode();
 }
+
+window.addEventListener('hashchange', handleRouteChange);
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
@@ -404,16 +439,149 @@ function bumpDebugBlank(){
 
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
-  profileKey: (u, d) => `wiz.profile.${u}.${d}`,
-  dbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
-  getDb(u, d) {
-    const raw = localStorage.getItem(this.dbKey(u, d));
-    return raw ? JSON.parse(raw) : [];
-    },
-  setDb(u, d, arr){ localStorage.setItem(this.dbKey(u, d), JSON.stringify(arr)); },
-  getProfile(u,d){ const raw = localStorage.getItem(this.profileKey(u,d)); return raw ? JSON.parse(raw, jsonReviver) : null; },
-  setProfile(u,d,p){ localStorage.setItem(this.profileKey(u,d), serializeProfile(p)); },
-  removeProfile(u,d){ localStorage.removeItem(this.profileKey(u,d)); }
+  legacyProfileKey: (u, d) => `wiz.profile.${u}.${d}`,
+  legacyDbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
+  legacyModelsKey: 'wiz.models',
+  profileKey: (u, id) => `accounts.${u}.wizards.${id}.profile`,
+  dbKey: (u, id) => `accounts.${u}.wizards.${id}.masterdb`,
+  indexKey: u => `accounts.${u}.wizards.index`,
+  getWizardIndex(u){
+    if(!u) return [];
+    try {
+      const raw = localStorage.getItem(this.indexKey(u));
+      if(!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter(m => m && m.id) : [];
+    } catch(err){
+      console.warn('LS.getWizardIndex failed', err);
+      return [];
+    }
+  },
+  setWizardIndex(u, list){
+    if(!u) return;
+    const clean = Array.isArray(list) ? list.filter(m => m && m.id) : [];
+    localStorage.setItem(this.indexKey(u), JSON.stringify(clean));
+  },
+  listWizards(u, docType){
+    const index = this.getWizardIndex(u);
+    if(!docType) return index;
+    return index.filter(meta => (meta?.docType || '') === docType);
+  },
+  getWizardMeta(u, id){
+    if(!u || !id) return null;
+    return this.getWizardIndex(u).find(meta => meta.id === id) || null;
+  },
+  upsertWizardMeta(u, meta){
+    if(!u || !meta || !meta.id) return null;
+    const now = Date.now();
+    const current = this.getWizardIndex(u);
+    const existing = current.find(m => m.id === meta.id) || {};
+    const next = current.filter(m => m.id !== meta.id);
+    const merged = {
+      createdAt: existing.createdAt || meta.createdAt || now,
+      updatedAt: now,
+      docType: meta.docType || existing.docType || 'invoice',
+      label: meta.label || existing.label || null,
+      id: meta.id,
+      username: u
+    };
+    if(!merged.label){
+      const stamp = new Date(merged.createdAt);
+      merged.label = `${merged.docType || 'Wizard'} • ${stamp.toLocaleString()}`;
+    }
+    next.push(Object.assign({}, existing, meta, merged));
+    next.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
+    this.setWizardIndex(u, next);
+    return next.find(m => m.id === meta.id) || merged;
+  },
+  removeWizard(u, id){
+    if(!u || !id) return;
+    const next = this.getWizardIndex(u).filter(m => m.id !== id);
+    this.setWizardIndex(u, next);
+    localStorage.removeItem(this.profileKey(u, id));
+    localStorage.removeItem(this.dbKey(u, id));
+  },
+  getDb(u, id){
+    if(!u || !id) return [];
+    try {
+      const raw = localStorage.getItem(this.dbKey(u, id));
+      return raw ? JSON.parse(raw) : [];
+    } catch(err){
+      console.error('LS.getDb parse error', err);
+      return [];
+    }
+  },
+  setDb(u, id, arr){
+    if(!u || !id) return;
+    localStorage.setItem(this.dbKey(u, id), JSON.stringify(arr));
+    const meta = this.getWizardMeta(u, id);
+    if(meta){
+      this.upsertWizardMeta(u, { id, docType: meta.docType, label: meta.label, createdAt: meta.createdAt });
+    }
+  },
+  getProfile(u, id){
+    if(!u || !id) return null;
+    try {
+      const raw = localStorage.getItem(this.profileKey(u, id));
+      return raw ? JSON.parse(raw, jsonReviver) : null;
+    } catch(err){
+      console.error('LS.getProfile parse error', err);
+      return null;
+    }
+  },
+  setProfile(u, id, profile){
+    if(!u || !id || !profile) return;
+    localStorage.setItem(this.profileKey(u, id), serializeProfile(profile));
+    const meta = this.getWizardMeta(u, id) || { id, docType: profile.docType || state.docType };
+    this.upsertWizardMeta(u, { id, docType: meta.docType, label: meta.label, createdAt: meta.createdAt });
+  },
+  removeProfile(u, id){
+    if(!u || !id) return;
+    localStorage.removeItem(this.profileKey(u, id));
+  },
+  migrateLegacy(username){
+    if(!username) return;
+    let changed = false;
+    try {
+      const raw = localStorage.getItem(this.legacyModelsKey);
+      if(raw){
+        const models = JSON.parse(raw, jsonReviver);
+        if(Array.isArray(models)){
+          models.filter(m => m && m.username === username).forEach(model => {
+            const docType = model.docType || 'invoice';
+            const wizardId = model.id || `${username}:${docType}`;
+            const createdAt = model.createdAt || (()=>{ const ts = Number.parseInt(String(wizardId).split(':').pop(),10); return Number.isFinite(ts) ? ts : Date.now(); })();
+            this.upsertWizardMeta(username, { id: wizardId, docType, label: model.label || model.name || model.title || model.docType, createdAt });
+            const existingProfile = localStorage.getItem(this.profileKey(username, wizardId));
+            if(!existingProfile && model.profile){
+              this.setProfile(username, wizardId, migrateProfile(clonePlain(model.profile)));
+              changed = true;
+            }
+            const legacyProfileRaw = localStorage.getItem(this.legacyProfileKey(username, docType));
+            if(!existingProfile && legacyProfileRaw){
+              try {
+                const parsed = JSON.parse(legacyProfileRaw, jsonReviver);
+                this.setProfile(username, wizardId, migrateProfile(parsed));
+                changed = true;
+              } catch(err){ console.warn('Legacy profile migration failed', err); }
+            }
+            const legacyDbRaw = localStorage.getItem(this.legacyDbKey(username, docType));
+            if(legacyDbRaw && !localStorage.getItem(this.dbKey(username, wizardId))){
+              localStorage.setItem(this.dbKey(username, wizardId), legacyDbRaw);
+              changed = true;
+            }
+          });
+        }
+      }
+    } catch(err){
+      console.error('Legacy migration failed', err);
+    }
+    if(changed){
+      const updated = this.getWizardIndex(username);
+      updated.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
+      this.setWizardIndex(username, updated);
+    }
+  }
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
@@ -583,57 +751,145 @@ function serializeProfile(p){
 }
 
 let saveTimer=null;
-function saveProfile(u, d, p){
+function saveProfile(username, wizardId, profile){
+  if(!username || !wizardId || !profile) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    try{ LS.setProfile(u, d, p); }
+    try{ LS.setProfile(username, wizardId, profile); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
-    try{ traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { docType:d }); }catch{}
+    try {
+      const meta = LS.getWizardMeta(username, wizardId);
+      traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { wizardId, docType: meta?.docType || wizardId });
+    } catch(err){ console.warn('traceEvent failed', err); }
+    refreshWizardIndex();
   },300);
 }
-function loadProfile(u, d){
+function loadProfile(username, wizardId){
+  if(!username || !wizardId) return null;
   try{
-    const raw = LS.getProfile(u, d);
+    const raw = LS.getProfile(username, wizardId);
     return migrateProfile(raw);
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
-// Raw and compiled stores
-const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
-const fileMeta = {};       // {fileId: {fileName}}
+function refreshWizardIndex(){
+  if(!state.username){ state.wizardIndex = []; return []; }
+  state.wizardIndex = LS.getWizardIndex(state.username);
+  return state.wizardIndex;
+}
 
-const MODELS_KEY = 'wiz.models';
-function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]', jsonReviver); } catch{ return []; } }
-function setModels(m){ localStorage.setItem(MODELS_KEY, JSON.stringify(m, jsonReplacer)); }
+function formatWizardLabel(meta){
+  if(!meta) return 'Untitled Wizard';
+  const label = (meta.label || '').trim();
+  if(label) return label;
+  const stamp = meta.updatedAt || meta.createdAt;
+  const time = stamp ? new Date(stamp).toLocaleString() : '';
+  if(meta.docType && time) return `${meta.docType} • ${time}`;
+  return meta.docType || meta.id || 'Wizard';
+}
 
-function saveCurrentProfileAsModel(){
-  ensureProfile();
-  const id = `${state.username}:${state.docType}:${Date.now()}`;
-  const models = getModels();
-  models.push({ id, username: state.username, docType: state.docType, profile: state.profile });
-  setModels(models);
-  populateModelSelect();
-  alert('Wizard model saved.');
+function populateDataDocTypeSelect(){
+  if(!els.dataDocType) return;
+  const current = els.dataDocType.value;
+  const all = refreshWizardIndex();
+  const options = [`<option value="__all__">All Wizards</option>`]
+    .concat(all.map(meta => `<option value="${meta.id}">${formatWizardLabel(meta)}</option>`));
+  els.dataDocType.innerHTML = options.join('');
+  if(current && (current === '__all__' || all.some(meta => meta.id === current))){
+    els.dataDocType.value = current;
+  } else if(state.activeWizardId && all.some(meta => meta.id === state.activeWizardId)){
+    els.dataDocType.value = state.activeWizardId;
+  } else {
+    els.dataDocType.value = '__all__';
+  }
+}
+
+function setActiveWizard(id, opts={}){
+  if(!state.username){
+    state.activeWizardId = null;
+    state.activeWizardMeta = null;
+    state.profile = null;
+    hydrateFingerprintsFromProfile(null);
+    return;
+  }
+  if(!id){
+    state.activeWizardId = null;
+    state.activeWizardMeta = null;
+    state.profile = null;
+    hydrateFingerprintsFromProfile(null);
+    if(opts.skipPreview !== true) renderSavedFieldsTable();
+    if(opts.refreshResults !== false){ renderResultsTable(); renderReports(); }
+    return;
+  }
+  const meta = LS.getWizardMeta(state.username, id);
+  if(!meta){
+    console.warn('Wizard metadata missing', id);
+    if(!opts.allowMissing) setActiveWizard(null, opts);
+    return;
+  }
+  state.activeWizardId = id;
+  state.activeWizardMeta = meta;
+  state.docType = meta.docType || state.docType || 'invoice';
+  if(els.docType && els.docType.value !== state.docType){
+    els.docType.value = state.docType;
+  }
+  const profile = loadProfile(state.username, id);
+  state.profile = profile || null;
+  hydrateFingerprintsFromProfile(state.profile);
+  if(!opts.skipSelectUpdate){
+    const sel = document.getElementById('model-select');
+    if(sel) sel.value = id;
+  }
+  if(opts.skipPreview !== true) renderSavedFieldsTable();
+  if(opts.refreshResults !== false){ renderResultsTable(); renderReports(); }
+}
+
+function createWizard(docType, label, opts={}){
+  if(!state.username) return null;
+  const now = Date.now();
+  const dt = (docType || state.docType || 'invoice').trim() || 'invoice';
+  const cleanLabel = (label || '').trim();
+  const id = `${state.username}:${dt}:${now}`;
+  LS.upsertWizardMeta(state.username, { id, docType: dt, label: cleanLabel || null, createdAt: now });
+  refreshWizardIndex();
+  if(opts.autoSelect !== false){
+    setActiveWizard(id, { skipPreview: true, refreshResults: false, skipSelectUpdate: true });
+  }
+  return id;
 }
 
 function populateModelSelect(){
   const sel = document.getElementById('model-select');
   if(!sel) return;
-  const models = getModels().filter(m => m.username === state.username && m.docType === state.docType);
-  const current = sel.value;
-  sel.innerHTML = `<option value="">— Select a saved model —</option>` +
-    models.map(m => `<option value="${m.id}">${new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString()}</option>`).join('');
-  if(current) sel.value = current;
+  const all = refreshWizardIndex();
+  const filtered = state.docType ? all.filter(meta => (meta.docType || '') === state.docType) : all;
+  const options = [`<option value="">— Select a saved wizard —</option>`]
+    .concat(filtered.map(meta => `<option value="${meta.id}">${formatWizardLabel(meta)}</option>`));
+  const previous = sel.value;
+  sel.innerHTML = options.join('');
+  let nextValue = '';
+  if(state.activeWizardId && filtered.some(meta => meta.id === state.activeWizardId)){
+    nextValue = state.activeWizardId;
+  } else if(previous && filtered.some(meta => meta.id === previous)){
+    nextValue = previous;
+  } else if(filtered.length){
+    nextValue = filtered[0].id;
+  }
+  if(nextValue){
+    sel.value = nextValue;
+    setActiveWizard(nextValue, { skipSelectUpdate: true, skipPreview: true, refreshResults: false });
+  } else {
+    sel.value = '';
+    if(state.activeWizardId && !all.some(meta => meta.id === state.activeWizardId)){
+      setActiveWizard(null, { skipPreview: true, refreshResults: false });
+    }
+  }
+  populateDataDocTypeSelect();
 }
 
-function loadModelById(id){
-  const m = getModels().find(x => x.id === id);
-  if(!m) return null;
-  state.profile = migrateProfile(m.profile);
-  hydrateFingerprintsFromProfile(state.profile);
-  saveProfile(state.username, state.docType, state.profile);
-  return m.profile;
-}
+// Raw and compiled stores
+const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
+const fileMeta = {};       // {fileId: {fileName}}
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
@@ -1033,15 +1289,27 @@ function codeOf(str){
   const hasSeparators = /[-_/.,:]/.test(text) || /\s/.test(text);
   const coreLength = text.replace(/[^A-Za-z0-9]/g, '').length;
   const isShort = coreLength <= 10;
-  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '2')).join('');
+  return [hasLetters, hasDigits, hasBoth, hasSeparators, isShort].map(v => (v ? '1' : '0')).join('');
 }
 
-function normalizeFingerprintCode(code){
-  if(code === undefined || code === null) return null;
-  const normalized = String(code).trim().replace(/0/g, '2');
-  if(normalized.length !== 5) return null;
-  if(!/^[12]{5}$/.test(normalized)) return null;
-  return normalized;
+function shapeOf(str){
+  let out = '';
+  for(const ch of str){
+    if(/[A-Z]/.test(ch)) out += 'A';
+    else if(/[0-9]/.test(ch)) out += '9';
+    else if(ch === '-') out += '-';
+    else if(ch === '/') out += '/';
+    else if(ch === '.') out += '.';
+    else if(/\s/.test(ch)) out += '_';
+    else out += '?';
+  }
+  return out;
+}
+
+function digitRatio(str){
+  if(!str.length) return 0;
+  const digits = (str.match(/[0-9]/g) || []).length;
+  return digits / str.length;
 }
 
 function clonePlain(obj){
@@ -1058,17 +1326,22 @@ const FieldDataEngine = (() => {
 
   function learn(ftype, value){
     if(!value) return;
-    const code = normalizeFingerprintCode(codeOf(value));
-    if(!code) return;
-    const p = patterns[ftype] || (patterns[ftype] = { code: {} });
-    p.code[code] = (p.code[code] || 0) + 1;
+    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}, digit:{}});
+    const c = codeOf(value);
+    const s = shapeOf(value);
+    const l = value.length;
+    const d = digitRatio(value).toFixed(2);
+    p.code[c] = (p.code[c] || 0) + 1;
+    p.shape[s] = (p.shape[s] || 0) + 1;
+    p.len[l] = (p.len[l] || 0) + 1;
+    p.digit[d] = (p.digit[d] || 0) + 1;
   }
 
   function dominant(ftype){
     const p = patterns[ftype];
-    if(!p || !p.code) return {};
-    const best = normalizeFingerprintCode(mostCommonKey(p.code));
-    return best ? { code: best } : {};
+    if(!p) return {};
+    const maxKey = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1])[0]?.[0];
+    return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len), digit: parseFloat(maxKey(p.digit)) };
   }
 
   function clean(ftype, input, mode='RUN', spanKey){
@@ -1105,48 +1378,35 @@ const FieldDataEngine = (() => {
       txt = isValid ? sanitized : '';
     }
     const conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
-    const code = normalizeFingerprintCode(codeOf(txt));
+    const code = codeOf(txt);
+    const shape = shapeOf(txt);
+    const digit = digitRatio(txt);
     const before = dominant(ftype);
-    const fingerprintMatch = isValid && (!before.code || (code && before.code === code));
+    const fingerprintMatch = isValid && (!before.code || before.code === code);
     const shouldLearn = isValid && (mode === 'CONFIG' || fingerprintMatch);
-    if(shouldLearn && code) learn(ftype, txt);
+    if(shouldLearn) learn(ftype, txt);
     const dom = shouldLearn ? dominant(ftype) : before;
-    const score = isValid && code && dom.code && dom.code === code ? 1 : 0;
+    let score=0;
+    if(isValid && dom.code && dom.code===code) score++;
+    if(isValid && dom.shape && dom.shape===shape) score++;
+    if(isValid && dom.len && dom.len===txt.length) score++;
+    if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
     if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason });
-    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, score, correctionsApplied:[], fingerprintMatch, isValid, invalidReason };
+    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch, isValid, invalidReason };
   }
 
   function exportPatterns(){ return patterns; }
   function importPatterns(p){
     Object.keys(patterns).forEach(k => delete patterns[k]);
     if(!p || typeof p !== 'object') return;
-    const ingest = (key, data) => {
-      if(!data || typeof data !== 'object') return;
-      const source = data.code && typeof data.code === 'object' ? data.code : data;
-      const tallies = {};
-      for(const [rawCode, count] of Object.entries(source)){
-        const normalized = normalizeFingerprintCode(rawCode);
-        if(!normalized) continue;
-        const num = Number(count) || 0;
-        tallies[normalized] = (tallies[normalized] || 0) + num;
-      }
-      if(Object.keys(tallies).length){
-        patterns[key] = { code: tallies };
-      }
-    };
     for(const [key, data] of Object.entries(p)){
-      if(!data || typeof data !== 'object') continue;
-      if(data.code){
-        ingest(key, data);
-        continue;
-      }
-      for(const [nestedKey, nestedVal] of Object.entries(data)){
-        ingest(nestedKey, nestedVal);
+      if(data && typeof data === 'object'){
+        patterns[key] = clonePlain(data);
       }
     }
   }
 
-  return { codeOf, clean, exportPatterns, importPatterns, dominant };
+  return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
 })();
 
 function mostCommonKey(counts){
@@ -1170,16 +1430,10 @@ function getProfileFieldEntry(fieldKey){
 
 function getDominantFingerprintCode(ftype, profileKey){
   const dom = ftype ? FieldDataEngine.dominant(ftype) : null;
-  if(dom?.code){
-    const normalized = normalizeFingerprintCode(dom.code);
-    if(normalized) return normalized;
-  }
+  if(dom?.code) return dom.code;
   if(profileKey && profileKey !== ftype){
     const altDom = FieldDataEngine.dominant(profileKey);
-    if(altDom?.code){
-      const normalized = normalizeFingerprintCode(altDom.code);
-      if(normalized) return normalized;
-    }
+    if(altDom?.code) return altDom.code;
   }
   const searchKeys = [];
   if(profileKey) searchKeys.push(profileKey);
@@ -1188,16 +1442,20 @@ function getDominantFingerprintCode(ftype, profileKey){
     const entry = getProfileFieldEntry(key);
     if(!entry?.fingerprints || typeof entry.fingerprints !== 'object') continue;
     const fp = entry.fingerprints;
-    const direct = sanitizeFingerprintRecord(fp);
-    const directBest = bestFingerprintCode(direct?.code);
-    if(directBest) return directBest;
-    const keyed = key ? sanitizeFingerprintRecord(fp[key]) : null;
-    const keyedBest = bestFingerprintCode(keyed?.code);
-    if(keyedBest) return keyedBest;
+    if(fp.code && typeof fp.code === 'object'){
+      const best = mostCommonKey(fp.code);
+      if(best) return best;
+    }
+    const direct = fp[key];
+    if(direct && typeof direct === 'object' && direct.code){
+      const best = mostCommonKey(direct.code);
+      if(best) return best;
+    }
     for(const value of Object.values(fp)){
-      const nested = sanitizeFingerprintRecord(value);
-      const nestedBest = bestFingerprintCode(nested?.code);
-      if(nestedBest) return nestedBest;
+      if(value && typeof value === 'object' && value.code){
+        const best = mostCommonKey(value.code);
+        if(best) return best;
+      }
     }
   }
   return null;
@@ -1205,29 +1463,10 @@ function getDominantFingerprintCode(ftype, profileKey){
 
 function fingerprintMatches(ftype, code, mode = state.mode, profileKey){
   if(mode === 'CONFIG') return true;
-  const expected = normalizeFingerprintCode(getDominantFingerprintCode(ftype, profileKey));
+  const expected = getDominantFingerprintCode(ftype, profileKey);
   if(!expected) return true;
-  const candidate = normalizeFingerprintCode(code);
-  if(!candidate) return false;
-  return candidate === expected;
-}
-
-function sanitizeFingerprintRecord(record){
-  if(!record || typeof record !== 'object') return null;
-  const source = record.code && typeof record.code === 'object' ? record.code : record;
-  const tallies = {};
-  for(const [rawCode, count] of Object.entries(source)){
-    const normalized = normalizeFingerprintCode(rawCode);
-    if(!normalized) continue;
-    const num = Number(count) || 0;
-    tallies[normalized] = (tallies[normalized] || 0) + num;
-  }
-  return Object.keys(tallies).length ? { code: tallies } : null;
-}
-
-function bestFingerprintCode(tallies){
-  if(!tallies || typeof tallies !== 'object') return null;
-  return normalizeFingerprintCode(mostCommonKey(tallies));
+  if(typeof code !== 'string') return false;
+  return code === expected;
 }
 
 function collectPersistedFingerprints(profile){
@@ -1236,17 +1475,13 @@ function collectPersistedFingerprints(profile){
   for(const field of profile.fields){
     const prints = field?.fingerprints;
     if(!prints || typeof prints !== 'object') continue;
-    const direct = sanitizeFingerprintRecord(prints);
-    if(direct){
-      if(field.fieldKey){
-        out[field.fieldKey] = direct;
-        continue;
-      }
+    if(prints.code || prints.shape || prints.len || prints.digit){
+      out[field.fieldKey] = clonePlain(prints);
+      continue;
     }
     for(const [key, data] of Object.entries(prints)){
-      const sanitized = sanitizeFingerprintRecord(data);
-      if(sanitized){
-        out[key] = sanitized;
+      if(data && typeof data === 'object'){
+        out[key] = clonePlain(data);
       }
     }
   }
@@ -1284,19 +1519,7 @@ function tokensInBox(tokens, box){
     return ay === by ? a.x - b.x : ay - by;
   });
 }
-function snapToLine(tokens, hintPx, optsOrMargin){
-  let marginPx = 6;
-  let clampToHint = false;
-  let edgeBufferPx = 0;
-  if(typeof optsOrMargin === 'number'){
-    if(Number.isFinite(optsOrMargin)) marginPx = optsOrMargin;
-  } else if(optsOrMargin && typeof optsOrMargin === 'object'){
-    if(Number.isFinite(optsOrMargin.marginPx)) marginPx = optsOrMargin.marginPx;
-    clampToHint = !!optsOrMargin.clampToHint;
-    if(Number.isFinite(optsOrMargin.edgeBufferPx)){
-      edgeBufferPx = Math.max(0, optsOrMargin.edgeBufferPx);
-    }
-  }
+function snapToLine(tokens, hintPx, marginPx=6){
   const hits = tokensInBox(tokens, hintPx);
   if(!hits.length) return { box: hintPx, text: '' };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
@@ -1308,47 +1531,17 @@ function snapToLine(tokens, hintPx, optsOrMargin){
   const top    = Math.min(...lineTokens.map(t => t.y));
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
-  const horizontalMargin = clampToHint ? 0 : marginPx;
-  const expanded = {
-    x: box.x - horizontalMargin,
-    y: box.y - marginPx,
-    w: box.w + horizontalMargin*2,
-    h: box.h + marginPx*2,
-    page: hintPx.page
-  };
+  const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
   let finalBox = expanded;
-  if(clampToHint && hintPx){
-    const hintLeft = hintPx.x;
-    const hintRight = hintPx.x + (hintPx.w || 0);
-    const buffer = edgeBufferPx || 0;
-    let leftEdge = Math.max(0, hintLeft - buffer);
-    let rightEdge = hintRight + buffer;
-    if(rightEdge <= leftEdge){
-      const fallbackWidth = Math.max(hintPx.w || 0, box.w || 0, 1);
-      rightEdge = leftEdge + fallbackWidth;
-    }
-    const width = Math.max(0.5, rightEdge - leftEdge);
-    finalBox = {
-      x: leftEdge,
-      y: expanded.y,
-      w: width,
-      h: expanded.h,
-      page: hintPx.page
-    };
-  }
   if(state.mode === 'CONFIG' && hintPx){
-    const minCoverageRatio = 0.9;
-    if(hintPx.w > 0 && finalBox.w < hintPx.w * minCoverageRatio){
+    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
+    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
+    if(needsWidth || needsHeight){
       const unionLeft = Math.min(finalBox.x, hintPx.x);
-      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
-      finalBox.x = unionLeft;
-      finalBox.w = unionRight - unionLeft;
-    }
-    if(hintPx.h > 0 && finalBox.h < hintPx.h * minCoverageRatio){
       const unionTop = Math.min(finalBox.y, hintPx.y);
+      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
       const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
-      finalBox.y = unionTop;
-      finalBox.h = unionBottom - unionTop;
+      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
     }
   }
   const text = lineTokens.map(t => t.text).join(' ').trim();
@@ -1404,12 +1597,26 @@ const ANCHOR_HINTS = {
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   if(state.profile) return;
+  if(!state.username) return;
 
-  const existing = loadProfile(state.username, state.docType);
+  if(!state.activeWizardId){
+    const label = `${state.docType || 'Wizard'} Wizard`;
+    const newId = createWizard(state.docType, label, { autoSelect: true });
+    if(newId){
+      populateModelSelect();
+    }
+  }
+
+  if(!state.activeWizardId){
+    state.profile = null;
+    return;
+  }
+
+  const existing = loadProfile(state.username, state.activeWizardId);
 
   state.profile = existing || {
     username: state.username,
-    docType: state.docType,
+    docType: state.activeWizardMeta?.docType || state.docType,
     version: PROFILE_VERSION,
     fields: [],
     globals: [],
@@ -1508,7 +1715,9 @@ function ensureProfile(){
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
   hydrateFingerprintsFromProfile(state.profile);
-  saveProfile(state.username, state.docType, state.profile);
+  if(state.activeWizardId){
+    saveProfile(state.username, state.activeWizardId, state.profile);
+  }
 }
 
 /* ------------------------ Wizard Steps --------------------------- */
@@ -1693,6 +1902,13 @@ const DEFAULT_FIELDS = [
   }
 ];
 
+function refreshPromptElements(){
+  const stepEl = document.getElementById('stepLabel');
+  const questionEl = document.getElementById('questionText');
+  if(stepEl) els.stepLabel = stepEl;
+  if(questionEl) els.questionText = questionEl;
+}
+
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
@@ -1708,10 +1924,16 @@ function initStepsFromProfile(){
     type: d.type
   }));
   state.stepIdx = 0;
+  refreshPromptElements();
   updatePrompt();
+  if(els.confirmBtn) els.confirmBtn.disabled = false;
+  if(els.skipBtn) els.skipBtn.disabled = false;
+  if(els.backBtn) els.backBtn.disabled = state.stepIdx <= 0;
 }
 function updatePrompt(){
+  refreshPromptElements();
   const step = state.steps[state.stepIdx];
+  if(!els.stepLabel || !els.questionText) return;
   els.stepLabel.textContent = `Step ${state.stepIdx+1}/${state.steps.length}`;
   els.questionText.textContent = step?.prompt || 'Highlight field';
 }
@@ -1732,6 +1954,7 @@ function finishWizard(){
   document.getElementById('promptBar').innerHTML =
     `<span id="stepLabel">Wizard complete</span>
      <strong id="questionText">Click “Save & Return” or export JSON.</strong>`;
+  refreshPromptElements();
 }
 
 function afterConfirmAdvance(){
@@ -2022,7 +2245,9 @@ function captureGlobalLandmarks(){
     const lm = captureRingLandmark(px);
     return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
   });
-  saveProfile(state.username, state.docType, state.profile);
+  if(state.activeWizardId){
+    saveProfile(state.username, state.activeWizardId, state.profile);
+  }
 }
 
 /* ----------------------- Field Extraction ------------------------ */
@@ -2517,7 +2742,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       return { value:'', raw:'', confidence:0, boxPx, tokens:[], method:'raw' };
     }
     const tokensOut = best.tokens.map(t=>({ text:t }));
-    const result = { value: rawText, raw: rawText, corrected: rawText, code:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
+    const result = { value: rawText, raw: rawText, corrected: rawText, code:null, shape:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
     traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method:'raw', mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false });
     return result;
   }
@@ -2539,6 +2764,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       raw: sel.raw,
       corrected: cleaned.corrected,
       code: cleaned.code,
+      shape: cleaned.shape,
       score: cleaned.score,
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
@@ -2562,6 +2788,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       raw: cleaned.raw || rawText,
       corrected: cleaned.corrected,
       code: cleaned.code,
+      shape: cleaned.shape,
       score: cleaned.score,
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
@@ -2634,7 +2861,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox); }
       const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
       if(boxOk){
-        result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
+        result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
       }
     }
   }
@@ -2643,7 +2870,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     traceEvent(spanKey,'fallback.search',{});
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
     traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
-    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   if(!result.value && selectionRaw){
     bumpDebugBlank();
@@ -2682,20 +2909,9 @@ async function extractLineItems(profile){
     return Array.from(new Set((list||[]).map(w=>cleanedTokenText(w)).filter(Boolean)));
   }
 
-  function buildRowBands(anchorTokens, pageHeight, allTokens=[]){
-    const primary = Array.isArray(anchorTokens) ? anchorTokens.slice() : [];
-    const fallbackList = Array.isArray(allTokens) ? allTokens : [];
-    if(fallbackList.length){
-      const seen = new Set(primary);
-      for(const tok of fallbackList){
-        if(!seen.has(tok)){
-          primary.push(tok);
-          seen.add(tok);
-        }
-      }
-    }
-    if(!primary.length) return [];
-    const ordered = primary.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
+  function buildRowBands(anchorTokens, pageHeight){
+    if(!anchorTokens.length) return [];
+    const ordered = anchorTokens.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
     const groups=[];
     let current=null;
     for(const tok of ordered){
@@ -2742,6 +2958,9 @@ async function extractLineItems(profile){
       if(y1 <= y0){
         y0=Math.max(0,rowTop);
         y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
+      }
+      if(!Number.isFinite(nextTop)){
+        y1 = pageHeight;
       }
       return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
     });
@@ -2908,7 +3127,6 @@ async function extractLineItems(profile){
   const totalPages = state.numPages || state.pdf?.numPages || configuredPages[configuredPages.length-1] || 1;
   const pages = Array.from({ length: totalPages }, (_,i)=>i+1);
   const docId = state.currentFileId || state.currentFileName || 'doc';
-  const rowSpanKey = getWizardTraceSpanKey('line_items');
   let globalRowIndex = 0;
 
   for(const page of pages){
@@ -2961,19 +3179,11 @@ async function extractLineItems(profile){
       const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
       const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
       const align = field.column.align || 'left';
-      const baseLeftRaw = bandPx.x;
-      const baseRightRaw = bandPx.x + bandPx.w;
-      let baseLeft = Number.isFinite(baseLeftRaw) ? baseLeftRaw : 0;
-      let baseRight = Number.isFinite(baseRightRaw) ? baseRightRaw : baseLeft + 1;
-      const minBandWidth = Math.max(1, Math.abs(bandPx.w) || 1);
-      baseLeft = Math.max(0, Math.min(pageWidth, baseLeft));
-      baseRight = Math.max(baseLeft, Math.min(pageWidth, baseRight));
-      if(baseRight - baseLeft < 1){
-        baseLeft = Math.max(0, Math.min(pageWidth - 1, baseLeft));
-        baseRight = Math.min(pageWidth, Math.max(baseLeft + 1, baseLeft + minBandWidth));
-      }
-      const fallbackX0 = baseLeft;
-      const fallbackX1 = baseRight;
+      const fallbackMargin = Math.max(2, typicalHeight * 0.4);
+      const baseLeft = bandPx.x;
+      const baseRight = bandPx.x + bandPx.w;
+      const fallbackX0 = Math.max(0, baseLeft - fallbackMargin);
+      const fallbackX1 = Math.min(pageWidth, baseRight + fallbackMargin);
       const anchorFera = tableHints.rowAnchor?.fieldKey === field.fieldKey ? (tableHints.rowAnchor.fera || tableHints.rowAnchor.metrics || null) : null;
       const savedFera = field.column.fera || field.anchorMetrics || anchorFera || null;
       const feraProjection = projectColumnFera(savedFera, pageWidth, pageHeight);
@@ -2993,56 +3203,18 @@ async function extractLineItems(profile){
       const feraTolerance = savedFera
         ? Math.max(6, typicalHeight * 0.9, expectedWidth * (align === 'right' ? 0.2 : align === 'center' ? 0.25 : 0.35))
         : null;
-      let searchX0 = Number.isFinite(feraProjection?.x0) ? feraProjection.x0 : Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
-      let searchX1 = Number.isFinite(feraProjection?.x1) ? feraProjection.x1 : Number.isFinite(expectedRight) ? expectedRight : baseRight;
-      if(Number.isFinite(expectedWidth) && (!Number.isFinite(searchX1) || searchX1 <= searchX0)){
-        searchX1 = Number.isFinite(searchX0) ? searchX0 + expectedWidth : searchX1;
-      }
-      if(!Number.isFinite(searchX0) || !Number.isFinite(searchX1) || searchX1 <= searchX0){
-        searchX0 = baseLeft;
-        searchX1 = baseRight;
-      }
-      searchX0 = Math.max(0, Math.min(pageWidth, searchX0));
-      searchX1 = Math.max(searchX0, Math.min(pageWidth, searchX1));
-      if(state.mode === 'CONFIG'){
-        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-        const originalLeft = baseLeft;
-        const originalRight = baseRight;
-        const originalWidth = Math.max(1, originalRight - originalLeft);
-        const guardMargin = Math.max(4, originalWidth * 0.1);
-        const minWidth = Math.max(1, originalWidth * 0.9);
-        const leftMin = Math.max(0, originalLeft - guardMargin);
-        const leftMax = Math.max(leftMin, Math.min(pageWidth - minWidth, originalLeft + guardMargin));
-        let guardedLeft = clamp(searchX0, leftMin, leftMax);
-        const rightMax = Math.min(pageWidth, originalRight + guardMargin);
-        const rightMinBase = Math.max(guardedLeft + minWidth, originalRight - guardMargin);
-        const rightMin = Math.min(rightMax, rightMinBase);
-        let guardedRight = clamp(searchX1, rightMin, rightMax);
-        if(guardedRight - guardedLeft < minWidth){
-          const deficit = minWidth - (guardedRight - guardedLeft);
-          const leftAllowance = guardedLeft - leftMin;
-          const useLeft = Math.min(deficit, leftAllowance);
-          guardedLeft -= useLeft;
-          let remaining = deficit - useLeft;
-          if(remaining > 0){
-            const rightAllowance = rightMax - guardedRight;
-            const useRight = Math.min(remaining, rightAllowance);
-            guardedRight += useRight;
-            remaining -= useRight;
-          }
-          if(remaining > 0){
-            guardedLeft = Math.max(leftMin, guardedLeft - remaining);
-          }
-          if(guardedRight - guardedLeft < minWidth){
-            guardedRight = Math.min(rightMax, Math.max(guardedRight, guardedLeft + minWidth));
-          }
-        }
-        searchX0 = guardedLeft;
-        searchX1 = Math.max(searchX0 + 0.5, guardedRight);
+      const searchMargin = savedFera
+        ? Math.max(4, typicalHeight * 0.75, feraTolerance || 0)
+        : Math.max(2, typicalHeight * 0.4);
+      let searchX0 = Number.isFinite(expectedLeft) ? expectedLeft : baseLeft;
+      let searchX1 = Number.isFinite(expectedRight) ? expectedRight : baseRight;
+      searchX0 = Math.max(0, searchX0 - searchMargin);
+      searchX1 = Math.min(pageWidth, searchX1 + searchMargin);
+      if(searchX1 <= searchX0){
+        searchX0 = fallbackX0;
+        searchX1 = fallbackX1;
       }
       const sourcePage = field.__sourcePage || field.page || page;
-      const fallbackX0Out = state.mode === 'CONFIG' ? searchX0 : fallbackX0;
-      const fallbackX1Out = state.mode === 'CONFIG' ? searchX1 : fallbackX1;
       return {
         fieldKey: field.fieldKey,
         outKey: keyMap[field.fieldKey] || field.fieldKey,
@@ -3050,8 +3222,8 @@ async function extractLineItems(profile){
         sourcePage,
         x0: searchX0,
         x1: searchX1,
-        fallbackX0: fallbackX0Out,
-        fallbackX1: fallbackX1Out,
+        fallbackX0,
+        fallbackX1,
         headerBottom,
         headerPad,
         align,
@@ -3118,7 +3290,6 @@ async function extractLineItems(profile){
       headerLimit = Math.max(0, headerLimit);
       const gather = (x0, x1) => {
         const hits=[];
-        let guardStopped = null;
         for(const tok of pageTokens){
           if(tok.page !== desc.page) continue;
           const cx = tok.x + tok.w/2;
@@ -3128,147 +3299,43 @@ async function extractLineItems(profile){
           const text = (tok.text||'').trim();
           if(!text) continue;
           const cleaned = cleanedTokenText(text);
-          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))){
-            guardStopped = cleaned;
-            break;
-          }
+          if(cleaned && (desc.guardWords.includes(cleaned) || guardMatch(cleaned))) break;
           hits.push({ ...tok, cy, cleaned });
         }
-        return { hits, guardStopped };
+        return hits;
       };
-      const filterByFeraTolerance = list => {
-        if(!Array.isArray(list) || !list.length) return [];
-        if(!desc.feraActive || !Number.isFinite(desc.feraTolerance) || desc.feraTolerance <= 0) return list.slice();
-        const align = desc.align || 'left';
-        const scored = list.map(token => {
-          const leftEdge = token.x;
-          const rightEdge = token.x + token.w;
-          const center = leftEdge + token.w/2;
-          let diff = null;
-          if(align === 'right' && Number.isFinite(desc.expectedRight)){
-            diff = Math.abs(rightEdge - desc.expectedRight);
-          } else if(align === 'center' && Number.isFinite(desc.expectedCenter)){
-            diff = Math.abs(center - desc.expectedCenter);
-          } else if(Number.isFinite(desc.expectedLeft)){
-            diff = Math.abs(leftEdge - desc.expectedLeft);
-          } else if(Number.isFinite(desc.expectedRight)){
-            diff = Math.abs(rightEdge - desc.expectedRight);
-          } else if(Number.isFinite(desc.expectedCenter)){
-            diff = Math.abs(center - desc.expectedCenter);
-          }
-          return { token, diff };
-        }).filter(entry => Number.isFinite(entry.diff));
-        if(!scored.length) return list.slice();
-        const within = scored.filter(entry => entry.diff <= desc.feraTolerance);
-        if(!within.length) return [];
-        within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
-        const bestDiff = within[0].diff;
-        const closenessAllowance = Math.max(desc.typicalHeight || 0, desc.feraTolerance * 0.3, 6);
-        const keepThreshold = Math.min(desc.feraTolerance, bestDiff + closenessAllowance);
-        const keepSet = new Set(within.filter(entry => entry.diff <= keepThreshold).map(entry => entry.token));
-        return list.filter(token => keepSet.has(token));
-      };
-      const primary = gather(desc.x0, desc.x1);
-      let guardStopped = primary.guardStopped || null;
-      let colToks = filterByFeraTolerance(primary.hits);
-      let usedFallbackWindow = false;
+      let colToks = gather(desc.x0, desc.x1);
       if(!colToks.length && desc.feraActive && Number.isFinite(desc.fallbackX0) && Number.isFinite(desc.fallbackX1)){
-        const fallback = gather(desc.fallbackX0, desc.fallbackX1);
-        usedFallbackWindow = true;
-        colToks = filterByFeraTolerance(fallback.hits);
-        if(!guardStopped) guardStopped = fallback.guardStopped || null;
+        colToks = gather(desc.fallbackX0, desc.fallbackX1);
       }
-      if(!Array.isArray(colToks)) colToks = [];
       colToks.sort((a,b)=> a.cy - b.cy || a.x - b.x);
-      return { tokens: colToks, usedFallbackWindow, guardStopped };
+      return colToks;
     };
 
-    const requestedAnchorField = anchor?.fieldKey || null;
-    const anchorAttempts = [];
-    const evaluateAnchorCandidate = desc => {
-      if(!desc) return { tokens: [], bandTokens: [], collect: { tokens: [], usedFallbackWindow: false, guardStopped: null } };
-      const collect = collectColumnTokens(desc);
-      let tokens = collect.tokens;
-      let bandTokens = collect.tokens;
-      if(tokens.length){
-        const guarded = applyAnchorGuard(desc, tokens, page);
-        tokens = guarded.tokens;
-        bandTokens = guarded.bandTokens;
-      }
-      anchorAttempts.push({
-        fieldKey: desc.fieldKey,
-        tokens: collect.tokens.length,
-        bandTokens: Array.isArray(bandTokens) ? bandTokens.length : 0,
-        usedFallbackWindow: collect.usedFallbackWindow || false,
-        guardStopped: collect.guardStopped || null
-      });
-      return { tokens, bandTokens, collect };
-    };
-
-    let { tokens: anchorTokens, bandTokens: anchorBandTokens, collect: anchorCollect } = evaluateAnchorCandidate(anchor);
-    let fallbackAnchorField = null;
+    let anchorTokens = collectColumnTokens(anchor);
+    let anchorBandTokens = anchorTokens;
+    if(anchorTokens.length){
+      const guarded = applyAnchorGuard(anchor, anchorTokens, page);
+      anchorTokens = guarded.tokens;
+      anchorBandTokens = guarded.bandTokens;
+    }
     if(!anchorTokens.length){
       for(const key of order){
         const cand = descriptors.find(d=>d.fieldKey===key);
-        if(!cand || cand.fieldKey === (anchor?.fieldKey || null)) continue;
-        const { tokens, bandTokens, collect } = evaluateAnchorCandidate(cand);
-        if(tokens.length){
-          anchor = cand;
-          anchorTokens = tokens;
-          anchorBandTokens = bandTokens;
-          anchorCollect = collect;
-          fallbackAnchorField = cand.fieldKey;
-          break;
-        }
+        if(!cand) continue;
+        const candidateTokens = collectColumnTokens(cand);
+        const guarded = applyAnchorGuard(cand, candidateTokens, page);
+        if(guarded.tokens.length){ anchor = cand; anchorTokens = guarded.tokens; anchorBandTokens = guarded.bandTokens; break; }
       }
     }
 
-    const rawAnchorTokenCount = Array.isArray(anchorCollect?.tokens) ? anchorCollect.tokens.length : (Array.isArray(anchorTokens) ? anchorTokens.length : 0);
-    const bandTokenCount = Array.isArray(anchorBandTokens) ? anchorBandTokens.length : 0;
-    const lineSpanKey = rowSpanKey;
-    if(typeof traceEvent === 'function' && lineSpanKey){
-      traceEvent(lineSpanKey,'rows.anchor',{
-        page,
-        requestedField: requestedAnchorField,
-        resolvedField: anchorTokens.length ? anchor?.fieldKey || null : null,
-        matched: !!anchorTokens.length,
-        anchorHint: anchorHintKey || null,
-        tokenCount: rawAnchorTokenCount,
-        bandTokenCount,
-        guardFiltered: bandTokenCount > 0 && rawAnchorTokenCount > bandTokenCount,
-        usedFallbackWindow: !!(anchorCollect?.usedFallbackWindow),
-        guardStopped: anchorCollect?.guardStopped || null,
-        fallbackField: fallbackAnchorField,
-        attempts: anchorAttempts
-      });
-    }
     if(!anchorTokens.length){
-      if(typeof traceEvent === 'function' && lineSpanKey){
-        traceEvent(lineSpanKey,'rows.detected',{
-          page,
-          anchorField: requestedAnchorField,
-          anchorMatched: false,
-          rowBands: 0,
-          rowsDetected: 0,
-          reason: 'anchor_unmatched'
-        });
-      }
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
     }
 
-    const rowBands = buildRowBands(anchorBandTokens, pageHeight, anchorTokens);
+    const rowBands = buildRowBands(anchorBandTokens, pageHeight);
     if(!rowBands.length){
-      if(typeof traceEvent === 'function' && lineSpanKey){
-        traceEvent(lineSpanKey,'rows.detected',{
-          page,
-          anchorField: anchor?.fieldKey || requestedAnchorField,
-          anchorMatched: true,
-          rowBands: 0,
-          rowsDetected: 0,
-          reason: 'no_row_bands'
-        });
-      }
       layout.pages[page] = { page, columns: descriptors.map(d=>({ fieldKey:d.fieldKey, x0:d.x0, x1:d.x1 })), rows: [], top: 0, bottom: 0 };
       continue;
     }
@@ -3276,7 +3343,6 @@ async function extractLineItems(profile){
     const columnRowCounts = new Map();
     const pageRows = [];
     for(const band of rowBands){
-      const candidateRowIndex = pageRows.length;
       const row={
         line_no: '',
         __page: page,
@@ -3299,7 +3365,6 @@ async function extractLineItems(profile){
         let cleaned = null;
         let value = '';
         let fingerprintOk = true;
-        let needsAnchorTextFallback = false;
         if(cellTokens.length){
           cleaned = FieldDataEngine.clean(desc.outKey, cellTokens, state.mode, spanKey);
           const isValid = cleaned?.isValid !== false;
@@ -3327,8 +3392,7 @@ async function extractLineItems(profile){
           const prevCount = columnRowCounts.get(desc.fieldKey) || 0;
           columnRowCounts.set(desc.fieldKey, prevCount + 1);
         }
-        needsAnchorTextFallback = desc.fieldKey === anchor.fieldKey && !value && band.text;
-        if(needsAnchorTextFallback){
+        if(desc.fieldKey === anchor.fieldKey && !value && band.text){
           value = band.text.trim();
         }
         if(desc.outKey === 'line_no'){
@@ -3370,31 +3434,6 @@ async function extractLineItems(profile){
           missingReason = 'fingerprint_mismatch';
         }
         if(missingReason){ row.__missing[desc.outKey] = missingReason; }
-        if(typeof traceEvent === 'function' && lineSpanKey){
-          traceEvent(lineSpanKey,'rows.cell',{
-            page,
-            bandIndex: band.index,
-            candidateRowIndex,
-            columnField: desc.fieldKey,
-            columnKey: desc.outKey,
-            raw,
-            value,
-            tokenCount: cellTokens.length,
-            missingReason: missingReason || null,
-            fingerprintOk,
-            isValid: cleaned?.isValid !== false,
-            fallbackFlags: {
-              anchorText: needsAnchorTextFallback,
-              cleanedInvalid: cleaned?.isValid === false,
-              feraOk: cellResult.feraOk,
-              feraReason: cellResult.feraReason || null,
-              fingerprintMismatch: !fingerprintOk && cellTokens.length > 0
-            },
-            cleanedValue: cleaned?.value || '',
-            cleanedRaw: cleaned?.raw || '',
-            fera: cellMeta.fera
-          });
-        }
       }
 
       row.description = row.description || '';
@@ -3438,21 +3477,6 @@ async function extractLineItems(profile){
     }
 
     const filteredRows = targetRowCount < pageRows.length ? pruneRowsBySupport(pageRows, targetRowCount) : pageRows;
-    if(typeof traceEvent === 'function' && lineSpanKey){
-      traceEvent(lineSpanKey,'rows.detected',{
-        page,
-        anchorField: anchor?.fieldKey || requestedAnchorField,
-        anchorMatched: true,
-        rowBands: rowBands.length,
-        rowsDetected: pageRows.length,
-        rowsKept: filteredRows.length,
-        targetRowCount,
-        columnCounts: descriptors.map(d=>({ fieldKey: d.fieldKey, outKey: d.outKey, rows: columnRowCounts.get(d.fieldKey) || 0 })),
-        consensusSource: nonAnchorCounts.length ? 'supporting_columns' : 'all_columns',
-        pruned: filteredRows.length !== pageRows.length,
-        reason: 'summary'
-      });
-    }
     const pageRowEntries=[];
     for(const row of filteredRows){
       row.__rowIndex = globalRowIndex;
@@ -3575,14 +3599,6 @@ async function openFile(file){
     console.error('openFile called with a non-Blob:', file);
     alert('Could not open file (unexpected type). Try selecting the file again.');
     return;
-  }
-
-  if(state.mode === 'CONFIG'){
-    state.configMode.previewRaw = {};
-    state.configMode.previewLineItems = [];
-    state.configMode.previewRecord = null;
-    state.savedFieldsRecord = null;
-    renderSavedFieldsTable();
   }
 
   cleanupDoc();
@@ -3840,13 +3856,7 @@ async function finalizeSelection(e) {
   state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
-  const step = (state.steps && state.steps[state.stepIdx]) || {};
-  const clampColumns = state.mode === 'CONFIG' && step?.type === 'column';
-  const snap = snapToLine(tokens, state.selectionPx, {
-    marginPx: 6,
-    clampToHint: clampColumns,
-    edgeBufferPx: 0
-  });
+  const snap = snapToLine(tokens, state.selectionPx);
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
   const { scaleX, scaleY } = getScaleFactors();
@@ -3857,6 +3867,7 @@ async function finalizeSelection(e) {
     h: state.snappedPx.h/scaleY,
     page: state.snappedPx.page
   };
+  const step = state.steps[state.stepIdx] || {};
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
   const vp = state.pageViewports[state.pageNum - 1] || { width: state.viewport.w, height: state.viewport.h };
   const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
@@ -3991,9 +4002,8 @@ function drawOverlay(){
 
 function renderCropAuditPanel(){
   if(!els.ocrCropList) return;
-  const modeState = getModeState();
   els.ocrCropList.innerHTML = '';
-  (modeState.cropAudits || []).forEach(a => {
+  state.cropAudits.forEach(a => {
     const row = document.createElement('div');
     row.className = 'ocrCropRow';
     if(a.thumbUrl){
@@ -4054,38 +4064,34 @@ function renderCropAuditPanel(){
   });
 }
 
-function clearCropThumbs(targetState = getModeState()){
-  if(!targetState) return;
-  (targetState.cropAudits||[]).forEach(a=>{
+function clearCropThumbs(){
+  (state.cropAudits||[]).forEach(a=>{
     if(a.thumbUrl) URL.revokeObjectURL(a.thumbUrl);
   });
-  targetState.cropAudits = [];
-  if(targetState === getModeState() && els.ocrCropList){
-    els.ocrCropList.innerHTML = '';
-  }
+  state.cropAudits = [];
+  if(els.ocrCropList) els.ocrCropList.innerHTML = '';
 }
 
 async function refreshCropAuditThumbs(){
-  const modeState = getModeState();
-  const existing = (modeState.cropAudits || []).slice();
-  clearCropThumbs(modeState);
+  const existing = state.cropAudits.slice();
+  clearCropThumbs();
   for(const a of existing){
     const meta = a.meta || {};
-    if(!meta.normBox){ modeState.cropAudits.push(a); continue; }
+    if(!meta.normBox){ state.cropAudits.push(a); continue; }
     const { cropBitmap, meta: m2 } = getOcrCropForSelection({ docId: meta.docId || '', pageIndex: meta.pageIndex, normBox: meta.normBox });
     m2.question = a.question;
     if(m2.errors.length){
-      modeState.cropAudits.push({ question:a.question, reason:m2.errors[0], ocrProbe:{}, best:{}, thumbUrl:'', meta: m2 });
+      state.cropAudits.push({ question:a.question, reason:m2.errors[0], ocrProbe:{}, best:{}, thumbUrl:'', meta:m2 });
       continue;
     }
     let blob; try{ blob = await new Promise(res=>cropBitmap.toBlob(res,'image/png')); }catch(e){ blob=null; }
     if(!blob){
       m2.errors.push('blob_or_image_failed');
-      modeState.cropAudits.push({ question:a.question, reason:'blob_or_image_failed', ocrProbe:{}, best:{}, thumbUrl:'', meta: m2 });
+      state.cropAudits.push({ question:a.question, reason:'blob_or_image_failed', ocrProbe:{}, best:{}, thumbUrl:'', meta:m2 });
       continue;
     }
     const url = URL.createObjectURL(blob);
-    modeState.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
+    state.cropAudits.push({ ...a, thumbUrl:url, meta:{...meta, ...m2} });
   }
   renderCropAuditPanel();
 }
@@ -4159,20 +4165,53 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function buildDocumentSnapshot(fileId, lineItems, records, opts = {}){
-  const fileKey = fileId || 'preview';
-  const recs = Array.isArray(records) ? records : [];
-  const byKey = {};
-  recs.forEach(r => {
-    if(!r || !r.fieldKey) return;
-    byKey[r.fieldKey] = {
-      value: r.value,
-      raw: r.raw,
-      correctionsApplied: clonePlain(r.correctionsApplied || r.corrections || []),
-      confidence: r.confidence || 0,
-      tokens: clonePlain(r.tokens || [])
+function buildPreviewRecordFromRaw(fileId, lineItems){
+  if(!fileId) return null;
+  const raw = rawStore.get(fileId) || [];
+  const fields = {};
+  raw.forEach(rec => {
+    if(!rec?.fieldKey) return;
+    fields[rec.fieldKey] = {
+      value: rec.value || '',
+      raw: rec.raw || '',
+      confidence: rec.confidence ?? 0,
+      correctionsApplied: Array.isArray(rec.correctionsApplied) ? rec.correctionsApplied.slice() : [],
+      tokens: Array.isArray(rec.tokens) ? rec.tokens.slice() : []
     };
   });
+  (state.profile?.fields || []).forEach(f => {
+    if(!fields[f.fieldKey]){
+      fields[f.fieldKey] = { value: '', raw: '', confidence: 0, correctionsApplied: [], tokens: [] };
+    }
+  });
+  const items = Array.isArray(lineItems) ? lineItems.map((item, idx) => ({
+    ...item,
+    line_no: item?.line_no || item?.line_no === 0 ? item.line_no : idx + 1
+  })) : [];
+  const label = state.activeWizardMeta ? formatWizardLabel(state.activeWizardMeta) : (state.activeWizardId || 'wizard');
+  return {
+    fileId,
+    fileHash: fileId,
+    fileName: fileMeta[fileId]?.fileName || 'sample-document',
+    processedAtISO: new Date().toISOString(),
+    fields,
+    lineItems: items,
+    wizardId: state.activeWizardId,
+    wizardLabel: label,
+    templateKey: `${state.username || 'user'}:${state.activeWizardId || 'wizard'}`
+  };
+}
+
+function compileDocument(fileId, lineItems){
+  if(!state.username || !state.activeWizardId){
+    console.warn('No active wizard selected; skipping compile.');
+    return null;
+  }
+  const wizardId = state.activeWizardId;
+  const meta = state.activeWizardMeta || LS.getWizardMeta(state.username, wizardId);
+  const raw = rawStore.get(fileId);
+  const byKey = {};
+  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
   (state.profile?.fields||[]).forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
   });
@@ -4191,27 +4230,36 @@ function buildDocumentSnapshot(fileId, lineItems, records, opts = {}){
       if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
     });
   }
-  const hasExplicitLineItems = !!opts.hasExplicitLineItems;
-  let items = Array.isArray(lineItems) ? clonePlain(lineItems) : [];
-  if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileKey && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
-    items = clonePlain(state.currentLineItems);
+  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
+  const db = LS.getDb(state.username, wizardId);
+  const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
+  const hasExplicitLineItems = arguments.length >= 2;
+  let items = Array.isArray(lineItems) ? lineItems : [];
+  if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileId && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
+    items = state.currentLineItems;
   }
+  let existingIdx = findExistingIndex();
+  if((!items || !items.length) && existingIdx >= 0){
+    const prevItems = db[existingIdx]?.lineItems;
+    if(Array.isArray(prevItems) && prevItems.length){
+      items = prevItems;
+    }
+  }
+  if(!Array.isArray(items)) items = [];
   const enriched = items.map((it,i)=>{
-    const copy = { ...it };
-    let amount = copy.amount;
-    if(!amount && copy.quantity && copy.unit_price){
-      const q=parseFloat(copy.quantity); const u=parseFloat(copy.unit_price);
+    let amount = it.amount;
+    if(!amount && it.quantity && it.unit_price){
+      const q=parseFloat(it.quantity); const u=parseFloat(it.unit_price);
       if(!isNaN(q) && !isNaN(u)) amount=(q*u).toFixed(2);
     }
-    return { line_no:i+1, ...copy, amount };
+    return { line_no:i+1, ...it, amount };
   });
   let lineSum=0; let allHave=true;
   enriched.forEach(it=>{ if(it.amount){ lineSum+=parseFloat(it.amount); } else allHave=false; });
-  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
   const compiled = {
-    fileId: fileKey,
-    fileHash: fileKey,
-    fileName: opts.fileName || fileMeta[fileKey]?.fileName || 'unnamed',
+    fileId,
+    fileHash: fileId,
+    fileName: fileMeta[fileId]?.fileName || 'unnamed',
     processedAtISO: new Date().toISOString(),
     fields: byKey,
     invoice: {
@@ -4227,213 +4275,79 @@ function buildDocumentSnapshot(fileId, lineItems, records, opts = {}){
       discount: byKey['discounts_amount']?.value || ''
     },
     lineItems: enriched,
-    templateKey: opts.templateKey || `${state.username}:${state.docType}`,
+    wizardId,
+    wizardLabel: formatWizardLabel(meta),
+    templateKey: `${state.username}:${wizardId}`,
     warnings: []
   };
-  if(opts.preview) compiled.isPreview = true;
   if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
     compiled.warnings.push('line_totals_vs_subtotal');
     if(byKey['subtotal_amount']){
       byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
     }
   }
-  return { compiled, invoiceNumber };
-}
-
-function tokenToPreviewText(token){
-  if(token === null || token === undefined) return '';
-  if(typeof token === 'string') return token;
-  if(typeof token.text === 'string') return token.text;
-  if(typeof token.raw === 'string') return token.raw;
-  if(typeof token.corrected === 'string') return token.corrected;
-  return '';
-}
-
-function tokensToPreviewText(tokens){
-  if(!Array.isArray(tokens) || !tokens.length) return '';
-  return tokens.map(tokenToPreviewText).filter(Boolean).join(' ').trim();
-}
-
-function normalizePreviewEntry(entry){
-  if(!entry || !entry.fieldKey) return null;
-  const copy = clonePlain(entry);
-  if(!Array.isArray(copy.tokens)) copy.tokens = [];
-  if(copy.raw === undefined || copy.raw === null){
-    copy.raw = tokensToPreviewText(copy.tokens);
-  }
-  if(copy.value === undefined || copy.value === null){
-    copy.value = copy.raw || '';
-  }
-  if(copy.correctionsApplied === undefined && copy.corrections !== undefined){
-    copy.correctionsApplied = clonePlain(copy.corrections);
-  }
-  if(copy.corrections === undefined && copy.correctionsApplied !== undefined){
-    copy.corrections = clonePlain(copy.correctionsApplied);
-  }
-  if(typeof copy.confidence !== 'number'){
-    const num = Number(copy.confidence);
-    copy.confidence = Number.isFinite(num) ? num : 1;
-  }
-  return copy;
-}
-
-function buildConfigPreviewRecord(){
-  const previewRaw = state.configMode?.previewRaw || {};
-  const records = [];
-  const seen = new Set();
-
-  (state.profile?.fields || []).forEach(field => {
-    if(!field || !field.fieldKey) return;
-    const key = field.fieldKey;
-    const rawEntry = previewRaw[key];
-    let entry = rawEntry ? normalizePreviewEntry(rawEntry) : null;
-    if(!entry){
-      const tokens = Array.isArray(field.tokens) ? clonePlain(field.tokens) : [];
-      let raw = typeof field.raw === 'string' ? field.raw : '';
-      if(!raw) raw = tokensToPreviewText(tokens);
-      let value = field.value;
-      if(value === undefined || value === null) value = raw || '';
-      const corrections = clonePlain(field.correctionsApplied || []);
-      entry = normalizePreviewEntry({
-        fieldKey: key,
-        value,
-        raw,
-        confidence: typeof field.confidence === 'number' ? field.confidence : 1,
-        correctionsApplied: corrections,
-        corrections,
-        tokens
-      });
-    }
-    if(entry){
-      records.push(entry);
-      seen.add(key);
-    }
-  });
-
-  Object.values(previewRaw).forEach(rawEntry => {
-    if(!rawEntry || !rawEntry.fieldKey || seen.has(rawEntry.fieldKey)) return;
-    const normalized = normalizePreviewEntry(rawEntry);
-    if(normalized){
-      records.push(normalized);
-      seen.add(normalized.fieldKey);
-    }
-  });
-
-  const previewItems = Array.isArray(state.configMode?.previewLineItems)
-    ? clonePlain(state.configMode.previewLineItems)
-    : [];
-  const fallbackItems = (!previewItems.length && Array.isArray(state.currentLineItems))
-    ? clonePlain(state.currentLineItems)
-    : [];
-  const items = previewItems.length ? previewItems : fallbackItems;
-
-  if(!records.length && !items.length) return null;
-
-  const fileId = state.currentFileId || 'config-preview';
-  const username = state.username || 'preview';
-  const docType = state.docType || 'invoice';
-  const snapshot = buildDocumentSnapshot(fileId, items, records, {
-    fileName: state.currentFileName || 'Config Preview',
-    templateKey: `${username}:${docType}`,
-    hasExplicitLineItems: true,
-    preview: true
-  });
-  return snapshot.compiled;
-}
-
-function updateConfigPreviewStore(fieldKey, record, lineItems){
-  if(!state.configMode) return;
-  if(!state.configMode.previewRaw) state.configMode.previewRaw = {};
-  state.configMode.previewRaw[fieldKey] = clonePlain(record);
-  state.configMode.previewLineItems = Array.isArray(lineItems) ? clonePlain(lineItems) : [];
-  state.configMode.previewRecord = buildConfigPreviewRecord();
-  state.savedFieldsRecord = state.configMode.previewRecord;
-}
-
-function compileDocument(fileId, lineItems){
-  const hasExplicitLineItems = arguments.length >= 2;
-  const snapshot = buildDocumentSnapshot(fileId, lineItems, rawStore.get(fileId), {
-    fileName: fileMeta[fileId]?.fileName || 'unnamed',
-    hasExplicitLineItems
-  });
-  const compiled = snapshot.compiled;
-  const invoiceNumber = snapshot.invoiceNumber;
-  const cleanScalar = val => {
-    if(val === undefined || val === null) return '';
-    if(typeof val === 'string') return val.replace(/\s+/g,' ').trim();
-    return String(val);
-  };
-  const db = LS.getDb(state.username, state.docType);
-  const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
-  let existingIdx = findExistingIndex();
-  if((!compiled.lineItems || !compiled.lineItems.length) && existingIdx >= 0){
-    const prevItems = db[existingIdx]?.lineItems;
-    if(Array.isArray(prevItems) && prevItems.length){
-      compiled.lineItems = prevItems;
-    }
-  }
-  if(!Array.isArray(compiled.lineItems)) compiled.lineItems = [];
   existingIdx = findExistingIndex();
   const invNum = compiled.invoice.number;
   const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
-  LS.setDb(state.username, state.docType, db);
-  state.savedFieldsRecord = compiled;
-  if(typeof traceEvent === 'function'){
-    const spanKey = getWizardTraceSpanKey('line_items');
-    if(spanKey){
-      const rows = (compiled.lineItems || []).map((row, index) => ({
-        index,
-        line_no: row.line_no ?? index + 1,
-        description: (row.description || '').slice(0, 120),
-        quantity: row.quantity || '',
-        unit_price: row.unit_price || '',
-        amount: row.amount || ''
-      }));
-      traceEvent(spanKey,'rows.appended',{
-        fileId: compiled.fileId,
-        rowCount: rows.length,
-        replacedExisting: idx >= 0,
-        hasExplicitLineItems,
-        invoiceNumber,
-        rows
-      });
-    }
-  }
+  LS.setDb(state.username, wizardId, db);
   renderResultsTable();
   renderTelemetry();
   renderReports();
-  renderSavedFieldsTable();
   return compiled;
+}
+
+function getWizardMetaList(){
+  if(!state.username) return [];
+  if(!Array.isArray(state.wizardIndex)) state.wizardIndex = [];
+  if(!state.wizardIndex.length) refreshWizardIndex();
+  return state.wizardIndex;
+}
+
+function collectRecords(filterId){
+  if(!state.username) return [];
+  const metas = getWizardMetaList();
+  const attach = (rec, meta) => ({ ...rec, __wizardId: meta?.id || '', __wizardLabel: formatWizardLabel(meta) });
+  if(filterId && filterId !== '__all__'){
+    const meta = metas.find(m => m.id === filterId) || (filterId ? LS.getWizardMeta(state.username, filterId) : null);
+    if(!meta) return [];
+    return (LS.getDb(state.username, meta.id) || []).map(rec => attach(rec, meta));
+  }
+  return metas.flatMap(meta => (LS.getDb(state.username, meta.id) || []).map(rec => attach(rec, meta)));
 }
 
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
-  const dt = els.dataDocType?.value || state.docType;
-  let db = LS.getDb(state.username, dt);
-  if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
-  db = db.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
+  if(!mount) return;
+  const filter = els.dataDocType?.value || (state.activeWizardId || '__all__');
+  let records = collectRecords(filter);
+  if(!records.length){
+    mount.innerHTML = '<p class="sub">No extractions yet.</p>';
+    return;
+  }
+  records = records.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
 
   const keySet = new Set();
-  db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
+  records.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
   const showRaw = state.modes.rawData || els.showRawToggle?.checked;
 
-  const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
-  const rows = db.map(r=>{
+  const thead = `<tr><th>wizard</th><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
+  const rows = records.map(r=>{
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', raw:'', confidence:0 };
       const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
       const val = showRaw ? (f.raw || f.value || '') : (f.value || f.raw || '');
       const prop = showRaw ? 'raw' : 'value';
-      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
+      return `<td><input class="editField" data-wizard="${r.__wizardId}" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
     const liRows = (r.lineItems||[]).map(it=>{
+      const warn = it.confidence < 0.8 ? ' <span class="warn">⚠️</span>' : '';
       const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
-      return `<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
+      return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
     }).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${liRows}</tbody></table>`;
-    return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
+    return `<tr><td>${r.__wizardLabel || ''}</td><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
 
   mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
@@ -4442,8 +4356,8 @@ function renderResultsTable(){
     const fileId = inp.dataset.file;
     const field = inp.dataset.field;
     const prop = inp.dataset.prop || 'value';
-    const dt = els.dataDocType?.value || state.docType;
-    const db = LS.getDb(state.username, dt);
+    const wizardId = inp.dataset.wizard;
+    const db = wizardId ? LS.getDb(state.username, wizardId) : [];
     const rec = db.find(r=>r.fileId===fileId);
     if(rec && rec.fields?.[field]){
       rec.fields[field][prop] = inp.value;
@@ -4452,27 +4366,21 @@ function renderResultsTable(){
         if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
         if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
       }
-      LS.setDb(state.username, dt, db);
+      LS.setDb(state.username, wizardId, db);
       renderResultsTable();
       renderReports();
-      renderSavedFieldsTable();
+      if(wizardId === state.activeWizardId){ renderSavedFieldsTable(); }
     }
   }));
 }
 
 function syncRawModeUI(){
-  const on = state.modes.rawData;
+  state.modes.rawData = !!state.modes.rawData;
   if(els.showRawToggle){
-    els.showRawToggle.checked = true;
-    els.showRawToggle.disabled = on;
-    if(!on) els.showRawToggle.checked = false;
+    els.showRawToggle.disabled = state.modes.rawData;
+    els.showRawToggle.checked = state.modes.rawData;
   }
-  if(els.rawDataBtn){
-    els.rawDataBtn.classList.toggle('active', on);
-  }
-  if(els.boxModeBtn){
-    els.boxModeBtn.classList.toggle('active', !on);
-  }
+  syncInteractionModes();
   renderResultsTable();
 }
 
@@ -4482,23 +4390,27 @@ function renderTelemetry(){
 }
 
 function renderReports(){
-  const dt = els.dataDocType?.value || state.docType;
-  let db = LS.getDb(state.username, dt);
-  const totalRevenue = db.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
-  const orders = db.length;
-  const taxTotal = db.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
-  const discountTotal = db.reduce((s,r)=> s + Math.abs(parseFloat(r.totals?.discount)||0), 0);
+  const filter = els.dataDocType?.value || (state.activeWizardId || '__all__');
+  const records = collectRecords(filter);
+  if(!records.length){
+    if(els.reports) els.reports.innerHTML = '<p class="sub">Reports coming soon.</p>';
+    return;
+  }
+  const totalRevenue = records.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
+  const orders = records.length;
+  const taxTotal = records.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
+  const discountTotal = records.reduce((s,r)=> s + Math.abs(parseFloat(r.totals?.discount)||0), 0);
   const skuMap = {};
-  db.forEach(r => (r.lineItems||[]).forEach(it=>{
+  records.forEach(r => (r.lineItems||[]).forEach(it=>{
     const sku = it.sku || '';
     if(!sku) return;
     const qty = parseFloat(it.quantity)||0;
-    const amt = parseFloat(it.unit_price)||0 * qty;
+    const amt = (parseFloat(it.unit_price)||0) * qty;
     const cur = skuMap[sku] || { qty:0, revenue:0 };
     cur.qty += qty; cur.revenue += amt; skuMap[sku] = cur;
   }));
   const top = Object.entries(skuMap).sort((a,b)=>b[1].revenue - a[1].revenue).slice(0,5);
-  const topRows = top.map(([sku,d])=>`<tr><td>${sku}</td><td>${d.qty}</td><td>${d.revenue.toFixed(2)}</td></tr>`).join('');
+  const topRows = top.map(([sku,d])=>`<tr><td>${sku}</td><td>${d.qty.toFixed(2)}</td><td>${d.revenue.toFixed(2)}</td></tr>`).join('');
   els.reports.innerHTML = `<p>Total revenue: ${totalRevenue.toFixed(2)}</p><p>Orders: ${orders}</p><p>Tax total: ${taxTotal.toFixed(2)}</p><p>Discount total: ${discountTotal.toFixed(2)}</p><h4>Top SKUs</h4><table class="line-items-table"><thead><tr><th>SKU</th><th>Qty</th><th>Revenue</th></tr></thead><tbody>${topRows}</tbody></table>`;
 }
 
@@ -4583,7 +4495,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     entry.fingerprints = nextFingerprints;
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
-  saveProfile(state.username, state.docType, state.profile);
+  if(state.activeWizardId){
+    saveProfile(state.username, state.activeWizardId, state.profile);
+  }
 }
 function ensureAnchorFor(fieldKey){
   if(!state.profile) return;
@@ -4599,32 +4513,71 @@ function ensureAnchorFor(fieldKey){
   };
   if(anchorMap[fieldKey]){
     f.anchor = anchorMap[fieldKey];
-    saveProfile(state.username, state.docType, state.profile);
+    if(state.activeWizardId){
+      saveProfile(state.username, state.activeWizardId, state.profile);
+    }
   }
 }
-function renderSavedFieldsTable(){
-  let latest = null;
+function renderSavedFieldsTable(latestOverride=null){
+  const wizardId = state.activeWizardId;
+  const preview = els.fieldsPreview;
+  const label = wizardId ? formatWizardLabel(LS.getWizardMeta(state.username, wizardId)) : null;
+  const savedJsonEl = els.savedJson;
+  if(!wizardId){
+    if(preview) preview.innerHTML = '<p class="sub">Select a wizard to preview its saved fields.</p>';
+    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
+    state.savedFieldsRecord = null;
+    renderConfirmedTables(null);
+    return;
+  }
+
   if(state.mode === 'CONFIG'){
-    latest = buildConfigPreviewRecord();
-    if(state.configMode){
-      state.configMode.previewRecord = latest || null;
+    const fileId = latestOverride?.fileId || state.currentFileId || null;
+    const previewRecord = latestOverride || (fileId ? buildPreviewRecordFromRaw(fileId, state.currentLineItems) : null);
+    state.savedFieldsRecord = previewRecord || null;
+    if(preview){
+      if(!previewRecord){
+        const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
+        preview.innerHTML = `<p class="sub">${msg}</p>`;
+      } else {
+        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+        const rows = order.map(k => ({ fieldKey:k, value: previewRecord.fields?.[k]?.value }))
+          .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+        if(!rows.length){
+          const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
+          preview.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const thead = `<tr>${rows.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+          const row = `<tr>${rows.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
+          preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+        }
+      }
     }
-  } else {
-    const db = LS.getDb(state.username, state.docType);
-    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0] || null;
+    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
+    renderConfirmedTables(previewRecord);
+    return;
+  }
+
+  const db = LS.getDb(state.username, wizardId);
+  let latest = latestOverride || null;
+  if(!latest){
+    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
   }
   state.savedFieldsRecord = latest || null;
-  const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
-  const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
-    .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
-  if(!fields.length){
-    els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
-  } else {
-    const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
-    const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
-    els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+  if(preview){
+    const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+    const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
+      .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+    if(!fields.length){
+      const msg = label ? `${label}: No fields yet.` : 'No fields yet.';
+      preview.innerHTML = `<p class="sub">${msg}</p>`;
+    } else {
+      const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+      const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
+      preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
+    }
   }
-  els.savedJson.textContent = serializeProfile(state.profile);
+  if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
   renderConfirmedTables(latest);
 }
 
@@ -4634,17 +4587,62 @@ function renderConfirmedTables(rec){
   confirmedRenderPending = true;
   requestAnimationFrame(()=>{
     confirmedRenderPending = false;
-    const latest = rec || (state.mode === 'CONFIG'
-      ? null
-      : LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0]);
-    const isPreview = !!latest?.isPreview || (state.mode === 'CONFIG' && rec === state.configMode?.previewRecord);
+    const wizardId = state.activeWizardId;
+    const meta = wizardId ? LS.getWizardMeta(state.username, wizardId) : null;
     const fDiv = document.getElementById('confirmedFields');
     const liDiv = document.getElementById('confirmedLineItems');
+    if(!wizardId){
+      if(fDiv) fDiv.innerHTML = '<p class="sub">Select a wizard to review confirmed fields.</p>';
+      if(liDiv) liDiv.innerHTML = '<p class="sub">Select a wizard to review line items.</p>';
+      return;
+    }
+    const mode = state.mode;
+    const latest = rec || (mode === 'RUN'
+      ? LS.getDb(state.username, wizardId).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0]
+      : state.savedFieldsRecord);
+
+    if(mode === 'CONFIG'){
+      if(fDiv){
+        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+        const rows = order.map(key => ({ key, field: latest?.fields?.[key] }))
+          .filter(entry => entry.field && String(entry.field.value || '').trim() !== '');
+        if(!rows.length){
+          const msg = meta ? `${formatWizardLabel(meta)}: No sample fields.` : 'No sample fields yet.';
+          fDiv.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const html = rows.map(({ key, field }) => {
+            const warn = (field.confidence || 0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
+            const conf = `<span class="confidence">${Math.round((field.confidence||0)*100)}%</span>`;
+            return `<tr><td>${key}</td><td>${(field.value||'').toString().replace(/</g,'&lt;')}${warn}${conf}</td></tr>`;
+          }).join('');
+          fDiv.innerHTML = `<table class="line-items-table"><tbody>${html}</tbody></table>`;
+        }
+      }
+      if(liDiv){
+        const items = Array.isArray(latest?.lineItems) ? latest.lineItems : [];
+        if(!items.length){
+          const msg = meta ? `${formatWizardLabel(meta)}: No sample line items.` : 'No sample line items yet.';
+          liDiv.innerHTML = `<p class="sub">${msg}</p>`;
+        } else {
+          const rows = items.map(it=>{
+            const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
+            return `<tr><td>${(it.description||'')}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
+          }).join('');
+          liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${rows}</tbody></table>`;
+        }
+      }
+      return;
+    }
+
+    const latestRun = latest;
     if(fDiv){
       const typeMap = {};
       (state.profile?.fields||[]).forEach(f=>{ typeMap[f.fieldKey]=f.type; });
-      const statics = Object.entries(latest?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
-      if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
+      const statics = Object.entries(latestRun?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
+      if(!statics.length){
+        const msg = meta ? `${formatWizardLabel(meta)}: No fields yet.` : 'No fields yet.';
+        fDiv.innerHTML = `<p class="sub">${msg}</p>`;
+      }
       else {
         const rows = statics.map(([k,f])=>{
           const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
@@ -4652,28 +4650,24 @@ function renderConfirmedTables(rec){
           return `<tr><td>${k}</td><td><input class="confirmEdit" data-field="${k}" value="${f.value}"/>${warn}${conf}</td></tr>`;
         }).join('');
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
-        fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>{
-          if(isPreview){
-            inp.disabled = true;
-            return;
+        fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
+          const db = LS.getDb(state.username, wizardId);
+          const record = db.find(r=>r.fileId===latestRun?.fileId);
+          if(record && record.fields?.[inp.dataset.field]){
+            record.fields[inp.dataset.field].value = inp.value;
+            record.fields[inp.dataset.field].confidence = 1;
+            LS.setDb(state.username, wizardId, db);
+            renderSavedFieldsTable();
           }
-          inp.disabled = false;
-          inp.addEventListener('change',()=>{
-            const db = LS.getDb(state.username, state.docType);
-            const rec = db.find(r=>r.fileId===latest?.fileId);
-            if(rec && rec.fields?.[inp.dataset.field]){
-              rec.fields[inp.dataset.field].value = inp.value;
-              rec.fields[inp.dataset.field].confidence = 1;
-              LS.setDb(state.username, state.docType, db);
-              renderSavedFieldsTable();
-            }
-          });
-        });
+        }));
       }
     }
     if(liDiv){
-      const items = latest?.lineItems || [];
-      if(!items.length){ liDiv.innerHTML = '<p class="sub">No line items.</p>'; }
+      const items = latestRun?.lineItems || [];
+      if(!items.length){
+        const msg = meta ? `${formatWizardLabel(meta)}: No line items.` : 'No line items.';
+        liDiv.innerHTML = `<p class="sub">${msg}</p>`;
+      }
       else {
         const rows = items.map(it=>{
           const warn = (it.confidence||0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
@@ -4687,286 +4681,193 @@ function renderConfirmedTables(rec){
 }
 
 /* --------------------------- Events ------------------------------ */
-function getActiveWizardId(mode = state.mode){
-  if(mode === 'RUN'){
-    return state.runMode?.wizardId || state.configMode?.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  }
-  return state.configMode?.wizardId || state.docType || DEFAULT_WIZARD_ID;
-}
-
-function logWizardAction(action){
-  const payload = { mode: state.mode, wizardId: getActiveWizardId(state.mode), action };
-  try {
-    console.log('[wizard-action]', payload);
-  } catch(err){
-    console.warn('wizard-action logging failed', err);
-  }
-  return payload;
-}
-
-function executeWizardAction(action, configHandler, runHandler){
-  logWizardAction(action);
-  const handler = state.mode === 'RUN' ? (runHandler || configHandler) : configHandler;
-  if(typeof handler === 'function'){
-    return handler();
-  }
-  return undefined;
-}
-
-function setWizardRawMode(enabled){
-  state.modes.rawData = !!enabled;
-  if(els.rawDataToggle){
-    els.rawDataToggle.checked = state.modes.rawData;
-  }
-  syncRawModeUI();
-}
-
-function clearSelectionFor(mode){
-  const modeState = getModeState(mode);
-  if(!modeState) return;
-  modeState.selectionPx = null;
-  modeState.snappedPx = null;
-  modeState.snappedText = '';
-  drawOverlay();
-}
-
-function handleBackFor(mode){
-  const modeState = getModeState(mode);
-  if(!modeState) return;
-  if(modeState.stepIdx > 0){
-    goToStep(modeState.stepIdx - 1);
-  }
-}
-
-function handleSkipFor(mode){
-  const modeState = getModeState(mode);
-  if(!modeState) return;
-  const steps = Array.isArray(modeState.steps) ? modeState.steps : [];
-  if(modeState.stepIdx < steps.length - 1){
-    goToStep(modeState.stepIdx + 1);
-  } else {
-    finishWizard();
-  }
-}
-
-function enterBoxModeFor(mode){
-  setWizardRawMode(false);
-  drawOverlay();
-}
-
-function enterRawModeFor(mode){
-  setWizardRawMode(true);
-  drawOverlay();
-}
-
-async function handleConfirmForMode(mode){
-  const modeState = getModeState(mode);
-  if(!modeState?.snappedPx){
-    alert('Draw a box first.');
-    return;
-  }
-  const tokens = await ensureTokensForPage(state.pageNum);
-  const steps = Array.isArray(modeState.steps) && modeState.steps.length ? modeState.steps : DEFAULT_FIELDS;
-  const idx = Math.max(0, Math.min(modeState.stepIdx || 0, steps.length - 1));
-  const step = steps[idx] || DEFAULT_FIELDS[idx] || DEFAULT_FIELDS[0];
-  const isConfigMode = mode === 'CONFIG';
-
-  let value = '';
-  let boxPx = modeState.snappedPx;
-  let confidence = 0;
-  let raw = '';
-  let corrections = [];
-  let fieldTokens = [];
-
-  if(step.kind === 'landmark'){
-    value = (modeState.snappedText || '').trim();
-    raw = value;
-  } else if(step.kind === 'block'){
-    value = (modeState.snappedText || '').trim();
-    raw = value;
-  } else {
-    const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value;
-    if(!value && modeState.snappedText){
-      bumpDebugBlank();
-      value = (modeState.snappedText || '').trim();
-    }
-    boxPx = res.boxPx || modeState.snappedPx;
-    confidence = res.confidence || 0;
-    raw = res.raw || (modeState.snappedText || '').trim();
-    corrections = res.correctionsApplied || res.corrections || [];
-    fieldTokens = res.tokens || [];
-  }
-
-  if(els.ocrToggle?.checked){
-    try {
-      await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx);
-    } catch(err){
-      console.error('auditCropSelfTest failed', err);
-    }
-  }
-
-  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-  const canvasW = (vp.width ?? vp.w) || 1;
-  const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
-  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
-  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
-  const extras = {};
-  if(step.type === 'static'){
-    const lm = captureRingLandmark(boxPx);
-    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
-    extras.landmark = lm;
-  } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, pct, boxPx, tokens);
-  }
-
-  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
-  ensureAnchorFor(step.fieldKey);
-
-  const lineItems = await extractLineItems(state.profile);
-  modeState.currentLineItems = lineItems;
-
-  const fid = state.currentFileId;
-  const rec = {
-    fieldKey: step.fieldKey,
-    raw,
-    value,
-    confidence,
-    correctionsApplied: corrections,
-    page: state.pageNum,
-    bboxPct: pct,
-    ts: Date.now(),
-    tokens: fieldTokens
-  };
-  if(isConfigMode){
-    updateConfigPreviewStore(step.fieldKey, rec, lineItems);
-    renderSavedFieldsTable();
-  } else if(fid){
-    rawStore.upsert(fid, rec);
-    compileDocument(fid, lineItems);
-  }
-
-  afterConfirmAdvance();
-}
-
-const handleConfigConfirm = () => handleConfirmForMode('CONFIG');
-const handleRunConfirm = () => handleConfirmForMode('RUN');
-
 // Auth
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
-  state.username = (els.username?.value || 'demo').trim();
-  const selectedDocType = els.docType?.value || resolveDocTypeFromWizard(DEFAULT_WIZARD_ID);
-  state.docType = selectedDocType;
-  const wizardKey = sanitizeWizardId(selectedDocType) || selectedDocType;
-  state.configMode.wizardId = wizardKey;
-  state.runMode.wizardId = wizardKey;
-  const existing = loadProfile(state.username, state.docType);
-  state.profile = existing || null;
-  hydrateFingerprintsFromProfile(state.profile);
-  if(els.loginSection) els.loginSection.style.display = 'none';
+  const username = (els.username?.value || 'demo').trim();
+  if(!username){
+    alert('Enter a username to continue.');
+    return;
+  }
+  state.username = username;
+  state.docType = els.docType?.value || 'invoice';
+  state.profile = null;
+  state.activeWizardId = null;
+  state.activeWizardMeta = null;
+  state.wizardIndex = [];
+  state.mode = 'CONFIG';
+  state.modes.rawData = false;
+  state.modes.boxMode = true;
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
+  hydrateFingerprintsFromProfile(null);
+  try { LS.migrateLegacy(state.username); } catch(err){ console.warn('Legacy migration skipped', err); }
+  logButtonAction('loginSubmit', { username: state.username });
+  refreshWizardIndex();
   populateModelSelect();
-  renderResultsTable();
+  populateDataDocTypeSelect();
+  els.loginSection.style.display = 'none';
+  els.app.style.display = 'block';
+  showTab('document-dashboard');
+  handleRouteChange();
+  if(!appliedRoute.mode){
+    renderSavedFieldsTable();
+    syncInteractionModes();
+  }
   renderReports();
-  navigateToRoute('RUN', wizardKey, { replace: true, force: true });
+  syncRawModeUI();
 });
 els.logoutBtn?.addEventListener('click', ()=>{
-  const configWizard = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  const runWizard = state.runMode.wizardId || configWizard;
-  resetConfigMode(configWizard);
-  resetRunMode(runWizard);
+  logButtonAction('logout');
+  leaveWizardMode();
   state.username = null;
+  state.activeWizardId = null;
+  state.activeWizardMeta = null;
   state.profile = null;
+  state.wizardIndex = [];
+  state.docType = 'invoice';
+  state.mode = 'CONFIG';
+  state.modes.rawData = false;
+  state.modes.boxMode = true;
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
   hydrateFingerprintsFromProfile(null);
-  state.tokensByPage = {};
-  state.grayCanvases = {};
-  state.telemetry = [];
-  state.overlayPinned = false;
-  state.overlayMetrics = null;
-  state.pendingSelection = null;
-  if(els.ocrCropList) els.ocrCropList.innerHTML = '';
-  if(els.telemetryPanel) els.telemetryPanel.textContent = '';
-  drawOverlay();
-  if(els.app) els.app.style.display = 'none';
-  if(els.wizardSection) els.wizardSection.style.display = 'none';
-  if(els.loginSection) els.loginSection.style.display = 'block';
-  renderResultsTable();
+  if(els.docType) els.docType.value = 'invoice';
+  populateModelSelect();
+  populateDataDocTypeSelect();
+  renderSavedFieldsTable();
   renderReports();
-  navigateToRoute('CONFIG', configWizard, { replace: true, force: true });
+  syncRawModeUI();
+  els.app.style.display = 'none';
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  els.loginSection.style.display = 'block';
+  appliedRoute = { mode: null, wizardId: null };
+  pendingRoute = null;
+  if(location.hash){ location.hash = ''; }
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
-  if(!state.username) return;
-  if(!confirm('Clear saved model and extracted records?')) return;
-  LS.removeProfile(state.username, state.docType);
-  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
-  setModels(models);
-  localStorage.removeItem(LS.dbKey(state.username, state.docType));
+  logButtonAction('resetWizardClick', { wizardId: state.activeWizardId || null });
+  if(!state.username || !state.activeWizardId){
+    alert('Select a wizard to reset.');
+    return;
+  }
+  if(!confirm('Clear saved wizard and extracted records?')) return;
+  const wizardId = state.activeWizardId;
+  LS.removeWizard(state.username, wizardId);
+  logButtonAction('resetWizardConfirmed', { wizardId });
+  leaveWizardMode();
+  resetModeState('CONFIG', { clearUi: true });
+  resetModeState('RUN', { clearUi: true });
   state.profile = null;
+  state.activeWizardId = null;
+  state.activeWizardMeta = null;
   hydrateFingerprintsFromProfile(null);
-  const configWizard = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  const runWizard = state.runMode.wizardId || configWizard;
-  resetConfigMode(configWizard);
-  resetRunMode(runWizard);
-  cleanupDoc();
-  drawOverlay();
-  renderTelemetry();
-  renderCropAuditPanel();
-  renderSavedFieldsTable();
+  refreshWizardIndex();
   populateModelSelect();
-  renderResultsTable();
+  populateDataDocTypeSelect();
+  renderSavedFieldsTable();
   renderReports();
-  alert('Model and records reset.');
-  handleRouteChange(true);
+  syncRawModeUI();
+  appliedRoute = { mode: null, wizardId: null };
+  pendingRoute = null;
+  if(location.hash){ location.hash = ''; }
+  alert('Wizard and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
-  const wizardKey = state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  navigateToRoute('CONFIG', wizardKey, { force: true });
+  logButtonAction('enterConfigClicked', { wizardId: state.activeWizardId || null });
+  if(!state.username){
+    alert('Please log in first.');
+    return;
+  }
+  let wizardId = state.activeWizardId;
+  if(!wizardId){
+    const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
+    const name = prompt('Name this wizard', defaultLabel) || defaultLabel;
+    wizardId = createWizard(state.docType, name);
+    populateModelSelect();
+    populateDataDocTypeSelect();
+    if(!wizardId){
+      alert('Unable to create wizard.');
+      return;
+    }
+  }
+  enterConfigMode(wizardId, { forceReset: true });
 });
-els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
+if(els.newWizardBtn){
+  els.newWizardBtn.style.display = '';
+  els.newWizardBtn.addEventListener('click', ()=>{
+    logButtonAction('newWizard');
+    if(!state.username){
+      alert('Please log in first.');
+      return;
+    }
+    const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
+    const name = prompt('Name for the new wizard', defaultLabel);
+    if(name === null) return;
+    const wizardId = createWizard(state.docType, name);
+    populateModelSelect();
+    populateDataDocTypeSelect();
+    if(wizardId){
+      setActiveWizard(wizardId, { skipSelectUpdate: false, skipPreview: true, refreshResults: false });
+      renderReports();
+      syncRawModeUI();
+      enterConfigMode(wizardId, { forceReset: true });
+      alert('Wizard created. Configure it to begin extracting.');
+    }
+  });
+}
+els.demoBtn?.addEventListener('click', ()=>{
+  logButtonAction('demoFilePicker');
+  els.wizardFile?.click();
+});
 
 els.docType?.addEventListener('change', ()=>{
-  const nextDocType = els.docType.value || DEFAULT_WIZARD_ID;
-  state.docType = nextDocType;
-  const wizardKey = sanitizeWizardId(nextDocType) || nextDocType;
-  state.configMode.wizardId = wizardKey;
-  state.runMode.wizardId = wizardKey;
-  if(state.username){
-    const existing = loadProfile(state.username, state.docType);
-    state.profile = existing || null;
-    hydrateFingerprintsFromProfile(state.profile);
-  } else {
-    state.profile = null;
-    hydrateFingerprintsFromProfile(null);
-  }
-  renderSavedFieldsTable();
+  state.docType = els.docType.value || 'invoice';
+  logButtonAction('changeDocType', { value: state.docType });
   populateModelSelect();
-  renderResultsTable();
-  renderReports();
-  if(state.mode === 'CONFIG'){
-    navigateToRoute('CONFIG', wizardKey, { force: true });
-  }
 });
 
-els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
-els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
-els.rawDataToggle?.addEventListener('change', ()=>{
-  setWizardRawMode(!!els.rawDataToggle.checked);
+els.dataDocType?.addEventListener('change', ()=>{
+  logButtonAction('changeDataDocType', { value: els.dataDocType.value || '__all__' });
+  renderResultsTable();
+  renderReports();
 });
-els.boxModeBtn?.addEventListener('click', ()=>{
-  executeWizardAction('boxMode', () => enterBoxModeFor('CONFIG'), () => enterBoxModeFor('RUN'));
+els.showRawToggle?.addEventListener('change', ()=>{
+  logButtonAction('toggleShowRaw', { value: !!els.showRawToggle.checked });
+  renderResultsTable();
+});
+els.rawDataToggle?.addEventListener('change', ()=>{
+  state.modes.rawData = !!els.rawDataToggle.checked;
+  logButtonAction('toggleRawData', { source: 'toggle', value: state.modes.rawData });
+  syncRawModeUI();
 });
 els.rawDataBtn?.addEventListener('click', ()=>{
-  executeWizardAction('rawData', () => enterRawModeFor('CONFIG'), () => enterRawModeFor('RUN'));
+  state.modes.rawData = !state.modes.rawData;
+  logButtonAction('toggleRawData', { source: 'button', value: state.modes.rawData });
+  if(els.rawDataToggle) els.rawDataToggle.checked = state.modes.rawData;
+  syncRawModeUI();
+});
+els.boxModeBtn?.addEventListener('click', ()=>{
+  state.modes.boxMode = !state.modes.boxMode;
+  logButtonAction('toggleBoxMode', { value: state.modes.boxMode });
+  syncInteractionModes();
 });
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
   modelSelect.addEventListener('change', ()=>{
     const id = modelSelect.value;
-    if(!id) return;
-    loadModelById(id);
-    alert('Model selected. Drop files to auto-extract.');
+    logButtonAction('selectWizard', { wizardId: id || null });
+    if(!id){
+      setActiveWizard(null, { skipSelectUpdate: true });
+      renderSavedFieldsTable();
+      renderReports();
+      syncRawModeUI();
+      return;
+    }
+    setActiveWizard(id, { skipSelectUpdate: true });
+    populateDataDocTypeSelect();
+    alert('Wizard selected. Drop files to auto-extract.');
   });
 }
 
@@ -4996,7 +4897,10 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length) processBatch(files);
+      if (files.length){
+        logButtonAction('dropzoneFiles', { count: files.length });
+        processBatch(files);
+      }
     }
   });
 });
@@ -5004,7 +4908,31 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length) processBatch(files);
+  if (files.length){
+    logButtonAction('fileInputSelected', { count: files.length });
+    processBatch(files);
+  }
+  e.target.value = '';
+});
+
+els.uploadBtn?.addEventListener('click', ()=>{
+  if(!state.username){ alert('Log in first.'); return; }
+  if(!state.activeWizardId){ alert('Select a wizard first.'); return; }
+  logButtonAction('uploadSingleFile');
+  els.wizardFile?.click();
+});
+
+els.wizardFile?.addEventListener('change', async e=>{
+  const file = e.target.files?.[0];
+  if(!file) return;
+  logButtonAction('wizardFileSelected', { name: file.name, size: file.size });
+  try {
+    await openFile(file);
+  } catch(err){
+    console.error('wizardFile open failed', err);
+  } finally {
+    e.target.value = '';
+  }
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
@@ -5012,15 +4940,10 @@ els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
-// Single-file open (wizard)
-els.wizardFile?.addEventListener('change', async e=>{
-  const f = e.target.files?.[0]; if(!f) return;
-  await openFile(f);
-});
-
 // Paging
 els.prevPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum<=1) return;
+  logButtonAction('prevPage', { page: state.pageNum - 1 });
   state.pageNum--; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -5028,6 +4951,7 @@ els.prevPageBtn?.addEventListener('click', ()=>{
 });
 els.nextPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum>=state.numPages) return;
+  logButtonAction('nextPage', { page: state.pageNum + 1 });
   state.pageNum++; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -5036,24 +4960,98 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  executeWizardAction('clearSelection', () => clearSelectionFor('CONFIG'), () => clearSelectionFor('RUN'));
+  logButtonAction('clearSelection');
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
-  executeWizardAction('back', () => handleBackFor('CONFIG'), () => handleBackFor('RUN'));
+  if(state.stepIdx <= 0) return;
+  logButtonAction('backStep', { to: state.stepIdx - 1 });
+  goToStep(state.stepIdx - 1);
 });
 
 els.skipBtn?.addEventListener('click', ()=>{
-  executeWizardAction('skip', () => handleSkipFor('CONFIG'), () => handleSkipFor('RUN'));
+  if(state.stepIdx < state.steps.length - 1){
+    logButtonAction('skipStep', { to: state.stepIdx + 1 });
+    goToStep(state.stepIdx + 1);
+  } else {
+    logButtonAction('skipToFinish');
+    finishWizard();
+  }
 });
 
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
-  await executeWizardAction('confirm', handleConfigConfirm, handleRunConfirm);
+  logButtonAction('confirmStep', { step: state.stepIdx, fieldKey: state.steps[state.stepIdx]?.fieldKey || null });
+  if(!state.snappedPx){ alert('Draw a box first.'); return; }
+  const tokens = await ensureTokensForPage(state.pageNum);
+  const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
+
+  let value = '', boxPx = state.snappedPx;
+  let confidence = 0, raw = '', corrections=[];
+  let fieldTokens = [];
+  if(step.kind === 'landmark'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else if (step.kind === 'block'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else {
+    const res = await extractFieldValue(step, tokens, state.viewport);
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
+    boxPx = res.boxPx || state.snappedPx;
+    confidence = res.confidence || 0;
+    raw = res.raw || (state.snappedText || '').trim();
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
+  }
+
+  if(els.ocrToggle?.checked){
+    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
+    catch(err){ console.error('auditCropSelfTest failed', err); }
+  }
+
+  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+  const extras = {};
+  if(step.type === 'static'){
+    const lm = captureRingLandmark(boxPx);
+    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+    extras.landmark = lm;
+  } else if(step.type === 'column'){
+    extras.column = buildColumnModel(step, pct, boxPx, tokens);
+  }
+  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
+  ensureAnchorFor(step.fieldKey);
+  state.currentLineItems = await extractLineItems(state.profile);
+
+  const fid = state.currentFileId;
+  let compiledDoc = null;
+  if(fid){
+    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
+    rawStore.upsert(fid, rec);
+    if(state.mode === 'RUN'){
+      compiledDoc = compileDocument(fid, state.currentLineItems);
+    } else {
+      compiledDoc = buildPreviewRecordFromRaw(fid, state.currentLineItems);
+    }
+  }
+  renderSavedFieldsTable(compiledDoc);
+
+  afterConfirmAdvance();
 });
 
 // Export JSON (profile)
 els.exportBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportProfile');
   ensureProfile();
   const blob = new Blob([serializeProfile(state.profile)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -5065,9 +5063,14 @@ els.exportBtn?.addEventListener('click', ()=>{
 
 // Export flat Master Database CSV
 els.exportMasterDbBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportMasterDb');
+  const wizardId = state.activeWizardId;
+  if(!wizardId){ alert('Select a wizard before exporting.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const csv = MasterDB.toCsv(state.savedFieldsRecord);
+    const records = LS.getDb(state.username, wizardId);
+    if(!records.length){ alert('No extracted records to export.'); return; }
+    const csv = MasterDB.toCsv(records);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -5080,9 +5083,14 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
   }
 });
 els.exportMissingBtn?.addEventListener('click', ()=>{
+  logButtonAction('exportMissingCells');
+  const wizardId = state.activeWizardId;
+  if(!wizardId){ alert('Select a wizard before exporting diagnostics.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
+    const records = LS.getDb(state.username, wizardId);
+    if(!records.length){ alert('No extracted records to analyse.'); return; }
+    const { missingMap } = MasterDB.flatten(records);
     const json = JSON.stringify(missingMap, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -5096,83 +5104,273 @@ els.exportMissingBtn?.addEventListener('click', ()=>{
   }
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
-  saveCurrentProfileAsModel();
-  compileDocument(state.currentFileId);
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
+  logButtonAction('finishWizard');
+  if(state.activeWizardId && state.profile){
+    saveProfile(state.username, state.activeWizardId, state.profile);
+  }
+  const compiled = compileDocument(state.currentFileId);
+  leaveWizardMode();
   populateModelSelect();
+  populateDataDocTypeSelect();
+  renderSavedFieldsTable(compiled);
+  renderReports();
+  syncRawModeUI();
+  showTab('extracted-data');
+  if(location.hash){ location.hash = ''; }
 });
 
 /* ---------------------------- Batch ------------------------------- */
+function computeSavedSelectionPx(fieldSpec, viewportOverride=null){
+  if(!fieldSpec) return null;
+  const totalPages = state.numPages || 1;
+  const targetPage = clamp(fieldSpec.page || 1, 1, totalPages);
+  const viewport = viewportOverride || state.pageViewports[targetPage-1] || state.viewport;
+  if(!viewport) return null;
+  let rawBox = null;
+  if(fieldSpec.bboxPct && typeof fieldSpec.bboxPct === 'object'){
+    rawBox = toPx(viewport, {
+      x0: fieldSpec.bboxPct.x0,
+      y0: fieldSpec.bboxPct.y0,
+      x1: fieldSpec.bboxPct.x1,
+      y1: fieldSpec.bboxPct.y1,
+      page: targetPage
+    });
+  } else if(Array.isArray(fieldSpec.bbox) && fieldSpec.bbox.length === 4){
+    rawBox = toPx(viewport, {
+      x0: fieldSpec.bbox[0],
+      y0: fieldSpec.bbox[1],
+      x1: fieldSpec.bbox[2],
+      y1: fieldSpec.bbox[3],
+      page: targetPage
+    });
+  } else if(fieldSpec.normBox && typeof fieldSpec.normBox === 'object'){
+    const { x0n, y0n, wN, hN } = fieldSpec.normBox;
+    if([x0n, y0n, wN, hN].every(v => typeof v === 'number' && Number.isFinite(v))){
+      const dims = getCanvasDimensions(viewport);
+      rawBox = {
+        x: x0n * dims.width,
+        y: y0n * dims.height,
+        w: wN * dims.width,
+        h: hN * dims.height,
+        page: targetPage
+      };
+    }
+  }
+  if(!rawBox) return null;
+  if(!Number.isFinite(rawBox.w) || !Number.isFinite(rawBox.h) || rawBox.w <= 0 || rawBox.h <= 0){
+    return null;
+  }
+  const applied = applyTransform({ x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h, page: targetPage });
+  applied.page = targetPage;
+  return applied;
+}
+
+async function autoAnswerStep(fieldSpec, stepIndex){
+  if(!fieldSpec || !fieldSpec.fieldKey) return;
+  state.stepIdx = stepIndex;
+  updatePrompt();
+  if(els.backBtn) els.backBtn.disabled = stepIndex <= 0;
+  if(els.skipBtn) els.skipBtn.disabled = false;
+
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.snappedPx = null;
+  state.snappedCss = null;
+  state.snappedText = '';
+  drawOverlay();
+
+  const totalPages = state.numPages || 1;
+  const targetPage = clamp(fieldSpec.page || state.pageNum || 1, 1, totalPages);
+  if(targetPage !== state.pageNum){
+    state.pageNum = targetPage;
+    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
+    updatePageIndicator();
+    const top = state.pageOffsets[state.pageNum-1] || 0;
+    if(els.viewer){
+      try {
+        els.viewer.scrollTo({ top, behavior: 'auto' });
+      } catch(err){
+        els.viewer.scrollTop = top;
+      }
+    }
+  } else {
+    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
+  }
+
+  const tokens = await ensureTokensForPage(state.pageNum);
+  const viewport = state.pageViewports[state.pageNum-1] || state.viewport || {};
+  const baseBox = computeSavedSelectionPx(fieldSpec, viewport);
+  if(baseBox){
+    const snap = snapToLine(tokens, baseBox);
+    state.snappedPx = snap.box;
+    state.snappedText = snap.text;
+    const { scaleX, scaleY } = getScaleFactors();
+    state.snappedCss = {
+      x: snap.box.x / scaleX,
+      y: snap.box.y / scaleY,
+      w: snap.box.w / scaleX,
+      h: snap.box.h / scaleY,
+      page: snap.box.page
+    };
+    drawOverlay();
+  } else {
+    state.snappedPx = null;
+    state.snappedCss = null;
+    state.snappedText = '';
+    drawOverlay();
+  }
+
+  let value = '';
+  let boxPx = state.snappedPx || baseBox || null;
+  let confidence = 0;
+  let raw = '';
+  let corrections = [];
+  let fieldTokens = [];
+
+  if(fieldSpec.kind === 'landmark'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else if(fieldSpec.kind === 'block'){
+    value = (state.snappedText || '').trim();
+    raw = value;
+  } else {
+    const res = await extractFieldValue(fieldSpec, tokens, viewport);
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
+    boxPx = res.boxPx || state.snappedPx || baseBox || null;
+    confidence = res.confidence || 0;
+    raw = res.raw || (state.snappedText || '').trim() || value || '';
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
+  }
+
+  if(!raw && value){
+    raw = value;
+  }
+
+  const vp = viewport || { width: 1, height: 1 };
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const nb = boxPx ? normalizeBox(boxPx, canvasW, canvasH) : null;
+  const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
+
+  const fileId = state.currentFileId;
+  if(fileId){
+    const arr = rawStore.get(fileId);
+    let conf = confidence;
+    if(value && ['subtotal_amount','tax_amount','invoice_total'].includes(fieldSpec.fieldKey)){
+      const dup = arr.find(r => r.fieldKey !== fieldSpec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value === value);
+      if(dup){ conf *= 0.5; }
+    }
+    const rec = {
+      fieldKey: fieldSpec.fieldKey,
+      raw,
+      value,
+      confidence: conf,
+      correctionsApplied: corrections,
+      page: state.pageNum,
+      bboxPct: pct,
+      ts: Date.now(),
+      tokens: fieldTokens
+    };
+    rawStore.upsert(fileId, rec);
+  }
+
+  if(typeof requestAnimationFrame === 'function'){
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+}
+
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
-  state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
-  hydrateFingerprintsFromProfile(state.profile);
-  const activeProfile = state.profile || profile || { fields: [] };
-  await openFile(file);
-  for(const spec of (activeProfile.fields || [])){
-    if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
-      state.pageNum = clamp(spec.page+1, 1, state.numPages);
-      state.viewport = state.pageViewports[state.pageNum-1];
-      updatePageIndicator();
-      els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
-    }
-    const tokens = await ensureTokensForPage(state.pageNum);
-    const fieldSpec = {
-      fieldKey: spec.fieldKey,
-      regex: spec.regex,
-      landmark: spec.landmark,
-      bbox: spec.bbox,
-      page: spec.page,
-      type: spec.type,
-      anchorMetrics: spec.anchorMetrics || null
-    };
-    state.snappedPx = null; state.snappedText = '';
-    const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
-    if(value){
-      const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
-      const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-      const arr = rawStore.get(state.currentFileId);
-      let conf = confidence;
-      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
-      if(dup) conf *= 0.5;
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
-      rawStore.upsert(state.currentFileId, rec);
-    }
-    if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
+  if(profile){
+    state.profile = profile === state.profile ? profile : migrateProfile(clonePlain(profile));
+  } else if(!state.profile){
+    ensureProfile();
   }
+  hydrateFingerprintsFromProfile(state.profile);
+  initStepsFromProfile();
+  renderSavedFieldsTable();
+
+  await openFile(file);
+
+  const map = new Map((state.profile?.fields || []).map(f => [f.fieldKey, f]));
+  for(let i=0; i<state.steps.length; i++){
+    const step = state.steps[i];
+    if(!step?.fieldKey) continue;
+    const baseSpec = map.get(step.fieldKey);
+    if(!baseSpec) continue;
+    const fieldSpec = { ...baseSpec, ...step };
+    state.steps[i] = fieldSpec;
+    await autoAnswerStep(fieldSpec, i);
+  }
+
   await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(activeProfile);
-  compileDocument(state.currentFileId, lineItems);
+  const lineItems = await extractLineItems(state.profile || { fields: [] });
+  state.currentLineItems = lineItems;
+  const compiled = compileDocument(state.currentFileId, lineItems);
+  finishWizard();
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.snappedPx = null;
+  state.snappedCss = null;
+  state.snappedText = '';
+  drawOverlay();
+  renderSavedFieldsTable(compiled);
+  return compiled;
 }
 
 async function processBatch(files){
   if(!files.length) return;
-  const wizardKey = state.runMode.wizardId || state.configMode.wizardId || state.docType || DEFAULT_WIZARD_ID;
-  navigateToRoute('RUN', wizardKey, { force: true });
-  if(!state.profile){
-    alert('No saved wizard profile found. Configure the wizard before running extraction.');
+  logButtonAction('processBatchStart', { count: files.length });
+  if(!state.username){
+    alert('Please log in first.');
     return;
   }
+
+  const selector = document.getElementById('model-select');
+  const desiredId = selector?.value || state.activeWizardId || '';
+  if(desiredId && desiredId !== state.activeWizardId){
+    setActiveWizard(desiredId, { skipSelectUpdate: true, skipPreview: true, refreshResults: false });
+  }
+
+  if(!state.activeWizardId){
+    alert('Select or configure a wizard before uploading.');
+    return;
+  }
+
+  const wizardId = state.activeWizardId;
+  const profile = state.profile || loadProfile(state.username, wizardId);
+  if(!profile || !(Array.isArray(profile.fields) && profile.fields.length)){
+    alert('Configure this wizard before running auto-extraction.');
+    return;
+  }
+
+  const entered = enterRunMode(wizardId, { forceReset: true, skipSelectUpdate: true, refreshResults: false });
+  if(!entered){
+    logButtonAction('processBatchAborted', { wizardId });
+    return;
+  }
+
+  state.profile = migrateProfile(clonePlain(profile));
+  hydrateFingerprintsFromProfile(state.profile);
   initStepsFromProfile();
   renderSavedFieldsTable();
-  const modelId = document.getElementById('model-select')?.value || '';
-  const model = modelId ? getModels().find(m => m.id === modelId) : null;
 
   for(const f of files){
-    if(model){ await autoExtractFileWithProfile(f, model.profile); }
-    else { await openFile(f); }
+    await autoExtractFileWithProfile(f, state.profile);
   }
-  if(els.wizardSection) els.wizardSection.style.display = 'none';
-  if(els.app) els.app.style.display = 'block';
-  showTab('extracted-data');
+
+  renderResultsTable();
+  renderReports();
+  logButtonAction('processBatchComplete', { count: files.length, wizardId });
 }
 
 /* ------------------------ Init on load ---------------------------- */
-renderResultsTable();
 renderReports();
 syncRawModeUI();
-window.addEventListener('hashchange', () => handleRouteChange());
-handleRouteChange(true);
+handleRouteChange();
+

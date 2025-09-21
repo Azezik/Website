@@ -30,7 +30,7 @@
     <nav class="tabs">
       <a href="index.html">Home</a>
       <a href="portfolio.html">Portfolio Preview</a>
-      <a class="active" href="invoice-wizard.html#/configure/invoice">Invoice Wizard</a>
+      <a class="active" href="invoice-wizard.html">Invoice Wizard</a>
     </nav>
 
     <header class="header">
@@ -247,11 +247,6 @@
   <script src="master-db.js"></script>
   <script src="orchestrator.js"></script>
   <script src="field-map.js"></script>
-  <script>
-    if (!/^#\/(configure|run)\//.test(window.location.hash)) {
-      window.location.replace('#/configure/invoice');
-    }
-  </script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
