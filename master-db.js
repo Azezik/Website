@@ -45,6 +45,7 @@
   const cleanLineNo = cleanText;
 
   const DYNAMIC_ITEM_KEYS = ['sku', 'description', 'quantity', 'unitPrice', 'amount'];
+  const CORE_DYNAMIC_KEYS = ['sku', 'description', 'quantity'];
 
   function extractFieldValue(record, key){
     const field = record?.fields?.[key];
@@ -93,26 +94,45 @@
     return counts;
   }
 
-  function computeMajorityRowCount(counts, totalItems){
-    const positiveCounts = DYNAMIC_ITEM_KEYS.map(key => counts[key]).filter(count => count > 0);
-    if(!positiveCounts.length) return null;
+  function collectPositiveCounts(counts, keys){
+    return keys
+      .map(key => counts[key])
+      .filter(count => typeof count === 'number' && count > 0);
+  }
 
+  function pickMajorityCount(values){
+    if(!Array.isArray(values) || !values.length) return null;
     const frequency = new Map();
-    positiveCounts.forEach(count => {
+    values.forEach(count => {
       frequency.set(count, (frequency.get(count) || 0) + 1);
     });
-
     let bestCount = null;
     let bestFrequency = 0;
     frequency.forEach((freq, count) => {
-      if(freq > bestFrequency || (freq === bestFrequency && (bestCount === null || count > bestCount))){
+      if(freq > bestFrequency){
         bestFrequency = freq;
         bestCount = count;
+        return;
+      }
+      if(freq === bestFrequency){
+        if(bestCount === null || count < bestCount){
+          bestCount = count;
+        }
       }
     });
+    return bestCount;
+  }
 
-    if(bestCount === null) return null;
-    return Math.min(bestCount, totalItems);
+  function computeMajorityRowCount(counts, totalItems){
+    const coreCounts = collectPositiveCounts(counts, CORE_DYNAMIC_KEYS);
+    const allCounts = collectPositiveCounts(counts, DYNAMIC_ITEM_KEYS);
+    if(!allCounts.length) return null;
+
+    const coreMajority = pickMajorityCount(coreCounts);
+    const overallMajority = pickMajorityCount(allCounts);
+    const chosen = coreMajority !== null ? coreMajority : overallMajority;
+    if(chosen === null) return null;
+    return Math.min(chosen, totalItems);
   }
 
   function selectMajorityRows(items){
@@ -128,21 +148,27 @@
       return { item, idx, rowIdx, filledCount };
     });
 
-    const sorted = annotated.slice().sort((a, b) => {
+    const byDensity = annotated.slice().sort((a, b) => {
+      if(a.filledCount !== b.filledCount) return b.filledCount - a.filledCount;
+      if(a.rowIdx !== b.rowIdx) return a.rowIdx - b.rowIdx;
+      return a.idx - b.idx;
+    });
+
+    const byRowOrder = annotated.slice().sort((a, b) => {
       if(a.rowIdx !== b.rowIdx) return a.rowIdx - b.rowIdx;
       return a.idx - b.idx;
     });
 
     const chosenIndices = new Set();
 
-    sorted.forEach(entry => {
+    byDensity.forEach(entry => {
       if(chosenIndices.size >= majorityCount) return;
       if(entry.filledCount === 0) return;
       chosenIndices.add(entry.idx);
     });
 
     if(chosenIndices.size < majorityCount){
-      sorted.forEach(entry => {
+      byRowOrder.forEach(entry => {
         if(chosenIndices.size >= majorityCount) return;
         chosenIndices.add(entry.idx);
       });
