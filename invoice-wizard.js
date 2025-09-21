@@ -113,34 +113,39 @@ function showTab(id){
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
-const MODE_BASE_DEFAULTS = {
-  pdf: null,
+let state = {
+  username: null,
+  docType: 'invoice',
+  mode: 'CONFIG',
+  modes: { rawData: false },
+  profile: null,             // Vendor profile (landmarks + fields + tableHints)
+  pdf: null,                 // pdf.js document
   isImage: false,
   pageNum: 1,
   numPages: 1,
   viewport: { w: 0, h: 0, scale: 1 },
-  pageViewports: [],
-  pageOffsets: [],
-  tokensByPage: {},
-  selectionCss: null,
-  selectionPx: null,
-  snappedCss: null,
-  snappedPx: null,
-  snappedText: '',
-  pageTransform: { scale: 1, rotation: 0 },
-  telemetry: [],
-  grayCanvases: {},
-  matchPoints: [],
-  steps: [],
+  pageViewports: [],       // viewport per page
+  pageOffsets: [],         // y-offset of each page within pdfCanvas
+  tokensByPage: {},          // {page:number: Token[] in px}
+  selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
+  selectionPx: null,         // current user-drawn selection (px, page-relative)
+  snappedCss: null,          // snapped line box (CSS units, page-relative)
+  snappedPx: null,           // snapped line box (px, page-relative)
+  snappedText: '',           // snapped line text
+  pageTransform: { scale:1, rotation:0 }, // calibration transform per page
+  telemetry: [],            // extraction telemetry
+  grayCanvases: {},         // cached grayscale canvases by page
+  matchPoints: [],          // ring/anchor match points
+  steps: [],                 // wizard steps
   stepIdx: 0,
   currentFileName: '',
-  currentFileId: '',
+  currentFileId: '',        // unique id per opened file
   currentLineItems: [],
   savedFieldsRecord: null,
   lastOcrCropPx: null,
   cropAudits: [],
-  cropHashes: {},
-  pageSnapshots: {},
+  cropHashes: {},        // per page hash map for duplicate detection
+  pageSnapshots: {},     // tracks saved full-page debug PNGs
   pageRenderPromises: [],
   pageRenderReady: [],
   currentTraceId: null,
@@ -149,288 +154,7 @@ const MODE_BASE_DEFAULTS = {
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
-  perFieldCandidates: {},
-  columnMasks: {},
 };
-
-const CONFIG_MODE_DEFAULTS = {
-  fields: [],
-  questionOrder: [],
-  bboxMap: {},
-  edgeAnchors: {},
-  textHeights: {},
-  fingerprints: {},
-  landmarks: {},
-  columnBands: {},
-  ui: { selection: null, activeQuestion: null, overlays: [], savedFieldsPreview: null },
-  caches: { ocrCache: {} },
-};
-
-const RUN_MODE_DEFAULTS = {
-  resolvedFields: [],
-  rowBoxes: [],
-  perColumnValues: {},
-  extractedRows: [],
-  ui: { docHash: null, status: null, extractedData: null },
-  caches: { ocrCache: {} },
-  docHash: null,
-  status: null,
-};
-
-function cloneDefault(val){
-  if(val === null || typeof val !== 'object') return val;
-  if(Array.isArray(val)) return [];
-  if(val instanceof Map) return new Map();
-  if(val instanceof Set) return new Set();
-  const out = {};
-  for(const [k, v] of Object.entries(val)){
-    out[k] = cloneDefault(v);
-  }
-  return out;
-}
-
-function createConfigModeState(){
-  const base = cloneDefault(MODE_BASE_DEFAULTS);
-  const extras = cloneDefault(CONFIG_MODE_DEFAULTS);
-  return Object.assign(base, extras);
-}
-
-function createRunModeState(){
-  const base = cloneDefault(MODE_BASE_DEFAULTS);
-  const extras = cloneDefault(RUN_MODE_DEFAULTS);
-  return Object.assign(base, extras);
-}
-
-let appliedRoute = { mode: null, wizardId: null };
-let pendingRoute = null;
-
-let state = {
-  username: null,
-  docType: 'invoice',
-  activeWizardId: null,
-  activeWizardMeta: null,
-  wizardIndex: [],
-  mode: 'CONFIG',
-  modes: { rawData: false, boxMode: true },
-  profile: null,             // Vendor profile (landmarks + fields + tableHints)
-  configMode: createConfigModeState(),
-  runMode: createRunModeState(),
-};
-
-function activeModeState(mode = state.mode){
-  return mode === 'RUN' ? state.runMode : state.configMode;
-}
-
-const MODE_PROXY_KEYS = Object.keys(MODE_BASE_DEFAULTS);
-MODE_PROXY_KEYS.forEach(key => {
-  Object.defineProperty(state, key, {
-    get(){ return activeModeState()[key]; },
-    set(val){ activeModeState()[key] = val; },
-    enumerable: true,
-  });
-});
-
-function releaseDocumentResources(store){
-  if(!store) return;
-  try {
-    if(store.pdf && typeof store.pdf.destroy === 'function'){ store.pdf.destroy(); }
-    else if(store.pdf && typeof store.pdf.cleanup === 'function'){ store.pdf.cleanup(); }
-  } catch(err){ console.warn('pdf cleanup failed', err); }
-  store.pdf = null;
-  if(Array.isArray(store.pageRenderPromises)){
-    store.pageRenderPromises.forEach(p => {
-      try { if(p && typeof p.cancel === 'function') p.cancel(); }
-      catch(err){ console.warn('render promise cancel failed', err); }
-    });
-  }
-  store.pageRenderPromises = [];
-  store.pageRenderReady = [];
-}
-
-function clearOverlayCanvas(){
-  const canvas = els.overlayCanvas;
-  if(!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if(ctx){ ctx.clearRect(0, 0, canvas.width || 0, canvas.height || 0); }
-}
-
-function clearModeUi(mode){
-  if(mode === 'CONFIG'){
-    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No preview yet.</p>';
-    if(els.savedJson) els.savedJson.textContent = '';
-  }
-  if(mode === 'RUN'){
-    if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No extracted rows yet.</p>';
-    if(els.savedJson) els.savedJson.textContent = '';
-  }
-  const cf = document.getElementById('confirmedFields');
-  if(cf) cf.innerHTML = '<p class="sub">No data.</p>';
-  const cl = document.getElementById('confirmedLineItems');
-  if(cl) cl.innerHTML = '<p class="sub">No data.</p>';
-}
-
-function resetModeState(mode, opts={}){
-  const store = mode === 'RUN' ? state.runMode : state.configMode;
-  releaseDocumentResources(store);
-  const fresh = mode === 'RUN' ? createRunModeState() : createConfigModeState();
-  Object.keys(store).forEach(k => delete store[k]);
-  Object.assign(store, fresh);
-  if(opts.clearUi !== false && state.mode === mode){
-    clearOverlayCanvas();
-    clearModeUi(mode);
-  }
-}
-
-function routesEqual(a, b){
-  if(!a && !b) return true;
-  if(!a || !b) return false;
-  return (a.mode || null) === (b.mode || null) && (a.wizardId || null) === (b.wizardId || null);
-}
-
-function showWizardSection(){
-  if(els.app) els.app.style.display = 'none';
-  if(els.wizardSection) els.wizardSection.style.display = 'block';
-}
-
-function showDashboard(){
-  if(els.wizardSection) els.wizardSection.style.display = 'none';
-  if(els.app) els.app.style.display = 'block';
-}
-
-function logButtonAction(action, extra={}){
-  const payload = Object.assign({
-    mode: state.mode,
-    wizardId: state.activeWizardId || null,
-    action
-  }, extra || {});
-  try {
-    console.log('[ui]', JSON.stringify(payload));
-  } catch(err){
-    console.log('[ui]', action, payload);
-  }
-}
-
-function syncInteractionModes(){
-  if(els.overlayCanvas){
-    els.overlayCanvas.style.pointerEvents = state.modes.boxMode ? 'auto' : 'none';
-  }
-  if(els.boxModeBtn){
-    els.boxModeBtn.classList.toggle('active', !!state.modes.boxMode);
-    els.boxModeBtn.setAttribute('aria-pressed', state.modes.boxMode ? 'true' : 'false');
-  }
-  if(els.rawDataToggle){
-    els.rawDataToggle.checked = !!state.modes.rawData;
-  }
-  if(els.rawDataBtn){
-    els.rawDataBtn.classList.toggle('active', !!state.modes.rawData);
-  }
-}
-
-function parseRoute(hash){
-  const clean = (hash || '').replace(/^#/, '');
-  if(!clean){
-    return { mode: null, wizardId: null };
-  }
-  const parts = clean.split('/').filter(Boolean);
-  if(parts.length >= 2){
-    const wizardId = decodeURIComponent(parts[1]);
-    if(parts[0] === 'configure') return { mode: 'CONFIG', wizardId };
-    if(parts[0] === 'run') return { mode: 'RUN', wizardId };
-  }
-  return { mode: null, wizardId: null };
-}
-
-function enterConfigMode(wizardId, opts={}){
-  if(!state.username){
-    pendingRoute = { mode: 'CONFIG', wizardId: wizardId || null };
-    return false;
-  }
-  const id = wizardId || state.activeWizardId;
-  if(!id){
-    pendingRoute = { mode: 'CONFIG', wizardId: null };
-    showDashboard();
-    appliedRoute = { mode: null, wizardId: null };
-    return false;
-  }
-  if(opts.skipHash !== true){
-    const hash = `#/configure/${encodeURIComponent(id)}`;
-    if(location.hash !== hash){ location.hash = hash; }
-  }
-  const shouldReset = opts.forceReset || state.mode !== 'CONFIG' || !routesEqual(appliedRoute, { mode:'CONFIG', wizardId:id });
-  if(shouldReset){ resetModeState('CONFIG'); }
-  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
-  state.mode = 'CONFIG';
-  showWizardSection();
-  ensureProfile();
-  initStepsFromProfile();
-  updatePrompt();
-  renderSavedFieldsTable();
-  syncInteractionModes();
-  appliedRoute = { mode: 'CONFIG', wizardId: id };
-  pendingRoute = null;
-  return true;
-}
-
-function enterRunMode(wizardId, opts={}){
-  if(!state.username){
-    pendingRoute = { mode: 'RUN', wizardId: wizardId || null };
-    return false;
-  }
-  const id = wizardId || state.activeWizardId;
-  if(!id){
-    pendingRoute = { mode: 'RUN', wizardId: null };
-    alert('Select or configure a wizard before running extraction.');
-    return false;
-  }
-  if(opts.skipHash !== true){
-    const hash = `#/run/${encodeURIComponent(id)}`;
-    if(location.hash !== hash){ location.hash = hash; }
-  }
-  const shouldReset = opts.forceReset || state.mode !== 'RUN' || !routesEqual(appliedRoute, { mode:'RUN', wizardId:id });
-  if(shouldReset){ resetModeState('RUN'); }
-  setActiveWizard(id, { skipSelectUpdate: !!opts.skipSelectUpdate, skipPreview: true, refreshResults: opts.refreshResults ?? false });
-  state.mode = 'RUN';
-  showWizardSection();
-  ensureProfile();
-  initStepsFromProfile();
-  updatePrompt();
-  renderSavedFieldsTable();
-  syncInteractionModes();
-  appliedRoute = { mode: 'RUN', wizardId: id };
-  pendingRoute = null;
-  return true;
-}
-
-function leaveWizardMode(){
-  const prevMode = state.mode;
-  if(prevMode === 'RUN'){ resetModeState('RUN'); }
-  if(prevMode === 'CONFIG'){ resetModeState('CONFIG'); }
-  state.mode = 'CONFIG';
-  showDashboard();
-  appliedRoute = { mode: null, wizardId: null };
-  syncInteractionModes();
-}
-
-function handleRouteChange(){
-  const route = parseRoute(location.hash);
-  if(!state.username){
-    pendingRoute = route;
-    appliedRoute = { mode: null, wizardId: null };
-    return;
-  }
-  pendingRoute = null;
-  if(route.mode === 'CONFIG'){
-    enterConfigMode(route.wizardId, { skipHash: true, forceReset: true });
-    return;
-  }
-  if(route.mode === 'RUN'){
-    enterRunMode(route.wizardId, { skipHash: true, forceReset: true });
-    return;
-  }
-  leaveWizardMode();
-}
-
-window.addEventListener('hashchange', handleRouteChange);
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
@@ -439,149 +163,16 @@ function bumpDebugBlank(){
 
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
-  legacyProfileKey: (u, d) => `wiz.profile.${u}.${d}`,
-  legacyDbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
-  legacyModelsKey: 'wiz.models',
-  profileKey: (u, id) => `accounts.${u}.wizards.${id}.profile`,
-  dbKey: (u, id) => `accounts.${u}.wizards.${id}.masterdb`,
-  indexKey: u => `accounts.${u}.wizards.index`,
-  getWizardIndex(u){
-    if(!u) return [];
-    try {
-      const raw = localStorage.getItem(this.indexKey(u));
-      if(!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.filter(m => m && m.id) : [];
-    } catch(err){
-      console.warn('LS.getWizardIndex failed', err);
-      return [];
-    }
-  },
-  setWizardIndex(u, list){
-    if(!u) return;
-    const clean = Array.isArray(list) ? list.filter(m => m && m.id) : [];
-    localStorage.setItem(this.indexKey(u), JSON.stringify(clean));
-  },
-  listWizards(u, docType){
-    const index = this.getWizardIndex(u);
-    if(!docType) return index;
-    return index.filter(meta => (meta?.docType || '') === docType);
-  },
-  getWizardMeta(u, id){
-    if(!u || !id) return null;
-    return this.getWizardIndex(u).find(meta => meta.id === id) || null;
-  },
-  upsertWizardMeta(u, meta){
-    if(!u || !meta || !meta.id) return null;
-    const now = Date.now();
-    const current = this.getWizardIndex(u);
-    const existing = current.find(m => m.id === meta.id) || {};
-    const next = current.filter(m => m.id !== meta.id);
-    const merged = {
-      createdAt: existing.createdAt || meta.createdAt || now,
-      updatedAt: now,
-      docType: meta.docType || existing.docType || 'invoice',
-      label: meta.label || existing.label || null,
-      id: meta.id,
-      username: u
-    };
-    if(!merged.label){
-      const stamp = new Date(merged.createdAt);
-      merged.label = `${merged.docType || 'Wizard'} • ${stamp.toLocaleString()}`;
-    }
-    next.push(Object.assign({}, existing, meta, merged));
-    next.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
-    this.setWizardIndex(u, next);
-    return next.find(m => m.id === meta.id) || merged;
-  },
-  removeWizard(u, id){
-    if(!u || !id) return;
-    const next = this.getWizardIndex(u).filter(m => m.id !== id);
-    this.setWizardIndex(u, next);
-    localStorage.removeItem(this.profileKey(u, id));
-    localStorage.removeItem(this.dbKey(u, id));
-  },
-  getDb(u, id){
-    if(!u || !id) return [];
-    try {
-      const raw = localStorage.getItem(this.dbKey(u, id));
-      return raw ? JSON.parse(raw) : [];
-    } catch(err){
-      console.error('LS.getDb parse error', err);
-      return [];
-    }
-  },
-  setDb(u, id, arr){
-    if(!u || !id) return;
-    localStorage.setItem(this.dbKey(u, id), JSON.stringify(arr));
-    const meta = this.getWizardMeta(u, id);
-    if(meta){
-      this.upsertWizardMeta(u, { id, docType: meta.docType, label: meta.label, createdAt: meta.createdAt });
-    }
-  },
-  getProfile(u, id){
-    if(!u || !id) return null;
-    try {
-      const raw = localStorage.getItem(this.profileKey(u, id));
-      return raw ? JSON.parse(raw, jsonReviver) : null;
-    } catch(err){
-      console.error('LS.getProfile parse error', err);
-      return null;
-    }
-  },
-  setProfile(u, id, profile){
-    if(!u || !id || !profile) return;
-    localStorage.setItem(this.profileKey(u, id), serializeProfile(profile));
-    const meta = this.getWizardMeta(u, id) || { id, docType: profile.docType || state.docType };
-    this.upsertWizardMeta(u, { id, docType: meta.docType, label: meta.label, createdAt: meta.createdAt });
-  },
-  removeProfile(u, id){
-    if(!u || !id) return;
-    localStorage.removeItem(this.profileKey(u, id));
-  },
-  migrateLegacy(username){
-    if(!username) return;
-    let changed = false;
-    try {
-      const raw = localStorage.getItem(this.legacyModelsKey);
-      if(raw){
-        const models = JSON.parse(raw, jsonReviver);
-        if(Array.isArray(models)){
-          models.filter(m => m && m.username === username).forEach(model => {
-            const docType = model.docType || 'invoice';
-            const wizardId = model.id || `${username}:${docType}`;
-            const createdAt = model.createdAt || (()=>{ const ts = Number.parseInt(String(wizardId).split(':').pop(),10); return Number.isFinite(ts) ? ts : Date.now(); })();
-            this.upsertWizardMeta(username, { id: wizardId, docType, label: model.label || model.name || model.title || model.docType, createdAt });
-            const existingProfile = localStorage.getItem(this.profileKey(username, wizardId));
-            if(!existingProfile && model.profile){
-              this.setProfile(username, wizardId, migrateProfile(clonePlain(model.profile)));
-              changed = true;
-            }
-            const legacyProfileRaw = localStorage.getItem(this.legacyProfileKey(username, docType));
-            if(!existingProfile && legacyProfileRaw){
-              try {
-                const parsed = JSON.parse(legacyProfileRaw, jsonReviver);
-                this.setProfile(username, wizardId, migrateProfile(parsed));
-                changed = true;
-              } catch(err){ console.warn('Legacy profile migration failed', err); }
-            }
-            const legacyDbRaw = localStorage.getItem(this.legacyDbKey(username, docType));
-            if(legacyDbRaw && !localStorage.getItem(this.dbKey(username, wizardId))){
-              localStorage.setItem(this.dbKey(username, wizardId), legacyDbRaw);
-              changed = true;
-            }
-          });
-        }
-      }
-    } catch(err){
-      console.error('Legacy migration failed', err);
-    }
-    if(changed){
-      const updated = this.getWizardIndex(username);
-      updated.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
-      this.setWizardIndex(username, updated);
-    }
-  }
+  profileKey: (u, d) => `wiz.profile.${u}.${d}`,
+  dbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
+  getDb(u, d) {
+    const raw = localStorage.getItem(this.dbKey(u, d));
+    return raw ? JSON.parse(raw) : [];
+    },
+  setDb(u, d, arr){ localStorage.setItem(this.dbKey(u, d), JSON.stringify(arr)); },
+  getProfile(u,d){ const raw = localStorage.getItem(this.profileKey(u,d)); return raw ? JSON.parse(raw, jsonReviver) : null; },
+  setProfile(u,d,p){ localStorage.setItem(this.profileKey(u,d), serializeProfile(p)); },
+  removeProfile(u,d){ localStorage.removeItem(this.profileKey(u,d)); }
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
@@ -751,145 +342,57 @@ function serializeProfile(p){
 }
 
 let saveTimer=null;
-function saveProfile(username, wizardId, profile){
-  if(!username || !wizardId || !profile) return;
+function saveProfile(u, d, p){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    try{ LS.setProfile(username, wizardId, profile); }
+    try{ LS.setProfile(u, d, p); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
-    try {
-      const meta = LS.getWizardMeta(username, wizardId);
-      traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { wizardId, docType: meta?.docType || wizardId });
-    } catch(err){ console.warn('traceEvent failed', err); }
-    refreshWizardIndex();
+    try{ traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { docType:d }); }catch{}
   },300);
 }
-function loadProfile(username, wizardId){
-  if(!username || !wizardId) return null;
+function loadProfile(u, d){
   try{
-    const raw = LS.getProfile(username, wizardId);
+    const raw = LS.getProfile(u, d);
     return migrateProfile(raw);
   }catch(e){ console.error('loadProfile', e); return null; }
-}
-
-function refreshWizardIndex(){
-  if(!state.username){ state.wizardIndex = []; return []; }
-  state.wizardIndex = LS.getWizardIndex(state.username);
-  return state.wizardIndex;
-}
-
-function formatWizardLabel(meta){
-  if(!meta) return 'Untitled Wizard';
-  const label = (meta.label || '').trim();
-  if(label) return label;
-  const stamp = meta.updatedAt || meta.createdAt;
-  const time = stamp ? new Date(stamp).toLocaleString() : '';
-  if(meta.docType && time) return `${meta.docType} • ${time}`;
-  return meta.docType || meta.id || 'Wizard';
-}
-
-function populateDataDocTypeSelect(){
-  if(!els.dataDocType) return;
-  const current = els.dataDocType.value;
-  const all = refreshWizardIndex();
-  const options = [`<option value="__all__">All Wizards</option>`]
-    .concat(all.map(meta => `<option value="${meta.id}">${formatWizardLabel(meta)}</option>`));
-  els.dataDocType.innerHTML = options.join('');
-  if(current && (current === '__all__' || all.some(meta => meta.id === current))){
-    els.dataDocType.value = current;
-  } else if(state.activeWizardId && all.some(meta => meta.id === state.activeWizardId)){
-    els.dataDocType.value = state.activeWizardId;
-  } else {
-    els.dataDocType.value = '__all__';
-  }
-}
-
-function setActiveWizard(id, opts={}){
-  if(!state.username){
-    state.activeWizardId = null;
-    state.activeWizardMeta = null;
-    state.profile = null;
-    hydrateFingerprintsFromProfile(null);
-    return;
-  }
-  if(!id){
-    state.activeWizardId = null;
-    state.activeWizardMeta = null;
-    state.profile = null;
-    hydrateFingerprintsFromProfile(null);
-    if(opts.skipPreview !== true) renderSavedFieldsTable();
-    if(opts.refreshResults !== false){ renderResultsTable(); renderReports(); }
-    return;
-  }
-  const meta = LS.getWizardMeta(state.username, id);
-  if(!meta){
-    console.warn('Wizard metadata missing', id);
-    if(!opts.allowMissing) setActiveWizard(null, opts);
-    return;
-  }
-  state.activeWizardId = id;
-  state.activeWizardMeta = meta;
-  state.docType = meta.docType || state.docType || 'invoice';
-  if(els.docType && els.docType.value !== state.docType){
-    els.docType.value = state.docType;
-  }
-  const profile = loadProfile(state.username, id);
-  state.profile = profile || null;
-  hydrateFingerprintsFromProfile(state.profile);
-  if(!opts.skipSelectUpdate){
-    const sel = document.getElementById('model-select');
-    if(sel) sel.value = id;
-  }
-  if(opts.skipPreview !== true) renderSavedFieldsTable();
-  if(opts.refreshResults !== false){ renderResultsTable(); renderReports(); }
-}
-
-function createWizard(docType, label, opts={}){
-  if(!state.username) return null;
-  const now = Date.now();
-  const dt = (docType || state.docType || 'invoice').trim() || 'invoice';
-  const cleanLabel = (label || '').trim();
-  const id = `${state.username}:${dt}:${now}`;
-  LS.upsertWizardMeta(state.username, { id, docType: dt, label: cleanLabel || null, createdAt: now });
-  refreshWizardIndex();
-  if(opts.autoSelect !== false){
-    setActiveWizard(id, { skipPreview: true, refreshResults: false, skipSelectUpdate: true });
-  }
-  return id;
-}
-
-function populateModelSelect(){
-  const sel = document.getElementById('model-select');
-  if(!sel) return;
-  const all = refreshWizardIndex();
-  const filtered = state.docType ? all.filter(meta => (meta.docType || '') === state.docType) : all;
-  const options = [`<option value="">— Select a saved wizard —</option>`]
-    .concat(filtered.map(meta => `<option value="${meta.id}">${formatWizardLabel(meta)}</option>`));
-  const previous = sel.value;
-  sel.innerHTML = options.join('');
-  let nextValue = '';
-  if(state.activeWizardId && filtered.some(meta => meta.id === state.activeWizardId)){
-    nextValue = state.activeWizardId;
-  } else if(previous && filtered.some(meta => meta.id === previous)){
-    nextValue = previous;
-  } else if(filtered.length){
-    nextValue = filtered[0].id;
-  }
-  if(nextValue){
-    sel.value = nextValue;
-    setActiveWizard(nextValue, { skipSelectUpdate: true, skipPreview: true, refreshResults: false });
-  } else {
-    sel.value = '';
-    if(state.activeWizardId && !all.some(meta => meta.id === state.activeWizardId)){
-      setActiveWizard(null, { skipPreview: true, refreshResults: false });
-    }
-  }
-  populateDataDocTypeSelect();
 }
 
 // Raw and compiled stores
 const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
 const fileMeta = {};       // {fileId: {fileName}}
+
+const MODELS_KEY = 'wiz.models';
+function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]', jsonReviver); } catch{ return []; } }
+function setModels(m){ localStorage.setItem(MODELS_KEY, JSON.stringify(m, jsonReplacer)); }
+
+function saveCurrentProfileAsModel(){
+  ensureProfile();
+  const id = `${state.username}:${state.docType}:${Date.now()}`;
+  const models = getModels();
+  models.push({ id, username: state.username, docType: state.docType, profile: state.profile });
+  setModels(models);
+  populateModelSelect();
+  alert('Wizard model saved.');
+}
+
+function populateModelSelect(){
+  const sel = document.getElementById('model-select');
+  if(!sel) return;
+  const models = getModels().filter(m => m.username === state.username && m.docType === state.docType);
+  const current = sel.value;
+  sel.innerHTML = `<option value="">— Select a saved model —</option>` +
+    models.map(m => `<option value="${m.id}">${new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString()}</option>`).join('');
+  if(current) sel.value = current;
+}
+
+function loadModelById(id){
+  const m = getModels().find(x => x.id === id);
+  if(!m) return null;
+  state.profile = migrateProfile(m.profile);
+  hydrateFingerprintsFromProfile(state.profile);
+  saveProfile(state.username, state.docType, state.profile);
+  return m.profile;
+}
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
@@ -1597,26 +1100,12 @@ const ANCHOR_HINTS = {
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   if(state.profile) return;
-  if(!state.username) return;
 
-  if(!state.activeWizardId){
-    const label = `${state.docType || 'Wizard'} Wizard`;
-    const newId = createWizard(state.docType, label, { autoSelect: true });
-    if(newId){
-      populateModelSelect();
-    }
-  }
-
-  if(!state.activeWizardId){
-    state.profile = null;
-    return;
-  }
-
-  const existing = loadProfile(state.username, state.activeWizardId);
+  const existing = loadProfile(state.username, state.docType);
 
   state.profile = existing || {
     username: state.username,
-    docType: state.activeWizardMeta?.docType || state.docType,
+    docType: state.docType,
     version: PROFILE_VERSION,
     fields: [],
     globals: [],
@@ -1715,9 +1204,7 @@ function ensureProfile(){
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
   hydrateFingerprintsFromProfile(state.profile);
-  if(state.activeWizardId){
-    saveProfile(state.username, state.activeWizardId, state.profile);
-  }
+  saveProfile(state.username, state.docType, state.profile);
 }
 
 /* ------------------------ Wizard Steps --------------------------- */
@@ -1902,13 +1389,6 @@ const DEFAULT_FIELDS = [
   }
 ];
 
-function refreshPromptElements(){
-  const stepEl = document.getElementById('stepLabel');
-  const questionEl = document.getElementById('questionText');
-  if(stepEl) els.stepLabel = stepEl;
-  if(questionEl) els.questionText = questionEl;
-}
-
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
@@ -1924,16 +1404,10 @@ function initStepsFromProfile(){
     type: d.type
   }));
   state.stepIdx = 0;
-  refreshPromptElements();
   updatePrompt();
-  if(els.confirmBtn) els.confirmBtn.disabled = false;
-  if(els.skipBtn) els.skipBtn.disabled = false;
-  if(els.backBtn) els.backBtn.disabled = state.stepIdx <= 0;
 }
 function updatePrompt(){
-  refreshPromptElements();
   const step = state.steps[state.stepIdx];
-  if(!els.stepLabel || !els.questionText) return;
   els.stepLabel.textContent = `Step ${state.stepIdx+1}/${state.steps.length}`;
   els.questionText.textContent = step?.prompt || 'Highlight field';
 }
@@ -1954,7 +1428,6 @@ function finishWizard(){
   document.getElementById('promptBar').innerHTML =
     `<span id="stepLabel">Wizard complete</span>
      <strong id="questionText">Click “Save & Return” or export JSON.</strong>`;
-  refreshPromptElements();
 }
 
 function afterConfirmAdvance(){
@@ -2245,9 +1718,7 @@ function captureGlobalLandmarks(){
     const lm = captureRingLandmark(px);
     return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
   });
-  if(state.activeWizardId){
-    saveProfile(state.username, state.activeWizardId, state.profile);
-  }
+  saveProfile(state.username, state.docType, state.profile);
 }
 
 /* ----------------------- Field Extraction ------------------------ */
@@ -4165,50 +3636,7 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
-function buildPreviewRecordFromRaw(fileId, lineItems){
-  if(!fileId) return null;
-  const raw = rawStore.get(fileId) || [];
-  const fields = {};
-  raw.forEach(rec => {
-    if(!rec?.fieldKey) return;
-    fields[rec.fieldKey] = {
-      value: rec.value || '',
-      raw: rec.raw || '',
-      confidence: rec.confidence ?? 0,
-      correctionsApplied: Array.isArray(rec.correctionsApplied) ? rec.correctionsApplied.slice() : [],
-      tokens: Array.isArray(rec.tokens) ? rec.tokens.slice() : []
-    };
-  });
-  (state.profile?.fields || []).forEach(f => {
-    if(!fields[f.fieldKey]){
-      fields[f.fieldKey] = { value: '', raw: '', confidence: 0, correctionsApplied: [], tokens: [] };
-    }
-  });
-  const items = Array.isArray(lineItems) ? lineItems.map((item, idx) => ({
-    ...item,
-    line_no: item?.line_no || item?.line_no === 0 ? item.line_no : idx + 1
-  })) : [];
-  const label = state.activeWizardMeta ? formatWizardLabel(state.activeWizardMeta) : (state.activeWizardId || 'wizard');
-  return {
-    fileId,
-    fileHash: fileId,
-    fileName: fileMeta[fileId]?.fileName || 'sample-document',
-    processedAtISO: new Date().toISOString(),
-    fields,
-    lineItems: items,
-    wizardId: state.activeWizardId,
-    wizardLabel: label,
-    templateKey: `${state.username || 'user'}:${state.activeWizardId || 'wizard'}`
-  };
-}
-
 function compileDocument(fileId, lineItems){
-  if(!state.username || !state.activeWizardId){
-    console.warn('No active wizard selected; skipping compile.');
-    return null;
-  }
-  const wizardId = state.activeWizardId;
-  const meta = state.activeWizardMeta || LS.getWizardMeta(state.username, wizardId);
   const raw = rawStore.get(fileId);
   const byKey = {};
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
@@ -4231,7 +3659,7 @@ function compileDocument(fileId, lineItems){
     });
   }
   const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
-  const db = LS.getDb(state.username, wizardId);
+  const db = LS.getDb(state.username, state.docType);
   const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
   const hasExplicitLineItems = arguments.length >= 2;
   let items = Array.isArray(lineItems) ? lineItems : [];
@@ -4275,9 +3703,7 @@ function compileDocument(fileId, lineItems){
       discount: byKey['discounts_amount']?.value || ''
     },
     lineItems: enriched,
-    wizardId,
-    wizardLabel: formatWizardLabel(meta),
-    templateKey: `${state.username}:${wizardId}`,
+    templateKey: `${state.username}:${state.docType}`,
     warnings: []
   };
   if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
@@ -4290,64 +3716,40 @@ function compileDocument(fileId, lineItems){
   const invNum = compiled.invoice.number;
   const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
-  LS.setDb(state.username, wizardId, db);
+  LS.setDb(state.username, state.docType, db);
   renderResultsTable();
   renderTelemetry();
   renderReports();
   return compiled;
 }
 
-function getWizardMetaList(){
-  if(!state.username) return [];
-  if(!Array.isArray(state.wizardIndex)) state.wizardIndex = [];
-  if(!state.wizardIndex.length) refreshWizardIndex();
-  return state.wizardIndex;
-}
-
-function collectRecords(filterId){
-  if(!state.username) return [];
-  const metas = getWizardMetaList();
-  const attach = (rec, meta) => ({ ...rec, __wizardId: meta?.id || '', __wizardLabel: formatWizardLabel(meta) });
-  if(filterId && filterId !== '__all__'){
-    const meta = metas.find(m => m.id === filterId) || (filterId ? LS.getWizardMeta(state.username, filterId) : null);
-    if(!meta) return [];
-    return (LS.getDb(state.username, meta.id) || []).map(rec => attach(rec, meta));
-  }
-  return metas.flatMap(meta => (LS.getDb(state.username, meta.id) || []).map(rec => attach(rec, meta)));
-}
-
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
-  if(!mount) return;
-  const filter = els.dataDocType?.value || (state.activeWizardId || '__all__');
-  let records = collectRecords(filter);
-  if(!records.length){
-    mount.innerHTML = '<p class="sub">No extractions yet.</p>';
-    return;
-  }
-  records = records.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
+  const dt = els.dataDocType?.value || state.docType;
+  let db = LS.getDb(state.username, dt);
+  if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
+  db = db.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
 
   const keySet = new Set();
-  records.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
+  db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
   const showRaw = state.modes.rawData || els.showRawToggle?.checked;
 
-  const thead = `<tr><th>wizard</th><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
-  const rows = records.map(r=>{
+  const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
+  const rows = db.map(r=>{
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', raw:'', confidence:0 };
       const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
       const val = showRaw ? (f.raw || f.value || '') : (f.value || f.raw || '');
       const prop = showRaw ? 'raw' : 'value';
-      return `<td><input class="editField" data-wizard="${r.__wizardId}" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
+      return `<td><input class="editField" data-file="${r.fileId}" data-field="${k}" data-prop="${prop}" value="${val}"/>${warn}<span class="confidence">${Math.round((f.confidence||0)*100)}%</span></td>`;
     }).join('');
     const liRows = (r.lineItems||[]).map(it=>{
-      const warn = it.confidence < 0.8 ? ' <span class="warn">⚠️</span>' : '';
       const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
-      return `<tr><td>${(it.description||'')}${warn}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
+      return `<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
     }).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${liRows}</tbody></table>`;
-    return `<tr><td>${r.__wizardLabel || ''}</td><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
+    return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
 
   mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
@@ -4356,8 +3758,8 @@ function renderResultsTable(){
     const fileId = inp.dataset.file;
     const field = inp.dataset.field;
     const prop = inp.dataset.prop || 'value';
-    const wizardId = inp.dataset.wizard;
-    const db = wizardId ? LS.getDb(state.username, wizardId) : [];
+    const dt = els.dataDocType?.value || state.docType;
+    const db = LS.getDb(state.username, dt);
     const rec = db.find(r=>r.fileId===fileId);
     if(rec && rec.fields?.[field]){
       rec.fields[field][prop] = inp.value;
@@ -4366,21 +3768,24 @@ function renderResultsTable(){
         if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
         if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
       }
-      LS.setDb(state.username, wizardId, db);
+      LS.setDb(state.username, dt, db);
       renderResultsTable();
       renderReports();
-      if(wizardId === state.activeWizardId){ renderSavedFieldsTable(); }
+      renderSavedFieldsTable();
     }
   }));
 }
 
 function syncRawModeUI(){
-  state.modes.rawData = !!state.modes.rawData;
+  const on = state.modes.rawData;
   if(els.showRawToggle){
-    els.showRawToggle.disabled = state.modes.rawData;
-    els.showRawToggle.checked = state.modes.rawData;
+    els.showRawToggle.checked = true;
+    els.showRawToggle.disabled = on;
+    if(!on) els.showRawToggle.checked = false;
   }
-  syncInteractionModes();
+  if(els.rawDataBtn){
+    els.rawDataBtn.classList.toggle('active', on);
+  }
   renderResultsTable();
 }
 
@@ -4390,27 +3795,23 @@ function renderTelemetry(){
 }
 
 function renderReports(){
-  const filter = els.dataDocType?.value || (state.activeWizardId || '__all__');
-  const records = collectRecords(filter);
-  if(!records.length){
-    if(els.reports) els.reports.innerHTML = '<p class="sub">Reports coming soon.</p>';
-    return;
-  }
-  const totalRevenue = records.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
-  const orders = records.length;
-  const taxTotal = records.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
-  const discountTotal = records.reduce((s,r)=> s + Math.abs(parseFloat(r.totals?.discount)||0), 0);
+  const dt = els.dataDocType?.value || state.docType;
+  let db = LS.getDb(state.username, dt);
+  const totalRevenue = db.reduce((s,r)=> s + (parseFloat(r.totals?.total)||0), 0);
+  const orders = db.length;
+  const taxTotal = db.reduce((s,r)=> s + (parseFloat(r.totals?.tax)||0), 0);
+  const discountTotal = db.reduce((s,r)=> s + Math.abs(parseFloat(r.totals?.discount)||0), 0);
   const skuMap = {};
-  records.forEach(r => (r.lineItems||[]).forEach(it=>{
+  db.forEach(r => (r.lineItems||[]).forEach(it=>{
     const sku = it.sku || '';
     if(!sku) return;
     const qty = parseFloat(it.quantity)||0;
-    const amt = (parseFloat(it.unit_price)||0) * qty;
+    const amt = parseFloat(it.unit_price)||0 * qty;
     const cur = skuMap[sku] || { qty:0, revenue:0 };
     cur.qty += qty; cur.revenue += amt; skuMap[sku] = cur;
   }));
   const top = Object.entries(skuMap).sort((a,b)=>b[1].revenue - a[1].revenue).slice(0,5);
-  const topRows = top.map(([sku,d])=>`<tr><td>${sku}</td><td>${d.qty.toFixed(2)}</td><td>${d.revenue.toFixed(2)}</td></tr>`).join('');
+  const topRows = top.map(([sku,d])=>`<tr><td>${sku}</td><td>${d.qty}</td><td>${d.revenue.toFixed(2)}</td></tr>`).join('');
   els.reports.innerHTML = `<p>Total revenue: ${totalRevenue.toFixed(2)}</p><p>Orders: ${orders}</p><p>Tax total: ${taxTotal.toFixed(2)}</p><p>Discount total: ${discountTotal.toFixed(2)}</p><h4>Top SKUs</h4><table class="line-items-table"><thead><tr><th>SKU</th><th>Qty</th><th>Revenue</th></tr></thead><tbody>${topRows}</tbody></table>`;
 }
 
@@ -4495,9 +3896,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     entry.fingerprints = nextFingerprints;
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
-  if(state.activeWizardId){
-    saveProfile(state.username, state.activeWizardId, state.profile);
-  }
+  saveProfile(state.username, state.docType, state.profile);
 }
 function ensureAnchorFor(fieldKey){
   if(!state.profile) return;
@@ -4513,71 +3912,24 @@ function ensureAnchorFor(fieldKey){
   };
   if(anchorMap[fieldKey]){
     f.anchor = anchorMap[fieldKey];
-    if(state.activeWizardId){
-      saveProfile(state.username, state.activeWizardId, state.profile);
-    }
+    saveProfile(state.username, state.docType, state.profile);
   }
 }
-function renderSavedFieldsTable(latestOverride=null){
-  const wizardId = state.activeWizardId;
-  const preview = els.fieldsPreview;
-  const label = wizardId ? formatWizardLabel(LS.getWizardMeta(state.username, wizardId)) : null;
-  const savedJsonEl = els.savedJson;
-  if(!wizardId){
-    if(preview) preview.innerHTML = '<p class="sub">Select a wizard to preview its saved fields.</p>';
-    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
-    state.savedFieldsRecord = null;
-    renderConfirmedTables(null);
-    return;
-  }
-
-  if(state.mode === 'CONFIG'){
-    const fileId = latestOverride?.fileId || state.currentFileId || null;
-    const previewRecord = latestOverride || (fileId ? buildPreviewRecordFromRaw(fileId, state.currentLineItems) : null);
-    state.savedFieldsRecord = previewRecord || null;
-    if(preview){
-      if(!previewRecord){
-        const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
-        preview.innerHTML = `<p class="sub">${msg}</p>`;
-      } else {
-        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
-        const rows = order.map(k => ({ fieldKey:k, value: previewRecord.fields?.[k]?.value }))
-          .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
-        if(!rows.length){
-          const msg = label ? `${label}: Capture a sample field to preview.` : 'Capture a sample field to preview.';
-          preview.innerHTML = `<p class="sub">${msg}</p>`;
-        } else {
-          const thead = `<tr>${rows.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
-          const row = `<tr>${rows.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
-          preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
-        }
-      }
-    }
-    if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
-    renderConfirmedTables(previewRecord);
-    return;
-  }
-
-  const db = LS.getDb(state.username, wizardId);
-  let latest = latestOverride || null;
-  if(!latest){
-    latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
-  }
+function renderSavedFieldsTable(){
+  const db = LS.getDb(state.username, state.docType);
+  const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
   state.savedFieldsRecord = latest || null;
-  if(preview){
-    const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
-    const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
-      .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
-    if(!fields.length){
-      const msg = label ? `${label}: No fields yet.` : 'No fields yet.';
-      preview.innerHTML = `<p class="sub">${msg}</p>`;
-    } else {
-      const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
-      const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
-      preview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
-    }
+  const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+  const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
+    .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
+  if(!fields.length){
+    els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
+  } else {
+    const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+    const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
+    els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
   }
-  if(savedJsonEl){ savedJsonEl.textContent = state.profile ? serializeProfile(state.profile) : ''; }
+  els.savedJson.textContent = serializeProfile(state.profile);
   renderConfirmedTables(latest);
 }
 
@@ -4587,62 +3939,14 @@ function renderConfirmedTables(rec){
   confirmedRenderPending = true;
   requestAnimationFrame(()=>{
     confirmedRenderPending = false;
-    const wizardId = state.activeWizardId;
-    const meta = wizardId ? LS.getWizardMeta(state.username, wizardId) : null;
+    const latest = rec || LS.getDb(state.username, state.docType).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
     const fDiv = document.getElementById('confirmedFields');
     const liDiv = document.getElementById('confirmedLineItems');
-    if(!wizardId){
-      if(fDiv) fDiv.innerHTML = '<p class="sub">Select a wizard to review confirmed fields.</p>';
-      if(liDiv) liDiv.innerHTML = '<p class="sub">Select a wizard to review line items.</p>';
-      return;
-    }
-    const mode = state.mode;
-    const latest = rec || (mode === 'RUN'
-      ? LS.getDb(state.username, wizardId).slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0]
-      : state.savedFieldsRecord);
-
-    if(mode === 'CONFIG'){
-      if(fDiv){
-        const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
-        const rows = order.map(key => ({ key, field: latest?.fields?.[key] }))
-          .filter(entry => entry.field && String(entry.field.value || '').trim() !== '');
-        if(!rows.length){
-          const msg = meta ? `${formatWizardLabel(meta)}: No sample fields.` : 'No sample fields yet.';
-          fDiv.innerHTML = `<p class="sub">${msg}</p>`;
-        } else {
-          const html = rows.map(({ key, field }) => {
-            const warn = (field.confidence || 0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
-            const conf = `<span class="confidence">${Math.round((field.confidence||0)*100)}%</span>`;
-            return `<tr><td>${key}</td><td>${(field.value||'').toString().replace(/</g,'&lt;')}${warn}${conf}</td></tr>`;
-          }).join('');
-          fDiv.innerHTML = `<table class="line-items-table"><tbody>${html}</tbody></table>`;
-        }
-      }
-      if(liDiv){
-        const items = Array.isArray(latest?.lineItems) ? latest.lineItems : [];
-        if(!items.length){
-          const msg = meta ? `${formatWizardLabel(meta)}: No sample line items.` : 'No sample line items yet.';
-          liDiv.innerHTML = `<p class="sub">${msg}</p>`;
-        } else {
-          const rows = items.map(it=>{
-            const lineTotal = it.amount || (it.quantity && it.unit_price ? (parseFloat(it.quantity)*parseFloat(it.unit_price)).toFixed(2) : '');
-            return `<tr><td>${(it.description||'')}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
-          }).join('');
-          liDiv.innerHTML = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${rows}</tbody></table>`;
-        }
-      }
-      return;
-    }
-
-    const latestRun = latest;
     if(fDiv){
       const typeMap = {};
       (state.profile?.fields||[]).forEach(f=>{ typeMap[f.fieldKey]=f.type; });
-      const statics = Object.entries(latestRun?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
-      if(!statics.length){
-        const msg = meta ? `${formatWizardLabel(meta)}: No fields yet.` : 'No fields yet.';
-        fDiv.innerHTML = `<p class="sub">${msg}</p>`;
-      }
+      const statics = Object.entries(latest?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
+      if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
       else {
         const rows = statics.map(([k,f])=>{
           const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
@@ -4651,23 +3955,20 @@ function renderConfirmedTables(rec){
         }).join('');
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
         fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
-          const db = LS.getDb(state.username, wizardId);
-          const record = db.find(r=>r.fileId===latestRun?.fileId);
-          if(record && record.fields?.[inp.dataset.field]){
-            record.fields[inp.dataset.field].value = inp.value;
-            record.fields[inp.dataset.field].confidence = 1;
-            LS.setDb(state.username, wizardId, db);
+          const db = LS.getDb(state.username, state.docType);
+          const rec = db.find(r=>r.fileId===latest?.fileId);
+          if(rec && rec.fields?.[inp.dataset.field]){
+            rec.fields[inp.dataset.field].value = inp.value;
+            rec.fields[inp.dataset.field].confidence = 1;
+            LS.setDb(state.username, state.docType, db);
             renderSavedFieldsTable();
           }
         }));
       }
     }
     if(liDiv){
-      const items = latestRun?.lineItems || [];
-      if(!items.length){
-        const msg = meta ? `${formatWizardLabel(meta)}: No line items.` : 'No line items.';
-        liDiv.innerHTML = `<p class="sub">${msg}</p>`;
-      }
+      const items = latest?.lineItems || [];
+      if(!items.length){ liDiv.innerHTML = '<p class="sub">No line items.</p>'; }
       else {
         const rows = items.map(it=>{
           const warn = (it.confidence||0) < 0.8 ? '<span class="warn">⚠️</span>' : '';
@@ -4684,190 +3985,74 @@ function renderConfirmedTables(rec){
 // Auth
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
-  const username = (els.username?.value || 'demo').trim();
-  if(!username){
-    alert('Enter a username to continue.');
-    return;
-  }
-  state.username = username;
+  state.username = (els.username?.value || 'demo').trim();
   state.docType = els.docType?.value || 'invoice';
-  state.profile = null;
-  state.activeWizardId = null;
-  state.activeWizardMeta = null;
-  state.wizardIndex = [];
-  state.mode = 'CONFIG';
-  state.modes.rawData = false;
-  state.modes.boxMode = true;
-  resetModeState('CONFIG', { clearUi: true });
-  resetModeState('RUN', { clearUi: true });
-  hydrateFingerprintsFromProfile(null);
-  try { LS.migrateLegacy(state.username); } catch(err){ console.warn('Legacy migration skipped', err); }
-  logButtonAction('loginSubmit', { username: state.username });
-  refreshWizardIndex();
-  populateModelSelect();
-  populateDataDocTypeSelect();
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
   els.loginSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('document-dashboard');
-  handleRouteChange();
-  if(!appliedRoute.mode){
-    renderSavedFieldsTable();
-    syncInteractionModes();
-  }
-  renderReports();
-  syncRawModeUI();
+  populateModelSelect();
+  renderResultsTable();
 });
 els.logoutBtn?.addEventListener('click', ()=>{
-  logButtonAction('logout');
-  leaveWizardMode();
-  state.username = null;
-  state.activeWizardId = null;
-  state.activeWizardMeta = null;
-  state.profile = null;
-  state.wizardIndex = [];
-  state.docType = 'invoice';
-  state.mode = 'CONFIG';
-  state.modes.rawData = false;
-  state.modes.boxMode = true;
-  resetModeState('CONFIG', { clearUi: true });
-  resetModeState('RUN', { clearUi: true });
-  hydrateFingerprintsFromProfile(null);
-  if(els.docType) els.docType.value = 'invoice';
-  populateModelSelect();
-  populateDataDocTypeSelect();
-  renderSavedFieldsTable();
-  renderReports();
-  syncRawModeUI();
   els.app.style.display = 'none';
-  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
-  appliedRoute = { mode: null, wizardId: null };
-  pendingRoute = null;
-  if(location.hash){ location.hash = ''; }
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
-  logButtonAction('resetWizardClick', { wizardId: state.activeWizardId || null });
-  if(!state.username || !state.activeWizardId){
-    alert('Select a wizard to reset.');
-    return;
-  }
-  if(!confirm('Clear saved wizard and extracted records?')) return;
-  const wizardId = state.activeWizardId;
-  LS.removeWizard(state.username, wizardId);
-  logButtonAction('resetWizardConfirmed', { wizardId });
-  leaveWizardMode();
-  resetModeState('CONFIG', { clearUi: true });
-  resetModeState('RUN', { clearUi: true });
+  if(!state.username) return;
+  if(!confirm('Clear saved model and extracted records?')) return;
+  LS.removeProfile(state.username, state.docType);
+  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
+  setModels(models);
+  localStorage.removeItem(LS.dbKey(state.username, state.docType));
   state.profile = null;
-  state.activeWizardId = null;
-  state.activeWizardMeta = null;
   hydrateFingerprintsFromProfile(null);
-  refreshWizardIndex();
-  populateModelSelect();
-  populateDataDocTypeSelect();
   renderSavedFieldsTable();
-  renderReports();
-  syncRawModeUI();
-  appliedRoute = { mode: null, wizardId: null };
-  pendingRoute = null;
-  if(location.hash){ location.hash = ''; }
-  alert('Wizard and records reset.');
+  populateModelSelect();
+  renderResultsTable();
+  alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
-  logButtonAction('enterConfigClicked', { wizardId: state.activeWizardId || null });
-  if(!state.username){
-    alert('Please log in first.');
-    return;
-  }
-  let wizardId = state.activeWizardId;
-  if(!wizardId){
-    const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
-    const name = prompt('Name this wizard', defaultLabel) || defaultLabel;
-    wizardId = createWizard(state.docType, name);
-    populateModelSelect();
-    populateDataDocTypeSelect();
-    if(!wizardId){
-      alert('Unable to create wizard.');
-      return;
-    }
-  }
-  enterConfigMode(wizardId, { forceReset: true });
+  state.mode = 'CONFIG';
+  els.app.style.display = 'none';
+  els.wizardSection.style.display = 'block';
+  ensureProfile();
+  initStepsFromProfile();
+  renderSavedFieldsTable();
 });
-if(els.newWizardBtn){
-  els.newWizardBtn.style.display = '';
-  els.newWizardBtn.addEventListener('click', ()=>{
-    logButtonAction('newWizard');
-    if(!state.username){
-      alert('Please log in first.');
-      return;
-    }
-    const defaultLabel = `${state.docType || 'Wizard'} Wizard`;
-    const name = prompt('Name for the new wizard', defaultLabel);
-    if(name === null) return;
-    const wizardId = createWizard(state.docType, name);
-    populateModelSelect();
-    populateDataDocTypeSelect();
-    if(wizardId){
-      setActiveWizard(wizardId, { skipSelectUpdate: false, skipPreview: true, refreshResults: false });
-      renderReports();
-      syncRawModeUI();
-      enterConfigMode(wizardId, { forceReset: true });
-      alert('Wizard created. Configure it to begin extracting.');
-    }
-  });
-}
-els.demoBtn?.addEventListener('click', ()=>{
-  logButtonAction('demoFilePicker');
-  els.wizardFile?.click();
-});
+els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
-  logButtonAction('changeDocType', { value: state.docType });
+  const existing = loadProfile(state.username, state.docType);
+  state.profile = existing || null;
+  hydrateFingerprintsFromProfile(state.profile);
+  renderSavedFieldsTable();
   populateModelSelect();
 });
 
-els.dataDocType?.addEventListener('change', ()=>{
-  logButtonAction('changeDataDocType', { value: els.dataDocType.value || '__all__' });
-  renderResultsTable();
-  renderReports();
-});
-els.showRawToggle?.addEventListener('change', ()=>{
-  logButtonAction('toggleShowRaw', { value: !!els.showRawToggle.checked });
-  renderResultsTable();
-});
+els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
+els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
 els.rawDataToggle?.addEventListener('change', ()=>{
   state.modes.rawData = !!els.rawDataToggle.checked;
-  logButtonAction('toggleRawData', { source: 'toggle', value: state.modes.rawData });
   syncRawModeUI();
 });
 els.rawDataBtn?.addEventListener('click', ()=>{
   state.modes.rawData = !state.modes.rawData;
-  logButtonAction('toggleRawData', { source: 'button', value: state.modes.rawData });
   if(els.rawDataToggle) els.rawDataToggle.checked = state.modes.rawData;
   syncRawModeUI();
-});
-els.boxModeBtn?.addEventListener('click', ()=>{
-  state.modes.boxMode = !state.modes.boxMode;
-  logButtonAction('toggleBoxMode', { value: state.modes.boxMode });
-  syncInteractionModes();
 });
 
 const modelSelect = document.getElementById('model-select');
 if(modelSelect){
   modelSelect.addEventListener('change', ()=>{
     const id = modelSelect.value;
-    logButtonAction('selectWizard', { wizardId: id || null });
-    if(!id){
-      setActiveWizard(null, { skipSelectUpdate: true });
-      renderSavedFieldsTable();
-      renderReports();
-      syncRawModeUI();
-      return;
-    }
-    setActiveWizard(id, { skipSelectUpdate: true });
-    populateDataDocTypeSelect();
-    alert('Wizard selected. Drop files to auto-extract.');
+    if(!id) return;
+    loadModelById(id);
+    alert('Model selected. Drop files to auto-extract.');
   });
 }
 
@@ -4897,10 +4082,7 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length){
-        logButtonAction('dropzoneFiles', { count: files.length });
-        processBatch(files);
-      }
+      if (files.length) processBatch(files);
     }
   });
 });
@@ -4908,31 +4090,7 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length){
-    logButtonAction('fileInputSelected', { count: files.length });
-    processBatch(files);
-  }
-  e.target.value = '';
-});
-
-els.uploadBtn?.addEventListener('click', ()=>{
-  if(!state.username){ alert('Log in first.'); return; }
-  if(!state.activeWizardId){ alert('Select a wizard first.'); return; }
-  logButtonAction('uploadSingleFile');
-  els.wizardFile?.click();
-});
-
-els.wizardFile?.addEventListener('change', async e=>{
-  const file = e.target.files?.[0];
-  if(!file) return;
-  logButtonAction('wizardFileSelected', { name: file.name, size: file.size });
-  try {
-    await openFile(file);
-  } catch(err){
-    console.error('wizardFile open failed', err);
-  } finally {
-    e.target.value = '';
-  }
+  if (files.length) processBatch(files);
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
@@ -4940,10 +4098,15 @@ els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 
+// Single-file open (wizard)
+els.wizardFile?.addEventListener('change', async e=>{
+  const f = e.target.files?.[0]; if(!f) return;
+  await openFile(f);
+});
+
 // Paging
 els.prevPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum<=1) return;
-  logButtonAction('prevPage', { page: state.pageNum - 1 });
   state.pageNum--; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -4951,7 +4114,6 @@ els.prevPageBtn?.addEventListener('click', ()=>{
 });
 els.nextPageBtn?.addEventListener('click', ()=>{
   if(state.pageNum>=state.numPages) return;
-  logButtonAction('nextPage', { page: state.pageNum + 1 });
   state.pageNum++; state.viewport = state.pageViewports[state.pageNum-1];
   updatePageIndicator();
   els.viewer?.scrollTo({ top: state.pageOffsets[state.pageNum-1], behavior: 'smooth' });
@@ -4960,29 +4122,20 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  logButtonAction('clearSelection');
   state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx <= 0) return;
-  logButtonAction('backStep', { to: state.stepIdx - 1 });
-  goToStep(state.stepIdx - 1);
+  if(state.stepIdx > 0) goToStep(state.stepIdx - 1);
 });
 
 els.skipBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx < state.steps.length - 1){
-    logButtonAction('skipStep', { to: state.stepIdx + 1 });
-    goToStep(state.stepIdx + 1);
-  } else {
-    logButtonAction('skipToFinish');
-    finishWizard();
-  }
+  if(state.stepIdx < state.steps.length - 1) goToStep(state.stepIdx + 1);
+  else finishWizard();
 });
 
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
-  logButtonAction('confirmStep', { step: state.stepIdx, fieldKey: state.steps[state.stepIdx]?.fieldKey || null });
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
@@ -5034,24 +4187,18 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   state.currentLineItems = await extractLineItems(state.profile);
 
   const fid = state.currentFileId;
-  let compiledDoc = null;
   if(fid){
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     rawStore.upsert(fid, rec);
-    if(state.mode === 'RUN'){
-      compiledDoc = compileDocument(fid, state.currentLineItems);
-    } else {
-      compiledDoc = buildPreviewRecordFromRaw(fid, state.currentLineItems);
-    }
+    compileDocument(fid, state.currentLineItems);
   }
-  renderSavedFieldsTable(compiledDoc);
+  renderSavedFieldsTable();
 
   afterConfirmAdvance();
 });
 
 // Export JSON (profile)
 els.exportBtn?.addEventListener('click', ()=>{
-  logButtonAction('exportProfile');
   ensureProfile();
   const blob = new Blob([serializeProfile(state.profile)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -5063,14 +4210,9 @@ els.exportBtn?.addEventListener('click', ()=>{
 
 // Export flat Master Database CSV
 els.exportMasterDbBtn?.addEventListener('click', ()=>{
-  logButtonAction('exportMasterDb');
-  const wizardId = state.activeWizardId;
-  if(!wizardId){ alert('Select a wizard before exporting.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const records = LS.getDb(state.username, wizardId);
-    if(!records.length){ alert('No extracted records to export.'); return; }
-    const csv = MasterDB.toCsv(records);
+    const csv = MasterDB.toCsv(state.savedFieldsRecord);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -5083,14 +4225,9 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
   }
 });
 els.exportMissingBtn?.addEventListener('click', ()=>{
-  logButtonAction('exportMissingCells');
-  const wizardId = state.activeWizardId;
-  if(!wizardId){ alert('Select a wizard before exporting diagnostics.'); return; }
   const dt = els.dataDocType?.value || state.docType;
   try {
-    const records = LS.getDb(state.username, wizardId);
-    if(!records.length){ alert('No extracted records to analyse.'); return; }
-    const { missingMap } = MasterDB.flatten(records);
+    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
     const json = JSON.stringify(missingMap, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -5104,273 +4241,77 @@ els.exportMissingBtn?.addEventListener('click', ()=>{
   }
 });
 els.finishWizardBtn?.addEventListener('click', ()=>{
-  logButtonAction('finishWizard');
-  if(state.activeWizardId && state.profile){
-    saveProfile(state.username, state.activeWizardId, state.profile);
-  }
-  const compiled = compileDocument(state.currentFileId);
-  leaveWizardMode();
-  populateModelSelect();
-  populateDataDocTypeSelect();
-  renderSavedFieldsTable(compiled);
-  renderReports();
-  syncRawModeUI();
+  saveCurrentProfileAsModel();
+  compileDocument(state.currentFileId);
+  els.wizardSection.style.display = 'none';
+  els.app.style.display = 'block';
   showTab('extracted-data');
-  if(location.hash){ location.hash = ''; }
+  populateModelSelect();
 });
 
 /* ---------------------------- Batch ------------------------------- */
-function computeSavedSelectionPx(fieldSpec, viewportOverride=null){
-  if(!fieldSpec) return null;
-  const totalPages = state.numPages || 1;
-  const targetPage = clamp(fieldSpec.page || 1, 1, totalPages);
-  const viewport = viewportOverride || state.pageViewports[targetPage-1] || state.viewport;
-  if(!viewport) return null;
-  let rawBox = null;
-  if(fieldSpec.bboxPct && typeof fieldSpec.bboxPct === 'object'){
-    rawBox = toPx(viewport, {
-      x0: fieldSpec.bboxPct.x0,
-      y0: fieldSpec.bboxPct.y0,
-      x1: fieldSpec.bboxPct.x1,
-      y1: fieldSpec.bboxPct.y1,
-      page: targetPage
-    });
-  } else if(Array.isArray(fieldSpec.bbox) && fieldSpec.bbox.length === 4){
-    rawBox = toPx(viewport, {
-      x0: fieldSpec.bbox[0],
-      y0: fieldSpec.bbox[1],
-      x1: fieldSpec.bbox[2],
-      y1: fieldSpec.bbox[3],
-      page: targetPage
-    });
-  } else if(fieldSpec.normBox && typeof fieldSpec.normBox === 'object'){
-    const { x0n, y0n, wN, hN } = fieldSpec.normBox;
-    if([x0n, y0n, wN, hN].every(v => typeof v === 'number' && Number.isFinite(v))){
-      const dims = getCanvasDimensions(viewport);
-      rawBox = {
-        x: x0n * dims.width,
-        y: y0n * dims.height,
-        w: wN * dims.width,
-        h: hN * dims.height,
-        page: targetPage
-      };
-    }
-  }
-  if(!rawBox) return null;
-  if(!Number.isFinite(rawBox.w) || !Number.isFinite(rawBox.h) || rawBox.w <= 0 || rawBox.h <= 0){
-    return null;
-  }
-  const applied = applyTransform({ x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h, page: targetPage });
-  applied.page = targetPage;
-  return applied;
-}
-
-async function autoAnswerStep(fieldSpec, stepIndex){
-  if(!fieldSpec || !fieldSpec.fieldKey) return;
-  state.stepIdx = stepIndex;
-  updatePrompt();
-  if(els.backBtn) els.backBtn.disabled = stepIndex <= 0;
-  if(els.skipBtn) els.skipBtn.disabled = false;
-
-  state.selectionPx = null;
-  state.selectionCss = null;
-  state.snappedPx = null;
-  state.snappedCss = null;
-  state.snappedText = '';
-  drawOverlay();
-
-  const totalPages = state.numPages || 1;
-  const targetPage = clamp(fieldSpec.page || state.pageNum || 1, 1, totalPages);
-  if(targetPage !== state.pageNum){
-    state.pageNum = targetPage;
-    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
-    updatePageIndicator();
-    const top = state.pageOffsets[state.pageNum-1] || 0;
-    if(els.viewer){
-      try {
-        els.viewer.scrollTo({ top, behavior: 'auto' });
-      } catch(err){
-        els.viewer.scrollTop = top;
-      }
-    }
-  } else {
-    state.viewport = state.pageViewports[state.pageNum-1] || state.viewport;
-  }
-
-  const tokens = await ensureTokensForPage(state.pageNum);
-  const viewport = state.pageViewports[state.pageNum-1] || state.viewport || {};
-  const baseBox = computeSavedSelectionPx(fieldSpec, viewport);
-  if(baseBox){
-    const snap = snapToLine(tokens, baseBox);
-    state.snappedPx = snap.box;
-    state.snappedText = snap.text;
-    const { scaleX, scaleY } = getScaleFactors();
-    state.snappedCss = {
-      x: snap.box.x / scaleX,
-      y: snap.box.y / scaleY,
-      w: snap.box.w / scaleX,
-      h: snap.box.h / scaleY,
-      page: snap.box.page
-    };
-    drawOverlay();
-  } else {
-    state.snappedPx = null;
-    state.snappedCss = null;
-    state.snappedText = '';
-    drawOverlay();
-  }
-
-  let value = '';
-  let boxPx = state.snappedPx || baseBox || null;
-  let confidence = 0;
-  let raw = '';
-  let corrections = [];
-  let fieldTokens = [];
-
-  if(fieldSpec.kind === 'landmark'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else if(fieldSpec.kind === 'block'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else {
-    const res = await extractFieldValue(fieldSpec, tokens, viewport);
-    value = res.value;
-    if(!value && state.snappedText){
-      bumpDebugBlank();
-      value = (state.snappedText || '').trim();
-    }
-    boxPx = res.boxPx || state.snappedPx || baseBox || null;
-    confidence = res.confidence || 0;
-    raw = res.raw || (state.snappedText || '').trim() || value || '';
-    corrections = res.correctionsApplied || res.corrections || [];
-    fieldTokens = res.tokens || [];
-  }
-
-  if(!raw && value){
-    raw = value;
-  }
-
-  const vp = viewport || { width: 1, height: 1 };
-  const canvasW = (vp.width ?? vp.w) || 1;
-  const canvasH = (vp.height ?? vp.h) || 1;
-  const nb = boxPx ? normalizeBox(boxPx, canvasW, canvasH) : null;
-  const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-
-  const fileId = state.currentFileId;
-  if(fileId){
-    const arr = rawStore.get(fileId);
-    let conf = confidence;
-    if(value && ['subtotal_amount','tax_amount','invoice_total'].includes(fieldSpec.fieldKey)){
-      const dup = arr.find(r => r.fieldKey !== fieldSpec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value === value);
-      if(dup){ conf *= 0.5; }
-    }
-    const rec = {
-      fieldKey: fieldSpec.fieldKey,
-      raw,
-      value,
-      confidence: conf,
-      correctionsApplied: corrections,
-      page: state.pageNum,
-      bboxPct: pct,
-      ts: Date.now(),
-      tokens: fieldTokens
-    };
-    rawStore.upsert(fileId, rec);
-  }
-
-  if(typeof requestAnimationFrame === 'function'){
-    await new Promise(resolve => requestAnimationFrame(resolve));
-  }
-}
-
 async function autoExtractFileWithProfile(file, profile){
   state.mode = 'RUN';
-  if(profile){
-    state.profile = profile === state.profile ? profile : migrateProfile(clonePlain(profile));
-  } else if(!state.profile){
-    ensureProfile();
-  }
+  state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
   hydrateFingerprintsFromProfile(state.profile);
-  initStepsFromProfile();
-  renderSavedFieldsTable();
-
+  const activeProfile = state.profile || profile || { fields: [] };
   await openFile(file);
-
-  const map = new Map((state.profile?.fields || []).map(f => [f.fieldKey, f]));
-  for(let i=0; i<state.steps.length; i++){
-    const step = state.steps[i];
-    if(!step?.fieldKey) continue;
-    const baseSpec = map.get(step.fieldKey);
-    if(!baseSpec) continue;
-    const fieldSpec = { ...baseSpec, ...step };
-    state.steps[i] = fieldSpec;
-    await autoAnswerStep(fieldSpec, i);
+  for(const spec of (activeProfile.fields || [])){
+    if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
+      state.pageNum = clamp(spec.page+1, 1, state.numPages);
+      state.viewport = state.pageViewports[state.pageNum-1];
+      updatePageIndicator();
+      els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
+    }
+    const tokens = await ensureTokensForPage(state.pageNum);
+    const fieldSpec = {
+      fieldKey: spec.fieldKey,
+      regex: spec.regex,
+      landmark: spec.landmark,
+      bbox: spec.bbox,
+      page: spec.page,
+      type: spec.type,
+      anchorMetrics: spec.anchorMetrics || null
+    };
+    state.snappedPx = null; state.snappedText = '';
+    const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
+    if(value){
+      const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+      const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
+      const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
+      const arr = rawStore.get(state.currentFileId);
+      let conf = confidence;
+      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
+      if(dup) conf *= 0.5;
+      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
+      rawStore.upsert(state.currentFileId, rec);
+    }
+    if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
   }
-
   await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(state.profile || { fields: [] });
-  state.currentLineItems = lineItems;
-  const compiled = compileDocument(state.currentFileId, lineItems);
-  finishWizard();
-  state.selectionPx = null;
-  state.selectionCss = null;
-  state.snappedPx = null;
-  state.snappedCss = null;
-  state.snappedText = '';
-  drawOverlay();
-  renderSavedFieldsTable(compiled);
-  return compiled;
+  const lineItems = await extractLineItems(activeProfile);
+  compileDocument(state.currentFileId, lineItems);
 }
 
 async function processBatch(files){
   if(!files.length) return;
-  logButtonAction('processBatchStart', { count: files.length });
-  if(!state.username){
-    alert('Please log in first.');
-    return;
-  }
-
-  const selector = document.getElementById('model-select');
-  const desiredId = selector?.value || state.activeWizardId || '';
-  if(desiredId && desiredId !== state.activeWizardId){
-    setActiveWizard(desiredId, { skipSelectUpdate: true, skipPreview: true, refreshResults: false });
-  }
-
-  if(!state.activeWizardId){
-    alert('Select or configure a wizard before uploading.');
-    return;
-  }
-
-  const wizardId = state.activeWizardId;
-  const profile = state.profile || loadProfile(state.username, wizardId);
-  if(!profile || !(Array.isArray(profile.fields) && profile.fields.length)){
-    alert('Configure this wizard before running auto-extraction.');
-    return;
-  }
-
-  const entered = enterRunMode(wizardId, { forceReset: true, skipSelectUpdate: true, refreshResults: false });
-  if(!entered){
-    logButtonAction('processBatchAborted', { wizardId });
-    return;
-  }
-
-  state.profile = migrateProfile(clonePlain(profile));
-  hydrateFingerprintsFromProfile(state.profile);
-  initStepsFromProfile();
-  renderSavedFieldsTable();
+  state.mode = 'RUN';
+  els.app.style.display = 'none';
+  els.wizardSection.style.display = 'block';
+  ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
+  const modelId = document.getElementById('model-select')?.value || '';
+  const model = modelId ? getModels().find(m => m.id === modelId) : null;
 
   for(const f of files){
-    await autoExtractFileWithProfile(f, state.profile);
+    if(model){ await autoExtractFileWithProfile(f, model.profile); }
+    else { await openFile(f); }
   }
-
-  renderResultsTable();
-  renderReports();
-  logButtonAction('processBatchComplete', { count: files.length, wizardId });
+  els.wizardSection.style.display = 'none';
+  els.app.style.display = 'block';
+  showTab('extracted-data');
 }
 
 /* ------------------------ Init on load ---------------------------- */
+renderResultsTable();
 renderReports();
 syncRawModeUI();
-handleRouteChange();
-
