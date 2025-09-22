@@ -2636,6 +2636,19 @@ async function extractLineItems(profile){
         ? field.column.headerBottomPct * pageHeight
         : headerBox ? headerBox.y + headerBox.h
         : bandPx.y + Math.max(lineHeightPx*1.5, 12);
+      let userTop = 0;
+      let userBottom = pageHeight;
+      if(Array.isArray(field.column.yband) && field.column.yband.length === 2){
+        const selectionBox = toPx(vp, {
+          x0: field.column.xband[0],
+          y0: field.column.yband[0],
+          x1: field.column.xband[1],
+          y1: field.column.yband[1],
+          page
+        });
+        userTop = selectionBox.y;
+        userBottom = selectionBox.y + selectionBox.h;
+      }
       const anchorSample = field.column.anchorSample ? {
         cy: field.column.anchorSample.cyNorm * pageHeight,
         h: Math.max(field.column.anchorSample.hNorm * pageHeight, 1),
@@ -2729,7 +2742,9 @@ async function extractLineItems(profile){
         feraActive: !!savedFera,
         feraSource: savedFera || null,
         feraProjection: feraProjection || null,
-        typicalHeight
+        typicalHeight,
+        userTop,
+        userBottom
       };
     });
 
@@ -2812,7 +2827,7 @@ async function extractLineItems(profile){
         if(a.userLeft !== b.userLeft) return a.userLeft - b.userLeft;
         return a.userRight - b.userRight;
       });
-      const meta = sorted.map(desc => {
+      const meta = sorted.map((desc, idx) => {
         const tokens = collectColumnTokens(desc);
         let textLeft = desc.userLeft;
         let textRight = desc.userRight;
@@ -2826,7 +2841,60 @@ async function extractLineItems(profile){
           if(Number.isFinite(minX)) textLeft = Math.min(textLeft, minX);
           if(Number.isFinite(maxX)) textRight = Math.max(textRight, maxX);
         }
-        return { desc, textLeft, textRight };
+        let pinkBounds = null;
+        if(desc.fieldKey === 'line_number_col'){
+          const nextDesc = sorted[idx+1];
+          const blueLeft = desc.userLeft;
+          const blueRight = desc.userRight;
+          const blueWidth = Math.max(1, desc.userWidth);
+          const widthCap = blueWidth * 1.1;
+          const verticalTop = Number.isFinite(desc.userTop) ? desc.userTop : 0;
+          const verticalBottom = Number.isFinite(desc.userBottom) ? desc.userBottom : pageHeight;
+          const tokensInBlue = tokens.filter(tok => {
+            const cx = tok.x + tok.w/2;
+            const cy = tok.cy ?? (tok.y + tok.h/2);
+            return cx >= blueLeft && cx <= blueRight && cy >= verticalTop && cy <= verticalBottom;
+          });
+          if(tokensInBlue.length){
+            const ordered = tokensInBlue.slice().sort((a,b)=> a.y - b.y || a.x - b.x);
+            const firstTok = ordered[0];
+            const lastTok = ordered[ordered.length - 1];
+            let pinkLeft = Math.max(blueLeft, firstTok.x + firstTok.w);
+            let maxRight = Math.min(blueRight, blueLeft + widthCap);
+            if(nextDesc){
+              maxRight = Math.min(maxRight, nextDesc.userLeft);
+            }
+            maxRight = clamp(maxRight, blueLeft, blueRight);
+            let pinkRight = Math.max(pinkLeft, maxRight);
+            if(pinkRight - pinkLeft > widthCap){
+              pinkRight = pinkLeft + widthCap;
+            }
+            pinkRight = clamp(pinkRight, pinkLeft, blueRight);
+            let filtered = ordered.filter(tok => {
+              const cx = tok.x + tok.w/2;
+              return cx >= pinkLeft && cx <= pinkRight;
+            });
+            if(pinkRight < pinkLeft){
+              pinkRight = pinkLeft;
+            }
+            if(pinkRight - pinkLeft > widthCap){
+              pinkRight = pinkLeft + widthCap;
+            }
+            pinkRight = clamp(pinkRight, pinkLeft, blueRight);
+            const pinkTop = firstTok.y;
+            const pinkBottom = lastTok.y + lastTok.h;
+            pinkBounds = {
+              left: clamp(pinkLeft, blueLeft, blueRight),
+              right: clamp(Math.max(pinkLeft, pinkRight), blueLeft, blueRight),
+              top: pinkTop,
+              bottom: pinkBottom,
+              tokens: filtered
+            };
+            textLeft = pinkBounds.left;
+            textRight = pinkBounds.right;
+          }
+        }
+        return { desc, textLeft, textRight, pinkBounds };
       });
       const boundaries = new Array(meta.length + 1);
       boundaries[0] = clamp(Math.min(meta[0].desc.userLeft, meta[0].textLeft), 0, pageWidth);
@@ -2888,7 +2956,33 @@ async function extractLineItems(profile){
         right = clamp(right, left + 1, pageWidth);
         boundaries[i] = left;
         boundaries[i+1] = right;
-        result.set(meta[i].desc.fieldKey, { x0: left, x1: right });
+        if(meta[i].pinkBounds){
+          const cacheKey = cacheKeyFor(meta[i].desc);
+          tokenCache.set(cacheKey, meta[i].pinkBounds.tokens);
+          meta[i].desc.visualBounds = {
+            left: meta[i].pinkBounds.left,
+            right: meta[i].pinkBounds.right,
+            top: meta[i].pinkBounds.top,
+            bottom: meta[i].pinkBounds.bottom
+          };
+          meta[i].desc.x0 = Math.max(meta[i].desc.x0, meta[i].pinkBounds.left);
+          meta[i].desc.x1 = Math.min(meta[i].desc.x1, meta[i].pinkBounds.right);
+          if(meta[i].desc.x1 < meta[i].desc.x0){
+            meta[i].desc.x1 = meta[i].desc.x0;
+          }
+          meta[i].desc.x0 = clamp(meta[i].desc.x0, 0, pageWidth);
+          meta[i].desc.x1 = clamp(meta[i].desc.x1, meta[i].desc.x0, pageWidth);
+          meta[i].desc.expectedLeft = meta[i].pinkBounds.left;
+          meta[i].desc.expectedRight = meta[i].pinkBounds.right;
+          meta[i].desc.expectedCenter = (meta[i].pinkBounds.left + meta[i].pinkBounds.right) / 2;
+          meta[i].desc.expectedWidth = Math.max(1, meta[i].pinkBounds.right - meta[i].pinkBounds.left);
+        }
+        result.set(meta[i].desc.fieldKey, {
+          x0: left,
+          x1: right,
+          y0: meta[i].pinkBounds?.top ?? 0,
+          y1: meta[i].pinkBounds?.bottom ?? pageHeight
+        });
       }
       return result;
     };
