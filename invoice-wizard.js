@@ -3498,14 +3498,14 @@ function drawOverlay(){
     const bottom = (layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1))) + off;
     overlayCtx.save();
     overlayCtx.lineWidth = 1;
-    overlayCtx.strokeStyle = 'rgba(68,210,255,0.35)';
+    overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
     xPositions.forEach(x => {
       overlayCtx.beginPath();
       overlayCtx.moveTo(x, top);
       overlayCtx.lineTo(x, bottom);
       overlayCtx.stroke();
     });
-    overlayCtx.strokeStyle = 'rgba(46,230,166,0.35)';
+    overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
     layoutPage.rows.forEach(row => {
       const y = row.y0 + off;
       overlayCtx.beginPath();
