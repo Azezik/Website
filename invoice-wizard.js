@@ -3640,14 +3640,18 @@ els.viewer.addEventListener('scroll', ()=>{
 function drawOverlay(){
   syncOverlay();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  const { scaleX = 1, scaleY = 1 } = getScaleFactors();
   const layoutPage = state.lineLayout?.pages?.[state.pageNum];
   if(layoutPage && (layoutPage.rows||[]).length){
-    const off = state.pageOffsets[state.pageNum-1] || 0;
-    const xPositions = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
+    const offPx = state.pageOffsets[state.pageNum-1] || 0;
+    const xPositionsPx = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
+    const xPositions = xPositionsPx.map(x => x / scaleX);
     const spanLeft = xPositions[0] ?? 0;
-    const spanRight = xPositions[xPositions.length-1] ?? els.overlayCanvas.width;
-    const top = (layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0))) + off;
-    const bottom = (layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1))) + off;
+    const spanRight = xPositions[xPositions.length-1] ?? (els.overlayCanvas.width / scaleX);
+    const topSrc = layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0));
+    const bottomSrc = layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1));
+    const top = (topSrc + offPx) / scaleY;
+    const bottom = (bottomSrc + offPx) / scaleY;
     overlayCtx.save();
     overlayCtx.lineWidth = 1;
     overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
@@ -3659,7 +3663,7 @@ function drawOverlay(){
     });
     overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
     layoutPage.rows.forEach(row => {
-      const y = row.y0 + off;
+      const y = (row.y0 + offPx) / scaleY;
       overlayCtx.beginPath();
       overlayCtx.moveTo(spanLeft, y);
       overlayCtx.lineTo(spanRight, y);
@@ -3667,7 +3671,7 @@ function drawOverlay(){
     });
     const lastRow = layoutPage.rows[layoutPage.rows.length-1];
     if(lastRow){
-      const yEnd = lastRow.y1 + off;
+      const yEnd = (lastRow.y1 + offPx) / scaleY;
       overlayCtx.beginPath();
       overlayCtx.moveTo(spanLeft, yEnd);
       overlayCtx.lineTo(spanRight, yEnd);
@@ -3679,22 +3683,22 @@ function drawOverlay(){
     overlayCtx.save();
     overlayCtx.strokeStyle = 'rgba(255,105,180,0.9)';
     overlayCtx.lineWidth = 1;
-    const cross = 4;
+    const crossX = 4 / scaleX;
+    const crossY = 4 / scaleY;
     for(const marker of state.debugLineAnchors){
       if(marker.page !== state.pageNum) continue;
-      const off = state.pageOffsets[marker.page-1] || 0;
-      const x = marker.anchorRight;
-      const y = marker.anchorTop + off;
+      const offPx = state.pageOffsets[marker.page-1] || 0;
+      const x = marker.anchorRight / scaleX;
+      const y = (marker.anchorTop + offPx) / scaleY;
       overlayCtx.beginPath();
-      overlayCtx.moveTo(x - cross, y);
-      overlayCtx.lineTo(x + cross, y);
-      overlayCtx.moveTo(x, y - cross);
-      overlayCtx.lineTo(x, y + cross);
+      overlayCtx.moveTo(x - crossX, y);
+      overlayCtx.lineTo(x + crossX, y);
+      overlayCtx.moveTo(x, y - crossY);
+      overlayCtx.lineTo(x, y + crossY);
       overlayCtx.stroke();
     }
     overlayCtx.restore();
   }
-  const { scaleY } = getScaleFactors();
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
   if(els.showBoxesToggle?.checked && state.profile?.fields){
@@ -3709,8 +3713,15 @@ function drawOverlay(){
       const W = Math.round(vp.width * dpr);
       const H = Math.round(vp.height * dpr);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const box = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
-      const off = state.pageOffsets[box.page-1] || 0;
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const box = {
+        x: boxPx.x / scaleX,
+        y: boxPx.y / scaleY,
+        w: boxPx.w / scaleX,
+        h: boxPx.h / scaleY,
+        page: boxPx.page
+      };
+      const off = (state.pageOffsets[box.page-1] || 0) / scaleY;
       overlayCtx.strokeRect(box.x, box.y + off, box.w, box.h);
     }
   }
@@ -3726,11 +3737,19 @@ function drawOverlay(){
       const W = Math.round(vp.width * dpr);
       const H = Math.round(vp.height * dpr);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const box = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
-      const off = state.pageOffsets[box.page-1] || 0;
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const box = {
+        x: boxPx.x / scaleX,
+        y: boxPx.y / scaleY,
+        w: boxPx.w / scaleX,
+        h: boxPx.h / scaleY,
+        page: boxPx.page
+      };
+      const off = (state.pageOffsets[box.page-1] || 0) / scaleY;
       const cx = box.x + box.w/2;
       const cy = box.y + off + box.h/2;
-      const r = Math.max(box.w, box.h)/2 + 8;
+      const pad = 8 / Math.max(scaleX, scaleY);
+      const r = Math.max(box.w, box.h)/2 + pad;
       overlayCtx.beginPath();
       overlayCtx.arc(cx, cy, r, 0, Math.PI*2);
       overlayCtx.stroke();
@@ -3740,9 +3759,12 @@ function drawOverlay(){
     overlayCtx.fillStyle = 'yellow';
     for(const mp of state.matchPoints){
       if(mp.page !== state.pageNum) continue;
-      const off = state.pageOffsets[mp.page-1] || 0;
+      const offPx = state.pageOffsets[mp.page-1] || 0;
+      const x = mp.x / scaleX;
+      const y = (mp.y + offPx) / scaleY;
       overlayCtx.beginPath();
-      overlayCtx.arc(mp.x, mp.y + off, 3, 0, Math.PI*2);
+      const radius = 3 / Math.max(scaleX, scaleY);
+      overlayCtx.arc(x, y, radius, 0, Math.PI*2);
       overlayCtx.fill();
     }
   }
