@@ -154,6 +154,7 @@ let state = {
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
+  debugLineAnchors: [],
 };
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -2823,6 +2824,7 @@ async function extractLineItems(profile){
 
     const computeVisualColumnLayout = () => {
       if(!descriptors.length) return new Map();
+      state.debugLineAnchors = [];
       const sorted = descriptors.slice().sort((a,b)=>{
         if(a.userLeft !== b.userLeft) return a.userLeft - b.userLeft;
         return a.userRight - b.userRight;
@@ -2843,55 +2845,95 @@ async function extractLineItems(profile){
         }
         let pinkBounds = null;
         if(desc.fieldKey === 'line_number_col'){
-          const nextDesc = sorted[idx+1];
           const blueLeft = desc.userLeft;
           const blueRight = desc.userRight;
+          const blueTop = Number.isFinite(desc.userTop) ? desc.userTop : 0;
+          const blueBottom = Number.isFinite(desc.userBottom) ? desc.userBottom : pageHeight;
           const blueWidth = Math.max(1, desc.userWidth);
           const widthCap = blueWidth * 1.1;
-          const verticalTop = Number.isFinite(desc.userTop) ? desc.userTop : 0;
-          const verticalBottom = Number.isFinite(desc.userBottom) ? desc.userBottom : pageHeight;
-          const tokensInBlue = tokens.filter(tok => {
-            const cx = tok.x + tok.w/2;
-            const cy = tok.cy ?? (tok.y + tok.h/2);
-            return cx >= blueLeft && cx <= blueRight && cy >= verticalTop && cy <= verticalBottom;
-          });
-          if(tokensInBlue.length){
-            const ordered = tokensInBlue.slice().sort((a,b)=> a.y - b.y || a.x - b.x);
-            const firstTok = ordered[0];
-            const lastTok = ordered[ordered.length - 1];
-            let pinkLeft = Math.max(blueLeft, firstTok.x + firstTok.w);
-            let maxRight = Math.min(blueRight, blueLeft + widthCap);
-            if(nextDesc){
-              maxRight = Math.min(maxRight, nextDesc.userLeft);
+          const epsilon = 0;
+          const intersectsBlue = tok => {
+            const top = tok.y;
+            const bottom = tok.y + tok.h;
+            const left = tok.x;
+            const right = tok.x + tok.w;
+            return right >= blueLeft && left <= blueRight && bottom >= blueTop && top <= blueBottom;
+          };
+          const verticalMatch = tok => {
+            const top = tok.y;
+            const bottom = tok.y + tok.h;
+            return bottom >= blueTop && top <= blueBottom;
+          };
+          const tokensInBlue = tokens.filter(intersectsBlue);
+          const anchorCandidates = tokensInBlue.length ? tokensInBlue : (tokens.filter(verticalMatch));
+          if(anchorCandidates.length){
+            let anchorToken = null;
+            let bestDy = Infinity;
+            let bestDx = Infinity;
+            for(const tok of anchorCandidates){
+              const dy = Math.abs(tok.y - blueTop);
+              const dx = Math.abs(tok.x - blueLeft);
+              if(dy < bestDy || (dy === bestDy && dx < bestDx)){
+                anchorToken = tok;
+                bestDy = dy;
+                bestDx = dx;
+              }
             }
-            maxRight = clamp(maxRight, blueLeft, blueRight);
-            let pinkRight = Math.max(pinkLeft, maxRight);
-            if(pinkRight - pinkLeft > widthCap){
-              pinkRight = pinkLeft + widthCap;
+            if(anchorToken){
+              const anchorRight = anchorToken.x + anchorToken.w;
+              let pinkLeft = Math.max(blueLeft, anchorRight + epsilon);
+              let pinkRight = Math.min(blueRight, blueLeft + widthCap);
+              if(pinkRight < pinkLeft){
+                pinkRight = pinkLeft;
+              }
+              if(pinkRight - pinkLeft > widthCap){
+                pinkRight = pinkLeft + widthCap;
+              }
+              pinkLeft = clamp(pinkLeft, blueLeft, blueRight);
+              pinkRight = clamp(pinkRight, pinkLeft, blueRight);
+              const ordered = (tokensInBlue.length ? tokensInBlue : anchorCandidates).slice().sort((a,b)=> a.y - b.y || a.x - b.x);
+              const lineTokens = tokensInBlue.filter(tok => {
+                const cx = tok.x + tok.w/2;
+                return cx >= pinkLeft && cx <= pinkRight;
+              }).sort((a,b)=> a.y - b.y || a.x - b.x);
+              const lastLineTok = (lineTokens.length ? lineTokens[lineTokens.length - 1] : ordered[ordered.length - 1]) || anchorToken;
+              const pinkTop = clamp(anchorToken.y, blueTop, blueBottom);
+              let pinkBottom = Math.min(blueBottom, lastLineTok.y + lastLineTok.h);
+              if(pinkBottom < pinkTop){
+                pinkBottom = pinkTop;
+              }
+              const pinkWidth = pinkRight - pinkLeft;
+              pinkBounds = {
+                left: pinkLeft,
+                right: pinkRight,
+                top: pinkTop,
+                bottom: pinkBottom,
+                tokens: lineTokens
+              };
+              textLeft = pinkBounds.left;
+              textRight = pinkBounds.right;
+              const anchorLog = {
+                fieldKey: desc.fieldKey,
+                page: desc.page,
+                blueLeft,
+                blueRight,
+                anchorLeft: anchorToken.x,
+                anchorRight,
+                pinkLeft,
+                pinkRight,
+                pinkWidth
+              };
+              state.debugLineAnchors.push({
+                page: desc.page,
+                anchorRight,
+                anchorTop: anchorToken.y,
+                blueLeft,
+                blueRight,
+                pinkLeft,
+                pinkRight
+              });
+              console.debug('[line-number snap]', anchorLog);
             }
-            pinkRight = clamp(pinkRight, pinkLeft, blueRight);
-            let filtered = ordered.filter(tok => {
-              const cx = tok.x + tok.w/2;
-              return cx >= pinkLeft && cx <= pinkRight;
-            });
-            if(pinkRight < pinkLeft){
-              pinkRight = pinkLeft;
-            }
-            if(pinkRight - pinkLeft > widthCap){
-              pinkRight = pinkLeft + widthCap;
-            }
-            pinkRight = clamp(pinkRight, pinkLeft, blueRight);
-            const pinkTop = firstTok.y;
-            const pinkBottom = lastTok.y + lastTok.h;
-            pinkBounds = {
-              left: clamp(pinkLeft, blueLeft, blueRight),
-              right: clamp(Math.max(pinkLeft, pinkRight), blueLeft, blueRight),
-              top: pinkTop,
-              bottom: pinkBottom,
-              tokens: filtered
-            };
-            textLeft = pinkBounds.left;
-            textRight = pinkBounds.right;
           }
         }
         return { desc, textLeft, textRight, pinkBounds };
@@ -3613,6 +3655,25 @@ function drawOverlay(){
       overlayCtx.beginPath();
       overlayCtx.moveTo(spanLeft, yEnd);
       overlayCtx.lineTo(spanRight, yEnd);
+      overlayCtx.stroke();
+    }
+    overlayCtx.restore();
+  }
+  if(Array.isArray(state.debugLineAnchors) && state.debugLineAnchors.length){
+    overlayCtx.save();
+    overlayCtx.strokeStyle = 'rgba(255,105,180,0.9)';
+    overlayCtx.lineWidth = 1;
+    const cross = 4;
+    for(const marker of state.debugLineAnchors){
+      if(marker.page !== state.pageNum) continue;
+      const off = state.pageOffsets[marker.page-1] || 0;
+      const x = marker.anchorRight;
+      const y = marker.anchorTop + off;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(x - cross, y);
+      overlayCtx.lineTo(x + cross, y);
+      overlayCtx.moveTo(x, y - cross);
+      overlayCtx.lineTo(x, y + cross);
       overlayCtx.stroke();
     }
     overlayCtx.restore();
