@@ -1034,6 +1034,8 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const right  = Math.max(...hits.map(t => t.x + t.w));
   const top    = Math.min(...lineTokens.map(t => t.y));
   const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
+  const tokenLeft = Math.min(...lineTokens.map(t => t.x));
+  const tokenRight = Math.max(...lineTokens.map(t => t.x + t.w));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
   let finalBox = expanded;
@@ -1046,6 +1048,20 @@ function snapToLine(tokens, hintPx, marginPx=6){
       const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
       const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
       finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
+    }
+  }
+  if(hintPx && hintPx.w > 0){
+    const widthCap = hintPx.w * 1.1;
+    const tokensWidth = tokenRight - tokenLeft;
+    const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
+    if(finalBox.w > targetWidth){
+      const minLeft = Math.max(finalBox.x, tokenRight - targetWidth);
+      const maxLeft = Math.min(finalBox.x + finalBox.w - targetWidth, tokenLeft);
+      let newLeft = finalBox.x + (finalBox.w - targetWidth) / 2;
+      if(newLeft < minLeft) newLeft = minLeft;
+      if(newLeft > maxLeft) newLeft = maxLeft;
+      const newRight = newLeft + targetWidth;
+      finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
     }
   }
   const text = lineTokens.map(t => t.text).join(' ').trim();
