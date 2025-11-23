@@ -36,7 +36,7 @@
     });
   }
 
-  function collectFullText(tokens, box, snappedText=''){ 
+  function collectFullText(tokens, box, snappedText=''){
     const hits = tokensInBox(tokens, box);
     if(!hits.length && snappedText){
       return { hits, text: snappedText.trim(), box };
@@ -53,5 +53,14 @@
     return { hits, text, box: usedBox, cleaned };
   }
 
-  return { extractConfigStatic, collectFullText, groupIntoLines, tokensInBox };
+  function finalizeConfigValue(opts){
+    const { tokens=[], selectionBox=null, snappedBox=null, snappedText='', cleanFn, fieldKey } = opts || {};
+    const chosenBox = selectionBox || snappedBox || null;
+    const { hits, text, box } = extractConfigStatic({ tokens, box: chosenBox, snappedText, cleanFn, fieldKey, mode:'CONFIG' });
+    const raw = text || snappedText || '';
+    const cleaned = cleanFn ? cleanFn(fieldKey || '', raw, 'CONFIG') : null;
+    return { hits, text: raw, value: raw, raw, box, cleaned };
+  }
+
+  return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox };
 });

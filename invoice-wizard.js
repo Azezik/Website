@@ -2251,38 +2251,39 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 
   const isConfigStatic = state.mode === 'CONFIG' && ftype === 'static';
   if(isConfigStatic){
-    let boxPx = null;
-    if(state.snappedPx){
-      boxPx = state.snappedPx;
-      traceEvent(spanKey,'selection.captured',{ boxPx });
-    } else if(fieldSpec.bbox){
+    const selectionBox = state.selectionPx || state.snappedPx || null;
+    let boxPx = selectionBox;
+    if(fieldSpec.bbox && !boxPx){
       const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       boxPx = applyTransform(raw);
-      traceEvent(spanKey,'selection.captured',{ boxPx });
     }
+    if(boxPx){ traceEvent(spanKey,'selection.captured',{ boxPx }); }
     if(!boxPx){
       return { value:'', raw:'', corrected:'', code:null, shape:null, score:null, correctionsApplied:[], boxPx:null, confidence:0, tokens:[], method:'config-permissive' };
     }
-    const extractor = StaticFieldMode?.extractConfigStatic;
+    const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
     let text = '';
     let hits = [];
     let usedBox = boxPx;
+    let cleaned = null;
     if(extractor){
-      const res = extractor({ tokens, box: boxPx, snappedText: state.snappedText });
-      text = res?.text || '';
+      const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey });
+      text = res?.text || res?.value || '';
       hits = res?.hits || [];
       usedBox = res?.box || boxPx;
+      cleaned = res?.cleaned || null;
     } else {
       hits = tokensInBox(tokens, boxPx);
       const lines = groupIntoLines(hits);
       text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
     }
-    if(!text && state.snappedText){ text = state.snappedText.trim(); }
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text, state.mode, spanKey);
-    const value = text || cleaned.value || cleaned.raw || '';
+    if(!cleaned){
+      cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
+    }
+    const value = text || state.snappedText || cleaned.value || cleaned.raw || '';
     const result = {
       value,
-      raw: text,
+      raw: text || state.snappedText || '',
       corrected: value,
       code: cleaned.code,
       shape: cleaned.shape,

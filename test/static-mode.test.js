@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { extractConfigStatic } = require('../tools/static-field-mode.js');
+const { extractConfigStatic, finalizeConfigValue } = require('../tools/static-field-mode.js');
 const selectionFirst = require('../orchestrator.js');
 
 const tokens = [
@@ -29,3 +29,18 @@ assert.strictEqual(runResult.value, 'ARNPRIOR ONTARIO');
 assert.strictEqual(runResult.cleanedOk, true);
 
 console.log('Static mode tests passed.');
+
+// UI-facing config-mode capture should preserve full multiline text (selection beats snapped line)
+const snappedBox = { x: 40, y: 20, w: 90, h: 10, page: 1 }; // would catch only part of line 2
+const configUIResult = finalizeConfigValue({
+  tokens,
+  selectionBox: bbox,
+  snappedBox,
+  snappedText: 'ARNPRIOR ONTARIO',
+  cleanFn: (_, raw) => ({ value: raw })
+});
+
+assert.strictEqual(configUIResult.value, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
+assert.strictEqual(configUIResult.raw, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
+assert.strictEqual(configUIResult.hits.length, tokens.length);
+assert.deepStrictEqual(configUIResult.box, bbox);
