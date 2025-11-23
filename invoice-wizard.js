@@ -1290,6 +1290,7 @@ const DEFAULT_FIELDS = [
     prompt: 'Draw a box around the Customer Address (include city, province/state, postal code).',
     kind: 'block',
     mode: 'cell',
+    isMultiline: true,
     required: false,
     type: 'static'
   },
@@ -2267,7 +2268,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     let usedBox = boxPx;
     let cleaned = null;
     if(extractor){
-      const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey });
+      const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey, multiline: !!fieldSpec.isMultiline });
       text = res?.text || res?.value || '';
       hits = res?.hits || [];
       usedBox = res?.box || boxPx;
@@ -2305,8 +2306,35 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(fieldSpec.fieldKey === 'customer_address'){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
-    const hits = tokensInBox(tokens, searchBox);
+    const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
+    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: state.mode === 'CONFIG' ? 0.5 : 0.7 };
+    const assembled = assembler ? assembler(assembleOpts) : null;
+    const hits = assembled?.hits || tokensInBox(tokens, searchBox);
+    const lines = assembled?.lines || groupIntoLines(hits);
+    const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
+      ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
+      : '';
     if(!hits.length) return null;
+    if(multilineValue){
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
+      const cleanedOk = !!(cleaned.value || cleaned.raw);
+      return {
+        value: multilineValue || cleaned.value || cleaned.raw,
+        raw: multilineValue,
+        corrected: cleaned.corrected,
+        code: cleaned.code,
+        shape: cleaned.shape,
+        score: cleaned.score,
+        correctionsApplied: cleaned.correctionsApplied,
+        corrections: cleaned.correctionsApplied,
+        boxPx: searchBox,
+        confidence: fingerprintOk ? (cleaned.conf || (cleanedOk ? 1 : 0.1)) : 0,
+        tokens: hits,
+        cleanedOk,
+        fingerprintOk
+      };
+    }
     const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     const cleaned = sel.cleaned || {};
     const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
@@ -4502,6 +4530,18 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   if(step.kind === 'landmark'){
     value = (state.snappedText || '').trim();
     raw = value;
+  } else if (step.type === 'static'){
+    const res = await extractFieldValue(step, tokens, state.viewport);
+    value = res.value;
+    if(!value && state.snappedText){
+      bumpDebugBlank();
+      value = (state.snappedText || '').trim();
+    }
+    boxPx = res.boxPx || state.snappedPx;
+    confidence = res.confidence || 0;
+    raw = res.raw || (state.snappedText || '').trim();
+    corrections = res.correctionsApplied || res.corrections || [];
+    fieldTokens = res.tokens || [];
   } else if (step.kind === 'block'){
     value = (state.snappedText || '').trim();
     raw = value;

@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { extractConfigStatic, finalizeConfigValue } = require('../tools/static-field-mode.js');
+const { extractConfigStatic, finalizeConfigValue, assembleTextFromBox } = require('../tools/static-field-mode.js');
 const selectionFirst = require('../orchestrator.js');
 
 const tokens = [
@@ -23,24 +23,34 @@ function strictClean(hits){
   return { value: raw.replace('176 RAYMOND L ', '').split(' K7S')[0], raw };
 }
 
-const runResult = selectionFirst(tokens, strictClean);
-assert.strictEqual(runResult.raw, '176 RAYMOND L ARNPRIOR ONTARIO K7S 3G8');
-assert.strictEqual(runResult.value, 'ARNPRIOR ONTARIO');
-assert.strictEqual(runResult.cleanedOk, true);
-
-console.log('Static mode tests passed.');
-
-// UI-facing config-mode capture should preserve full multiline text (selection beats snapped line)
 const snappedBox = { x: 40, y: 20, w: 90, h: 10, page: 1 }; // would catch only part of line 2
 const configUIResult = finalizeConfigValue({
   tokens,
   selectionBox: bbox,
   snappedBox,
   snappedText: 'ARNPRIOR ONTARIO',
-  cleanFn: (_, raw) => ({ value: raw })
+  cleanFn: (_, raw) => ({ value: raw }),
+  multiline: true
 });
 
 assert.strictEqual(configUIResult.value, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
 assert.strictEqual(configUIResult.raw, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
 assert.strictEqual(configUIResult.hits.length, tokens.length);
 assert.deepStrictEqual(configUIResult.box, bbox);
+
+// Run-mode assembly should keep every line inside the bbox when multiline is requested
+const runAssembly = assembleTextFromBox({ tokens, box: bbox, multiline: true, minOverlap: 0.7 });
+assert.strictEqual(runAssembly.text, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
+assert.strictEqual(runAssembly.hits.length, tokens.length);
+
+// Even without the explicit multiline flag, multiple lines inside the box should be joined
+const autoMultiline = assembleTextFromBox({ tokens, box: bbox, multiline: false });
+assert.strictEqual(autoMultiline.text, '176 RAYMOND L\nARNPRIOR ONTARIO\nK7S 3G8');
+assert.strictEqual(autoMultiline.hits.length, tokens.length);
+
+const runResult = selectionFirst(tokens, strictClean);
+assert.strictEqual(runResult.raw, '176 RAYMOND L ARNPRIOR ONTARIO K7S 3G8');
+assert.strictEqual(runResult.value, 'ARNPRIOR ONTARIO');
+assert.strictEqual(runResult.cleanedOk, true);
+
+console.log('Static mode tests passed.');

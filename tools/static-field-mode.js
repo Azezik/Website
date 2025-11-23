@@ -19,7 +19,8 @@
     return lines;
   }
 
-  function tokensInBox(tokens, box, minOverlap=0.5){
+  function tokensInBox(tokens, box, opts={}){
+    const { minOverlap=0.5 } = opts || {};
     if(!box) return [];
     return (tokens||[]).filter(t => {
       if(t.page !== box.page) return false;
@@ -36,31 +37,39 @@
     });
   }
 
-  function collectFullText(tokens, box, snappedText=''){
-    const hits = tokensInBox(tokens, box);
+  function assembleTextFromBox({ tokens, box, snappedText='', multiline=false, minOverlap=0.5, lineTol=4 }){
+    const hits = tokensInBox(tokens, box, { minOverlap });
+    const lines = groupIntoLines(hits, lineTol);
     if(!hits.length && snappedText){
-      return { hits, text: snappedText.trim(), box };
+      return { hits, lines, text: snappedText.trim(), box };
     }
-    const lines = groupIntoLines(hits);
-    const text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
-    return { hits, text, box };
+    const joined = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
+    const text = (multiline || joined.length > 1)
+      ? joined.join('\n')
+      : (joined[0] || '');
+    return { hits, lines, text, box };
+  }
+
+  function collectFullText(tokens, box, snappedText='', opts={}){
+    const { multiline=true, minOverlap=0.5, lineTol=4 } = opts || {};
+    return assembleTextFromBox({ tokens, box, snappedText, multiline, minOverlap, lineTol });
   }
 
   function extractConfigStatic(opts){
-    const { tokens=[], box, snappedText='', cleanFn, fieldKey, mode='CONFIG' } = opts || {};
-    const { hits, text, box: usedBox } = collectFullText(tokens, box, snappedText);
+    const { tokens=[], box, snappedText='', cleanFn, fieldKey, mode='CONFIG', multiline=true } = opts || {};
+    const { hits, text, box: usedBox } = collectFullText(tokens, box, snappedText, { multiline });
     const cleaned = cleanFn ? cleanFn(fieldKey || '', text, mode) : null;
     return { hits, text, box: usedBox, cleaned };
   }
 
   function finalizeConfigValue(opts){
-    const { tokens=[], selectionBox=null, snappedBox=null, snappedText='', cleanFn, fieldKey } = opts || {};
+    const { tokens=[], selectionBox=null, snappedBox=null, snappedText='', cleanFn, fieldKey, multiline=true } = opts || {};
     const chosenBox = selectionBox || snappedBox || null;
-    const { hits, text, box } = extractConfigStatic({ tokens, box: chosenBox, snappedText, cleanFn, fieldKey, mode:'CONFIG' });
+    const { hits, text, box } = extractConfigStatic({ tokens, box: chosenBox, snappedText, cleanFn, fieldKey, mode:'CONFIG', multiline });
     const raw = text || snappedText || '';
     const cleaned = cleanFn ? cleanFn(fieldKey || '', raw, 'CONFIG') : null;
     return { hits, text: raw, value: raw, raw, box, cleaned };
   }
 
-  return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox };
+  return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox, assembleTextFromBox };
 });
