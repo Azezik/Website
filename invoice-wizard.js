@@ -66,7 +66,10 @@ const els = {
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
   wizardFile:      document.getElementById('wizard-file'),
+  wizardTitle:     document.querySelector('#wizard-section h2'),
+  wizardSubhead:   document.querySelector('#wizard-section > p.sub'),
   viewer:          document.getElementById('viewer'),
+  promptBar:       document.getElementById('promptBar'),
 
   pageControls:    document.getElementById('pageControls'),
   prevPageBtn:     document.getElementById('prevPageBtn'),
@@ -104,6 +107,11 @@ const els = {
     els.extractedData?.appendChild(div);
   }
 })();
+
+const defaultWizardTitle = els.wizardTitle?.textContent || 'Wizard Configuration';
+const defaultWizardSubhead = els.wizardSubhead?.textContent || '';
+const runWizardTitle = 'Wizard Run Mode';
+const runWizardSubhead = 'Drop a document to extract using the saved wizard.';
 
 function showTab(id){
   [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
@@ -157,6 +165,40 @@ let state = {
   lineLayout: null,
   debugLineAnchors: [],
 };
+
+const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
+
+function syncModeUi(){
+  const isConfig = state.mode === 'CONFIG';
+  if(els.promptBar){ els.promptBar.style.display = isConfig ? 'flex' : 'none'; }
+  [els.backBtn, els.skipBtn, els.confirmBtn].forEach(btn=>{ if(btn) btn.style.display = isConfig ? '' : 'none'; });
+  if(els.wizardTitle){ els.wizardTitle.textContent = isConfig ? defaultWizardTitle : runWizardTitle; }
+  if(els.wizardSubhead){ els.wizardSubhead.textContent = isConfig ? defaultWizardSubhead : runWizardSubhead; }
+}
+
+function activateRunMode(opts = {}){
+  if(modeHelpers?.enterRunModeState) modeHelpers.enterRunModeState(state);
+  else {
+    state.mode = 'RUN';
+    state.stepIdx = 0; state.steps = [];
+    state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
+    state.pendingSelection = null; state.matchPoints = [];
+  }
+  if(opts.clearDoc) cleanupDoc();
+  syncModeUi();
+}
+
+function activateConfigMode(){
+  if(modeHelpers?.enterConfigModeState) modeHelpers.enterConfigModeState(state);
+  else {
+    state.mode = 'CONFIG';
+    state.stepIdx = 0; state.steps = [];
+    state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
+    state.pendingSelection = null; state.matchPoints = [];
+  }
+  initStepsFromProfile();
+  syncModeUi();
+}
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
@@ -4400,11 +4442,10 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
-  state.mode = 'CONFIG';
+  ensureProfile();
+  activateConfigMode();
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
-  ensureProfile();
-  initStepsFromProfile();
   renderSavedFieldsTable();
 });
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
@@ -4436,6 +4477,10 @@ if(modelSelect){
     const id = modelSelect.value;
     if(!id) return;
     loadModelById(id);
+    activateRunMode({ clearDoc: true });
+    renderSavedFieldsTable();
+    renderConfirmedTables();
+    renderResultsTable();
     alert('Model selected. Drop files to auto-extract.');
   });
 }
@@ -4485,6 +4530,16 @@ els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
   const f = e.target.files?.[0]; if(!f) return;
+  if(state.mode === 'RUN'){
+    activateRunMode({ clearDoc: true });
+    els.app.style.display = 'none';
+    els.wizardSection.style.display = 'block';
+    ensureProfile();
+    await autoExtractFileWithProfile(f, state.profile);
+    renderSavedFieldsTable();
+    renderConfirmedTables();
+    return;
+  }
   await openFile(f);
 });
 
@@ -4691,10 +4746,10 @@ async function autoExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
-  state.mode = 'RUN';
+  activateRunMode({ clearDoc: true });
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
-  ensureProfile(); initStepsFromProfile(); renderSavedFieldsTable();
+  ensureProfile(); renderSavedFieldsTable();
   const modelId = document.getElementById('model-select')?.value || '';
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
 
@@ -4711,3 +4766,4 @@ async function processBatch(files){
 renderResultsTable();
 renderReports();
 syncRawModeUI();
+syncModeUi();
