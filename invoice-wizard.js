@@ -1,6 +1,7 @@
 // ===== pdf.js & tesseract bindings (must appear before any getDocument call) =====
 const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
+const StaticFieldMode = window.StaticFieldMode || null;
 
 (function sanityLog(){
   console.log('[pdf.js] version:', pdfjsLibRef?.version,
@@ -2248,6 +2249,56 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     return result;
   }
 
+  const isConfigStatic = state.mode === 'CONFIG' && ftype === 'static';
+  if(isConfigStatic){
+    const selectionBox = state.selectionPx || state.snappedPx || null;
+    let boxPx = selectionBox;
+    if(fieldSpec.bbox && !boxPx){
+      const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      boxPx = applyTransform(raw);
+    }
+    if(boxPx){ traceEvent(spanKey,'selection.captured',{ boxPx }); }
+    if(!boxPx){
+      return { value:'', raw:'', corrected:'', code:null, shape:null, score:null, correctionsApplied:[], boxPx:null, confidence:0, tokens:[], method:'config-permissive' };
+    }
+    const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
+    let text = '';
+    let hits = [];
+    let usedBox = boxPx;
+    let cleaned = null;
+    if(extractor){
+      const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey });
+      text = res?.text || res?.value || '';
+      hits = res?.hits || [];
+      usedBox = res?.box || boxPx;
+      cleaned = res?.cleaned || null;
+    } else {
+      hits = tokensInBox(tokens, boxPx);
+      const lines = groupIntoLines(hits);
+      text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
+    }
+    if(!cleaned){
+      cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
+    }
+    const value = text || state.snappedText || cleaned.value || cleaned.raw || '';
+    const result = {
+      value,
+      raw: text || state.snappedText || '',
+      corrected: value,
+      code: cleaned.code,
+      shape: cleaned.shape,
+      score: cleaned.score,
+      correctionsApplied: cleaned.correctionsApplied,
+      corrections: cleaned.correctionsApplied,
+      boxPx: usedBox,
+      confidence: cleaned.conf ?? 1,
+      tokens: hits,
+      method:'config-permissive'
+    };
+    traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method, mode:'CONFIG' });
+    return result;
+  }
+
   async function attempt(box){
     const snap = snapToLine(tokens, box);
     let searchBox = snap.box;
@@ -2278,28 +2329,6 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
-  if(state.mode === 'CONFIG' && state.snappedPx){
-    traceEvent(spanKey,'selection.captured',{ boxPx: state.snappedPx });
-    const hits = tokensInBox(tokens, state.snappedPx);
-    const rawText = hits.length ? hits.map(t => t.text).join(' ') : (state.snappedText || '');
-    const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', hits.length ? hits : rawText, state.mode, spanKey);
-    const value = cleaned.value || cleaned.raw || rawText;
-    result = {
-      value,
-      raw: cleaned.raw || rawText,
-      corrected: cleaned.corrected,
-      code: cleaned.code,
-      shape: cleaned.shape,
-      score: cleaned.score,
-      correctionsApplied: cleaned.correctionsApplied,
-      corrections: cleaned.correctionsApplied,
-      boxPx: state.snappedPx,
-      confidence: cleaned.conf ?? 1,
-      tokens: hits,
-      method:'snap'
-    };
-    return result;
-  }
   let selectionRaw = '';
   let firstAttempt = null;
   if(fieldSpec.bbox){
