@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { enterRunModeState, enterConfigModeState, clearTransientState } = require('../tools/wizard-mode.js');
+const { enterRunModeState, enterConfigModeState, clearTransientState, createRunLoopGuard, runKeyForFile } = require('../tools/wizard-mode.js');
 
 function buildState(){
   return {
@@ -52,5 +52,19 @@ assert.strictEqual(cleared.mode, 'CONFIG');
 assert.strictEqual(cleared.stepIdx, 0);
 assert.strictEqual(cleared.snappedCss, null);
 assert.deepStrictEqual(cleared.pageOffsets, []);
+
+const guard = createRunLoopGuard();
+const keyA = 'fileA';
+const keyB = 'fileB';
+assert.strictEqual(guard.start(keyA), true, 'first start should pass');
+assert.strictEqual(guard.start(keyA), false, 'duplicate start should be blocked');
+assert.strictEqual(guard.start(keyB), true, 'different key can start while first is active');
+guard.finish(keyA);
+assert.strictEqual(guard.start(keyA), true, 'keyA can start after finish');
+guard.finish(keyA);
+guard.finish(keyB);
+
+const fakeFile = { name:'demo.pdf', size: 1234, lastModified: 1700000000000 };
+assert.strictEqual(runKeyForFile(fakeFile), 'demo.pdf::1234::1700000000000');
 
 console.log('Wizard mode tests passed.');

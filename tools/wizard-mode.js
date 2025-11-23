@@ -43,5 +43,30 @@
     return state;
   }
 
-  return { clearTransientState, enterRunModeState, enterConfigModeState };
+  function runKeyForFile(file){
+    if(!file) return '';
+    const name = file.name || '';
+    const size = Number.isFinite(file.size) ? file.size : 0;
+    const mtime = Number.isFinite(file.lastModified) ? file.lastModified : 0;
+    return `${name}::${size}::${mtime}`;
+  }
+
+  function createRunLoopGuard(){
+    const activeKeys = new Set();
+    return {
+      start(key){
+        if(!key) return true;
+        if(activeKeys.has(key)) return false;
+        activeKeys.add(key);
+        return true;
+      },
+      finish(key){
+        if(!key) return;
+        activeKeys.delete(key);
+      },
+      isActive:(key)=>activeKeys.has(key)
+    };
+  }
+
+  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, runKeyForFile };
 });

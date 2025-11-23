@@ -167,6 +167,24 @@ let state = {
 };
 
 const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
+const runLoopGuard = modeHelpers?.createRunLoopGuard ? modeHelpers.createRunLoopGuard() : (()=>{
+  const active = new Set();
+  return {
+    start(key){
+      if(!key) return true;
+      if(active.has(key)) return false;
+      active.add(key);
+      return true;
+    },
+    finish(key){ if(!key) return; active.delete(key); }
+  };
+})();
+
+function runKeyForFile(file){
+  if(modeHelpers?.runKeyForFile) return modeHelpers.runKeyForFile(file);
+  if(!file) return '';
+  return `${file.name||''}::${Number.isFinite(file.size)?file.size:0}::${Number.isFinite(file.lastModified)?file.lastModified:0}`;
+}
 
 function syncModeUi(){
   const isConfig = state.mode === 'CONFIG';
@@ -4702,6 +4720,13 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 
 /* ---------------------------- Batch ------------------------------- */
 async function autoExtractFileWithProfile(file, profile){
+  const guardKey = runKeyForFile(file);
+  const guardStarted = runLoopGuard?.start ? runLoopGuard.start(guardKey) : true;
+  if(runLoopGuard && !guardStarted){
+    console.warn('Duplicate run detected; skipping auto extraction for', guardKey);
+    return;
+  }
+  try {
   state.mode = 'RUN';
   state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
   hydrateFingerprintsFromProfile(state.profile);
@@ -4742,6 +4767,11 @@ async function autoExtractFileWithProfile(file, profile){
   await ensureTokensForPage(state.pageNum);
   const lineItems = await extractLineItems(activeProfile);
   compileDocument(state.currentFileId, lineItems);
+  } finally {
+    if(runLoopGuard?.finish && guardStarted){
+      runLoopGuard.finish(guardKey);
+    }
+  }
 }
 
 async function processBatch(files){
