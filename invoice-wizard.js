@@ -1810,6 +1810,20 @@ function getPdfBitmapCanvas(pageIndex){
   return { canvas: node, error:null };
 }
 
+function dataUrlToBytes(dataUrl){
+  if(!dataUrl || typeof dataUrl !== 'string') return new Uint8Array();
+  const base64 = dataUrl.split(',')[1] || '';
+  if(typeof Buffer !== 'undefined'){
+    try { return Buffer.from(base64, 'base64'); }
+    catch(err){ return Buffer.from(''); }
+  }
+  if(typeof atob !== 'function') return new Uint8Array();
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
 function getOcrCropForSelection({docId, pageIndex, normBox}){
   const { canvas: src, error: canvasErr } = getPdfBitmapCanvas(pageIndex);
   const result = { cropBitmap: null, meta: { docId, pageIndex, errors: [], warnings: [], normBox, canvasSize:null, computedPx:null, cssBox:null, overlayPinned:isOverlayPinned() } };
@@ -1889,13 +1903,11 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   const cssSH = sh / dpr;
 
   // hash for duplicate detection
-  const buf = Buffer.from(off.toDataURL('image/png').split(',')[1],'base64');
+  const pngBytes = dataUrlToBytes(off.toDataURL('image/png'));
   const crypto = window.crypto?.subtle ? null : (window.require && window.require('crypto'));
   let hash='';
   if(crypto){
-    hash = crypto.createHash('sha1').update(buf).digest('hex');
-  } else if(window.crypto?.subtle){
-    hash = '';
+    hash = crypto.createHash('sha1').update(pngBytes).digest('hex');
   }
   if(hash){
     const pageKey = `${docId}_${pageIndex}`;
@@ -1944,7 +1956,8 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
       pageCanvas.width = W; pageCanvas.height = H;
       const pctx = pageCanvas.getContext('2d');
       pctx.drawImage(src, 0, offY, W, H, 0,0,W,H);
-      fs.writeFileSync(`${pageDir}/${pageIndex}.png`, Buffer.from(pageCanvas.toDataURL('image/png').split(',')[1],'base64'));
+      const pagePng = dataUrlToBytes(pageCanvas.toDataURL('image/png'));
+      fs.writeFileSync(`${pageDir}/${pageIndex}.png`, pagePng);
       state.pageSnapshots[pageSnapKey] = true;
     }
   }
@@ -2100,7 +2113,7 @@ async function auditCropSelfTest(question, boxPx){
   const dir = `debug/crops/${docId}/${pageIndex}`;
   const ts = Date.now();
   const baseName = `${question}__${ts}`;
-  const bufFromCanvas = c => Buffer.from(c.toDataURL('image/png').split(',')[1],'base64');
+  const bufFromCanvas = c => dataUrlToBytes(c.toDataURL('image/png'));
   if(fs){ fs.mkdirSync(dir,{recursive:true}); }
   if(cropBitmap && fs){ fs.writeFileSync(`${dir}/${baseName}.png`, bufFromCanvas(cropBitmap)); }
   if(cropBitmap && !fs){ console.log('OCR crop', cropBitmap.toDataURL('image/png')); }
