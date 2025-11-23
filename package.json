@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node test/conflict-markers.test.js && node test/field-map.test.js && node test/master-db.test.js && node test/orchestrator.test.js"
+    "test": "node test/conflict-markers.test.js && node test/field-map.test.js && node test/master-db.test.js && node test/orchestrator.test.js && node test/static-mode.test.js"
   }
 }
