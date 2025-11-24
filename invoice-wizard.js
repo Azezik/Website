@@ -187,6 +187,45 @@ function runKeyForFile(file){
   return `${file.name||''}::${Number.isFinite(file.size)?file.size:0}::${Number.isFinite(file.lastModified)?file.lastModified:0}`;
 }
 
+function clearTransientStateLocal(){
+  if(modeHelpers?.clearTransientState) return modeHelpers.clearTransientState(state);
+  state.stepIdx = 0; state.steps = [];
+  state.selectionCss = null; state.selectionPx = null;
+  state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
+  state.pendingSelection = null; state.matchPoints = [];
+  state.overlayMetrics = null; state.overlayPinned = false;
+  state.pdf = null; state.isImage = false;
+  state.pageNum = 1; state.numPages = 0;
+  state.viewport = { w:0, h:0, scale:1 };
+  state.pageOffsets = []; state.pageViewports = [];
+  state.pageRenderPromises = []; state.pageRenderReady = [];
+  state.pageSnapshots = {}; state.grayCanvases = {};
+  state.telemetry = []; state.currentTraceId = null;
+  state.lastOcrCropPx = null; state.lastOcrCropCss = null;
+  state.cropAudits = []; state.cropHashes = {};
+  state.tokensByPage = {}; state.currentLineItems = [];
+  state.currentFileId = ''; state.currentFileName = '';
+  state.lineLayout = null;
+  return state;
+}
+
+function resetDocArtifacts(){
+  cleanupDoc();
+  state.grayCanvases = {};
+  state.telemetry = [];
+  state.currentTraceId = null;
+  state.lastOcrCropPx = null;
+  state.lastOcrCropCss = null;
+  state.cropAudits = [];
+  state.cropHashes = {};
+  state.pdf = null;
+  state.isImage = false;
+  state.viewport = { w:0, h:0, scale:1 };
+  state.pageNum = 1;
+  state.numPages = 0;
+  renderTelemetry();
+}
+
 function syncModeUi(){
   const isConfig = state.mode === 'CONFIG';
   if(els.promptBar){ els.promptBar.style.display = isConfig ? 'flex' : 'none'; }
@@ -196,25 +235,16 @@ function syncModeUi(){
 }
 
 function activateRunMode(opts = {}){
-  if(modeHelpers?.enterRunModeState) modeHelpers.enterRunModeState(state);
-  else {
-    state.mode = 'RUN';
-    state.stepIdx = 0; state.steps = [];
-    state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
-    state.pendingSelection = null; state.matchPoints = [];
-  }
-  if(opts.clearDoc) cleanupDoc();
+  clearTransientStateLocal();
+  state.mode = 'RUN';
+  if(opts.clearDoc !== false) resetDocArtifacts();
   syncModeUi();
 }
 
 function activateConfigMode(){
-  if(modeHelpers?.enterConfigModeState) modeHelpers.enterConfigModeState(state);
-  else {
-    state.mode = 'CONFIG';
-    state.stepIdx = 0; state.steps = [];
-    state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
-    state.pendingSelection = null; state.matchPoints = [];
-  }
+  clearTransientStateLocal();
+  state.mode = 'CONFIG';
+  resetDocArtifacts();
   initStepsFromProfile();
   syncModeUi();
 }
@@ -3391,6 +3421,7 @@ function sizeOverlayTo(cssW, cssH){
 function syncOverlay(){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!src) return;
+  const isConfig = state.mode === 'CONFIG';
   const rect = src.getBoundingClientRect();
   const parentRect = els.viewer.getBoundingClientRect();
   const left = rect.left - parentRect.left + els.viewer.scrollLeft;
@@ -3411,7 +3442,7 @@ function syncOverlay(){
   };
   state.overlayPinned = state.overlayMetrics.pin;
   updateOverlayHud();
-  if(state.overlayPinned && state.pendingSelection && !state.pendingSelection.active && !applyingPendingSelection){
+  if(isConfig && state.overlayPinned && state.pendingSelection && !state.pendingSelection.active && !applyingPendingSelection){
     const pending = state.pendingSelection;
     state.pendingSelection = null;
     if(runDiagnostics){
@@ -3677,6 +3708,7 @@ function getScaleFactors(){
 let drawing = false, start = null, startCss = null, applyingPendingSelection = false;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
+  if(state.mode !== 'CONFIG') return;
   e.preventDefault();
   syncOverlay();
   const rect = els.overlayCanvas.getBoundingClientRect();
@@ -3693,6 +3725,7 @@ els.overlayCanvas.addEventListener('pointerdown', e => {
 }, { passive: false });
 
 els.overlayCanvas.addEventListener('pointermove', e => {
+  if(state.mode !== 'CONFIG') return;
   if(state.pendingSelection && state.pendingSelection.active && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
     state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -3727,6 +3760,7 @@ els.overlayCanvas.addEventListener('pointermove', e => {
 }, { passive: false });
 
 async function finalizeSelection(e) {
+  if(state.mode !== 'CONFIG') return;
   if(state.pendingSelection && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
     state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -4723,6 +4757,7 @@ els.exportMissingBtn?.addEventListener('click', ()=>{
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
   compileDocument(state.currentFileId);
+  activateRunMode({ clearDoc: true });
   els.wizardSection.style.display = 'none';
   els.app.style.display = 'block';
   showTab('extracted-data');
