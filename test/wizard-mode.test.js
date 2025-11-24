@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { enterRunModeState, enterConfigModeState, clearTransientState, createRunLoopGuard, createRunDiagnostics, runKeyForFile } = require('../tools/wizard-mode.js');
+const { enterRunModeState, enterConfigModeState, clearTransientState, createRunLoopGuard, createRunDiagnostics, runKeyForFile, WizardMode, createModeController } = require('../tools/wizard-mode.js');
 
 function buildState(){
   return {
@@ -42,7 +42,7 @@ function buildState(){
 }
 
 const runState = enterRunModeState(buildState());
-assert.strictEqual(runState.mode, 'RUN');
+assert.strictEqual(runState.mode, WizardMode.RUN);
 assert.strictEqual(runState.stepIdx, 0);
 assert.deepStrictEqual(runState.steps, []);
 assert.strictEqual(runState.selectionPx, null);
@@ -65,7 +65,7 @@ assert.strictEqual(runState.overlayPinned, false);
 assert.deepStrictEqual(runState.profile, { keep: 'me' });
 
 const cfgState = enterConfigModeState(buildState());
-assert.strictEqual(cfgState.mode, 'CONFIG');
+assert.strictEqual(cfgState.mode, WizardMode.CONFIG);
 assert.strictEqual(cfgState.stepIdx, 0);
 assert.deepStrictEqual(cfgState.steps, []);
 assert.strictEqual(cfgState.pendingSelection, null);
@@ -77,7 +77,7 @@ assert.strictEqual(cfgState.numPages, 0);
 assert.deepStrictEqual(cfgState.viewport, { w:0, h:0, scale:1 });
 
 const cleared = clearTransientState(buildState());
-assert.strictEqual(cleared.mode, 'CONFIG');
+assert.strictEqual(cleared.mode, WizardMode.CONFIG);
 assert.strictEqual(cleared.stepIdx, 0);
 assert.strictEqual(cleared.snappedCss, null);
 assert.deepStrictEqual(cleared.pageOffsets, []);
@@ -114,5 +114,17 @@ if(guard2.start(keyA)) diag2.startExtraction(keyA);
 if(guard2.start(keyA)) diag2.startExtraction(keyA);
 guard2.finish(keyA);
 assert.strictEqual(diag2.stats().extractionStarts[keyA], 1);
+
+const controller = createModeController({ warn:()=>{} });
+assert.strictEqual(controller.getMode(), WizardMode.CONFIG);
+controller.setMode(WizardMode.RUN);
+assert.strictEqual(controller.isRun(), true);
+assert.strictEqual(controller.guardInteractive('overlay'), true, 'overlay guard should block in RUN');
+let calls = 0;
+controller.trackRun('dup', ()=>{ calls += 1; });
+controller.trackRun('dup', ()=>{ calls += 1; });
+assert.strictEqual(calls, 1, 'trackRun should block duplicates');
+controller.setMode(WizardMode.CONFIG);
+assert.strictEqual(controller.guardInteractive('overlay'), false, 'guard should allow in CONFIG');
 
 console.log('Wizard mode tests passed.');
