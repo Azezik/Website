@@ -167,6 +167,7 @@ let state = {
 };
 
 const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
+const runDiagnostics = modeHelpers?.createRunDiagnostics ? modeHelpers.createRunDiagnostics() : null;
 const runLoopGuard = modeHelpers?.createRunLoopGuard ? modeHelpers.createRunLoopGuard() : (()=>{
   const active = new Set();
   return {
@@ -3410,9 +3411,17 @@ function syncOverlay(){
   };
   state.overlayPinned = state.overlayMetrics.pin;
   updateOverlayHud();
-  if(state.overlayPinned && state.pendingSelection && !state.pendingSelection.active){
-    applySelectionFromCss(state.pendingSelection.startCss, state.pendingSelection.endCss);
+  if(state.overlayPinned && state.pendingSelection && !state.pendingSelection.active && !applyingPendingSelection){
+    const pending = state.pendingSelection;
     state.pendingSelection = null;
+    if(runDiagnostics){
+      if(runDiagnostics.shouldThrottleModeSync('pendingSelection', 3)) return;
+      runDiagnostics.noteModeSync('pendingSelection');
+    }
+    applyingPendingSelection = true;
+    applySelectionFromCss(pending.startCss, pending.endCss, { skipDraw:true });
+    applyingPendingSelection = false;
+    drawOverlay();
   }
 }
 
@@ -3439,7 +3448,7 @@ function updateOverlayHud(){
   els.overlayHud.textContent = `pin:${m.pin?1:0} css:${sn(m.cssW)}×${sn(m.cssH)} px:${sn(m.pxW)}×${sn(m.pxH)} dpr:${sn(m.dpr)}${boxCss}${boxPx}`;
 }
 
-function applySelectionFromCss(startCss, endCss){
+function applySelectionFromCss(startCss, endCss, opts={}){
   const { scaleX, scaleY } = getScaleFactors();
   const startPx = { x:startCss.x*scaleX, y:startCss.y*scaleY };
   const endPx = { x:endCss.x*scaleX, y:endCss.y*scaleY };
@@ -3462,7 +3471,9 @@ function applySelectionFromCss(startCss, endCss){
   };
   state.selectionCss = boxCss;
   state.selectionPx = boxPx;
-  drawOverlay();
+  if(!opts.skipDraw){
+    drawOverlay();
+  }
   finalizeSelection();
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
@@ -3663,7 +3674,7 @@ function getScaleFactors(){
 }
 
 /* --------------------- Overlay / Drawing Box --------------------- */
-let drawing = false, start = null, startCss = null;
+let drawing = false, start = null, startCss = null, applyingPendingSelection = false;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
   e.preventDefault();
@@ -4726,48 +4737,54 @@ async function autoExtractFileWithProfile(file, profile){
     console.warn('Duplicate run detected; skipping auto extraction for', guardKey);
     return;
   }
-  try {
-  state.mode = 'RUN';
-  state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
-  hydrateFingerprintsFromProfile(state.profile);
-  const activeProfile = state.profile || profile || { fields: [] };
-  await openFile(file);
-  for(const spec of (activeProfile.fields || [])){
-    if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
-      state.pageNum = clamp(spec.page+1, 1, state.numPages);
-      state.viewport = state.pageViewports[state.pageNum-1];
-      updatePageIndicator();
-      els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
-    }
-    const tokens = await ensureTokensForPage(state.pageNum);
-    const fieldSpec = {
-      fieldKey: spec.fieldKey,
-      regex: spec.regex,
-      landmark: spec.landmark,
-      bbox: spec.bbox,
-      page: spec.page,
-      type: spec.type,
-      anchorMetrics: spec.anchorMetrics || null
-    };
-    state.snappedPx = null; state.snappedText = '';
-    const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
-    if(value){
-      const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
-      const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-      const arr = rawStore.get(state.currentFileId);
-      let conf = confidence;
-      const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
-      if(dup) conf *= 0.5;
-      const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
-      rawStore.upsert(state.currentFileId, rec);
-    }
-    if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
+  if(runDiagnostics && guardStarted){
+    runDiagnostics.startExtraction(guardKey);
   }
-  await ensureTokensForPage(state.pageNum);
-  const lineItems = await extractLineItems(activeProfile);
-  compileDocument(state.currentFileId, lineItems);
+  try {
+    state.mode = 'RUN';
+    state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
+    hydrateFingerprintsFromProfile(state.profile);
+    const activeProfile = state.profile || profile || { fields: [] };
+    await openFile(file);
+    for(const spec of (activeProfile.fields || [])){
+      if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
+        state.pageNum = clamp(spec.page+1, 1, state.numPages);
+        state.viewport = state.pageViewports[state.pageNum-1];
+        updatePageIndicator();
+        els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
+      }
+      const tokens = await ensureTokensForPage(state.pageNum);
+      const fieldSpec = {
+        fieldKey: spec.fieldKey,
+        regex: spec.regex,
+        landmark: spec.landmark,
+        bbox: spec.bbox,
+        page: spec.page,
+        type: spec.type,
+        anchorMetrics: spec.anchorMetrics || null
+      };
+      state.snappedPx = null; state.snappedText = '';
+      const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
+      if(value){
+        const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
+        const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
+        const arr = rawStore.get(state.currentFileId);
+        let conf = confidence;
+        const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
+        if(dup) conf *= 0.5;
+        const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
+        rawStore.upsert(state.currentFileId, rec);
+      }
+      if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
+    }
+    await ensureTokensForPage(state.pageNum);
+    const lineItems = await extractLineItems(activeProfile);
+    compileDocument(state.currentFileId, lineItems);
   } finally {
+    if(runDiagnostics && guardStarted){
+      runDiagnostics.finishExtraction(guardKey);
+    }
     if(runLoopGuard?.finish && guardStarted){
       runLoopGuard.finish(guardKey);
     }

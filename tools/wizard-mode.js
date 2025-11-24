@@ -68,5 +68,46 @@
     };
   }
 
-  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, runKeyForFile };
+  function createRunDiagnostics(){
+    const extractionStarts = new Map();
+    const extractionFinishes = new Map();
+    const modeSyncCounts = new Map();
+    return {
+      startExtraction(key){
+        if(!key) return 0;
+        const next = (extractionStarts.get(key) || 0) + 1;
+        extractionStarts.set(key, next);
+        return next;
+      },
+      finishExtraction(key){
+        if(!key) return 0;
+        const next = (extractionFinishes.get(key) || 0) + 1;
+        extractionFinishes.set(key, next);
+        return next;
+      },
+      noteModeSync(label){
+        const next = (modeSyncCounts.get(label) || 0) + 1;
+        modeSyncCounts.set(label, next);
+        return next;
+      },
+      shouldThrottleModeSync(label, limit=5){
+        return (modeSyncCounts.get(label) || 0) >= limit;
+      },
+      reset(){
+        extractionStarts.clear();
+        extractionFinishes.clear();
+        modeSyncCounts.clear();
+      },
+      stats(){
+        const obj = m => Object.fromEntries(Array.from(m.entries()));
+        return {
+          extractionStarts: obj(extractionStarts),
+          extractionFinishes: obj(extractionFinishes),
+          modeSyncCounts: obj(modeSyncCounts)
+        };
+      }
+    };
+  }
+
+  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, createRunDiagnostics, runKeyForFile };
 });
