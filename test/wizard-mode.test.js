@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { enterRunModeState, enterConfigModeState, clearTransientState, createRunLoopGuard, runKeyForFile } = require('../tools/wizard-mode.js');
+const { enterRunModeState, enterConfigModeState, clearTransientState, createRunLoopGuard, createRunDiagnostics, runKeyForFile } = require('../tools/wizard-mode.js');
 
 function buildState(){
   return {
@@ -66,5 +66,24 @@ guard.finish(keyB);
 
 const fakeFile = { name:'demo.pdf', size: 1234, lastModified: 1700000000000 };
 assert.strictEqual(runKeyForFile(fakeFile), 'demo.pdf::1234::1700000000000');
+
+const diag = createRunDiagnostics();
+diag.startExtraction(keyA);
+diag.startExtraction(keyA);
+diag.finishExtraction(keyA);
+diag.noteModeSync('pendingSelection');
+diag.noteModeSync('pendingSelection');
+assert.strictEqual(diag.stats().extractionStarts[keyA], 2);
+assert.strictEqual(diag.stats().extractionFinishes[keyA], 1);
+assert.strictEqual(diag.shouldThrottleModeSync('pendingSelection', 2), true);
+diag.reset();
+assert.deepStrictEqual(diag.stats(), { extractionStarts:{}, extractionFinishes:{}, modeSyncCounts:{} });
+
+const guard2 = createRunLoopGuard();
+const diag2 = createRunDiagnostics();
+if(guard2.start(keyA)) diag2.startExtraction(keyA);
+if(guard2.start(keyA)) diag2.startExtraction(keyA);
+guard2.finish(keyA);
+assert.strictEqual(diag2.stats().extractionStarts[keyA], 1);
 
 console.log('Wizard mode tests passed.');
