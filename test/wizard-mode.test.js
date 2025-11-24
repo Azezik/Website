@@ -15,11 +15,23 @@ function buildState(){
     matchPoints: [1,2],
     overlayMetrics: { foo:'bar' },
     overlayPinned: true,
+    pdf: { doc:'sample' },
+    isImage: true,
+    pageNum: 3,
+    numPages: 6,
+    viewport: { w: 100, h: 200, scale: 2 },
     pageOffsets: [1],
     pageViewports: [2],
     pageRenderPromises: [Promise.resolve()],
     pageRenderReady: [true],
     pageSnapshots: { a:1 },
+    grayCanvases: { 1: {} },
+    telemetry: [{ stage: 'seen' }],
+    currentTraceId: 'trace-1',
+    lastOcrCropPx: { w:1 },
+    lastOcrCropCss: { h:2 },
+    cropAudits: [1,2],
+    cropHashes: { h:1 },
     tokensByPage: { 1:[{text:'a'}] },
     currentLineItems: [{ id:1 }],
     currentFileId: 'file',
@@ -35,6 +47,18 @@ assert.strictEqual(runState.stepIdx, 0);
 assert.deepStrictEqual(runState.steps, []);
 assert.strictEqual(runState.selectionPx, null);
 assert.strictEqual(runState.snappedText, '');
+assert.strictEqual(runState.pdf, null);
+assert.strictEqual(runState.isImage, false);
+assert.strictEqual(runState.pageNum, 1);
+assert.strictEqual(runState.numPages, 0);
+assert.deepStrictEqual(runState.viewport, { w:0, h:0, scale:1 });
+assert.deepStrictEqual(runState.grayCanvases, {});
+assert.deepStrictEqual(runState.telemetry, []);
+assert.strictEqual(runState.currentTraceId, null);
+assert.strictEqual(runState.lastOcrCropPx, null);
+assert.strictEqual(runState.lastOcrCropCss, null);
+assert.deepStrictEqual(runState.cropAudits, []);
+assert.deepStrictEqual(runState.cropHashes, {});
 assert.deepStrictEqual(runState.tokensByPage, {});
 assert.strictEqual(runState.currentFileId, '');
 assert.strictEqual(runState.overlayPinned, false);
@@ -46,6 +70,11 @@ assert.strictEqual(cfgState.stepIdx, 0);
 assert.deepStrictEqual(cfgState.steps, []);
 assert.strictEqual(cfgState.pendingSelection, null);
 assert.strictEqual(cfgState.currentFileName, '');
+assert.strictEqual(cfgState.pdf, null);
+assert.strictEqual(cfgState.isImage, false);
+assert.strictEqual(cfgState.pageNum, 1);
+assert.strictEqual(cfgState.numPages, 0);
+assert.deepStrictEqual(cfgState.viewport, { w:0, h:0, scale:1 });
 
 const cleared = clearTransientState(buildState());
 assert.strictEqual(cleared.mode, 'CONFIG');
