@@ -5,6 +5,7 @@
     root.WizardMode = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function(){
+  const WizardMode = Object.freeze({ CONFIG: 'CONFIG', RUN: 'RUN' });
   function clearTransientState(state){
     if(!state) return state;
     state.stepIdx = 0;
@@ -45,13 +46,13 @@
 
   function enterRunModeState(state){
     clearTransientState(state);
-    if(state) state.mode = 'RUN';
+    if(state) state.mode = WizardMode.RUN;
     return state;
   }
 
   function enterConfigModeState(state){
     clearTransientState(state);
-    if(state) state.mode = 'CONFIG';
+    if(state) state.mode = WizardMode.CONFIG;
     return state;
   }
 
@@ -121,5 +122,39 @@
     };
   }
 
-  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, createRunDiagnostics, runKeyForFile };
+  function createModeController(logger = console){
+    const guard = createRunLoopGuard();
+    let mode = WizardMode.CONFIG;
+    return {
+      WizardMode,
+      setMode(next){ mode = next === WizardMode.RUN ? WizardMode.RUN : WizardMode.CONFIG; },
+      getMode(){ return mode; },
+      isRun(){ return mode === WizardMode.RUN; },
+      guardInteractive(label){
+        if(mode !== WizardMode.RUN) return false;
+        if(logger && typeof logger.warn === 'function'){
+          logger.warn(`[run-mode] ${label} invoked while in RUN mode; skipping.`);
+        }
+        return true;
+      },
+      trackRun(fileKey, work){
+        if(!guard.start(fileKey)){
+          if(logger && typeof logger.warn === 'function'){
+            logger.warn(`Duplicate run blocked for ${fileKey}`);
+          }
+          return Promise.resolve();
+        }
+        const finish = ()=>guard.finish(fileKey);
+        try {
+          const res = work();
+          return Promise.resolve(res).finally(finish);
+        } catch(err){
+          finish();
+          throw err;
+        }
+      }
+    };
+  }
+
+  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, createRunDiagnostics, runKeyForFile, WizardMode, createModeController };
 });

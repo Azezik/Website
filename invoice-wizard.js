@@ -113,6 +113,36 @@ const defaultWizardSubhead = els.wizardSubhead?.textContent || '';
 const runWizardTitle = 'Wizard Run Mode';
 const runWizardSubhead = 'Drop a document to extract using the saved wizard.';
 
+const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
+const ModeEnum = modeHelpers?.WizardMode || { CONFIG:'CONFIG', RUN:'RUN' };
+const modeController = modeHelpers?.createModeController ? modeHelpers.createModeController(console) : null;
+const runDiagnostics = modeHelpers?.createRunDiagnostics ? modeHelpers.createRunDiagnostics() : null;
+const runLoopGuard = modeHelpers?.createRunLoopGuard ? modeHelpers.createRunLoopGuard() : (()=>{
+  const active = new Set();
+  return {
+    start(key){
+      if(!key) return true;
+      if(active.has(key)) return false;
+      active.add(key);
+      return true;
+    },
+    finish(key){ if(!key) return; active.delete(key); }
+  };
+})();
+
+function isConfigMode(){ return state.mode === ModeEnum.CONFIG; }
+function isRunMode(){ return state.mode === ModeEnum.RUN; }
+
+function guardInteractive(label){
+  const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
+  if(blocked) return true;
+  if(isRunMode()){
+    console.warn(`[run-mode] ${label} called during RUN mode; skipping.`);
+    return true;
+  }
+  return false;
+}
+
 function showTab(id){
   [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
@@ -125,7 +155,7 @@ if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(locat
 let state = {
   username: null,
   docType: 'invoice',
-  mode: 'CONFIG',
+  mode: ModeEnum.CONFIG,
   modes: { rawData: false },
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
@@ -165,21 +195,6 @@ let state = {
   lineLayout: null,
   debugLineAnchors: [],
 };
-
-const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
-const runDiagnostics = modeHelpers?.createRunDiagnostics ? modeHelpers.createRunDiagnostics() : null;
-const runLoopGuard = modeHelpers?.createRunLoopGuard ? modeHelpers.createRunLoopGuard() : (()=>{
-  const active = new Set();
-  return {
-    start(key){
-      if(!key) return true;
-      if(active.has(key)) return false;
-      active.add(key);
-      return true;
-    },
-    finish(key){ if(!key) return; active.delete(key); }
-  };
-})();
 
 function runKeyForFile(file){
   if(modeHelpers?.runKeyForFile) return modeHelpers.runKeyForFile(file);
@@ -227,26 +242,31 @@ function resetDocArtifacts(){
 }
 
 function syncModeUi(){
-  const isConfig = state.mode === 'CONFIG';
+  const isConfig = isConfigMode();
   if(els.promptBar){ els.promptBar.style.display = isConfig ? 'flex' : 'none'; }
   [els.backBtn, els.skipBtn, els.confirmBtn].forEach(btn=>{ if(btn) btn.style.display = isConfig ? '' : 'none'; });
   if(els.wizardTitle){ els.wizardTitle.textContent = isConfig ? defaultWizardTitle : runWizardTitle; }
   if(els.wizardSubhead){ els.wizardSubhead.textContent = isConfig ? defaultWizardSubhead : runWizardSubhead; }
 }
 
+function setWizardMode(nextMode){
+  const normalized = nextMode === ModeEnum.RUN ? ModeEnum.RUN : ModeEnum.CONFIG;
+  state.mode = normalized;
+  modeController?.setMode?.(normalized);
+  syncModeUi();
+}
+
 function activateRunMode(opts = {}){
   clearTransientStateLocal();
-  state.mode = 'RUN';
+  setWizardMode(ModeEnum.RUN);
   if(opts.clearDoc !== false) resetDocArtifacts();
-  syncModeUi();
 }
 
 function activateConfigMode(){
   clearTransientStateLocal();
-  state.mode = 'CONFIG';
+  setWizardMode(ModeEnum.CONFIG);
   resetDocArtifacts();
   initStepsFromProfile();
-  syncModeUi();
 }
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -1107,7 +1127,7 @@ function tokensInBox(tokens, box){
     const cx = t.x + t.w/2;
     if(cx < box.x || cx > box.x + box.w) return false;
     const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
-    const minOverlap = state.mode === 'CONFIG' ? 0.5 : 0.7;
+    const minOverlap = isConfigMode() ? 0.5 : 0.7;
     if(overlapY / t.h < minOverlap) return false;
     return true;
   }).sort((a,b)=>{
@@ -1131,7 +1151,7 @@ function snapToLine(tokens, hintPx, marginPx=6){
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
   let finalBox = expanded;
-  if(state.mode === 'CONFIG' && hintPx){
+  if(isConfigMode() && hintPx){
     const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
     const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
     if(needsWidth || needsHeight){
@@ -2298,7 +2318,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageCanvasSize(fieldSpec.page || state.pageNum || 1);
   }
-  const enforceAnchors = state.mode === 'RUN' && !!fieldSpec.anchorMetrics;
+  const enforceAnchors = isRunMode() && !!fieldSpec.anchorMetrics;
   const anchorMatchesCandidate = cand => {
     if(!enforceAnchors) return true;
     if(!cand || !cand.boxPx) return false;
@@ -2307,7 +2327,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
 
   if(state.modes.rawData){
     let boxPx = null;
-    if(state.mode === 'CONFIG' && state.snappedPx){
+    if(isConfigMode() && state.snappedPx){
       boxPx = state.snappedPx;
       traceEvent(spanKey,'selection.captured',{ boxPx });
     } else if(fieldSpec.bbox){
@@ -2341,7 +2361,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     return result;
   }
 
-  const isConfigStatic = state.mode === 'CONFIG' && ftype === 'static';
+  const isConfigStatic = isConfigMode() && ftype === 'static';
   if(isConfigStatic){
     const selectionBox = state.selectionPx || state.snappedPx || null;
     let boxPx = selectionBox;
@@ -2398,7 +2418,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
-    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: state.mode === 'CONFIG' ? 0.5 : 0.7 };
+    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: isConfigMode() ? 0.5 : 0.7 };
     const assembled = assembler ? assembler(assembleOpts) : null;
     const hits = assembled?.hits || tokensInBox(tokens, searchBox);
     const lines = assembled?.lines || groupIntoLines(hits);
@@ -2465,7 +2485,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(firstAttempt && firstAttempt.cleanedOk){
       result = firstAttempt; method='bbox';
     } else {
-      const pads = state.mode==='CONFIG' ? [4] : [4,8,12];
+    const pads = isConfigMode() ? [4] : [4,8,12];
       for(const pad of pads){
         const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
         const r = await attempt(search);
@@ -2932,7 +2952,7 @@ async function extractLineItems(profile){
     const guardMatch = cleaned => cleaned && guardWordsBase.has(cleaned);
 
     const applyAnchorGuard = (desc, tokList=[], pageNum=page) => {
-      if(state.mode !== 'RUN') return { tokens: tokList, bandTokens: tokList };
+      if(!isRunMode()) return { tokens: tokList, bandTokens: tokList };
       if(desc.sourcePage && desc.sourcePage !== pageNum) return { tokens: tokList, bandTokens: tokList };
       const saved = desc.anchorSampleMetrics || (tableHints.rowAnchor?.fieldKey === desc.fieldKey ? tableHints.rowAnchor.metrics : null);
       if(!saved) return { tokens: tokList, bandTokens: tokList };
@@ -3408,6 +3428,7 @@ const overlayCtx = els.overlayCanvas.getContext('2d');
 const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/100 : 'err';
 
 function sizeOverlayTo(cssW, cssH){
+  if(guardInteractive('overlay.size')) return;
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   const pxW = src?.width || Math.round(cssW * (window.devicePixelRatio || 1));
   const pxH = src?.height || Math.round(cssH * (window.devicePixelRatio || 1));
@@ -3419,9 +3440,10 @@ function sizeOverlayTo(cssW, cssH){
 }
 
 function syncOverlay(){
+  if(guardInteractive('overlay.sync')) return;
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!src) return;
-  const isConfig = state.mode === 'CONFIG';
+  const isConfig = isConfigMode();
   const rect = src.getBoundingClientRect();
   const parentRect = els.viewer.getBoundingClientRect();
   const left = rect.left - parentRect.left + els.viewer.scrollLeft;
@@ -3585,6 +3607,96 @@ function cleanupDoc(){
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
+
+function loadRunImageFromBuffer(arrayBuffer){
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([arrayBuffer]);
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 980 / img.naturalWidth);
+      const width = img.naturalWidth * scale;
+      const height = img.naturalHeight * scale;
+      URL.revokeObjectURL(url);
+      resolve({ width, height, scale });
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    img.src = url;
+  });
+}
+
+async function prepareRunDocument(file){
+  if(!(file instanceof Blob)){
+    console.error('prepareRunDocument called with a non-Blob:', file);
+    alert('Could not open file (unexpected type). Try selecting the file again.');
+    return null;
+  }
+  cleanupDoc();
+  state.grayCanvases = {};
+  state.matchPoints = [];
+  state.telemetry = [];
+  state.currentLineItems = [];
+  state.lineLayout = null;
+  state.pageSnapshots = {};
+  state.pageNum = 1;
+  state.numPages = 0;
+  state.viewport = { w:0, h:0, scale:1 };
+  const arrayBuffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  state.currentFileName = file.name || 'untitled';
+  state.currentFileId = hashHex;
+  fileMeta[state.currentFileId] = { fileName: state.currentFileName };
+  rawStore.clear(state.currentFileId);
+
+  const isImage = /^image\//.test(file.type || '');
+  state.isImage = isImage;
+  if(isImage){
+    try {
+      const imgMeta = await loadRunImageFromBuffer(arrayBuffer);
+      state.viewport = { w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
+      state.pageViewports[0] = { width: imgMeta.width, height: imgMeta.height, w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
+      state.pageOffsets[0] = 0;
+      state.pageRenderReady[0] = true;
+      state.pageRenderPromises[0] = Promise.resolve();
+      state.tokensByPage[1] = [];
+      state.numPages = 1;
+      return { type:'image' };
+    } catch(err){
+      console.error('Image load failed in run mode', err);
+      alert('Could not load image for extraction.');
+      return null;
+    }
+  }
+
+  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+  state.pdf = await loadingTask.promise;
+  const scale = 1.5;
+  let totalH = 0;
+  for(let i=1; i<=state.pdf.numPages; i++){
+    const page = await state.pdf.getPage(i);
+    const vp = page.getViewport({ scale });
+    vp.w = vp.width; vp.h = vp.height; vp.pageNumber = i;
+    state.pageViewports[i-1] = vp;
+    state.pageOffsets[i-1] = totalH;
+    const tokens = await readTokensForPage(page, vp);
+    tokens.forEach(t => { t.page = i; });
+    state.tokensByPage[i] = tokens;
+    if(isRunMode()) console.log(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
+    totalH += vp.height;
+  }
+  state.pageRenderReady = state.pageViewports.map(()=>true);
+  state.pageRenderPromises = state.pageViewports.map(()=>Promise.resolve());
+  state.numPages = state.pdf.numPages;
+  state.viewport = state.pageViewports[0] || { w:0, h:0, scale };
+  state.overlayPinned = false;
+  return { type:'pdf' };
+}
+
 async function renderImage(url){
   state.overlayPinned = false;
   const img = els.imgCanvas;
@@ -3652,6 +3764,7 @@ async function renderAllPages(){
 }
 
 window.addEventListener('resize', () => {
+  if(guardInteractive('overlay.resize')) return;
   state.overlayPinned = false;
   const base = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!base) return;
@@ -3659,6 +3772,23 @@ window.addEventListener('resize', () => {
   sizeOverlayTo(rect.width, rect.height);
   drawOverlay();
 });
+
+async function readTokensForPage(pageObj, vp){
+  const tokens = [];
+  try {
+    const content = await pageObj.getTextContent();
+    for(const item of content.items){
+      const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
+      const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
+      const raw = item.str;
+      const { text: corrected, corrections } = applyOcrCorrections(raw);
+      tokens.push({ raw, corrected, text: corrected, correctionsApplied: corrections, confidence: 1, x, y: yTop - h, w, h, page: pageObj.pageNumber });
+    }
+  } catch(err){
+    console.warn('PDF textContent failed', err);
+  }
+  return tokens;
+}
 
 /* ----------------------- Text Extraction ------------------------- */
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
@@ -3672,18 +3802,8 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   if(!pageObj) pageObj = await state.pdf.getPage(pageNum);
   if(!vp) vp = state.pageViewports[pageNum-1];
 
-  try {
-    const content = await pageObj.getTextContent();
-    for(const item of content.items){
-      const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
-      const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
-      const raw = item.str;
-      const { text: corrected, corrections } = applyOcrCorrections(raw);
-      tokens.push({ raw, corrected, text: corrected, correctionsApplied: corrections, confidence: 1, x, y: yTop - h, w, h, page: pageNum });
-    }
-  } catch(err){
-    console.warn('PDF textContent failed', err);
-  }
+  tokens = await readTokensForPage(pageObj, vp);
+  tokens.forEach(t => { t.page = pageNum; });
   state.tokensByPage[pageNum] = tokens;
   return tokens;
 }
@@ -3708,7 +3828,7 @@ function getScaleFactors(){
 let drawing = false, start = null, startCss = null, applyingPendingSelection = false;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
-  if(state.mode !== 'CONFIG') return;
+  if(guardInteractive('overlay.pointerdown')) return;
   e.preventDefault();
   syncOverlay();
   const rect = els.overlayCanvas.getBoundingClientRect();
@@ -3725,7 +3845,7 @@ els.overlayCanvas.addEventListener('pointerdown', e => {
 }, { passive: false });
 
 els.overlayCanvas.addEventListener('pointermove', e => {
-  if(state.mode !== 'CONFIG') return;
+  if(guardInteractive('overlay.pointermove')) return;
   if(state.pendingSelection && state.pendingSelection.active && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
     state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -3760,7 +3880,7 @@ els.overlayCanvas.addEventListener('pointermove', e => {
 }, { passive: false });
 
 async function finalizeSelection(e) {
-  if(state.mode !== 'CONFIG') return;
+  if(guardInteractive('overlay.pointerup')) return;
   if(state.pendingSelection && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
     state.pendingSelection.endCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -3800,6 +3920,7 @@ els.overlayCanvas.addEventListener('pointerup', e=>finalizeSelection(e), { passi
 els.overlayCanvas.addEventListener('pointercancel', e=>finalizeSelection(e), { passive: false });
 
 els.viewer.addEventListener('scroll', ()=>{
+  if(guardInteractive('viewer.scroll')) return;
   syncOverlay();
   const y = els.viewer.scrollTop;
   let p = 1;
@@ -3813,6 +3934,7 @@ els.viewer.addEventListener('scroll', ()=>{
   }
 });
 function drawOverlay(){
+  if(guardInteractive('overlay.draw')) return;
   syncOverlay();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
@@ -4424,6 +4546,10 @@ function renderSavedFieldsTable(){
 
 let confirmedRenderPending = false;
 function renderConfirmedTables(rec){
+  if(isRunMode()){
+    console.warn('[run-mode] renderConfirmedTables invoked during RUN; skipping RAF update');
+    return;
+  }
   if(confirmedRenderPending) return;
   confirmedRenderPending = true;
   requestAnimationFrame(()=>{
@@ -4593,12 +4719,12 @@ els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
   const f = e.target.files?.[0]; if(!f) return;
-  if(state.mode === 'RUN'){
+  if(isRunMode()){
     activateRunMode({ clearDoc: true });
     els.app.style.display = 'none';
     els.wizardSection.style.display = 'block';
     ensureProfile();
-    await autoExtractFileWithProfile(f, state.profile);
+    await runModeExtractFileWithProfile(f, state.profile);
     renderSavedFieldsTable();
     renderConfirmedTables();
     return;
@@ -4765,7 +4891,7 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
 });
 
 /* ---------------------------- Batch ------------------------------- */
-async function autoExtractFileWithProfile(file, profile){
+async function runModeExtractFileWithProfile(file, profile){
   const guardKey = runKeyForFile(file);
   const guardStarted = runLoopGuard?.start ? runLoopGuard.start(guardKey) : true;
   if(runLoopGuard && !guardStarted){
@@ -4776,19 +4902,20 @@ async function autoExtractFileWithProfile(file, profile){
     runDiagnostics.startExtraction(guardKey);
   }
   try {
-    state.mode = 'RUN';
+    activateRunMode({ clearDoc: true });
+    if(isRunMode()) console.log(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
     hydrateFingerprintsFromProfile(state.profile);
     const activeProfile = state.profile || profile || { fields: [] };
-    await openFile(file);
+    const prepared = await prepareRunDocument(file);
+    if(!prepared){ return; }
+    if(isRunMode()) console.log(`[run-mode] tokens cached for ${state.numPages} page(s)`);
+
     for(const spec of (activeProfile.fields || [])){
-      if(typeof spec.page === 'number' && spec.page+1 !== state.pageNum && !state.isImage && state.pdf){
-        state.pageNum = clamp(spec.page+1, 1, state.numPages);
-        state.viewport = state.pageViewports[state.pageNum-1];
-        updatePageIndicator();
-        els.viewer?.scrollTo(0, state.pageOffsets[state.pageNum-1] || 0);
-      }
-      const tokens = await ensureTokensForPage(state.pageNum);
+      const targetPage = Number.isFinite(spec.page) ? clamp(spec.page + 1, 1, state.numPages || 1) : (state.pageNum || 1);
+      state.pageNum = targetPage;
+      state.viewport = state.pageViewports[targetPage-1] || state.viewport;
+      const tokens = state.tokensByPage[targetPage] || [];
       const fieldSpec = {
         fieldKey: spec.fieldKey,
         regex: spec.regex,
@@ -4801,21 +4928,22 @@ async function autoExtractFileWithProfile(file, profile){
       state.snappedPx = null; state.snappedText = '';
       const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
       if(value){
-        const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        const vp = state.pageViewports[targetPage-1] || state.viewport || {width:1,height:1};
         const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
         const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-        const arr = rawStore.get(state.currentFileId);
+        const arr = rawStore.get(state.currentFileId) || [];
         let conf = confidence;
         const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
         if(dup) conf *= 0.5;
-        const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: state.pageNum, bbox: pct, ts: Date.now() };
+        const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: targetPage, bbox: pct, ts: Date.now() };
         rawStore.upsert(state.currentFileId, rec);
       }
-      if(boxPx){ state.snappedPx = { ...boxPx, page: state.pageNum }; drawOverlay(); }
     }
-    await ensureTokensForPage(state.pageNum);
+    if(isRunMode()) console.log(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
     const lineItems = await extractLineItems(activeProfile);
-    compileDocument(state.currentFileId, lineItems);
+    if(isRunMode()) console.log(`[run-mode] dynamic line items extracted (${lineItems.length})`);
+    const compiled = compileDocument(state.currentFileId, lineItems);
+    if(isRunMode()) console.log(`[run-mode] MasterDB written for ${compiled.fileId}`);
   } finally {
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
@@ -4834,10 +4962,10 @@ async function processBatch(files){
   ensureProfile(); renderSavedFieldsTable();
   const modelId = document.getElementById('model-select')?.value || '';
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
+  const profile = model ? model.profile : state.profile;
 
   for(const f of files){
-    if(model){ await autoExtractFileWithProfile(f, model.profile); }
-    else { await openFile(f); }
+    await runModeExtractFileWithProfile(f, profile);
   }
   els.wizardSection.style.display = 'none';
   els.app.style.display = 'block';
