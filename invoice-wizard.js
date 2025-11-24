@@ -2314,6 +2314,7 @@ function labelValueHeuristic(fieldSpec, tokens){
 async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
+  const runMode = isRunMode();
   let viewportDims = getCanvasDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageCanvasSize(fieldSpec.page || state.pageNum || 1);
@@ -2496,29 +2497,37 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   }
 
   if(!result && ftype==='static' && fieldSpec.landmark && basePx){
-    let m = matchRingLandmark(fieldSpec.landmark, basePx);
-    if(m){
-      const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
-      const r = await attempt(box);
-      if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
-    }
-    if(!result){
+    if(!runMode){
+      let m = matchRingLandmark(fieldSpec.landmark, basePx);
+      if(m){
+        const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+        const r = await attempt(box);
+        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+      }
+      if(!result){
+        const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
+        if(a){
+          const r = await attempt(a.box);
+          if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        }
+      }
+      if(!result){
+        for(const half of ['right','left']){
+          m = matchRingLandmark(fieldSpec.landmark, basePx, half);
+          if(m){
+            const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+            const r = await attempt(box);
+            const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
+            const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
+            if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+          }
+        }
+      }
+    } else {
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
         if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
-      }
-    }
-    if(!result){
-      for(const half of ['right','left']){
-        m = matchRingLandmark(fieldSpec.landmark, basePx, half);
-        if(m){
-          const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
-          const r = await attempt(box);
-          const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
-          const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-          if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
-        }
       }
     }
   }
@@ -2546,10 +2555,33 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const raw = selectionRaw.trim();
     result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
   }
+  const baseConfidence = result?.confidence ?? 0;
+  let landmarkBoost = null;
+  if(runMode && ftype==='static' && fieldSpec.landmark && basePx && RunLandmarkOnce?.maybeBoostWithLandmark){
+    landmarkBoost = RunLandmarkOnce.maybeBoostWithLandmark({
+      fieldConfig: fieldSpec,
+      pageTokens: tokens,
+      baseConfidence,
+      baseBoxPx: basePx,
+      captureFn: box => captureRingLandmark(box, state.pageTransform.rotation),
+      compareFn: (sample, tmpl) => edgeScore(sample, tmpl),
+      resolveBox: () => basePx,
+      low: 0.3,
+      high: 0.8
+    });
+    if(landmarkBoost){
+      result.confidence = landmarkBoost.confidence;
+      if(landmarkBoost.landmarkScore !== null && landmarkBoost.landmarkScore !== undefined && score === null){
+        score = landmarkBoost.landmarkScore;
+        comp = comp || 'ring_once';
+      }
+    }
+  }
   result.method = result.method || method || 'fallback';
   result.score = score;
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
-  if(result.score){ result.confidence = clamp(result.confidence * result.score, 0, 1); }
+  const shouldScaleConfidence = result.score && !(runMode && result.comparator === 'ring_once');
+  if(shouldScaleConfidence){ result.confidence = clamp(result.confidence * result.score, 0, 1); }
   state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence });
   if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
     state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
