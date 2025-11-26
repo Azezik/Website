@@ -3,10 +3,11 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 
-const DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
+let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
+window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
-function staticDebugEnabled(){ return !!DEBUG_STATIC_FIELDS; }
+function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
   const line = `[static-debug] ${message}`;
@@ -86,12 +87,19 @@ const els = {
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
+  staticDebugBtn:  document.getElementById('static-debug-btn'),
   snapshotModeToggle: document.getElementById('snapshot-mode-toggle'),
   uploadBtn:       document.getElementById('upload-btn'),
   resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
   dropzone:        document.getElementById('dropzone'),
   fileInput:       document.getElementById('file-input'),
+  staticDebugModal: document.getElementById('staticDebugModal'),
+  staticDebugClose: document.getElementById('closeStaticDebug'),
+  staticDebugText:  document.getElementById('staticDebugText'),
+  staticDebugRefresh: document.getElementById('refreshStaticDebug'),
+  staticDebugClear: document.getElementById('clearStaticDebug'),
+  staticDebugToggle: document.getElementById('staticDebugToggle'),
 
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
@@ -232,8 +240,44 @@ let state = {
   debugLineAnchors: [],
 };
 
-if(staticDebugEnabled()){
-  window.getStaticDebugLogs = () => staticDebugLogs.slice();
+function normalizeStaticDebugLogs(logs = staticDebugLogs){
+  return logs.map(entry => {
+    if(typeof entry === 'string') return entry;
+    if(entry && typeof entry === 'object'){
+      if(entry.details !== undefined){
+        try { return `${entry.line || ''} ${JSON.stringify(entry.details)}`.trim(); }
+        catch(e){ return entry.line || ''; }
+      }
+      return entry.line || '';
+    }
+    return String(entry ?? '');
+  });
+}
+window.getStaticDebugLogs = () => staticDebugLogs.slice();
+window.clearStaticDebugLogs = () => { staticDebugLogs.length = 0; return []; };
+
+function showStaticDebugModal(){
+  if(!els.staticDebugModal) return;
+  els.staticDebugModal.style.display = 'flex';
+  els.staticDebugModal.classList.add('open');
+  syncStaticDebugToggleUI();
+  renderStaticDebugLogs();
+}
+function hideStaticDebugModal(){
+  if(!els.staticDebugModal) return;
+  els.staticDebugModal.classList.remove('open');
+  els.staticDebugModal.style.display = 'none';
+}
+function renderStaticDebugLogs(){
+  if(!els.staticDebugText) return;
+  const logs = window.getStaticDebugLogs ? window.getStaticDebugLogs() : [];
+  const lines = normalizeStaticDebugLogs(logs).join('\n');
+  els.staticDebugText.value = lines;
+}
+function syncStaticDebugToggleUI(){
+  if(els.staticDebugToggle){
+    els.staticDebugToggle.checked = !!window.DEBUG_STATIC_FIELDS;
+  }
 }
 
 function runKeyForFile(file){
@@ -5105,6 +5149,15 @@ els.configureBtn?.addEventListener('click', ()=>{
   renderSavedFieldsTable();
 });
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
+els.staticDebugBtn?.addEventListener('click', showStaticDebugModal);
+els.staticDebugClose?.addEventListener('click', hideStaticDebugModal);
+els.staticDebugRefresh?.addEventListener('click', renderStaticDebugLogs);
+els.staticDebugClear?.addEventListener('click', ()=>{ window.clearStaticDebugLogs?.(); renderStaticDebugLogs(); });
+els.staticDebugToggle?.addEventListener('change', ()=>{
+  const enabled = !!els.staticDebugToggle.checked;
+  window.DEBUG_STATIC_FIELDS = enabled;
+  DEBUG_STATIC_FIELDS = enabled;
+});
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
@@ -5475,3 +5528,4 @@ renderReports();
 syncRawModeUI();
 initSnapshotMode();
 syncModeUi();
+syncStaticDebugToggleUI();
