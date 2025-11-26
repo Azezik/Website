@@ -3901,7 +3901,7 @@ function getScaleFactors(){
 
 function paintOverlay(ctx, options = {}){
   if(!ctx || !ctx.canvas) return;
-  const { scaleX = 1, scaleY = 1, pageFilter = null, offsetY = 0, includeSelections = true, flags = getOverlayFlags() } = options;
+  const { scaleX = 1, scaleY = 1, pageFilter = null, offsetY = 0, includeSelections = true, flags = getOverlayFlags(), boxSource = 'profile', layoutFirst = true, fileId = state.currentFileId } = options;
   const boxesOn = !!flags.boxes;
   const ringsOn = !!flags.rings;
   const matchesOn = !!flags.matches;
@@ -3911,44 +3911,46 @@ function paintOverlay(ctx, options = {}){
 
   ctx.clearRect(0,0,ctx.canvas.width, ctx.canvas.height);
 
-  const layoutPage = state.lineLayout?.pages?.[targetPage];
-  if(layoutPage && (!pageFilter || targetPage === pageFilter)){
-    const offPx = offsetForPage(targetPage);
-    const xPositionsPx = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
-    const xPositions = xPositionsPx.map(x => x / scaleX);
-    const spanLeft = xPositions[0] ?? 0;
-    const spanRight = xPositions[xPositions.length-1] ?? (ctx.canvas.width / scaleX);
-    const topSrc = layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0));
-    const bottomSrc = layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1));
-    const top = topSrc/scaleY + offPx;
-    const bottom = bottomSrc/scaleY + offPx;
-    ctx.save();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(255,0,255,0.6)';
-    xPositions.forEach(x => {
-      ctx.beginPath();
-      ctx.moveTo(x, top);
-      ctx.lineTo(x, bottom);
-      ctx.stroke();
-    });
-    ctx.strokeStyle = 'rgba(255,0,255,0.6)';
-    layoutPage.rows.forEach(row => {
-      const y = row.y0/scaleY + offPx;
-      ctx.beginPath();
-      ctx.moveTo(spanLeft, y);
-      ctx.lineTo(spanRight, y);
-      ctx.stroke();
-    });
-    const lastRow = layoutPage.rows[layoutPage.rows.length-1];
-    if(lastRow){
-      const yEnd = lastRow.y1/scaleY + offPx;
-      ctx.beginPath();
-      ctx.moveTo(spanLeft, yEnd);
-      ctx.lineTo(spanRight, yEnd);
-      ctx.stroke();
+  const drawLayout = ()=>{
+    const layoutPage = state.lineLayout?.pages?.[targetPage];
+    if(layoutPage && (!pageFilter || targetPage === pageFilter)){
+      const offPx = offsetForPage(targetPage);
+      const xPositionsPx = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
+      const xPositions = xPositionsPx.map(x => x / scaleX);
+      const spanLeft = xPositions[0] ?? 0;
+      const spanRight = xPositions[xPositions.length-1] ?? (ctx.canvas.width / scaleX);
+      const topSrc = layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0));
+      const bottomSrc = layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1));
+      const top = topSrc/scaleY + offPx;
+      const bottom = bottomSrc/scaleY + offPx;
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,0,255,0.6)';
+      xPositions.forEach(x => {
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, bottom);
+        ctx.stroke();
+      });
+      ctx.strokeStyle = 'rgba(255,0,255,0.6)';
+      layoutPage.rows.forEach(row => {
+        const y = row.y0/scaleY + offPx;
+        ctx.beginPath();
+        ctx.moveTo(spanLeft, y);
+        ctx.lineTo(spanRight, y);
+        ctx.stroke();
+      });
+      const lastRow = layoutPage.rows[layoutPage.rows.length-1];
+      if(lastRow){
+        const yEnd = lastRow.y1/scaleY + offPx;
+        ctx.beginPath();
+        ctx.moveTo(spanLeft, yEnd);
+        ctx.lineTo(spanRight, yEnd);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
-    ctx.restore();
-  }
+  };
 
   if(Array.isArray(state.debugLineAnchors) && state.debugLineAnchors.length){
     const anchorPage = pageFilter || state.pageNum;
@@ -3972,20 +3974,27 @@ function paintOverlay(ctx, options = {}){
     ctx.restore();
   }
 
-  if(boxesOn && state.profile?.fields){
-    ctx.strokeStyle = 'rgba(255,0,0,0.6)';
+  const drawBoxes = ()=>{
+    if(!boxesOn) return;
+    const extractionBoxes = boxSource === 'extraction';
+    const stroke = extractionBoxes ? '#2ee6a6' : 'rgba(255,0,0,0.6)';
+    ctx.strokeStyle = stroke;
     ctx.lineWidth = 1;
-    for(const f of state.profile.fields){
-      if(pageFilter && f.page !== pageFilter) continue;
-      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
-      if(!nb) continue;
-      const vp = state.pageViewports[f.page-1];
+    const entries = extractionBoxes ? (rawStore.get(fileId) || []) : (state.profile?.fields || []);
+    for(const f of entries){
+      const fPage = f.page || f.pageNumber || 1;
+      if(pageFilter && fPage !== pageFilter) continue;
+      const nbRaw = f.normBox || f.nb || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null) || (f.bbox ? { x0n:f.bbox.x0, y0n:f.bbox.y0, wN:f.bbox.x1 - f.bbox.x0, hN:f.bbox.y1 - f.bbox.y0 } : null);
+      if(!nbRaw) continue;
+      const nb = { x0n: nbRaw.x0n, y0n: nbRaw.y0n, wN: nbRaw.wN, hN: nbRaw.hN };
+      if([nb.x0n, nb.y0n, nb.wN, nb.hN].some(v => typeof v !== 'number' || !Number.isFinite(v))) continue;
+      const vp = state.pageViewports[fPage-1];
       if(!vp) continue;
       const dpr = window.devicePixelRatio || 1;
-      const W = Math.round(vp.width * dpr);
-      const H = Math.round(vp.height * dpr);
+      const W = Math.round((vp.width ?? vp.w) * dpr);
+      const H = Math.round((vp.height ?? vp.h) * dpr);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:fPage });
       const box = {
         x: boxPx.x / scaleX,
         y: boxPx.y / scaleY,
@@ -3996,7 +4005,10 @@ function paintOverlay(ctx, options = {}){
       const off = offsetForPage(box.page);
       ctx.strokeRect(box.x, box.y + off, box.w, box.h);
     }
-  }
+  };
+
+  if(layoutFirst){ drawLayout(); drawBoxes(); }
+  else { drawBoxes(); drawLayout(); }
 
   if(ringsOn && state.profile?.fields){
     ctx.strokeStyle = 'rgba(255,105,180,0.7)';
@@ -4325,16 +4337,41 @@ function createThumbFromCanvas(canvas, maxW = SNAPSHOT_THUMB_MAX_W){
   return c.toDataURL('image/png');
 }
 
-async function capturePageSnapshot(pageNumber, overlayFlags){
-  const pageIdx = (pageNumber || 1) - 1;
+async function getSnapshotPageBitmap(pageIdx){
+  const pageNumber = pageIdx + 1;
   const ready = state.pageRenderPromises[pageIdx];
   if(ready) await ready.catch(()=>{});
   const { canvas: src } = getPdfBitmapCanvas(pageIdx);
-  if(!src) return null;
-  const vp = state.pageViewports[pageIdx] || state.viewport || { width: src.width, height: src.height };
-  const baseW = Math.max(1, Math.round((vp.width ?? vp.w) || src.width));
-  const baseH = Math.max(1, Math.round((vp.height ?? vp.h) || (src.height - (state.pageOffsets[pageIdx]||0))));
+  const viewport = state.pageViewports[pageIdx] || state.viewport || {};
   const pageOffset = state.pageOffsets[pageIdx] || 0;
+  if(src && src.width && src.height){
+    const combined = src === els.pdfCanvas;
+    return { canvas: src, viewport, pageOffset, combined };
+  }
+
+  if(state.pdf){
+    try {
+      const page = await state.pdf.getPage(pageNumber);
+      const vp = state.pageViewports[pageIdx] || page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement('canvas');
+      canvas.width = vp.width;
+      canvas.height = vp.height;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      return { canvas, viewport: vp, pageOffset, combined: false };
+    } catch(err){
+      console.warn('snapshot render failed', err);
+    }
+  }
+  return { canvas:null, viewport:null, pageOffset:0, combined:false };
+}
+
+async function capturePageSnapshot(pageNumber, overlayFlags){
+  const pageIdx = (pageNumber || 1) - 1;
+  const render = await getSnapshotPageBitmap(pageIdx);
+  const { canvas: src, viewport: vp, pageOffset, combined } = render;
+  if(!src || !vp) return null;
+  const baseW = Math.max(1, Math.round((vp.width ?? vp.w) || src.width));
+  const baseH = Math.max(1, Math.round((vp.height ?? vp.h) || src.height));
   let renderW = baseW;
   let renderH = baseH;
   const pixels = renderW * renderH;
@@ -4346,11 +4383,12 @@ async function capturePageSnapshot(pageNumber, overlayFlags){
   const out = document.createElement('canvas');
   out.width = renderW; out.height = renderH;
   const ctx = out.getContext('2d');
-  ctx.drawImage(src, 0, pageOffset, baseW, baseH, 0, 0, renderW, renderH);
+  const srcY = combined ? pageOffset : 0;
+  ctx.drawImage(src, 0, srcY, baseW, baseH, 0, 0, renderW, renderH);
 
   const overlayCanvas = document.createElement('canvas');
   overlayCanvas.width = baseW; overlayCanvas.height = baseH;
-  paintOverlay(overlayCanvas.getContext('2d'), { scaleX:1, scaleY:1, pageFilter: pageNumber, offsetY: pageOffset, includeSelections:false, flags: overlayFlags });
+  paintOverlay(overlayCanvas.getContext('2d'), { scaleX:1, scaleY:1, pageFilter: pageNumber, offsetY: pageOffset, includeSelections:false, flags: overlayFlags, boxSource: 'extraction', layoutFirst: false, fileId: state.currentFileId });
   ctx.drawImage(overlayCanvas, 0, 0, renderW, renderH);
 
   const dataUrl = out.toDataURL('image/png');
