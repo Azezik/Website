@@ -83,6 +83,7 @@
                 <button id="configure-btn" class="btn">Configure Wizard</button>
                 <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
                 <button id="demo-btn" class="btn">Demo Wizard</button>
+                <button id="static-debug-btn" class="btn" type="button">Static Debug Logs</button>
                 <label class="toggle-inline">
                   <input type="checkbox" id="snapshot-mode-toggle" />
                   Snapshot mode
@@ -190,6 +191,26 @@
           <p class="sub">Reports coming soon.</p>
         </section>
       </section>
+
+      <div id="staticDebugModal" class="modal" style="display:none;">
+        <div class="modal-content panel">
+          <div class="modal-header">
+            <h3>Static Debug Logs</h3>
+            <button id="closeStaticDebug" class="btn" type="button">Close</button>
+          </div>
+          <div class="modal-controls">
+            <div class="actions">
+              <button id="refreshStaticDebug" class="btn" type="button">Refresh</button>
+              <button id="clearStaticDebug" class="btn" type="button">Clear logs</button>
+              <label class="toggle-inline">
+                <input type="checkbox" id="staticDebugToggle" />
+                Enable static debug logging
+              </label>
+            </div>
+          </div>
+          <textarea id="staticDebugText" class="code log-viewer" readonly></textarea>
+        </div>
+      </div>
 
       <!-- Wizard -->
       <section id="wizard-section" class="panel" style="display:none">

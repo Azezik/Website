@@ -101,3 +101,11 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 #thumbs img.thumb{ width:80px; height:auto; margin:4px; border:1px solid var(--border); cursor:pointer; }
 #thumbs img.thumb.selected{ border-color:var(--accent); }
 #overlayControls{ margin:8px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+/* Static debug log viewer */
+.modal{ position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:1000; padding:20px; }
+.modal.open{ display:flex; }
+.modal .modal-content{ width:min(960px, 100%); max-height:80vh; overflow:hidden; box-shadow:0 12px 30px rgba(0,0,0,0.4); }
+.modal-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+.modal-controls{ margin-bottom:8px; }
+.log-viewer{ width:100%; min-height:260px; max-height:55vh; background:#0b1111; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:12px; white-space:pre-wrap; overflow:auto; font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
