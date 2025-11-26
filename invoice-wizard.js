@@ -605,8 +605,9 @@ function loadModelById(id){
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
-const toPx = (vp, pctBox) => {
-  const dpr = window.devicePixelRatio || 1;
+const toPx = (vp, pctBox, opts={}) => {
+  const { useDpr=true } = opts || {};
+  const dpr = useDpr ? (window.devicePixelRatio || 1) : 1;
   const w = ((vp.w ?? vp.width) || 1) * dpr;
   const h = ((vp.h ?? vp.height) || 1) * dpr;
   const x = pctBox.x0 * w;
@@ -888,11 +889,12 @@ function validateSelection(sel){
   return { ok:false, reason:'invalid_box_input' };
 }
 
-function applyTransform(boxPx, transform=state.pageTransform){
+function applyTransform(boxPx, transform=state.pageTransform, opts={}){
+  const { useDpr=true } = opts || {};
   const { scale=1, rotation=0 } = transform || {};
   if(scale === 1 && rotation === 0) return { ...boxPx };
   const vp = state.pageViewports[boxPx.page-1] || state.viewport;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = useDpr ? (window.devicePixelRatio || 1) : 1;
   const wPage = ((vp.w ?? vp.width) || 1) * dpr;
   const hPage = ((vp.h ?? vp.height) || 1) * dpr;
   const cx = wPage/2, cy = hPage/2;
@@ -1268,26 +1270,29 @@ function groupIntoLines(tokens, tol=4){
   lines.forEach(L => L.tokens.sort((a,b)=>a.x-b.x));
   return lines;
 }
-function tokensInBox(tokens, box){
+function tokensInBox(tokens, box, opts={}){
+  const { minOverlap } = opts || {};
   return tokens.filter(t => {
     if(t.page !== box.page) return false;
     const cx = t.x + t.w/2;
     if(cx < box.x || cx > box.x + box.w) return false;
     const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
-    const minOverlap = isConfigMode() ? 0.5 : 0.7;
-    if(overlapY / t.h < minOverlap) return false;
+    const needOverlap = typeof minOverlap === 'number'
+      ? minOverlap
+      : (isConfigMode() ? 0.5 : 0.7);
+    if(overlapY / t.h < needOverlap) return false;
     return true;
   }).sort((a,b)=>{
     const ay = a.y + a.h/2, by = b.y + b.h/2;
     return ay === by ? a.x - b.x : ay - by;
   });
 }
-function snapToLine(tokens, hintPx, marginPx=6){
-  const hits = tokensInBox(tokens, hintPx);
+function snapToLine(tokens, hintPx, marginPx=6, opts={}){
+  const hits = tokensInBox(tokens, hintPx, opts);
   if(!hits.length) return { box: hintPx, text: '' };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
   const line = groupIntoLines(tokens, 4).find(L => Math.abs(L.cy - bandCy) <= 4);
-  const lineTokens = line ? tokensInBox(line.tokens, hintPx) : hits;
+  const lineTokens = line ? tokensInBox(line.tokens, hintPx, opts) : hits;
   // Horizontally limit to tokens inside the hint box, but keep full line height
   const left   = Math.min(...hits.map(t => t.x));
   const right  = Math.max(...hits.map(t => t.x + t.w));
@@ -2458,10 +2463,13 @@ function labelValueHeuristic(fieldSpec, tokens){
   return { value, usedBox, confidence };
 }
 
-async function extractFieldValue(fieldSpec, tokens, viewportPx){
+  async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const runMode = isRunMode();
+  const staticRun = runMode && ftype === 'static';
+  const staticPxOpts = staticRun ? { useDpr:false } : undefined;
+  const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   let viewportDims = getCanvasDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageCanvasSize(fieldSpec.page || state.pageNum || 1);
@@ -2476,14 +2484,14 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height, debugCtx);
   };
 
-  if(state.modes.rawData){
+    if(state.modes.rawData){
     let boxPx = null;
     if(isConfigMode() && state.snappedPx){
       boxPx = state.snappedPx;
       traceEvent(spanKey,'selection.captured',{ boxPx });
     } else if(fieldSpec.bbox){
-      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
-      boxPx = applyTransform(raw);
+      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, staticPxOpts);
+      boxPx = applyTransform(raw, undefined, staticPxOpts);
       traceEvent(spanKey,'selection.captured',{ boxPx });
     }
     if(!boxPx){ return { value:'', raw:'', confidence:0, boxPx:null, tokens:[], method:'raw' }; }
@@ -2563,15 +2571,15 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   }
 
   async function attempt(box){
-    const snap = snapToLine(tokens, box);
+    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
     let searchBox = snap.box;
     if(fieldSpec.fieldKey === 'customer_address'){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
-    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: isConfigMode() ? 0.5 : 0.7 };
+    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
     const assembled = assembler ? assembler(assembleOpts) : null;
-    const hits = assembled?.hits || tokensInBox(tokens, searchBox);
+    const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
@@ -2600,6 +2608,10 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
         : null;
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
       const cleanedOk = !!(cleaned.value || cleaned.raw);
+      const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
+      const confidence = fingerprintOk
+        ? baseConf
+        : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
@@ -2610,7 +2622,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
         correctionsApplied: cleaned.correctionsApplied,
         corrections: cleaned.correctionsApplied,
         boxPx: searchBox,
-        confidence: fingerprintOk ? (cleaned.conf || (cleanedOk ? 1 : 0.1)) : 0,
+        confidence,
         tokens: hits,
         cleanedOk,
         fingerprintOk
@@ -2630,7 +2642,11 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
       : null;
     const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-    const cleanedOk = !!sel.cleanedOk && fingerprintOk;
+    const cleanedOk = staticRun ? !!sel.cleanedOk : !!sel.cleanedOk && fingerprintOk;
+    const baseConf = cleaned.conf || (sel.cleanedOk ? 1 : 0.1);
+    const confidence = fingerprintOk
+      ? baseConf
+      : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
     const attemptResult = {
       value: sel.value,
       raw: sel.raw,
@@ -2641,7 +2657,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       correctionsApplied: cleaned.correctionsApplied,
       corrections: cleaned.correctionsApplied,
       boxPx: searchBox,
-      confidence: fingerprintOk ? (cleaned.conf || (sel.cleanedOk ? 1 : 0.1)) : 0,
+      confidence,
       tokens: hits,
       cleanedOk,
       fingerprintOk
@@ -2660,8 +2676,8 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   let selectionRaw = '';
   let firstAttempt = null;
   if(fieldSpec.bbox){
-    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
-    basePx = applyTransform(raw);
+    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, staticPxOpts);
+    basePx = applyTransform(raw, undefined, staticPxOpts);
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
@@ -2730,7 +2746,7 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     if(lv.value){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
       let candidateTokens = [];
-      if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox); }
+      if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
       const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
       if(boxOk){
         result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
