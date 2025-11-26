@@ -47,6 +47,7 @@ const els = {
   rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
   viewSnapshotBtn: document.getElementById('view-snapshot-btn'),
+  exportMasterDbDataBtn: document.getElementById('export-master-db-data-btn'),
   snapshotStatus: document.getElementById('snapshotStatus'),
   snapshotPanel: document.getElementById('snapshotPanel'),
   closeSnapshotBtn: document.getElementById('closeSnapshotBtn'),
@@ -5210,11 +5211,23 @@ els.exportBtn?.addEventListener('click', ()=>{
   URL.revokeObjectURL(url);
 });
 
-// Export flat Master Database CSV
-els.exportMasterDbBtn?.addEventListener('click', ()=>{
-  const dt = els.dataDocType?.value || state.docType;
+function resolveRecordForDocType(docType, preferred){
+  const dt = docType || els.dataDocType?.value || state.docType;
+  if(preferred) return { record: preferred, dt };
+  const db = LS.getDb(state.username, dt);
+  if(!db.length) return { record: null, dt };
+  const selected = state.selectedRunId ? db.find(r => r.fileId === state.selectedRunId) : null;
+  return { record: selected || db[0], dt };
+}
+
+function downloadMasterDb(record, docType){
+  const { record: target, dt } = resolveRecordForDocType(docType, record);
+  if(!target){
+    alert('No extraction record available for export.');
+    return;
+  }
   try {
-    const csv = MasterDB.toCsv(state.savedFieldsRecord);
+    const csv = MasterDB.toCsv(target);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -5225,11 +5238,16 @@ els.exportMasterDbBtn?.addEventListener('click', ()=>{
     console.error('MasterDB export failed', err);
     alert(err?.message || 'Failed to export MasterDB CSV');
   }
-});
-els.exportMissingBtn?.addEventListener('click', ()=>{
-  const dt = els.dataDocType?.value || state.docType;
+}
+
+function downloadMissingCells(record, docType){
+  const { record: target, dt } = resolveRecordForDocType(docType, record);
+  if(!target){
+    alert('No extraction record available for export.');
+    return;
+  }
   try {
-    const { missingMap } = MasterDB.flatten(state.savedFieldsRecord);
+    const { missingMap } = MasterDB.flatten(target);
     const json = JSON.stringify(missingMap, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -5241,7 +5259,12 @@ els.exportMissingBtn?.addEventListener('click', ()=>{
     console.error('Missing cell export failed', err);
     alert(err?.message || 'Failed to export missing-cell diagnostics');
   }
-});
+}
+
+// Export flat Master Database CSV
+els.exportMasterDbBtn?.addEventListener('click', ()=> downloadMasterDb(state.savedFieldsRecord));
+els.exportMasterDbDataBtn?.addEventListener('click', ()=> downloadMasterDb());
+els.exportMissingBtn?.addEventListener('click', ()=> downloadMissingCells(state.savedFieldsRecord));
 els.finishWizardBtn?.addEventListener('click', ()=>{
   saveCurrentProfileAsModel();
   compileDocument(state.currentFileId);
