@@ -605,11 +605,9 @@ function loadModelById(id){
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
-const toPx = (vp, pctBox, opts={}) => {
-  const { useDpr=true } = opts || {};
-  const dpr = useDpr ? (window.devicePixelRatio || 1) : 1;
-  const w = ((vp.w ?? vp.width) || 1) * dpr;
-  const h = ((vp.h ?? vp.height) || 1) * dpr;
+const toPx = (vp, pctBox) => {
+  const w = ((vp.w ?? vp.width) || 1);
+  const h = ((vp.h ?? vp.height) || 1);
   const x = pctBox.x0 * w;
   const y = pctBox.y0 * h;
   const wPx = (pctBox.x1 - pctBox.x0) * w;
@@ -618,9 +616,8 @@ const toPx = (vp, pctBox, opts={}) => {
 };
 
 const toPct = (vp, pxBox) => {
-  const dpr = window.devicePixelRatio || 1;
-  const w = ((vp.w ?? vp.width) || 1) * dpr;
-  const h = ((vp.h ?? vp.height) || 1) * dpr;
+  const w = ((vp.w ?? vp.width) || 1);
+  const h = ((vp.h ?? vp.height) || 1);
   return {
     x0: pxBox.x / w,
     y0: pxBox.y / h,
@@ -644,16 +641,15 @@ const denormalizeBox = (normBox, W, H) => ({
   sh: Math.max(1, Math.round(normBox.hN * H))
 });
 
-function getCanvasDimensions(viewport){
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(1, (((viewport?.width ?? viewport?.w) || 0) * dpr) || 1);
-  const height = Math.max(1, (((viewport?.height ?? viewport?.h) || 0) * dpr) || 1);
+function getViewportDimensions(viewport){
+  const width = Math.max(1, ((viewport?.width ?? viewport?.w) || 0) || 1);
+  const height = Math.max(1, ((viewport?.height ?? viewport?.h) || 0) || 1);
   return { width, height };
 }
 
-function getPageCanvasSize(page){
+function getPageViewportSize(page){
   const vp = state.pageViewports[(page||1)-1] || state.viewport || {};
-  return getCanvasDimensions(vp);
+  return getViewportDimensions(vp);
 }
 
 function getOverlayFlags(){
@@ -679,8 +675,8 @@ function median(values){
   return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
 }
 
-function anchorMetricsFromBox(box, canvasW, canvasH, heights=[], fallbackHeight=0){
-  if(!box || !Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0){
+function anchorMetricsFromBox(box, pageWidth, pageHeight, heights=[], fallbackHeight=0){
+  if(!box || !Number.isFinite(pageWidth) || !Number.isFinite(pageHeight) || pageWidth <= 0 || pageHeight <= 0){
     return null;
   }
   const x = Number.isFinite(box.x) ? box.x : null;
@@ -694,8 +690,8 @@ function anchorMetricsFromBox(box, canvasW, canvasH, heights=[], fallbackHeight=
   const topPx = Math.max(0, y);
   const widthPx = Math.max(0, w);
   const heightPx = Math.max(0, h);
-  const rightPx = Math.max(0, canvasW - (leftPx + widthPx));
-  const bottomPx = Math.max(0, canvasH - (topPx + heightPx));
+  const rightPx = Math.max(0, pageWidth - (leftPx + widthPx));
+  const bottomPx = Math.max(0, pageHeight - (topPx + heightPx));
   const cleanHeights = (heights || []).map(v => Number.isFinite(v) ? v : null).filter(v => Number.isFinite(v) && v > 0);
   let textHeightPx = cleanHeights.length ? median(cleanHeights) : 0;
   if(!textHeightPx && Number.isFinite(fallbackHeight) && fallbackHeight > 0){
@@ -707,29 +703,29 @@ function anchorMetricsFromBox(box, canvasW, canvasH, heights=[], fallbackHeight=
     bottomPx,
     leftPx,
     rightPx,
-    pageWidthPx: canvasW,
-    pageHeightPx: canvasH,
-    topPct: clampPct(topPx, canvasH),
-    bottomPct: clampPct(bottomPx, canvasH),
-    leftPct: clampPct(leftPx, canvasW),
-    rightPct: clampPct(rightPx, canvasW),
+    pageWidthPx: pageWidth,
+    pageHeightPx: pageHeight,
+    topPct: clampPct(topPx, pageHeight),
+    bottomPct: clampPct(bottomPx, pageHeight),
+    leftPct: clampPct(leftPx, pageWidth),
+    rightPct: clampPct(rightPx, pageWidth),
     textHeightPx,
-    textHeightPct: clampPct(textHeightPx, canvasH)
+    textHeightPct: clampPct(textHeightPx, pageHeight)
   };
 }
 
 function computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras }){
   const rb = rawBox || {};
-  let { canvasW, canvasH } = rb;
-  if(!Number.isFinite(canvasW) || canvasW <= 0 || !Number.isFinite(canvasH) || canvasH <= 0){
-    const dims = getPageCanvasSize(page);
-    canvasW = dims.width;
-    canvasH = dims.height;
+  let { canvasW: pageWidth, canvasH: pageHeight } = rb;
+  if(!Number.isFinite(pageWidth) || pageWidth <= 0 || !Number.isFinite(pageHeight) || pageHeight <= 0){
+    const dims = getPageViewportSize(page);
+    pageWidth = dims.width;
+    pageHeight = dims.height;
   }
   const box = (Number.isFinite(rb.x) && Number.isFinite(rb.y) && Number.isFinite(rb.w) && Number.isFinite(rb.h))
     ? { x: rb.x, y: rb.y, w: rb.w, h: rb.h }
     : normBox
-      ? { x: normBox.x0n * canvasW, y: normBox.y0n * canvasH, w: normBox.wN * canvasW, h: normBox.hN * canvasH }
+      ? { x: normBox.x0n * pageWidth, y: normBox.y0n * pageHeight, w: normBox.wN * pageWidth, h: normBox.hN * pageHeight }
       : null;
   if(!box) return null;
   const heights = (tokens || []).map(t => Number.isFinite(t?.h) ? t.h : null).filter(v => Number.isFinite(v) && v > 0);
@@ -737,17 +733,17 @@ function computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras }){
   if(!fallbackHeight && extras?.column){
     const samples=[];
     if(extras.column.anchorSample && Number.isFinite(extras.column.anchorSample.hNorm)){
-      samples.push(extras.column.anchorSample.hNorm * canvasH);
+      samples.push(extras.column.anchorSample.hNorm * pageHeight);
     }
     if(Array.isArray(extras.column.rowSamples)){
       extras.column.rowSamples.forEach(s => {
-        if(Number.isFinite(s.hNorm)) samples.push(s.hNorm * canvasH);
+        if(Number.isFinite(s.hNorm)) samples.push(s.hNorm * pageHeight);
       });
     }
     if(samples.length){ fallbackHeight = median(samples); }
   }
   if(!fallbackHeight && Number.isFinite(box.h)){ fallbackHeight = box.h / 2; }
-  return anchorMetricsFromBox(box, canvasW, canvasH, heights, fallbackHeight);
+  return anchorMetricsFromBox(box, pageWidth, pageHeight, heights, fallbackHeight);
 }
 
 function projectAnchorDistance(savedPct, savedPx, savedPageDim, targetPageDim){
@@ -838,20 +834,20 @@ function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
       ? `${Math.abs(candidate.textHeightPx - expectedText) <= tolerance ? 'OK' : 'FAIL'} (${Math.round(candidate.textHeightPx - expectedText)}px)`
       : 'n/a';
     logStaticDebug(
-      `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} -> match=${ok}`
+      `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} viewport=${Math.round(targetWidth)}x${Math.round(targetHeight)} -> match=${ok}`
     );
   }
   return { ok, matches, textMatch, tolerance };
 }
 
-function anchorMatchForBox(savedMetrics, box, tokens, canvasW, canvasH, debugCtx=null){
+function anchorMatchForBox(savedMetrics, box, tokens, viewportW, viewportH, debugCtx=null){
   if(!savedMetrics) return true;
-  if(!box || !Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0){
+  if(!box || !Number.isFinite(viewportW) || !Number.isFinite(viewportH) || viewportW <= 0 || viewportH <= 0){
     return false;
   }
   const heights = (tokens || []).map(t => Number.isFinite(t?.h) ? t.h : null).filter(v => Number.isFinite(v) && v > 0);
   const fallbackHeight = heights.length ? median(heights) : (Number.isFinite(box.h) ? box.h : 0);
-  const metrics = anchorMetricsFromBox(box, canvasW, canvasH, heights, fallbackHeight);
+  const metrics = anchorMetricsFromBox(box, viewportW, viewportH, heights, fallbackHeight);
   if(!metrics) return false;
   return anchorMetricsSatisfied(savedMetrics, metrics, debugCtx).ok;
 }
@@ -890,13 +886,11 @@ function validateSelection(sel){
 }
 
 function applyTransform(boxPx, transform=state.pageTransform, opts={}){
-  const { useDpr=true } = opts || {};
   const { scale=1, rotation=0 } = transform || {};
   if(scale === 1 && rotation === 0) return { ...boxPx };
   const vp = state.pageViewports[boxPx.page-1] || state.viewport;
-  const dpr = useDpr ? (window.devicePixelRatio || 1) : 1;
-  const wPage = ((vp.w ?? vp.width) || 1) * dpr;
-  const hPage = ((vp.h ?? vp.height) || 1) * dpr;
+  const wPage = ((vp.w ?? vp.width) || 1);
+  const hPage = ((vp.h ?? vp.height) || 1);
   const cx = wPage/2, cy = hPage/2;
   const x = boxPx.x + boxPx.w/2;
   const y = boxPx.y + boxPx.h/2;
@@ -1745,9 +1739,8 @@ function ensureGrayCanvas(page){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   const offY = state.pageOffsets[page-1] || 0;
   const vp = state.pageViewports[page-1] || state.viewport;
-  const dpr = window.devicePixelRatio || 1;
   const w = src.width;
-  const h = Math.round(((vp.h ?? vp.height) || 1) * dpr);
+  const h = Math.round((vp.h ?? vp.height) || 1);
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
@@ -1854,8 +1847,7 @@ function edgeScore(sample, tmpl, half=null){
 
 function matchRingLandmark(lm, guessPx, half=null){
   const vp = state.pageViewports[guessPx.page-1] || state.viewport;
-  const dpr = window.devicePixelRatio || 1;
-  const range = 0.25 * ((vp.h ?? vp.height) || 1) * dpr;
+  const range = 0.25 * ((vp.h ?? vp.height) || 1);
   const step = 4;
   let best = { score:-1, box:null, comparator:null };
   for(let dy=-range; dy<=range; dy+=step){
@@ -1908,10 +1900,9 @@ async function calibrateIfNeeded(){
 }
 
 function buildColumnModel(step, norm, boxPx, tokens){
-  const dpr = window.devicePixelRatio || 1;
   const vp = state.viewport;
-  const pageWidthPx = Math.max(1, ((vp.w ?? vp.width) || 1) * dpr);
-  const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1) * dpr);
+  const pageWidthPx = Math.max(1, ((vp.w ?? vp.width) || 1));
+  const pageHeightPx = Math.max(1, ((vp.h ?? vp.height) || 1));
   const colTokens = tokens
     .filter(t=> intersect(t, boxPx))
     .map(t => ({ ...t, cy: t.y + t.h/2 }));
@@ -2468,11 +2459,10 @@ function labelValueHeuristic(fieldSpec, tokens){
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
-  const staticPxOpts = staticRun ? { useDpr:false } : undefined;
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
-  let viewportDims = getCanvasDimensions(viewportPx);
+  let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
-    viewportDims = getPageCanvasSize(fieldSpec.page || state.pageNum || 1);
+    viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
   }
   const enforceAnchors = isRunMode() && !!fieldSpec.anchorMetrics;
   const anchorMatchesCandidate = cand => {
@@ -2490,8 +2480,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       boxPx = state.snappedPx;
       traceEvent(spanKey,'selection.captured',{ boxPx });
     } else if(fieldSpec.bbox){
-      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, staticPxOpts);
-      boxPx = applyTransform(raw, undefined, staticPxOpts);
+      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      boxPx = applyTransform(raw);
       traceEvent(spanKey,'selection.captured',{ boxPx });
     }
     if(!boxPx){ return { value:'', raw:'', confidence:0, boxPx:null, tokens:[], method:'raw' }; }
@@ -2676,8 +2666,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   let selectionRaw = '';
   let firstAttempt = null;
   if(fieldSpec.bbox){
-    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}, staticPxOpts);
-    basePx = applyTransform(raw, undefined, staticPxOpts);
+    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+    basePx = applyTransform(raw);
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
@@ -3047,9 +3037,8 @@ async function extractLineItems(profile){
       continue;
     }
     const pageTokens = await ensureTokensForPage(page);
-    const dpr = window.devicePixelRatio || 1;
-    const pageWidth = Math.max(1, ((vp.w ?? vp.width)||1) * dpr);
-    const pageHeight = Math.max(1, ((vp.h ?? vp.height)||1) * dpr);
+    const pageWidth = Math.max(1, ((vp.w ?? vp.width)||1));
+    const pageHeight = Math.max(1, ((vp.h ?? vp.height)||1));
     const mapFieldToPage = (field, targetPage) => {
       const columnClone = field.column ? clonePlain(field.column) : null;
       return {
