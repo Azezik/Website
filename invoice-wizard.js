@@ -3,6 +3,26 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 
+const DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
+let staticDebugLogs = [];
+
+function staticDebugEnabled(){ return !!DEBUG_STATIC_FIELDS; }
+function logStaticDebug(message, details){
+  if(!staticDebugEnabled()) return;
+  const line = `[static-debug] ${message}`;
+  staticDebugLogs.push(details ? { line, details } : line);
+  if(details !== undefined){ console.log(line, details); }
+  else { console.log(line); }
+}
+function formatBoxForLog(box){
+  if(!box) return '<null>';
+  const { x=0, y=0, w=0, h=0, page } = box;
+  return `{x:${Math.round(x)},y:${Math.round(y)},w:${Math.round(w)},h:${Math.round(h)},page:${page||'?'}}`;
+}
+function formatArrayBox(boxArr){
+  return Array.isArray(boxArr) ? `[${boxArr.map(v=>Math.round(v??0)).join(',')}]` : '<none>';
+}
+
 (function sanityLog(){
   console.log('[pdf.js] version:', pdfjsLibRef?.version,
               'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
@@ -198,6 +218,7 @@ let state = {
   cropHashes: {},        // per page hash map for duplicate detection
   pageSnapshots: {},     // tracks saved full-page debug PNGs
   pageRenderPromises: [],
+  staticDebugLogs,
   pageRenderReady: [],
   currentTraceId: null,
   selectedRunId: '',
@@ -210,6 +231,10 @@ let state = {
   lineLayout: null,
   debugLineAnchors: [],
 };
+
+if(staticDebugEnabled()){
+  window.getStaticDebugLogs = () => staticDebugLogs.slice();
+}
 
 function runKeyForFile(file){
   if(modeHelpers?.runKeyForFile) return modeHelpers.runKeyForFile(file);
@@ -718,7 +743,7 @@ function projectColumnFera(fera, pageWidth, pageHeight){
   };
 }
 
-function anchorMetricsSatisfied(saved, candidate){
+function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
   if(!saved || !candidate) return { ok: true, matches: 0, textMatch: false, tolerance: 0 };
   const targetHeight = candidate.pageHeightPx || 0;
   const targetWidth = candidate.pageWidthPx || 0;
@@ -728,10 +753,10 @@ function anchorMetricsSatisfied(saved, candidate){
   const expectedRight = projectAnchorDistance(saved.rightPct, saved.rightPx, saved.pageWidthPx, targetWidth);
   const expectedText = projectAnchorDistance(saved.textHeightPct, saved.textHeightPx, saved.pageHeightPx, targetHeight);
   const distances = [
-    { expected: expectedTop, actual: candidate.topPx },
-    { expected: expectedBottom, actual: candidate.bottomPx },
-    { expected: expectedLeft, actual: candidate.leftPx },
-    { expected: expectedRight, actual: candidate.rightPx }
+    { expected: expectedTop, actual: candidate.topPx, label:'top' },
+    { expected: expectedBottom, actual: candidate.bottomPx, label:'bottom' },
+    { expected: expectedLeft, actual: candidate.leftPx, label:'left' },
+    { expected: expectedRight, actual: candidate.rightPx, label:'right' }
   ];
   const available = distances.filter(d => Number.isFinite(d.expected) && Number.isFinite(d.actual));
   let toleranceBase = Number.isFinite(expectedText) ? expectedText : candidate.textHeightPx;
@@ -757,10 +782,24 @@ function anchorMetricsSatisfied(saved, candidate){
       ok = true;
     }
   }
+  if(staticDebugEnabled() && debugCtx?.enabled){
+    const annotated = distances.map(d => {
+      const ready = Number.isFinite(d.expected) && Number.isFinite(d.actual);
+      const delta = ready ? Math.round(d.actual - d.expected) : null;
+      const edgeOk = ready ? Math.abs(d.actual - d.expected) <= tolerance : null;
+      return `${d.label}=${ready ? (edgeOk ? 'OK' : 'FAIL') + ` (${delta >= 0 ? '+' : ''}${delta}px)` : 'n/a'}`;
+    }).join(', ');
+    const heightStatus = Number.isFinite(expectedText) && Number.isFinite(candidate.textHeightPx)
+      ? `${Math.abs(candidate.textHeightPx - expectedText) <= tolerance ? 'OK' : 'FAIL'} (${Math.round(candidate.textHeightPx - expectedText)}px)`
+      : 'n/a';
+    logStaticDebug(
+      `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} -> match=${ok}`
+    );
+  }
   return { ok, matches, textMatch, tolerance };
 }
 
-function anchorMatchForBox(savedMetrics, box, tokens, canvasW, canvasH){
+function anchorMatchForBox(savedMetrics, box, tokens, canvasW, canvasH, debugCtx=null){
   if(!savedMetrics) return true;
   if(!box || !Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0){
     return false;
@@ -769,7 +808,7 @@ function anchorMatchForBox(savedMetrics, box, tokens, canvasW, canvasH){
   const fallbackHeight = heights.length ? median(heights) : (Number.isFinite(box.h) ? box.h : 0);
   const metrics = anchorMetricsFromBox(box, canvasW, canvasH, heights, fallbackHeight);
   if(!metrics) return false;
-  return anchorMetricsSatisfied(savedMetrics, metrics).ok;
+  return anchorMetricsSatisfied(savedMetrics, metrics, debugCtx).ok;
 }
 
 function validateNormBox(nb){
@@ -1050,6 +1089,14 @@ const FieldDataEngine = (() => {
     if(isValid && dom.len && dom.len===txt.length) score++;
     if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
     if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason });
+    if(state.mode === ModeEnum.RUN && staticDebugEnabled() && isStaticFieldDebugTarget(spanKey?.fieldKey || ftype)){
+      const expectedCode = getDominantFingerprintCode(ftype, spanKey?.fieldKey || ftype);
+      const fingerprintOk = fingerprintMatches(ftype, code, mode, spanKey?.fieldKey, { enabled:false, fieldKey: spanKey?.fieldKey || ftype, cleanedValue: txt });
+      logStaticDebug(
+        `field=${spanKey?.fieldKey || ftype || ''} cleaned="${txt}" code=${code || '<none>'} expected=${expectedCode || '<none>'} -> fingerprintOk=${fingerprintOk}`,
+        { field: spanKey?.fieldKey || ftype, cleaned: txt, code, expected: expectedCode, fingerprintOk }
+      );
+    }
     return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch, isValid, invalidReason };
   }
 
@@ -1086,6 +1133,13 @@ function getProfileFieldEntry(fieldKey){
   return state.profile.fields.find(f => f.fieldKey === fieldKey) || null;
 }
 
+function isStaticFieldDebugTarget(fieldKey){
+  if(!staticDebugEnabled()) return false;
+  if(!fieldKey) return true;
+  const entry = getProfileFieldEntry(fieldKey);
+  return !entry || entry.type !== 'column';
+}
+
 function getDominantFingerprintCode(ftype, profileKey){
   const dom = ftype ? FieldDataEngine.dominant(ftype) : null;
   if(dom?.code) return dom.code;
@@ -1119,12 +1173,19 @@ function getDominantFingerprintCode(ftype, profileKey){
   return null;
 }
 
-function fingerprintMatches(ftype, code, mode = state.mode, profileKey){
+function fingerprintMatches(ftype, code, mode = state.mode, profileKey, debugCtx=null){
   if(mode === 'CONFIG') return true;
   const expected = getDominantFingerprintCode(ftype, profileKey);
   if(!expected) return true;
   if(typeof code !== 'string') return false;
-  return code === expected;
+  const ok = code === expected;
+  if(staticDebugEnabled() && debugCtx?.enabled){
+    logStaticDebug(
+      `field=${debugCtx.fieldKey||ftype||''} fingerprint code=${code||'<none>'} expected=${expected} -> fingerprintOk=${ok}`,
+      { field: debugCtx.fieldKey || ftype, cleaned: debugCtx.cleanedValue, code, expected, fingerprintOk: ok }
+    );
+  }
+  return ok;
 }
 
 function collectPersistedFingerprints(profile){
@@ -2365,7 +2426,10 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const anchorMatchesCandidate = cand => {
     if(!enforceAnchors) return true;
     if(!cand || !cand.boxPx) return false;
-    return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height);
+    const debugCtx = (runMode && ftype==='static' && isStaticFieldDebugTarget(fieldSpec.fieldKey))
+      ? { enabled:true, fieldKey: fieldSpec.fieldKey, page: cand.boxPx.page }
+      : null;
+    return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height, debugCtx);
   };
 
   if(state.modes.rawData){
@@ -2468,12 +2532,31 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
-    if(!hits.length) return null;
+    if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      const tokenPreview = hits.slice(0,3).map(t => ({ text: t.text, box: { x:t.x, y:t.y, w:t.w, h:t.h } }));
+      logStaticDebug(
+        `ocr-box field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} box=${formatBoxForLog(searchBox)} raw="${(assembled?.text||'').replace(/\s+/g,' ').trim()}"`,
+        { hits: hits.length, tokenPreview, rawText: assembled?.text || '', box: searchBox }
+      );
+    }
+    if(!hits.length){
+      if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+        const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+        logStaticDebug(
+          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=0 anchorsOk=${anchorsOk} fingerprintOk=false finalText=<empty> conf=0`,
+          { anchorsOk, fingerprintOk:false, text:'', confidence:0, box: searchBox }
+        );
+      }
+      return null;
+    }
     if(multilineValue){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
-      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
+      const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
+        ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
+        : null;
+      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
       const cleanedOk = !!(cleaned.value || cleaned.raw);
-      return {
+      const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
         corrected: cleaned.corrected,
@@ -2488,12 +2571,23 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
         cleanedOk,
         fingerprintOk
       };
+      if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+        const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+        logStaticDebug(
+          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+          { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+        );
+      }
+      return attemptResult;
     }
     const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     const cleaned = sel.cleaned || {};
-    const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey);
+    const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
+      ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
+      : null;
+    const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
     const cleanedOk = !!sel.cleanedOk && fingerprintOk;
-    return {
+    const attemptResult = {
       value: sel.value,
       raw: sel.raw,
       corrected: cleaned.corrected,
@@ -2508,6 +2602,14 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
       cleanedOk,
       fingerprintOk
     };
+    if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+      logStaticDebug(
+        `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+        { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+      );
+    }
+    return attemptResult;
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
@@ -2516,6 +2618,12 @@ async function extractFieldValue(fieldSpec, tokens, viewportPx){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      logStaticDebug(
+        `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
+        { field: fieldSpec.fieldKey, page: basePx.page, configBox: fieldSpec.bbox, transformed: basePx, viewport: viewportDims, rawBox: raw }
+      );
+    }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
     if(initialAttempt && !anchorMatchesCandidate(initialAttempt)){ initialAttempt.cleanedOk = false; }
