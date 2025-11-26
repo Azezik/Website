@@ -605,6 +605,10 @@ function loadModelById(id){
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
 
+// Convert normalized [0-1] coords into the canonical logical pixel space used by
+// pdf.js tokens (CSS/document pixels, not device pixels). Any rendering scale or
+// devicePixelRatio should be applied only when drawing, not when computing these
+// logical coordinates.
 const toPx = (vp, pctBox) => {
   const w = ((vp.w ?? vp.width) || 1);
   const h = ((vp.h ?? vp.height) || 1);
@@ -2097,10 +2101,14 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
 
   const vp = state.pageViewports[pageIndex] || state.viewport || { width: src.width, height: src.height, scale:1 };
   const viewportScale = Number(vp.scale || 1);
+  const logicalW = Math.max(1, Number(vp.width ?? vp.w ?? src.width));
+  const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? src.height));
   const dpr = Number(window.devicePixelRatio || 1);
   const W = Number(src.width);
   const H = Number(src.height);
-  const inputs = { canvasW: W, canvasH: H, viewportScale, dpr };
+  const renderScaleX = W && logicalW ? W / logicalW : 1;
+  const renderScaleY = H && logicalH ? H / logicalH : 1;
+  const inputs = { canvasW: W, canvasH: H, viewportScale, dpr, logicalW, logicalH, renderScaleX, renderScaleY };
   for(const [k,v] of Object.entries(inputs)){
     if(typeof v !== 'number' || !Number.isFinite(v)){
       result.meta.errors.push(`nan_or_infinity_in_math(${k})`);
@@ -2111,30 +2119,37 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   const scale = state.pageTransform?.scale || 1;
   const rotation = state.pageTransform?.rotation || 0;
   const offY = state.pageOffsets[pageIndex] || 0;
-  result.meta.canvasSize = { w: W, h: H, dpr, scale: viewportScale, rotation };
+  result.meta.canvasSize = { w: W, h: H, dpr, scale: viewportScale, rotation, logicalW, logicalH, renderScaleX, renderScaleY };
 
-  let { sx, sy, sw, sh } = denormalizeBox(normBox, W, H);
+  // Work entirely in logical (CSS/pdf.js) space for transforms/anchors, then
+  // map to the rendered canvas with the render scale. This keeps stored/queried
+  // boxes aligned with token coordinates regardless of device pixel ratio.
+  let { sx, sy, sw, sh } = denormalizeBox(normBox, logicalW, logicalH);
   let box = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
   if(scale !== 1 || rotation !== 0){
     box = applyTransform(box, { scale, rotation });
-    sx = Math.round(box.x); sy = Math.round(box.y); sw = Math.round(box.w); sh = Math.round(box.h);
+    sx = box.x; sy = box.y; sw = box.w; sh = box.h;
   }
+  const sxPx = Math.round(sx * renderScaleX);
+  const syPx = Math.round(sy * renderScaleY);
+  const swPx = Math.max(1, Math.round(sw * renderScaleX));
+  const shPx = Math.max(1, Math.round(sh * renderScaleY));
 
   let clamped = false;
-  if(sx < 0){ sw += sx; sx = 0; clamped = true; }
-  if(sy < 0){ sh += sy; sy = 0; clamped = true; }
-  if(sx + sw > W){ sw = W - sx; clamped = true; }
-  if(sy + sh > H){ sh = H - sy; clamped = true; }
+  if(sxPx < 0){ swPx += sxPx; sxPx = 0; clamped = true; }
+  if(syPx < 0){ shPx += syPx; syPx = 0; clamped = true; }
+  if(sxPx + swPx > W){ swPx = W - sxPx; clamped = true; }
+  if(syPx + shPx > H){ shPx = H - syPx; clamped = true; }
 
-  const nums = { W, H, sx, sy, sw, sh, dpr, scale, rotation, offY };
+  const nums = { W, H, sx: sxPx, sy: syPx, sw: swPx, sh: shPx, dpr, scale, rotation, offY };
   for(const [k,v] of Object.entries(nums)){
     if(typeof v !== 'number' || !Number.isFinite(v)){
       result.meta.errors.push(`nan_or_infinity_in_math(${k})`);
       return result;
     }
   }
-  result.meta.computedPx = { sx, sy, sw, sh, rotation };
-  if(sw <= 2 || sh <= 2){
+  result.meta.computedPx = { sx: sxPx, sy: syPx, sw: swPx, sh: shPx, rotation };
+  if(swPx <= 2 || shPx <= 2){
     result.meta.errors.push('tiny_or_zero_crop');
     result.meta.clamped = clamped;
     return result;
@@ -2142,21 +2157,21 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
 
   const off = document.createElement('canvas');
   off.className = 'debug-crop';
-  off.width = sw; off.height = sh;
+  off.width = swPx; off.height = shPx;
   const octx = off.getContext('2d');
-  octx.clearRect(0,0,sw,sh);
+  octx.clearRect(0,0,swPx,shPx);
   try{
-    octx.drawImage(src, sx, offY + sy, sw, sh, 0, 0, sw, sh);
+    octx.drawImage(src, sxPx, offY + syPx, swPx, shPx, 0, 0, swPx, shPx);
   }catch(err){
     console.error('drawImage failed', err);
     result.meta.errors.push('canvas_tainted');
     return result;
   }
 
-  const cssSX = sx / dpr;
-  const cssSY = sy / dpr;
-  const cssSW = sw / dpr;
-  const cssSH = sh / dpr;
+  const cssSX = sx;
+  const cssSY = sy;
+  const cssSW = sw;
+  const cssSH = sh;
 
   // hash for duplicate detection
   const pngBytes = dataUrlToBytes(off.toDataURL('image/png'));
@@ -2176,7 +2191,7 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
     state.cropHashes[pageKey][hash] = { x:sx, y:sy, w:sw, h:sh };
   }
 
-  const imgData = octx.getImageData(0,0,sw,sh).data;
+  const imgData = octx.getImageData(0,0,swPx,shPx).data;
   let uniform = true;
   const r0 = imgData[0], g0 = imgData[1], b0 = imgData[2], a0 = imgData[3];
   for(let i=4;i<imgData.length;i+=4){
@@ -2184,22 +2199,22 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   }
   if(uniform){ result.meta.errors.push('blank_or_uniform_crop'); }
   const rowHashes = new Set();
-  for(let y=0;y<sh;y++){
+  for(let y=0;y<shPx;y++){
     let row='';
-    for(let x=0;x<sw;x++){
-      const i=(y*sw+x)*4; row+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    for(let x=0;x<swPx;x++){
+      const i=(y*swPx+x)*4; row+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
     }
     rowHashes.add(row);
   }
   const colHashes = new Set();
-  for(let x=0;x<sw;x++){
+  for(let x=0;x<swPx;x++){
     let col='';
-    for(let y=0;y<sh;y++){
-      const i=(y*sw+x)*4; col+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
+    for(let y=0;y<shPx;y++){
+      const i=(y*swPx+x)*4; col+=imgData[i]+','+imgData[i+1]+','+imgData[i+2]+','+imgData[i+3]+';';
     }
     colHashes.add(col);
   }
-  const bandingScore = Math.max(1 - rowHashes.size/sh, 1 - colHashes.size/sw);
+  const bandingScore = Math.max(1 - rowHashes.size/shPx, 1 - colHashes.size/swPx);
   if(bandingScore > 0.3){ result.meta.warnings.push('banding/tiling-like artifact'); }
 
   const fs = window.fs || (window.require && window.require('fs'));
@@ -2224,7 +2239,7 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   result.meta.bandingScore = bandingScore;
   result.meta.clamped = clamped;
   state.lastOcrCropCss = { x:cssSX, y:cssSY, w:cssSW, h:cssSH, page: pageIndex+1 };
-  state.lastOcrCropPx = { x:sx, y:sy, w:sw, h:sh, page: pageIndex+1 };
+  state.lastOcrCropPx = { x:sxPx, y:syPx, w:swPx, h:shPx, page: pageIndex+1 };
   result.meta.cssBox = { sx: cssSX, sy: cssSY, sw: cssSW, sh: cssSH };
   drawOverlay();
   return result;
@@ -4148,9 +4163,8 @@ function paintOverlay(ctx, options = {}){
       if([nb.x0n, nb.y0n, nb.wN, nb.hN].some(v => typeof v !== 'number' || !Number.isFinite(v))) continue;
       const vp = state.pageViewports[fPage-1];
       if(!vp) continue;
-      const dpr = window.devicePixelRatio || 1;
-      const W = Math.round((vp.width ?? vp.w) * dpr);
-      const H = Math.round((vp.height ?? vp.h) * dpr);
+      const W = Math.round(vp.width ?? vp.w ?? 1);
+      const H = Math.round(vp.height ?? vp.h ?? 1);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
       const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:fPage });
       const box = {
@@ -4177,9 +4191,8 @@ function paintOverlay(ctx, options = {}){
       if(!nb) continue;
       const vp = state.pageViewports[f.page-1];
       if(!vp) continue;
-      const dpr = window.devicePixelRatio || 1;
-      const W = Math.round(vp.width * dpr);
-      const H = Math.round(vp.height * dpr);
+      const W = Math.round(vp.width ?? vp.w ?? 1);
+      const H = Math.round(vp.height ?? vp.h ?? 1);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
       const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
       const box = {
