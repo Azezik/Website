@@ -46,6 +46,14 @@ const els = {
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
   rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
+  viewSnapshotBtn: document.getElementById('view-snapshot-btn'),
+  snapshotStatus: document.getElementById('snapshotStatus'),
+  snapshotPanel: document.getElementById('snapshotPanel'),
+  closeSnapshotBtn: document.getElementById('closeSnapshotBtn'),
+  regenerateSnapshotBtn: document.getElementById('regenerateSnapshotBtn'),
+  snapshotMeta: document.getElementById('snapshotMeta'),
+  snapshotList: document.getElementById('snapshotList'),
+  snapshotDetail: document.getElementById('snapshotDetail'),
   ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
   traceViewer:    document.getElementById('traceViewer'),
@@ -57,6 +65,7 @@ const els = {
   configureBtn:    document.getElementById('configure-btn'),
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
+  snapshotModeToggle: document.getElementById('snapshot-mode-toggle'),
   uploadBtn:       document.getElementById('upload-btn'),
   resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
@@ -157,6 +166,8 @@ let state = {
   docType: 'invoice',
   mode: ModeEnum.CONFIG,
   modes: { rawData: false },
+  snapshotMode: false,
+  snapshotDirty: false,
   profile: null,             // Vendor profile (landmarks + fields + tableHints)
   pdf: null,                 // pdf.js document
   isImage: false,
@@ -188,6 +199,9 @@ let state = {
   pageRenderPromises: [],
   pageRenderReady: [],
   currentTraceId: null,
+  selectedRunId: '',
+  lastSnapshotManifestId: '',
+  snapshotPanels: { activePage: null },
   overlayPinned: false,
   overlayMetrics: null,
   pendingSelection: null,
@@ -221,6 +235,8 @@ function clearTransientStateLocal(){
   state.tokensByPage = {}; state.currentLineItems = [];
   state.currentFileId = ''; state.currentFileName = '';
   state.lineLayout = null;
+  state.lastSnapshotManifestId = '';
+  state.snapshotPanels = { activePage: null };
   return state;
 }
 
@@ -238,6 +254,8 @@ function resetDocArtifacts(){
   state.viewport = { w:0, h:0, scale:1 };
   state.pageNum = 1;
   state.numPages = 0;
+  state.lastSnapshotManifestId = '';
+  state.snapshotPanels = { activePage: null };
   renderTelemetry();
 }
 
@@ -473,6 +491,13 @@ function loadProfile(u, d){
 // Raw and compiled stores
 const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
 const fileMeta = {};       // {fileId: {fileName}}
+const SNAPSHOT_BYTE_LIMIT = 2_500_000;
+const SNAPSHOT_PIXEL_CAP = 14_000_000;
+const SNAPSHOT_MAX_PAGES = 16;
+const SNAPSHOT_THUMB_MAX_W = 260;
+const snapshotStore = (typeof SnapshotStore === 'function')
+  ? new SnapshotStore({ maxBytes: SNAPSHOT_BYTE_LIMIT, maxPages: SNAPSHOT_MAX_PAGES })
+  : { get(){ return null; }, set(){}, reset(){}, upsertPage(){ return null; } };
 
 const MODELS_KEY = 'wiz.models';
 function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) || '[]', jsonReviver); } catch{ return []; } }
@@ -558,6 +583,22 @@ function getCanvasDimensions(viewport){
 function getPageCanvasSize(page){
   const vp = state.pageViewports[(page||1)-1] || state.viewport || {};
   return getCanvasDimensions(vp);
+}
+
+function getOverlayFlags(){
+  const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
+  const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
+  return {
+    boxes: !!els.showBoxesToggle?.checked,
+    rings: ringsOn,
+    matches: matchesOn,
+    ocr: !!els.showOcrBoxesToggle?.checked
+  };
+}
+
+function overlayFlagsEqual(a,b){
+  if(!a || !b) return false;
+  return ['boxes','rings','matches','ocr'].every(k => !!a[k] === !!b[k]);
 }
 
 function median(values){
@@ -3684,6 +3725,8 @@ async function prepareRunDocument(file){
   state.currentFileId = hashHex;
   fileMeta[state.currentFileId] = { fileName: state.currentFileName };
   rawStore.clear(state.currentFileId);
+  state.lastSnapshotManifestId = '';
+  state.snapshotDirty = state.snapshotMode;
 
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
@@ -3856,6 +3899,170 @@ function getScaleFactors(){
   return { scaleX, scaleY };
 }
 
+function paintOverlay(ctx, options = {}){
+  if(!ctx || !ctx.canvas) return;
+  const { scaleX = 1, scaleY = 1, pageFilter = null, offsetY = 0, includeSelections = true, flags = getOverlayFlags() } = options;
+  const boxesOn = !!flags.boxes;
+  const ringsOn = !!flags.rings;
+  const matchesOn = !!flags.matches;
+  const ocrOn = !!flags.ocr;
+  const targetPage = pageFilter || state.pageNum;
+  const offsetForPage = (page) => ((state.pageOffsets[(page||1)-1] || 0) / scaleY) - offsetY;
+
+  ctx.clearRect(0,0,ctx.canvas.width, ctx.canvas.height);
+
+  const layoutPage = state.lineLayout?.pages?.[targetPage];
+  if(layoutPage && (!pageFilter || targetPage === pageFilter)){
+    const offPx = offsetForPage(targetPage);
+    const xPositionsPx = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
+    const xPositions = xPositionsPx.map(x => x / scaleX);
+    const spanLeft = xPositions[0] ?? 0;
+    const spanRight = xPositions[xPositions.length-1] ?? (ctx.canvas.width / scaleX);
+    const topSrc = layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0));
+    const bottomSrc = layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1));
+    const top = topSrc/scaleY + offPx;
+    const bottom = bottomSrc/scaleY + offPx;
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,0,255,0.6)';
+    xPositions.forEach(x => {
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+      ctx.stroke();
+    });
+    ctx.strokeStyle = 'rgba(255,0,255,0.6)';
+    layoutPage.rows.forEach(row => {
+      const y = row.y0/scaleY + offPx;
+      ctx.beginPath();
+      ctx.moveTo(spanLeft, y);
+      ctx.lineTo(spanRight, y);
+      ctx.stroke();
+    });
+    const lastRow = layoutPage.rows[layoutPage.rows.length-1];
+    if(lastRow){
+      const yEnd = lastRow.y1/scaleY + offPx;
+      ctx.beginPath();
+      ctx.moveTo(spanLeft, yEnd);
+      ctx.lineTo(spanRight, yEnd);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if(Array.isArray(state.debugLineAnchors) && state.debugLineAnchors.length){
+    const anchorPage = pageFilter || state.pageNum;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,105,180,0.9)';
+    ctx.lineWidth = 1;
+    const crossX = 4 / scaleX;
+    const crossY = 4 / scaleY;
+    for(const marker of state.debugLineAnchors){
+      if(marker.page !== anchorPage) continue;
+      const offPx = offsetForPage(marker.page);
+      const x = marker.anchorRight / scaleX;
+      const y = (marker.anchorTop / scaleY) + offPx;
+      ctx.beginPath();
+      ctx.moveTo(x - crossX, y);
+      ctx.lineTo(x + crossX, y);
+      ctx.moveTo(x, y - crossY);
+      ctx.lineTo(x, y + crossY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if(boxesOn && state.profile?.fields){
+    ctx.strokeStyle = 'rgba(255,0,0,0.6)';
+    ctx.lineWidth = 1;
+    for(const f of state.profile.fields){
+      if(pageFilter && f.page !== pageFilter) continue;
+      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
+      if(!nb) continue;
+      const vp = state.pageViewports[f.page-1];
+      if(!vp) continue;
+      const dpr = window.devicePixelRatio || 1;
+      const W = Math.round(vp.width * dpr);
+      const H = Math.round(vp.height * dpr);
+      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const box = {
+        x: boxPx.x / scaleX,
+        y: boxPx.y / scaleY,
+        w: boxPx.w / scaleX,
+        h: boxPx.h / scaleY,
+        page: boxPx.page
+      };
+      const off = offsetForPage(box.page);
+      ctx.strokeRect(box.x, box.y + off, box.w, box.h);
+    }
+  }
+
+  if(ringsOn && state.profile?.fields){
+    ctx.strokeStyle = 'rgba(255,105,180,0.7)';
+    for(const f of state.profile.fields){
+      if(f.type !== 'static') continue;
+      if(pageFilter && f.page !== pageFilter) continue;
+      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
+      if(!nb) continue;
+      const vp = state.pageViewports[f.page-1];
+      if(!vp) continue;
+      const dpr = window.devicePixelRatio || 1;
+      const W = Math.round(vp.width * dpr);
+      const H = Math.round(vp.height * dpr);
+      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const box = {
+        x: boxPx.x / scaleX,
+        y: boxPx.y / scaleY,
+        w: boxPx.w / scaleX,
+        h: boxPx.h / scaleY,
+        page: boxPx.page
+      };
+      const off = offsetForPage(box.page);
+      const cx = box.x + box.w/2;
+      const cy = box.y + off + box.h/2;
+      const pad = 8 / Math.max(scaleX, scaleY);
+      const r = Math.max(box.w, box.h)/2 + pad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.stroke();
+    }
+  }
+
+  if(matchesOn && state.matchPoints.length){
+    const matchPage = pageFilter || state.pageNum;
+    ctx.fillStyle = 'yellow';
+    for(const mp of state.matchPoints){
+      if(mp.page !== matchPage) continue;
+      const offPx = offsetForPage(mp.page);
+      const x = mp.x / scaleX;
+      const y = (mp.y / scaleY) + offPx;
+      ctx.beginPath();
+      const radius = 3 / Math.max(scaleX, scaleY);
+      ctx.arc(x, y, radius, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  if(!includeSelections) return;
+  if(state.selectionCss && (!pageFilter || state.selectionCss.page === pageFilter)){
+    ctx.strokeStyle = '#2ee6a6'; ctx.lineWidth = 1.5;
+    const b = state.selectionCss; const off = offsetForPage(b.page);
+    ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+  }
+  if(state.snappedCss && (!pageFilter || state.snappedCss.page === pageFilter)){
+    ctx.strokeStyle = '#44ccff'; ctx.lineWidth = 2;
+    const s = state.snappedCss; const off2 = offsetForPage(s.page);
+    ctx.strokeRect(s.x, s.y + off2, s.w, s.h);
+  }
+  if(ocrOn && state.lastOcrCropCss && (!pageFilter || state.lastOcrCropCss.page === pageFilter)){
+    ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
+    const c = state.lastOcrCropCss; const off3 = offsetForPage(c.page);
+    ctx.strokeRect(c.x, c.y + off3, c.w, c.h);
+  }
+}
+
 /* --------------------- Overlay / Drawing Box --------------------- */
 let drawing = false, start = null, startCss = null, applyingPendingSelection = false;
 
@@ -3968,150 +4175,8 @@ els.viewer.addEventListener('scroll', ()=>{
 function drawOverlay(){
   if(guardInteractive('overlay.draw')) return;
   syncOverlay();
-  overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
-  const layoutPage = state.lineLayout?.pages?.[state.pageNum];
-  if(layoutPage && (layoutPage.rows||[]).length){
-    const offPx = state.pageOffsets[state.pageNum-1] || 0;
-    const xPositionsPx = Array.from(new Set((layoutPage.columns||[]).flatMap(c=>[c.x0, c.x1]))).sort((a,b)=>a-b);
-    const xPositions = xPositionsPx.map(x => x / scaleX);
-    const spanLeft = xPositions[0] ?? 0;
-    const spanRight = xPositions[xPositions.length-1] ?? (els.overlayCanvas.width / scaleX);
-    const topSrc = layoutPage.top ?? Math.min(...layoutPage.rows.map(r=>r.y0));
-    const bottomSrc = layoutPage.bottom ?? Math.max(...layoutPage.rows.map(r=>r.y1));
-    const top = (topSrc + offPx) / scaleY;
-    const bottom = (bottomSrc + offPx) / scaleY;
-    overlayCtx.save();
-    overlayCtx.lineWidth = 1;
-    overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
-    xPositions.forEach(x => {
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(x, top);
-      overlayCtx.lineTo(x, bottom);
-      overlayCtx.stroke();
-    });
-    overlayCtx.strokeStyle = 'rgba(255,0,255,0.6)';
-    layoutPage.rows.forEach(row => {
-      const y = (row.y0 + offPx) / scaleY;
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(spanLeft, y);
-      overlayCtx.lineTo(spanRight, y);
-      overlayCtx.stroke();
-    });
-    const lastRow = layoutPage.rows[layoutPage.rows.length-1];
-    if(lastRow){
-      const yEnd = (lastRow.y1 + offPx) / scaleY;
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(spanLeft, yEnd);
-      overlayCtx.lineTo(spanRight, yEnd);
-      overlayCtx.stroke();
-    }
-    overlayCtx.restore();
-  }
-  if(Array.isArray(state.debugLineAnchors) && state.debugLineAnchors.length){
-    overlayCtx.save();
-    overlayCtx.strokeStyle = 'rgba(255,105,180,0.9)';
-    overlayCtx.lineWidth = 1;
-    const crossX = 4 / scaleX;
-    const crossY = 4 / scaleY;
-    for(const marker of state.debugLineAnchors){
-      if(marker.page !== state.pageNum) continue;
-      const offPx = state.pageOffsets[marker.page-1] || 0;
-      const x = marker.anchorRight / scaleX;
-      const y = (marker.anchorTop + offPx) / scaleY;
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(x - crossX, y);
-      overlayCtx.lineTo(x + crossX, y);
-      overlayCtx.moveTo(x, y - crossY);
-      overlayCtx.lineTo(x, y + crossY);
-      overlayCtx.stroke();
-    }
-    overlayCtx.restore();
-  }
-  const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
-  const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
-  if(els.showBoxesToggle?.checked && state.profile?.fields){
-    overlayCtx.strokeStyle = 'rgba(255,0,0,0.6)';
-    overlayCtx.lineWidth = 1;
-    for(const f of state.profile.fields){
-      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
-      if(!nb) continue;
-      const vp = state.pageViewports[f.page-1];
-      if(!vp) continue;
-      const dpr = window.devicePixelRatio || 1;
-      const W = Math.round(vp.width * dpr);
-      const H = Math.round(vp.height * dpr);
-      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
-      const box = {
-        x: boxPx.x / scaleX,
-        y: boxPx.y / scaleY,
-        w: boxPx.w / scaleX,
-        h: boxPx.h / scaleY,
-        page: boxPx.page
-      };
-      const off = (state.pageOffsets[box.page-1] || 0) / scaleY;
-      overlayCtx.strokeRect(box.x, box.y + off, box.w, box.h);
-    }
-  }
-  if(ringsOn && state.profile?.fields){
-    overlayCtx.strokeStyle = 'rgba(255,105,180,0.7)';
-    for(const f of state.profile.fields){
-      if(f.type !== 'static') continue;
-      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
-      if(!nb) continue;
-      const vp = state.pageViewports[f.page-1];
-      if(!vp) continue;
-      const dpr = window.devicePixelRatio || 1;
-      const W = Math.round(vp.width * dpr);
-      const H = Math.round(vp.height * dpr);
-      const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
-      const box = {
-        x: boxPx.x / scaleX,
-        y: boxPx.y / scaleY,
-        w: boxPx.w / scaleX,
-        h: boxPx.h / scaleY,
-        page: boxPx.page
-      };
-      const off = (state.pageOffsets[box.page-1] || 0) / scaleY;
-      const cx = box.x + box.w/2;
-      const cy = box.y + off + box.h/2;
-      const pad = 8 / Math.max(scaleX, scaleY);
-      const r = Math.max(box.w, box.h)/2 + pad;
-      overlayCtx.beginPath();
-      overlayCtx.arc(cx, cy, r, 0, Math.PI*2);
-      overlayCtx.stroke();
-    }
-  }
-  if(matchesOn && state.matchPoints.length){
-    overlayCtx.fillStyle = 'yellow';
-    for(const mp of state.matchPoints){
-      if(mp.page !== state.pageNum) continue;
-      const offPx = state.pageOffsets[mp.page-1] || 0;
-      const x = mp.x / scaleX;
-      const y = (mp.y + offPx) / scaleY;
-      overlayCtx.beginPath();
-      const radius = 3 / Math.max(scaleX, scaleY);
-      overlayCtx.arc(x, y, radius, 0, Math.PI*2);
-      overlayCtx.fill();
-    }
-  }
-  if(state.selectionCss){
-    overlayCtx.strokeStyle = '#2ee6a6'; overlayCtx.lineWidth = 1.5;
-    const b = state.selectionCss; const off = (state.pageOffsets[b.page-1] || 0)/scaleY;
-    overlayCtx.strokeRect(b.x, b.y + off, b.w, b.h);
-  }
-  if(state.snappedCss){
-    overlayCtx.strokeStyle = '#44ccff'; overlayCtx.lineWidth = 2;
-    const s = state.snappedCss; const off2 = (state.pageOffsets[s.page-1] || 0)/scaleY;
-    overlayCtx.strokeRect(s.x, s.y + off2, s.w, s.h);
-  }
-  if(els.showOcrBoxesToggle?.checked && state.lastOcrCropCss){
-    overlayCtx.strokeStyle = 'red'; overlayCtx.lineWidth = 2;
-    const c = state.lastOcrCropCss; const off3 = (state.pageOffsets[c.page-1] || 0)/scaleY;
-    overlayCtx.strokeRect(c.x, c.y + off3, c.w, c.h);
-  }
+  paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });
 }
 
 function renderCropAuditPanel(){
@@ -4210,6 +4275,211 @@ async function refreshCropAuditThumbs(){
   renderCropAuditPanel();
 }
 
+/* ---------------------- Snapshot helpers ------------------------ */
+const SNAPSHOT_MODE_KEY = 'wiz.snapshotMode';
+
+function describeOverlayFlags(flags){
+  const parts = [];
+  if(flags?.boxes) parts.push('boxes');
+  if(flags?.rings) parts.push('rings');
+  if(flags?.matches) parts.push('match points');
+  if(flags?.ocr) parts.push('OCR boxes');
+  return parts.length ? parts.join(', ') : 'no overlays';
+}
+
+function syncSnapshotUi(){
+  if(els.snapshotModeToggle){ els.snapshotModeToggle.checked = !!state.snapshotMode; }
+  if(els.snapshotStatus){
+    const selected = state.selectedRunId ? (fileMeta[state.selectedRunId]?.fileName || state.selectedRunId.slice(0,8)) : 'no run selected';
+    const modeText = state.snapshotMode ? 'Snapshot mode on' : 'Snapshot mode off';
+    els.snapshotStatus.textContent = `${modeText} — ${selected}`;
+  }
+  if(els.viewSnapshotBtn){
+    els.viewSnapshotBtn.disabled = !state.snapshotMode || !state.selectedRunId;
+  }
+}
+
+function setSnapshotMode(enabled){
+  state.snapshotMode = !!enabled;
+  localStorage.setItem(SNAPSHOT_MODE_KEY, state.snapshotMode ? '1' : '0');
+  state.snapshotDirty = true;
+  syncSnapshotUi();
+}
+
+function initSnapshotMode(){
+  state.snapshotMode = localStorage.getItem(SNAPSHOT_MODE_KEY) === '1';
+  if(els.snapshotModeToggle){ els.snapshotModeToggle.checked = state.snapshotMode; }
+  syncSnapshotUi();
+}
+
+function markSnapshotsDirty(){ state.snapshotDirty = true; }
+
+function createThumbFromCanvas(canvas, maxW = SNAPSHOT_THUMB_MAX_W){
+  if(!canvas || !canvas.width || !canvas.height) return '';
+  const scale = Math.min(1, maxW / canvas.width);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(canvas.width * scale));
+  c.height = Math.max(1, Math.round(canvas.height * scale));
+  const ctx = c.getContext('2d');
+  ctx.drawImage(canvas, 0, 0, c.width, c.height);
+  return c.toDataURL('image/png');
+}
+
+async function capturePageSnapshot(pageNumber, overlayFlags){
+  const pageIdx = (pageNumber || 1) - 1;
+  const ready = state.pageRenderPromises[pageIdx];
+  if(ready) await ready.catch(()=>{});
+  const { canvas: src } = getPdfBitmapCanvas(pageIdx);
+  if(!src) return null;
+  const vp = state.pageViewports[pageIdx] || state.viewport || { width: src.width, height: src.height };
+  const baseW = Math.max(1, Math.round((vp.width ?? vp.w) || src.width));
+  const baseH = Math.max(1, Math.round((vp.height ?? vp.h) || (src.height - (state.pageOffsets[pageIdx]||0))));
+  const pageOffset = state.pageOffsets[pageIdx] || 0;
+  let renderW = baseW;
+  let renderH = baseH;
+  const pixels = renderW * renderH;
+  if(pixels > SNAPSHOT_PIXEL_CAP){
+    const scale = Math.sqrt(SNAPSHOT_PIXEL_CAP / pixels);
+    renderW = Math.max(1, Math.round(renderW * scale));
+    renderH = Math.max(1, Math.round(renderH * scale));
+  }
+  const out = document.createElement('canvas');
+  out.width = renderW; out.height = renderH;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(src, 0, pageOffset, baseW, baseH, 0, 0, renderW, renderH);
+
+  const overlayCanvas = document.createElement('canvas');
+  overlayCanvas.width = baseW; overlayCanvas.height = baseH;
+  paintOverlay(overlayCanvas.getContext('2d'), { scaleX:1, scaleY:1, pageFilter: pageNumber, offsetY: pageOffset, includeSelections:false, flags: overlayFlags });
+  ctx.drawImage(overlayCanvas, 0, 0, renderW, renderH);
+
+  const dataUrl = out.toDataURL('image/png');
+  const thumbUrl = createThumbFromCanvas(out, SNAPSHOT_THUMB_MAX_W);
+  return { dataUrl, thumbUrl, width: renderW, height: renderH, pageOffset, renderKey:{ width: baseW, height: baseH, pageOffset } };
+}
+
+async function buildSnapshotManifest(fileId, overlayFlags){
+  if(!fileId || !state.snapshotMode) return null;
+  const flags = overlayFlags || getOverlayFlags();
+  const manifest = { id: `${fileId}:snap`, fileId, createdAtISO: new Date().toISOString(), overlays: flags, pages: [] };
+  snapshotStore.set(fileId, manifest);
+  const totalPages = Math.max(1, Math.min(state.numPages || state.pageViewports.length || 1, SNAPSHOT_MAX_PAGES));
+  state.snapshotPanels.activePage = null;
+  for(let i=1; i<=totalPages; i++){
+    const snap = await capturePageSnapshot(i, flags);
+    if(!snap) continue;
+    snapshotStore.upsertPage(fileId, { pageNumber: i, dataUrl: snap.dataUrl, thumbUrl: snap.thumbUrl, width: snap.width, height: snap.height, renderKey: snap.renderKey, pageOffset: snap.pageOffset });
+  }
+  state.lastSnapshotManifestId = manifest.id;
+  state.snapshotDirty = false;
+  return snapshotStore.get(fileId) || manifest;
+}
+
+function manifestNeedsRefresh(manifest, flags){
+  if(!manifest) return true;
+  if(!overlayFlagsEqual(manifest.overlays || {}, flags || {})) return true;
+  return !!state.snapshotDirty;
+}
+
+async function ensureSnapshotManifest(fileId, overlayFlags, opts = {}){
+  const flags = overlayFlags || getOverlayFlags();
+  let manifest = snapshotStore.get(fileId);
+  const mustRefresh = opts.force || manifestNeedsRefresh(manifest, flags);
+  if(mustRefresh && state.snapshotMode && state.currentFileId === fileId){
+    manifest = await buildSnapshotManifest(fileId, flags);
+  }
+  return manifest;
+}
+
+async function renderSnapshotDetail(manifest, pageNumber){
+  if(!els.snapshotDetail) return;
+  const page = (manifest?.pages || []).find(p => p.pageNumber === pageNumber);
+  if(!page){
+    els.snapshotDetail.innerHTML = '<p class="snapshot-empty">No snapshot for this page.</p>';
+    return;
+  }
+  let dataUrl = page.dataUrl;
+  if(!dataUrl && state.snapshotMode && state.currentFileId === manifest.fileId){
+    const regen = await capturePageSnapshot(page.pageNumber, manifest.overlays || getOverlayFlags());
+    if(regen){
+      snapshotStore.upsertPage(manifest.fileId, { pageNumber: page.pageNumber, dataUrl: regen.dataUrl, thumbUrl: page.thumbUrl || regen.thumbUrl, width: regen.width, height: regen.height, renderKey: regen.renderKey, pageOffset: regen.pageOffset });
+      dataUrl = regen.dataUrl;
+    }
+  }
+  if(!dataUrl){
+    els.snapshotDetail.innerHTML = '<p class="snapshot-empty">Snapshot unavailable for this page.</p>';
+    return;
+  }
+  els.snapshotDetail.innerHTML = `<img src="${dataUrl}" alt="Snapshot page ${page.pageNumber}" />`;
+}
+
+function renderSnapshotPanel(manifest){
+  if(!els.snapshotPanel || !manifest){
+    if(els.snapshotPanel) els.snapshotPanel.style.display = 'none';
+    return;
+  }
+  els.snapshotPanel.style.display = 'block';
+  els.snapshotPanel.dataset.open = '1';
+  const pages = manifest.pages || [];
+  if(els.snapshotMeta){
+    els.snapshotMeta.textContent = `${pages.length} page(s) • ${describeOverlayFlags(manifest.overlays || {})}`;
+  }
+  if(!pages.length){
+    if(els.snapshotList) els.snapshotList.innerHTML = '<p class="snapshot-empty">No snapshots captured.</p>';
+    if(els.snapshotDetail) els.snapshotDetail.innerHTML = '';
+    return;
+  }
+  if(!state.snapshotPanels.activePage || !pages.some(p => p.pageNumber === state.snapshotPanels.activePage)){
+    state.snapshotPanels.activePage = pages[0].pageNumber;
+  }
+  if(els.snapshotList){
+    els.snapshotList.innerHTML = '';
+    pages.forEach(p => {
+      const card = document.createElement('div');
+      card.className = 'snapshot-card' + (p.pageNumber === state.snapshotPanels.activePage ? ' active' : '');
+      const img = document.createElement('img');
+      img.src = p.thumbUrl || p.dataUrl || '';
+      img.alt = `Page ${p.pageNumber}`;
+      card.appendChild(img);
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = `Page ${p.pageNumber}${p.tooLarge ? ' (on-demand)' : ''}`;
+      card.appendChild(meta);
+      card.addEventListener('click', ()=>{
+        state.snapshotPanels.activePage = p.pageNumber;
+        renderSnapshotPanel(manifest);
+      });
+      els.snapshotList.appendChild(card);
+    });
+  }
+  renderSnapshotDetail(manifest, state.snapshotPanels.activePage);
+}
+
+async function openSnapshotPanel(force=false){
+  if(!state.snapshotMode){
+    alert('Enable snapshot mode to capture page images.');
+    return;
+  }
+  if(!state.selectedRunId){
+    alert('Select a run from the extracted data table.');
+    return;
+  }
+  const flags = getOverlayFlags();
+  let manifest = await ensureSnapshotManifest(state.selectedRunId, flags, { force });
+  if(!manifest){
+    alert('No snapshots available for this run. Drop the file again with snapshot mode enabled.');
+    return;
+  }
+  renderSnapshotPanel(manifest);
+}
+
+function closeSnapshotPanel(){
+  if(els.snapshotPanel){
+    els.snapshotPanel.style.display = 'none';
+    els.snapshotPanel.dataset.open = '0';
+  }
+}
+
 function traceFromAudit(a){
   const meta = a.meta || {};
   const docId = meta.docId || (state.currentFileName || 'doc').replace(/[^a-z0-9_-]/gi,'_');
@@ -4282,6 +4552,8 @@ function displayTrace(traceId){
 function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
   const byKey = {};
+  if(!state.snapshotMode){ state.lastSnapshotManifestId = ''; }
+  state.selectedRunId = fileId || state.selectedRunId;
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
   (state.profile?.fields||[]).forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
@@ -4359,6 +4631,9 @@ function compileDocument(fileId, lineItems){
   const invNum = compiled.invoice.number;
   const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
+  if(state.lastSnapshotManifestId){
+    compiled.snapshotManifestId = state.lastSnapshotManifestId;
+  }
   LS.setDb(state.username, state.docType, db);
   renderResultsTable();
   renderTelemetry();
@@ -4373,6 +4648,11 @@ function renderResultsTable(){
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
   db = db.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
 
+  const firstId = db[0]?.fileId || '';
+  if(!state.selectedRunId || !db.some(r => r.fileId === state.selectedRunId)){
+    state.selectedRunId = firstId;
+  }
+
   const keySet = new Set();
   db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
@@ -4380,6 +4660,7 @@ function renderResultsTable(){
 
   const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
   const rows = db.map(r=>{
+    const rowClass = r.fileId === state.selectedRunId ? 'results-selected' : '';
     const cells = keys.map(k=>{
       const f = r.fields?.[k] || { value:'', raw:'', confidence:0 };
       const warn = f.confidence < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
@@ -4392,7 +4673,7 @@ function renderResultsTable(){
       return `<tr><td>${it.description||''}${it.confidence<0.8?' <span class="warn">⚠️</span>':''}</td><td>${it.sku||''}</td><td>${it.quantity||''}</td><td>${it.unit_price||''}</td><td>${lineTotal}</td></tr>`;
     }).join('');
     const liTable = `<table class="line-items-table"><thead><tr><th>Item Description</th><th>Item Code (SKU)</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>${liRows}</tbody></table>`;
-    return `<tr><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
+    return `<tr class="${rowClass}" data-file="${r.fileId}"><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
 
   mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
@@ -4409,14 +4690,21 @@ function renderResultsTable(){
       if(prop === 'value'){
         rec.fields[field].confidence = 1;
         if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
-        if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
-      }
-      LS.setDb(state.username, dt, db);
-      renderResultsTable();
-      renderReports();
-      renderSavedFieldsTable();
+      if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
     }
+    LS.setDb(state.username, dt, db);
+    renderResultsTable();
+    renderReports();
+    renderSavedFieldsTable();
+  }
   }));
+  mount.querySelectorAll('tr[data-file]').forEach(tr => tr.addEventListener('click', evt => {
+    if((evt.target?.tagName||'').toLowerCase() === 'input') return;
+    state.selectedRunId = tr.dataset.file || '';
+    mount.querySelectorAll('tr[data-file]').forEach(row => row.classList.toggle('results-selected', row.dataset.file === state.selectedRunId));
+    syncSnapshotUi();
+  }));
+  syncSnapshotUi();
 }
 
 function syncRawModeUI(){
@@ -4743,10 +5031,14 @@ els.fileInput?.addEventListener('change', e=>{
   if (files.length) processBatch(files);
 });
 
-els.showBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
-els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
-els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ drawOverlay(); }));
-els.showOcrBoxesToggle?.addEventListener('change', ()=>{ drawOverlay(); });
+els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
+els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
+els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.snapshotModeToggle?.addEventListener('change', ()=>{ setSnapshotMode(!!els.snapshotModeToggle.checked); });
+els.viewSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(false); });
+els.regenerateSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(true); });
+els.closeSnapshotBtn?.addEventListener('click', closeSnapshotPanel);
 
 // Single-file open (wizard)
 els.wizardFile?.addEventListener('change', async e=>{
@@ -4975,6 +5267,10 @@ async function runModeExtractFileWithProfile(file, profile){
     const lineItems = await extractLineItems(activeProfile);
     if(isRunMode()) console.log(`[run-mode] dynamic line items extracted (${lineItems.length})`);
     const compiled = compileDocument(state.currentFileId, lineItems);
+    if(state.snapshotMode){
+      const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
+      if(manifest){ compiled.snapshotManifestId = manifest.id; }
+    }
     if(isRunMode()) console.log(`[run-mode] MasterDB written for ${compiled.fileId}`);
   } finally {
     if(runDiagnostics && guardStarted){
@@ -5008,4 +5304,5 @@ async function processBatch(files){
 renderResultsTable();
 renderReports();
 syncRawModeUI();
+initSnapshotMode();
 syncModeUi();

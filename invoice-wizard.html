@@ -83,6 +83,10 @@
                 <button id="configure-btn" class="btn">Configure Wizard</button>
                 <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
                 <button id="demo-btn" class="btn">Demo Wizard</button>
+                <label class="toggle-inline">
+                  <input type="checkbox" id="snapshot-mode-toggle" />
+                  Snapshot mode
+                </label>
                 <button id="upload-btn" class="btn" style="display:none">Upload Documents</button>
                 <button id="reset-model-btn" class="btn" type="button">Reset Model</button>
                 <button id="logout-btn" class="btn" type="button">Logout</button>
@@ -147,7 +151,24 @@
               Show raw values
             </label>
           </div>
+          <div class="field">
+            <div class="actions">
+              <button id="view-snapshot-btn" class="btn" type="button">View Snapshot</button>
+              <span id="snapshotStatus" class="sub"></span>
+            </div>
+          </div>
           <div id="resultsMount"></div>
+          <div id="snapshotPanel" class="panel minimal" style="display:none">
+            <div class="actions" style="justify-content:space-between; align-items:center; gap:12px;">
+              <div class="actions">
+                <button id="closeSnapshotBtn" class="btn" type="button">Close</button>
+                <button id="regenerateSnapshotBtn" class="btn" type="button">Regenerate</button>
+              </div>
+              <div class="sub" id="snapshotMeta"></div>
+            </div>
+            <div id="snapshotList" class="snapshot-grid"></div>
+            <div id="snapshotDetail" class="snapshot-detail"></div>
+          </div>
           <pre id="telemetryPanel" class="code" style="max-height:120px;overflow:auto;"></pre>
           <div id="ocrCropSelfTest" class="panel minimal">
             <h3>OCR Crop Self-Test</h3>
@@ -250,6 +271,7 @@
   <script src="master-db.js"></script>
   <script src="orchestrator.js"></script>
   <script src="field-map.js"></script>
+  <script src="snapshot-store.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
