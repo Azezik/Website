@@ -1403,6 +1403,138 @@ function tokensInBox(tokens, box, opts={}){
     return ay === by ? a.x - b.x : ay - by;
   });
 }
+function lineBounds(line){
+  const xs = line.tokens.map(t=>t.x), ys = line.tokens.map(t=>t.y);
+  const x2s = line.tokens.map(t=>t.x + t.w), y2s = line.tokens.map(t=>t.y + t.h);
+  const left = Math.min(...xs), right = Math.max(...x2s);
+  const top = Math.min(...ys), bottom = Math.max(...y2s);
+  return { left, right, top, bottom, width: right-left, height: bottom-top, cy: line.cy, page: line.page, tokens: line.tokens };
+}
+function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
+  if(!hintPx) return [];
+  const horizontalOverlap = (L)=> Math.max(0, Math.min(L.right, hintPx.x + hintPx.w) - Math.max(L.left, hintPx.x));
+  const overlapThreshold = (L)=> Math.max(L.width, hintPx.w) * 0.15;
+  const verticalPad = 2;
+  const candidates = lines
+    .filter(L => L.page === hintPx.page)
+    .filter(L => horizontalOverlap(L) >= overlapThreshold(L))
+    .filter(L => (L.bottom > hintPx.y - verticalPad) && (L.top < hintPx.y + hintPx.h + verticalPad))
+    .sort((a,b)=> a.top - b.top || a.left - b.left);
+  if(!candidates.length) return [];
+  if(!multiline){
+    const cy = hintPx.y + hintPx.h/2;
+    let best = candidates[0];
+    let bestScore = Infinity;
+    for(const L of candidates){
+      const overlap = horizontalOverlap(L) / Math.max(1, Math.max(L.width, hintPx.w));
+      const dy = Math.abs(((L.top + L.bottom)/2) - cy);
+      const score = dy + (1 - overlap) * 20;
+      if(score < bestScore){ bestScore = score; best = L; }
+    }
+    return best ? [best] : [];
+  }
+  const anchorLine = candidates.find(L => L.cy >= hintPx.y - verticalPad && L.cy <= hintPx.y + hintPx.h + verticalPad) || candidates[0];
+  const ordered = candidates.filter(L => L.top >= anchorLine.top);
+  const maxGap = Math.max(4, Math.min(anchorLine.height * 0.6, 12));
+  const selected = [anchorLine];
+  let prev = anchorLine;
+  for(const L of ordered){
+    if(L === anchorLine) continue;
+    if(L.top - prev.bottom <= maxGap){ selected.push(L); prev = L; }
+  }
+  return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
+}
+function snapStaticToLines(tokens, hintPx, opts={}){
+  const { multiline=false, marginPx=4 } = opts || {};
+  const lines = groupIntoLines(tokens, 4).map(lineBounds);
+  const selected = selectLinesForStatic(lines, hintPx, { multiline });
+  if(!selected.length){
+    const fallback = snapToLine(tokens, hintPx, marginPx, opts);
+    return { ...fallback, lines: [] };
+  }
+  const selectedTokens = selected.flatMap(L => L.tokens);
+  const left = Math.min(...selectedTokens.map(t=>t.x));
+  const right = Math.max(...selectedTokens.map(t=>t.x + t.w));
+  const top = Math.min(...selected.map(L => L.top));
+  const bottom = Math.max(...selected.map(L => L.bottom));
+  let box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
+  const expanded = { x: box.x - marginPx, y: box.y - marginPx, w: box.w + marginPx*2, h: box.h + marginPx*2, page: hintPx.page };
+  let finalBox = expanded;
+  if(hintPx && hintPx.w > 0){
+    const widthCap = hintPx.w * 1.1;
+    const tokensWidth = right - left;
+    const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
+    if(finalBox.w > targetWidth){
+      const minLeft = Math.max(finalBox.x, right - targetWidth);
+      const maxLeft = Math.min(finalBox.x + finalBox.w - targetWidth, left);
+      let newLeft = finalBox.x + (finalBox.w - targetWidth) / 2;
+      if(newLeft < minLeft) newLeft = minLeft;
+      if(newLeft > maxLeft) newLeft = maxLeft;
+      const newRight = newLeft + targetWidth;
+      finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
+    }
+  }
+  const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
+  const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
+  return { box: finalBox, text, lines: selected };
+}
+function resolveStaticOverlap(entries){
+  const groups = [];
+  const overlapX = (a,b)=> Math.max(0, Math.min(a.box.x + a.box.w, b.box.x + b.box.w) - Math.max(a.box.x, b.box.x));
+  const sameBand = (a,b)=> overlapX(a,b) >= Math.max(4, Math.min(a.box.w, b.box.w) * 0.3);
+  for(const entry of entries){
+    let group = groups.find(g => g.some(e => sameBand(e, entry)));
+    if(group) group.push(entry); else groups.push([entry]);
+  }
+  const gap = 1;
+  for(const group of groups){
+    group.sort((a,b)=> (a.box.y) - (b.box.y));
+    for(let i=0; i<group.length-1; i++){
+      const a = group[i], b = group[i+1];
+      const overlapY = (a.box.y + a.box.h) - b.box.y;
+      if(overlapY <= 0) continue;
+      const aBottoms = (a.lines||[]).map(L=>L.bottom);
+      const bTops = (b.lines||[]).map(L=>L.top);
+      const aBottom = Math.max(a.box.y + 1, aBottoms.length ? Math.max(...aBottoms) : (a.box.y + a.box.h));
+      const bTop = Math.min(b.box.y + b.box.h - 1, bTops.length ? Math.min(...bTops) : b.box.y);
+      let split = Math.max(aBottom, bTop);
+      const maxSplit = b.box.y + b.box.h - 1;
+      split = clamp(split, a.box.y + 1, maxSplit);
+      const newABottom = Math.max(a.box.y + 1, split - gap/2);
+      const bBottom = b.box.y + b.box.h;
+      const newBTop = Math.min(split + gap/2, bBottom - 1);
+      a.box.h = Math.max(1, newABottom - a.box.y);
+      b.box.y = Math.max(b.box.y, newBTop);
+      b.box.h = Math.max(1, bBottom - b.box.y);
+    }
+  }
+  return entries;
+}
+function stepSpecForField(fieldKey=''){
+  return (state.steps||[]).find(s=>s.fieldKey === fieldKey)
+    || DEFAULT_FIELDS.find(s=>s.fieldKey === fieldKey)
+    || {};
+}
+function pxBoxFromField(field){
+  const nb = normBoxFromField(field);
+  if(!nb) return null;
+  const page = field.page || 1;
+  const vp = state.pageViewports[page-1] || state.viewport || {};
+  const W = Math.max(1, (vp.width ?? vp.w) || 1);
+  const H = Math.max(1, (vp.height ?? vp.h) || 1);
+  const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
+  return applyTransform({ x:sx, y:sy, w:sw, h:sh, page });
+}
+function buildStaticOverlapEntries(page, currentFieldKey, tokens){
+  const siblings = (state.profile?.fields || []).filter(f => f.type === 'static' && f.page === page && f.fieldKey !== currentFieldKey);
+  return siblings.map(f => {
+    const box = pxBoxFromField(f);
+    if(!box) return null;
+    const spec = stepSpecForField(f.fieldKey || '');
+    const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline });
+    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [] } : null;
+  }).filter(Boolean);
+}
 function snapToLine(tokens, hintPx, marginPx=6, opts={}){
   const hits = tokensInBox(tokens, hintPx, opts);
   if(!hits.length) return { box: hintPx, text: '' };
@@ -4442,7 +4574,22 @@ async function finalizeSelection(e) {
   state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
-  const snap = snapToLine(tokens, state.selectionPx);
+  const step = state.steps[state.stepIdx] || {};
+  let snap = null;
+  if(isConfigMode() && (step.type||'static') === 'static'){
+    const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
+    const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
+    if(siblings.length){
+      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [] }]);
+      const mine = resolved.find(e => e.fieldKey === step.fieldKey);
+      if(mine){ snap = { ...baseSnap, box: mine.box, lines: mine.lines || baseSnap.lines }; }
+    } else {
+      snap = baseSnap;
+    }
+  }
+  if(!snap){
+    snap = snapToLine(tokens, state.selectionPx);
+  }
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
   const { scaleX, scaleY } = getScaleFactors();
@@ -4453,7 +4600,6 @@ async function finalizeSelection(e) {
     h: state.snappedPx.h/scaleY,
     page: state.snappedPx.page
   };
-  const step = state.steps[state.stepIdx] || {};
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
   const vp = state.pageViewports[state.pageNum - 1] || { width: state.viewport.w, height: state.viewport.h };
   const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
