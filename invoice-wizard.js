@@ -221,6 +221,7 @@ let state = {
   pageViewports: [],       // viewport per page
   pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: {},          // {page:number: Token[] in px}
+  keywordIndexByPage: {},   // per-page keyword bbox cache
   selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
   selectionPx: null,         // current user-drawn selection (px, page-relative)
   snappedCss: null,          // snapped line box (CSS units, page-relative)
@@ -1092,6 +1093,26 @@ const KNOWN_LEXICON = [
   'DELIVERY','PICKUP','SUBTOTAL','TOTAL','BALANCE','DEPOSIT','CONTINUATION','GST','QST','HST'
 ];
 
+const KEYWORD_CATALOGUE = {
+  store_name: { en: ['store', 'vendor', 'seller', 'company'] },
+  department_division: { en: ['department', 'division'] },
+  invoice_number: { en: ['invoice number', 'invoice no', 'invoice #', 'inv #', 'inv no'] },
+  invoice_date: { en: ['invoice date', 'date of issue', 'issued date'] },
+  salesperson_rep: { en: ['salesperson', 'sales rep', 'representative'] },
+  customer_name: { en: ['customer', 'client', 'bill to', 'sold to'] },
+  customer_address: { en: ['address', 'billing address', 'bill to address', 'customer address'] },
+  subtotal_amount: { en: ['subtotal', 'sub total'] },
+  discounts_amount: { en: ['discount', 'discounts'] },
+  tax_amount: { en: ['tax', 'hst', 'gst', 'qst', 'vat'] },
+  invoice_total: { en: ['total', 'grand total', 'amount due', 'balance due'] },
+  payment_method: { en: ['payment method', 'paid with'] },
+  payment_status: { en: ['payment status', 'status'] }
+};
+
+function getKeywordCatalogue(){
+  return KEYWORD_CATALOGUE;
+}
+
 function editDistance(a,b){
   const dp = Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
   for(let i=0;i<=a.length;i++) dp[i][0]=i;
@@ -1411,6 +1432,41 @@ function lineBounds(line){
   const left = Math.min(...xs), right = Math.max(...x2s);
   const top = Math.min(...ys), bottom = Math.max(...y2s);
   return { left, right, top, bottom, width: right-left, height: bottom-top, cy: line.cy, page: line.page, tokens: line.tokens };
+}
+
+function normalizeKeywordText(text){
+  return (text || '')
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeTokenBounds(tokens){
+  if(!Array.isArray(tokens) || !tokens.length) return null;
+  const xs = tokens.map(t=>t.x);
+  const ys = tokens.map(t=>t.y);
+  const x2s = tokens.map(t=>t.x + t.w);
+  const y2s = tokens.map(t=>t.y + t.h);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    w: Math.max(...x2s) - Math.min(...xs),
+    h: Math.max(...y2s) - Math.min(...ys),
+    page: tokens[0]?.page
+  };
+}
+
+function normalizeBBoxForPage(box, pageW, pageH){
+  if(!box || !pageW || !pageH) return null;
+  return {
+    x: box.x / pageW,
+    y: box.y / pageH,
+    w: box.w / pageW,
+    h: box.h / pageH,
+    page: box.page
+  };
 }
 
 function median(nums=[]){
@@ -4187,7 +4243,8 @@ async function openFile(file){
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
-    await ensureTokensForPage(1);
+    const tokens = await ensureTokensForPage(1);
+    await buildKeywordIndexForPage(1, tokens);
     if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
     else await calibrateIfNeeded();
     drawOverlay();
@@ -4221,6 +4278,7 @@ async function openFile(file){
 }
 function cleanupDoc(){
   state.tokensByPage = {};
+  state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
   state.pageRenderPromises = [];
@@ -4325,19 +4383,27 @@ async function prepareRunDocument(file){
 async function renderImage(url){
   state.overlayPinned = false;
   const img = els.imgCanvas;
-  img.onload = () => {
-    const scale = Math.min(1, 980 / img.naturalWidth);
-    img.width = img.naturalWidth * scale;
-    img.height = img.naturalHeight * scale;
-    syncOverlay();
-    state.overlayPinned = isOverlayPinned();
-    state.viewport = { w: img.width, h: img.height, scale };
-    state.pageRenderReady[0] = true;
-    state.pageRenderPromises[0] = Promise.resolve();
-    refreshCropAuditThumbs();
-    URL.revokeObjectURL(url);
-  };
-  img.src = url;
+  const loadPromise = new Promise((resolve, reject) => {
+    img.onload = () => {
+      const scale = Math.min(1, 980 / img.naturalWidth);
+      img.width = img.naturalWidth * scale;
+      img.height = img.naturalHeight * scale;
+      syncOverlay();
+      state.overlayPinned = isOverlayPinned();
+      state.viewport = { w: img.width, h: img.height, scale };
+      state.pageRenderReady[0] = true;
+      refreshCropAuditThumbs();
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    img.src = url;
+  });
+  state.pageRenderPromises[0] = loadPromise;
+  return loadPromise;
 }
 // ===== Render all PDF pages vertically =====
 async function renderAllPages(){
@@ -4380,7 +4446,8 @@ async function renderAllPages(){
   for(let i=0; i<pageCanvases.length; i++){
     const p = pageCanvases[i];
     ctx.drawImage(p.canvas, 0, y);
-    await ensureTokensForPage(i+1, p.page, p.vp, p.canvas);
+    const tokens = await ensureTokensForPage(i+1, p.page, p.vp, p.canvas);
+    await buildKeywordIndexForPage(i+1, tokens, p.vp);
     y += p.canvas.height;
   }
   await refreshCropAuditThumbs();
@@ -4415,11 +4482,51 @@ async function readTokensForPage(pageObj, vp){
   return tokens;
 }
 
+async function readImageTokensForPage(pageNum, canvasEl=null){
+  const canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || els.imgCanvas;
+  if(!canvas){ return []; }
+  const opts = { tessedit_pageseg_mode: 6, oem: 1 };
+  try{
+    const { data } = await TesseractRef.recognize(canvas, 'eng', opts);
+    const tokens = (data.words || []).map(w => {
+      const raw = w.text.trim();
+      if(!raw) return null;
+      const { text: corrected, corrections } = applyOcrCorrections(raw);
+      return {
+        raw,
+        corrected,
+        text: corrected,
+        correctionsApplied: corrections,
+        confidence: (w.confidence || 0) / 100,
+        x: w.bbox?.x || 0,
+        y: w.bbox?.y || 0,
+        w: w.bbox?.width || 0,
+        h: w.bbox?.height || 0,
+        page: pageNum
+      };
+    }).filter(Boolean);
+    logStaticDebug(`full-page-ocr page=${pageNum}`, { tokens: tokens.length, meanConf: tokens.reduce((s,t)=>s+t.confidence,0)/(tokens.length||1) });
+    return tokens;
+  } catch(err){
+    console.warn('Full-page OCR failed', err);
+    logStaticDebug(`full-page-ocr-failed page=${pageNum}`, { error: err?.message || err });
+    return [];
+  }
+}
+
 /* ----------------------- Text Extraction ------------------------- */
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
   let tokens = [];
   if(state.isImage){
+    if(state.pageRenderPromises[pageNum-1]){
+      try {
+        await state.pageRenderPromises[pageNum-1];
+      } catch(err){
+        console.warn('Image render promise failed', err);
+      }
+    }
+    tokens = await readImageTokensForPage(pageNum, canvasEl);
     state.tokensByPage[pageNum] = tokens;
     return tokens;
   }
@@ -4431,6 +4538,93 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   tokens.forEach(t => { t.page = pageNum; });
   state.tokensByPage[pageNum] = tokens;
   return tokens;
+}
+
+async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
+  if(state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
+  const catalogue = getKeywordCatalogue();
+  const activeLangs = ['en'];
+  const keywordEntries = [];
+  for(const [category, langs] of Object.entries(catalogue)){
+    for(const lang of activeLangs){
+      const list = langs?.[lang] || [];
+      for(const keyword of list){
+        const norm = normalizeKeywordText(keyword);
+        if(norm){
+          keywordEntries.push({ category, keyword, norm });
+        }
+      }
+    }
+  }
+
+  tokens = tokens || state.tokensByPage[pageNum] || await ensureTokensForPage(pageNum, null, vpOverride);
+  if(!Array.isArray(tokens)) tokens = [];
+
+  const vp = vpOverride || (state.isImage ? state.viewport : state.pageViewports[pageNum-1]) || {};
+  const pageW = Math.max(1, Number(vp.width || vp.w || (state.isImage ? els.imgCanvas?.width : els.pdfCanvas?.width) || 0));
+  const pageH = Math.max(1, Number(vp.height || vp.h || (state.isImage ? els.imgCanvas?.height : els.pdfCanvas?.height) || 0));
+
+  const lines = groupIntoLines(tokens);
+  const matches = [];
+
+  const alreadyRecorded = (bbox, entry) => {
+    return matches.some(m => m.keyword === entry.keyword && m.category === entry.category && Math.abs(m.bboxPx.x - bbox.x) < 1 && Math.abs(m.bboxPx.y - bbox.y) < 1 && Math.abs(m.bboxPx.w - bbox.w) < 1 && Math.abs(m.bboxPx.h - bbox.h) < 1);
+  };
+
+  const pushMatch = (bboxPx, entry, fontHeight=0) => {
+    if(!bboxPx || !Number.isFinite(bboxPx.x) || !Number.isFinite(bboxPx.y)) return;
+    if(alreadyRecorded(bboxPx, entry)) return;
+    const bboxNorm = normalizeBBoxForPage(bboxPx, pageW, pageH);
+    matches.push({ page: pageNum, bboxPx, bboxNorm, keyword: entry.keyword, category: entry.category, fontHeight: fontHeight || bboxPx.h });
+  };
+
+  for(const token of tokens){
+    const normText = normalizeKeywordText(token.text || token.raw || '');
+    if(!normText) continue;
+    for(const entry of keywordEntries){
+      if(normText.includes(entry.norm)){
+        pushMatch({ x: token.x, y: token.y, w: token.w, h: token.h, page: token.page }, entry, token.h);
+      }
+    }
+  }
+
+  for(const line of lines){
+    const normalizedParts = line.tokens
+      .map((t, idx) => ({ part: normalizeKeywordText(t.text || t.raw || ''), idx }))
+      .filter(p => p.part);
+    let lineNorm = '';
+    const spans = [];
+    for(let i=0;i<normalizedParts.length;i++){
+      const { part, idx } = normalizedParts[i];
+      if(lineNorm) lineNorm += ' ';
+      const actualStart = lineNorm.length;
+      lineNorm += part;
+      spans.push({ start: actualStart, end: lineNorm.length, idx });
+    }
+    if(!lineNorm) continue;
+    const lineBox = lineBounds(line);
+
+    for(const entry of keywordEntries){
+      let searchFrom = 0;
+      while(true){
+        const idx = lineNorm.indexOf(entry.norm, searchFrom);
+        if(idx === -1) break;
+        const endIdx = idx + entry.norm.length;
+        const startTok = spans.find(s => s.end > idx);
+        const endTok = [...spans].reverse().find(s => s.start < endIdx);
+        const slice = (startTok && endTok)
+          ? line.tokens.slice(startTok.idx, endTok.idx + 1)
+          : [];
+        const bbox = slice.length ? mergeTokenBounds(slice) : { x: lineBox.left, y: lineBox.top, w: lineBox.width, h: lineBox.height, page: line.page };
+        pushMatch(bbox, entry, lineBox.height);
+        searchFrom = endIdx;
+      }
+    }
+  }
+
+  state.keywordIndexByPage[pageNum] = matches;
+  logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
+  return matches;
 }
 
 function pageFromYPx(yPx){
