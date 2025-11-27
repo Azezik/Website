@@ -181,6 +181,21 @@ function guardInteractive(label){
   return false;
 }
 
+const PAGE_ROLE = { FIRST:'first', LAST:'last', EXPLICIT:'explicit' };
+const VERTICAL_ANCHOR = { TOP:'top', BOTTOM:'bottom' };
+const HEADER_FIELD_KEYS = new Set([
+  'store_name','department_division','invoice_number','invoice_date','salesperson_rep',
+  'customer_name','customer_address'
+]);
+const FOOTER_FIELD_KEYS = new Set([
+  'subtotal_amount','discounts_amount','tax_amount','invoice_total','deposit','balance',
+  'payment_method','payment_status'
+]);
+const BOTTOM_ANCHOR_FIELD_KEYS = new Set([
+  'subtotal_amount','discounts_amount','tax_amount','invoice_total','deposit','balance',
+  'payment_method','payment_status'
+]);
+
 function showTab(id){
   [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
@@ -377,7 +392,7 @@ const LS = {
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 5;
+const PROFILE_VERSION = 6;
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -481,6 +496,27 @@ const migrations = {
         }
       }
     }
+  },
+  5: p => {
+    const fields = p.fields || [];
+    fields.forEach(f => {
+      if(f.type !== 'static') return;
+      const anchor = inferVerticalAnchor(f);
+      f.verticalAnchor = anchor;
+      const role = inferPageRole(f, f.page || 1);
+      if(!f.pageRole) f.pageRole = role;
+      if(!Number.isFinite(f.pageIndex)){
+        const rawPage = Number.isFinite(f.page) ? (f.page - 1) : 0;
+        f.pageIndex = rawPage;
+      }
+      if(!f.staticGeom){
+        const nb = normBoxFromField(f);
+        const geom = buildStaticGeometry(nb, anchor);
+        if(geom) f.staticGeom = geom;
+      } else if(!f.staticGeom.anchor){
+        f.staticGeom.anchor = anchor;
+      }
+    });
   }
 };
 
@@ -604,6 +640,88 @@ function loadModelById(id){
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
+
+function inferVerticalAnchor(field){
+  const anchor = field?.verticalAnchor || field?.staticGeom?.anchor;
+  if(anchor === VERTICAL_ANCHOR.TOP || anchor === VERTICAL_ANCHOR.BOTTOM) return anchor;
+  const key = field?.fieldKey || '';
+  return BOTTOM_ANCHOR_FIELD_KEYS.has(key) ? VERTICAL_ANCHOR.BOTTOM : VERTICAL_ANCHOR.TOP;
+}
+
+function inferPageRole(field, page=1){
+  if(field?.pageRole === PAGE_ROLE.FIRST || field?.pageRole === PAGE_ROLE.LAST || field?.pageRole === PAGE_ROLE.EXPLICIT){
+    return field.pageRole;
+  }
+  const key = field?.fieldKey || '';
+  if(FOOTER_FIELD_KEYS.has(key)) return PAGE_ROLE.LAST;
+  if(HEADER_FIELD_KEYS.has(key)) return PAGE_ROLE.FIRST;
+  return page === 1 ? PAGE_ROLE.FIRST : PAGE_ROLE.EXPLICIT;
+}
+
+function normBoxFromField(field){
+  const nbRaw = field?.normBox || field?.nb || (field?.bboxPct ? { x0n:field.bboxPct.x0, y0n:field.bboxPct.y0, wN:field.bboxPct.x1 - field.bboxPct.x0, hN:field.bboxPct.y1 - field.bboxPct.y0 } : null) || (field?.bbox ? { x0n:field.bbox.x0, y0n:field.bbox.y0, wN:field.bbox.x1 - field.bbox.x0, hN:field.bbox.y1 - field.bbox.y0 } : null);
+  if(!nbRaw) return null;
+  if(!validateNormBox(nbRaw).ok) return null;
+  return { x0n: nbRaw.x0n, y0n: nbRaw.y0n, wN: nbRaw.wN, hN: nbRaw.hN };
+}
+
+function buildStaticGeometry(normBox, anchor){
+  if(!normBox) return null;
+  const geom = {
+    x0n: clamp(normBox.x0n ?? 0, 0, 1),
+    wN: clamp(normBox.wN ?? 0, 0, 1),
+    hN: clamp(normBox.hN ?? 0, 0, 1),
+    anchor: anchor || VERTICAL_ANCHOR.TOP,
+    yNorm: 0
+  };
+  if(geom.wN <= 0 || geom.hN <= 0) return null;
+  if(geom.anchor === VERTICAL_ANCHOR.BOTTOM){
+    geom.yNorm = clamp(1 - (normBox.y0n + geom.hN), 0, 1);
+  } else {
+    geom.yNorm = clamp(normBox.y0n ?? 0, 0, 1);
+  }
+  return geom;
+}
+
+function geometryToNormBox(geom){
+  if(!geom) return null;
+  const x0n = geom.x0n ?? 0;
+  const wN = geom.wN ?? 0;
+  const hN = geom.hN ?? 0;
+  if(wN <= 0 || hN <= 0) return null;
+  const y0n = geom.anchor === VERTICAL_ANCHOR.BOTTOM
+    ? clamp(1 - (geom.yNorm ?? 0) - hN, 0, 1 - hN)
+    : clamp(geom.yNorm ?? 0, 0, 1 - hN);
+  return { x0n, y0n, wN, hN };
+}
+
+function resolveStaticPlacement(field, viewports=[], totalPages){
+  if(!field || field.type !== 'static') return { pageNumber: field?.page || 1, pageRole: inferPageRole(field, field?.page || 1), anchor: inferVerticalAnchor(field), normBox: normBoxFromField(field) };
+  const pages = Math.max(1, Number.isFinite(totalPages) ? totalPages : (viewports?.length || 1));
+  const role = inferPageRole(field, field.page || 1);
+  const anchor = inferVerticalAnchor(field);
+  const pageIdx = role === PAGE_ROLE.LAST
+    ? pages - 1
+    : (role === PAGE_ROLE.FIRST ? 0 : clamp(Number.isFinite(field.pageIndex) ? field.pageIndex : ((field.page||1) - 1), 0, pages - 1));
+  const pageNumber = pageIdx + 1;
+  const geom = field.staticGeom || buildStaticGeometry(normBoxFromField(field), anchor);
+  const normBox = geometryToNormBox(geom);
+  const vp = viewports[pageIdx] || {};
+  const W = Math.max(1, (vp.width ?? vp.w) || 1);
+  const H = Math.max(1, (vp.height ?? vp.h) || 1);
+  let boxPx = null;
+  if(normBox){
+    const { sx, sy, sw, sh } = denormalizeBox(normBox, W, H);
+    boxPx = applyTransform({ x: sx, y: sy, w: sw, h: sh, page: pageNumber });
+  }
+  const bboxArr = normBox ? [normBox.x0n, normBox.y0n, normBox.x0n + normBox.wN, normBox.y0n + normBox.hN] : null;
+  return { pageNumber, pageRole: role, anchor, normBox, bbox: bboxArr, boxPx };
+}
+
+function summarizeTokens(tokens=[], max=5){
+  if(!tokens.length) return '';
+  return tokens.slice(0, max).map(t => (t.text || '').trim()).filter(Boolean).join(' | ');
+}
 
 // Convert normalized [0-1] coords into the canonical logical pixel space used by
 // pdf.js tokens (CSS/document pixels, not device pixels). Any rendering scale or
@@ -4155,18 +4273,23 @@ function paintOverlay(ctx, options = {}){
     ctx.lineWidth = 1;
     const entries = extractionBoxes ? (rawStore.get(fileId) || []) : (state.profile?.fields || []);
     for(const f of entries){
-      const fPage = f.page || f.pageNumber || 1;
-      if(pageFilter && fPage !== pageFilter) continue;
-      const nbRaw = f.normBox || f.nb || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null) || (f.bbox ? { x0n:f.bbox.x0, y0n:f.bbox.y0, wN:f.bbox.x1 - f.bbox.x0, hN:f.bbox.y1 - f.bbox.y0 } : null);
+      let targetPage = f.page || f.pageNumber || 1;
+      let nbRaw = f.normBox || f.nb || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null) || (f.bbox ? { x0n:f.bbox.x0, y0n:f.bbox.y0, wN:f.bbox.x1 - f.bbox.x0, hN:f.bbox.y1 - f.bbox.y0 } : null);
+      if(!extractionBoxes && f.type === 'static'){
+        const placement = resolveStaticPlacement(f, state.pageViewports, state.numPages);
+        targetPage = placement?.pageNumber || targetPage;
+        nbRaw = placement?.normBox || nbRaw;
+      }
+      if(pageFilter && targetPage !== pageFilter) continue;
       if(!nbRaw) continue;
       const nb = { x0n: nbRaw.x0n, y0n: nbRaw.y0n, wN: nbRaw.wN, hN: nbRaw.hN };
       if([nb.x0n, nb.y0n, nb.wN, nb.hN].some(v => typeof v !== 'number' || !Number.isFinite(v))) continue;
-      const vp = state.pageViewports[fPage-1];
+      const vp = state.pageViewports[targetPage-1];
       if(!vp) continue;
       const W = Math.round(vp.width ?? vp.w ?? 1);
       const H = Math.round(vp.height ?? vp.h ?? 1);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:fPage });
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:targetPage });
       const box = {
         x: boxPx.x / scaleX,
         y: boxPx.y / scaleY,
@@ -4186,15 +4309,17 @@ function paintOverlay(ctx, options = {}){
     ctx.strokeStyle = 'rgba(255,105,180,0.7)';
     for(const f of state.profile.fields){
       if(f.type !== 'static') continue;
-      if(pageFilter && f.page !== pageFilter) continue;
-      const nb = f.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
+      const placement = resolveStaticPlacement(f, state.pageViewports, state.numPages);
+      const ringPage = placement?.pageNumber || f.page;
+      if(pageFilter && ringPage !== pageFilter) continue;
+      const nb = placement?.normBox || (f.bboxPct ? { x0n:f.bboxPct.x0, y0n:f.bboxPct.y0, wN:f.bboxPct.x1 - f.bboxPct.x0, hN:f.bboxPct.y1 - f.bboxPct.y0 } : null);
       if(!nb) continue;
-      const vp = state.pageViewports[f.page-1];
+      const vp = state.pageViewports[ringPage-1];
       if(!vp) continue;
       const W = Math.round(vp.width ?? vp.w ?? 1);
       const H = Math.round(vp.height ?? vp.h ?? 1);
       const { sx, sy, sw, sh } = denormalizeBox(nb, W, H);
-      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:f.page });
+      const boxPx = applyTransform({ x:sx, y:sy, w:sw, h:sh, page:ringPage });
       const box = {
         x: boxPx.x / scaleX,
         y: boxPx.y / scaleY,
@@ -4986,6 +5111,13 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     correctionsApplied: corrections,
     tokens
   };
+  if(step.type === 'static'){
+    entry.pageRole = inferPageRole(step, page);
+    entry.pageIndex = (page || 1) - 1;
+    entry.verticalAnchor = inferVerticalAnchor(step);
+    const geom = buildStaticGeometry(normBox, entry.verticalAnchor);
+    if(geom) entry.staticGeom = geom;
+  }
   const anchorMetrics = computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras });
   if(anchorMetrics) entry.anchorMetrics = anchorMetrics;
   if(extras.landmark) entry.landmark = extras.landmark;
@@ -5476,19 +5608,32 @@ async function runModeExtractFileWithProfile(file, profile){
     if(isRunMode()) console.log(`[run-mode] tokens cached for ${state.numPages} page(s)`);
 
     for(const spec of (activeProfile.fields || [])){
-      const targetPage = Number.isFinite(spec.page) ? clamp(spec.page + 1, 1, state.numPages || 1) : (state.pageNum || 1);
+      const placement = spec.type === 'static'
+        ? resolveStaticPlacement(spec, state.pageViewports, state.numPages)
+        : null;
+      const targetPage = placement?.pageNumber
+        ? clamp(placement.pageNumber, 1, state.numPages || 1)
+        : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
       const tokens = state.tokensByPage[targetPage] || [];
+      const bboxArr = placement?.bbox || spec.bbox;
       const fieldSpec = {
         fieldKey: spec.fieldKey,
         regex: spec.regex,
         landmark: spec.landmark,
-        bbox: spec.bbox,
-        page: spec.page,
+        bbox: bboxArr,
+        page: targetPage,
         type: spec.type,
         anchorMetrics: spec.anchorMetrics || null
       };
+      if(spec.type === 'static'){
+        const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
+        logStaticDebug(
+          `resolve ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(placement?.boxPx)}`,
+          { tokens: hitTokens.length, preview: summarizeTokens(hitTokens) }
+        );
+      }
       state.snappedPx = null; state.snappedText = '';
       const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
       if(value){
@@ -5501,6 +5646,13 @@ async function runModeExtractFileWithProfile(file, profile){
         if(dup) conf *= 0.5;
         const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: targetPage, bbox: pct, ts: Date.now() };
         rawStore.upsert(state.currentFileId, rec);
+      }
+      if(spec.type === 'static'){
+        const postTokens = boxPx ? tokensInBox(tokens, boxPx, { minOverlap: 0 }) : [];
+        logStaticDebug(
+          `resolved ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(boxPx || placement?.boxPx)}`,
+          { tokens: postTokens.length, preview: summarizeTokens(postTokens) }
+        );
       }
     }
     if(isRunMode()) console.log(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
