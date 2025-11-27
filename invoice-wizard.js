@@ -252,6 +252,7 @@ let state = {
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
+  snappedLineMetrics: null,
   debugLineAnchors: [],
 };
 
@@ -307,6 +308,7 @@ function clearTransientStateLocal(){
   state.selectionCss = null; state.selectionPx = null;
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
   state.pendingSelection = null; state.matchPoints = [];
+  state.snappedLineMetrics = null;
   state.overlayMetrics = null; state.overlayPinned = false;
   state.pdf = null; state.isImage = false;
   state.pageNum = 1; state.numPages = 0;
@@ -1410,6 +1412,27 @@ function lineBounds(line){
   const top = Math.min(...ys), bottom = Math.max(...y2s);
   return { left, right, top, bottom, width: right-left, height: bottom-top, cy: line.cy, page: line.page, tokens: line.tokens };
 }
+
+function median(nums=[]){
+  if(!nums.length) return 0;
+  const sorted = nums.slice().sort((a,b)=>a-b);
+  const mid = Math.floor(sorted.length/2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+}
+
+function summarizeLineMetrics(lines=[]){
+  const heights = (lines||[]).map(L => L?.height ?? (L?.bottom ?? 0) - (L?.top ?? 0)).filter(h => Number.isFinite(h) && h > 0);
+  const lineCount = (lines||[]).length;
+  if(!heights.length) return { lineCount, lineHeights: { min:0, max:0, median:0 } };
+  return {
+    lineCount,
+    lineHeights: {
+      min: Math.min(...heights),
+      max: Math.max(...heights),
+      median: median(heights)
+    }
+  };
+}
 function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
   if(!hintPx) return [];
   const horizontalOverlap = (L)=> Math.max(0, Math.min(L.right, hintPx.x + hintPx.w) - Math.max(L.left, hintPx.x));
@@ -1450,7 +1473,8 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   const selected = selectLinesForStatic(lines, hintPx, { multiline });
   if(!selected.length){
     const fallback = snapToLine(tokens, hintPx, marginPx, opts);
-    return { ...fallback, lines: [] };
+    const metrics = summarizeLineMetrics([]);
+    return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
   }
   const selectedTokens = selected.flatMap(L => L.tokens);
   const left = Math.min(...selectedTokens.map(t=>t.x));
@@ -1476,12 +1500,70 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   }
   const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
-  return { box: finalBox, text, lines: selected };
+  const metrics = summarizeLineMetrics(selected);
+  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
 }
 function resolveStaticOverlap(entries){
   const groups = [];
   const overlapX = (a,b)=> Math.max(0, Math.min(a.box.x + a.box.w, b.box.x + b.box.w) - Math.max(a.box.x, b.box.x));
   const sameBand = (a,b)=> overlapX(a,b) >= Math.max(4, Math.min(a.box.w, b.box.w) * 0.3);
+  const expectedLines = entry => entry?.expectedLineCount ?? entry?.lineMetrics?.lineCount ?? entry?.lineCount ?? (entry?.lines?.length || 0);
+  const observedLines = entry => entry?.lines?.length || 0;
+  const lineOverlaps = (line, top, bottom) => {
+    const lTop = line?.top ?? (line?.cy ?? 0) - (line?.height ?? 0)/2;
+    const lBottom = line?.bottom ?? lTop + (line?.height ?? 0);
+    return lBottom > top && lTop < bottom;
+  };
+  const linesInSpan = (entry, top, bottom)=> (entry?.lines||[]).filter(L => lineOverlaps(L, top, bottom));
+  const trimBoxToLines = (entry, keepLines=[], pad=0, trimTop=true)=>{
+    if(!entry?.box) return;
+    const bottomEdge = entry.box.y + entry.box.h;
+    if(trimTop){
+      const anchor = keepLines[0] || {};
+      const targetTop = anchor.top ?? entry.box.y;
+      const newTop = clamp(targetTop - pad, entry.box.y, targetTop);
+      entry.box.y = newTop;
+      entry.box.h = Math.max(1, bottomEdge - entry.box.y);
+    } else {
+      const anchor = keepLines[keepLines.length-1] || {};
+      const targetBottom = anchor.bottom ?? bottomEdge;
+      const newBottom = clamp(targetBottom + pad, entry.box.y + 1, bottomEdge);
+      entry.box.h = Math.max(1, newBottom - entry.box.y);
+    }
+    entry.lines = (entry.lines||[]).filter(L => lineOverlaps(L, entry.box.y, entry.box.y + entry.box.h));
+  };
+  const resolveWithLineCounts = (topEntry, bottomEntry, overlapTop, overlapBottom) => {
+    const aExp = expectedLines(topEntry) || 0;
+    const bExp = expectedLines(bottomEntry) || 0;
+    const aObs = observedLines(topEntry) || 0;
+    const bObs = observedLines(bottomEntry) || 0;
+    if(!aObs && !bObs) return false;
+    const aDiff = Math.abs(aObs - (aExp || aObs));
+    const bDiff = Math.abs(bObs - (bExp || bObs));
+    if(aDiff === bDiff) return false;
+    const winner = aDiff < bDiff ? topEntry : bottomEntry;
+    const loser = winner === topEntry ? bottomEntry : topEntry;
+    const overlapLinesWinner = linesInSpan(winner, overlapTop, overlapBottom);
+    const overlapLinesLoser = linesInSpan(loser, overlapTop, overlapBottom);
+    if(!overlapLinesWinner.length || !overlapLinesLoser.length) return false;
+    const keepLines = (loser.lines||[]).filter(L => !lineOverlaps(L, overlapTop, overlapBottom));
+    if(!keepLines.length) return false;
+    const metrics = summarizeLineMetrics(overlapLinesLoser);
+    const pad = (metrics?.lineHeights?.median || 0) * 0.35;
+    const keepTop = Math.min(...keepLines.map(l=>l.top));
+    const keepBottom = Math.max(...keepLines.map(l=>l.bottom));
+    const overlapCenter = (overlapTop + overlapBottom)/2;
+    const trimTop = overlapCenter <= ((loser.box.y + loser.box.h/2)) || (Math.max(...overlapLinesLoser.map(l=>l.bottom)) <= keepTop);
+    const trimBottom = Math.min(...overlapLinesLoser.map(l=>l.top)) >= keepBottom;
+    trimBoxToLines(loser, keepLines, pad, trimBottom ? false : trimTop);
+    if(staticDebugEnabled()){
+      logStaticDebug(
+        `overlap-resolve winner=${winner.fieldKey||''} loser=${loser.fieldKey||''} aDiff=${aDiff} bDiff=${bDiff} pad=${pad.toFixed(2)}`,
+        { overlapTop, overlapBottom, winner: winner.fieldKey, loser: loser.fieldKey, winnerExpected: expectedLines(winner), winnerObserved: observedLines(winner), loserExpected: expectedLines(loser), loserObserved: observedLines(loser), pad }
+      );
+    }
+    return true;
+  };
   for(const entry of entries){
     let group = groups.find(g => g.some(e => sameBand(e, entry)));
     if(group) group.push(entry); else groups.push([entry]);
@@ -1493,6 +1575,10 @@ function resolveStaticOverlap(entries){
       const a = group[i], b = group[i+1];
       const overlapY = (a.box.y + a.box.h) - b.box.y;
       if(overlapY <= 0) continue;
+      const overlapTop = b.box.y;
+      const overlapBottom = Math.min(a.box.y + a.box.h, b.box.y + b.box.h);
+      const resolved = resolveWithLineCounts(a, b, overlapTop, overlapBottom);
+      if(resolved) continue;
       const aBottoms = (a.lines||[]).map(L=>L.bottom);
       const bTops = (b.lines||[]).map(L=>L.top);
       const aBottom = Math.max(a.box.y + 1, aBottoms.length ? Math.max(...aBottoms) : (a.box.y + a.box.h));
@@ -1532,7 +1618,8 @@ function buildStaticOverlapEntries(page, currentFieldKey, tokens){
     if(!box) return null;
     const spec = stepSpecForField(f.fieldKey || '');
     const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline });
-    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [] } : null;
+    const expectedLineCount = f.lineMetrics?.lineCount ?? f.lineCount ?? snap.lineCount;
+    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [], expectedLineCount } : null;
   }).filter(Boolean);
 }
 function snapToLine(tokens, hintPx, marginPx=6, opts={}){
@@ -1948,7 +2035,7 @@ function goToStep(idx){
   els.confirmBtn.disabled = false;
   els.skipBtn.disabled = false;
   updatePrompt();
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.matchPoints=[]; drawOverlay();
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; state.matchPoints=[]; drawOverlay();
 }
 
 function finishWizard(){
@@ -2836,6 +2923,20 @@ function labelValueHeuristic(fieldSpec, tokens){
     const assembled = assembler ? assembler(assembleOpts) : null;
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
+    const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
+    const adjustConfidenceForLines = (confidence)=>{
+      const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
+      if(!expected || !observedLineCount) return { confidence, expected, factor: 1 };
+      const tolerance = expected >= 3 ? 1 : 0;
+      const diff = Math.abs(observedLineCount - expected);
+      let factor = 1;
+      let reason = 'exact';
+      if(diff === 0){ factor = 1.1; reason = 'exact'; }
+      else if(diff <= tolerance){ factor = 1.05; reason = 'near'; }
+      else { factor = Math.max(0.6, 1 - diff * 0.15); reason = 'mismatch'; }
+      const next = clamp(confidence * factor, 0, 1);
+      return { confidence: next, expected, factor, reason };
+    };
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
@@ -2864,9 +2965,14 @@ function labelValueHeuristic(fieldSpec, tokens){
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
       const cleanedOk = !!(cleaned.value || cleaned.raw);
       const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
-      const confidence = fingerprintOk
+      let confidence = fingerprintOk
         ? baseConf
         : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
+      let lineAdj = null;
+      if(runMode && ftype==='static'){
+        lineAdj = adjustConfidenceForLines(confidence);
+        confidence = lineAdj.confidence;
+      }
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
@@ -2880,10 +2986,18 @@ function labelValueHeuristic(fieldSpec, tokens){
         confidence,
         tokens: hits,
         cleanedOk,
-        fingerprintOk
+        fingerprintOk,
+        lineCount: observedLineCount,
+        expectedLineCount: lineAdj?.expected ?? (fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount)
       };
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
         const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+        if(lineAdj && lineAdj.factor !== 1){
+          logStaticDebug(
+            `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
+            { expected: lineAdj.expected, observed: observedLineCount, factor: lineAdj.factor, reason: lineAdj.reason }
+          );
+        }
         logStaticDebug(
           `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
           { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
@@ -2899,9 +3013,14 @@ function labelValueHeuristic(fieldSpec, tokens){
     const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
     const cleanedOk = staticRun ? !!sel.cleanedOk : !!sel.cleanedOk && fingerprintOk;
     const baseConf = cleaned.conf || (sel.cleanedOk ? 1 : 0.1);
-    const confidence = fingerprintOk
+    let confidence = fingerprintOk
       ? baseConf
       : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
+    let lineAdj = null;
+    if(runMode && ftype==='static'){
+      lineAdj = adjustConfidenceForLines(confidence);
+      confidence = lineAdj.confidence;
+    }
     const attemptResult = {
       value: sel.value,
       raw: sel.raw,
@@ -2915,10 +3034,18 @@ function labelValueHeuristic(fieldSpec, tokens){
       confidence,
       tokens: hits,
       cleanedOk,
-      fingerprintOk
+      fingerprintOk,
+      lineCount: observedLineCount,
+      expectedLineCount: lineAdj?.expected ?? (fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount)
     };
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+      if(lineAdj && lineAdj.factor !== 1){
+        logStaticDebug(
+          `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
+          { expected: lineAdj.expected, observed: observedLineCount, factor: lineAdj.factor, reason: lineAdj.reason }
+        );
+      }
       logStaticDebug(
         `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
         { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
@@ -4580,7 +4707,7 @@ async function finalizeSelection(e) {
     const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
     const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
     if(siblings.length){
-      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [] }]);
+      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount }]);
       const mine = resolved.find(e => e.fieldKey === step.fieldKey);
       if(mine){ snap = { ...baseSnap, box: mine.box, lines: mine.lines || baseSnap.lines }; }
     } else {
@@ -4592,6 +4719,8 @@ async function finalizeSelection(e) {
   }
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
+  const snapMetrics = snap.lineMetrics || { lineCount: snap.lineCount ?? 0, lineHeights: snap.lineHeights || { min:0, max:0, median:0 } };
+  state.snappedLineMetrics = snapMetrics.lineCount ? snapMetrics : null;
   const { scaleX, scaleY } = getScaleFactors();
   state.snappedCss = {
     x: state.snappedPx.x/scaleX,
@@ -5257,6 +5386,11 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     correctionsApplied: corrections,
     tokens
   };
+  if(extras.lineMetrics){
+    entry.lineMetrics = clonePlain(extras.lineMetrics);
+    if(extras.lineMetrics.lineCount !== undefined) entry.lineCount = extras.lineMetrics.lineCount;
+    if(extras.lineMetrics.lineHeights) entry.lineHeights = clonePlain(extras.lineMetrics.lineHeights);
+  }
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
     entry.pageIndex = (page || 1) - 1;
@@ -5570,7 +5704,7 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
@@ -5639,6 +5773,9 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     const lm = captureRingLandmark(boxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
     extras.landmark = lm;
+    if(state.snappedLineMetrics){
+      extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+    }
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
