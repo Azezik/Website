@@ -1109,6 +1109,22 @@ const KEYWORD_CATALOGUE = {
   payment_status: { en: ['payment status', 'status'] }
 };
 
+const KEYWORD_RELATION_SCOPE = new Set([
+  'store_name',
+  'department_division',
+  'invoice_number',
+  'invoice_date',
+  'salesperson_rep',
+  'customer_name',
+  'customer_address',
+  'subtotal_amount',
+  'discounts_amount',
+  'tax_amount',
+  'invoice_total',
+  'payment_method',
+  'payment_status'
+]);
+
 function getKeywordCatalogue(){
   return KEYWORD_CATALOGUE;
 }
@@ -4627,6 +4643,75 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
   return matches;
 }
 
+function computeKeywordRelationsForConfig(fieldKey, boxPx, normBox, page, pageW, pageH){
+  if(!KEYWORD_RELATION_SCOPE.has(fieldKey)) return null;
+  if(!boxPx || !normBox || !pageW || !pageH) return null;
+  const candidates = (state.keywordIndexByPage?.[page] || [])
+    .filter(k => k && k.category === fieldKey);
+
+  if(!candidates.length){
+    logStaticDebug(`keyword-rel ${fieldKey}: no keyword candidates`, { page });
+    return null;
+  }
+
+  const valCx = boxPx.x + (boxPx.w || 0) / 2;
+  const valCy = boxPx.y + (boxPx.h || 0) / 2;
+  const valHeight = Math.max(1, boxPx.h || 1);
+
+  const scored = candidates.map(c => {
+    const kBox = c.bboxPx || {};
+    const kCx = (kBox.x || 0) + (kBox.w || 0) / 2;
+    const kCy = (kBox.y || 0) + (kBox.h || 0) / 2;
+    const yOverlap = Math.min((kBox.y || 0) + (kBox.h || 0), boxPx.y + boxPx.h) - Math.max((kBox.y || 0), boxPx.y);
+    const xOverlap = Math.min((kBox.x || 0) + (kBox.w || 0), boxPx.x + boxPx.w) - Math.max((kBox.x || 0), boxPx.x);
+    const isLeft = (kBox.x || 0) + (kBox.w || 0) <= boxPx.x && yOverlap > 0;
+    const isAbove = (kBox.y || 0) + (kBox.h || 0) <= boxPx.y && xOverlap > 0;
+    const positionScore = isLeft ? 3 : (isAbove ? 2 : 1);
+    const dist = Math.hypot((kCx - valCx) / pageW, (kCy - valCy) / pageH);
+    if(dist > 0.35) return { ...c, score: -Infinity };
+    const distanceScore = Math.max(0, 1 - (dist / 0.3));
+    const heightRatio = (kBox.h || 0) / valHeight;
+    const fontPenalty = (heightRatio > 1.5 || heightRatio < 0.5) ? 0.5 : 0;
+    const score = positionScore + distanceScore - fontPenalty;
+    return { ...c, score };
+  }).filter(c => Number.isFinite(c.score));
+
+  if(!scored.length){
+    logStaticDebug(`keyword-rel ${fieldKey}: no keyword candidates`, { page });
+    return null;
+  }
+
+  scored.sort((a,b) => b.score - a.score);
+  const valueNorm = { x: normBox.x0n, y: normBox.y0n, w: normBox.wN, h: normBox.hN };
+
+  const mapEntry = (entry) => {
+    const nb = entry.bboxNorm || normalizeBBoxForPage(entry.bboxPx, pageW, pageH) || {};
+    const norm = { x: nb.x || 0, y: nb.y || 0, w: nb.w || 0, h: nb.h || 0 };
+    return {
+      text: entry.keyword,
+      category: entry.category,
+      normBox: norm,
+      offset: {
+        dx: valueNorm.x - norm.x,
+        dy: valueNorm.y - norm.y,
+        dw: valueNorm.w - norm.w,
+        dh: valueNorm.h - norm.h
+      },
+      score: entry.score
+    };
+  };
+
+  const mother = mapEntry(scored[0]);
+  const secondaries = scored.slice(1, 4).map(mapEntry);
+
+  logStaticDebug(
+    `keyword-rel ${fieldKey}: candidates=${candidates.length}`,
+    { mother: { text: mother.text, score: mother.score }, secondaries: secondaries.map(s => ({ text: s.text, score: s.score })), page }
+  );
+
+  return { mother, secondaries, page };
+}
+
 function pageFromYPx(yPx){
   for(let i=state.pageOffsets.length-1; i>=0; i--){
     if(yPx >= state.pageOffsets[i]) return i+1;
@@ -5594,6 +5679,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   }
   const anchorMetrics = computeFieldAnchorMetrics({ normBox, rawBox, tokens, page, extras });
   if(anchorMetrics) entry.anchorMetrics = anchorMetrics;
+  if(extras.keywordRelations !== undefined){
+    entry.keywordRelations = extras.keywordRelations ? clonePlain(extras.keywordRelations) : null;
+  }
   if(extras.landmark) entry.landmark = extras.landmark;
   if(step.type === 'column' && extras.column){
     const columnExtras = clonePlain(extras.column);
@@ -5962,6 +6050,9 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const normBox = normalizeBox(boxPx, canvasW, canvasH);
   const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+  const keywordRelations = (step.type === 'static')
+    ? computeKeywordRelationsForConfig(step.fieldKey, boxPx, normBox, state.pageNum, canvasW, canvasH)
+    : null;
   const extras = {};
   if(step.type === 'static'){
     const lm = captureRingLandmark(boxPx);
@@ -5970,6 +6061,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     if(state.snappedLineMetrics){
       extras.lineMetrics = clonePlain(state.snappedLineMetrics);
     }
+    extras.keywordRelations = keywordRelations || null;
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
