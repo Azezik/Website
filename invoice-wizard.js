@@ -2,6 +2,7 @@
 const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
+const KeywordWeighting = window.KeywordWeighting || null;
 
 let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
@@ -2897,6 +2898,23 @@ function labelValueHeuristic(fieldSpec, tokens){
       : null;
     return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height, debugCtx);
   };
+  const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
+    ? (fieldSpec.keywordRelations || null)
+    : null;
+  const ensureKeywordIndexForPage = async (page)=>{
+    if(!page) return [];
+    const vp = state.pageViewports[(page||1)-1] || state.viewport || viewportDims;
+    const pageTokens = (page === (fieldSpec.page || state.pageNum || page))
+      ? tokens
+      : (state.tokensByPage?.[page] || null);
+    return await buildKeywordIndexForPage(page, pageTokens, vp);
+  };
+  const getPageSize = (page)=>{
+    const vp = state.pageViewports[(page||1)-1] || viewportDims || {};
+    const pageW = (vp.width ?? vp.w ?? viewportDims.width ?? 1) || 1;
+    const pageH = (vp.height ?? vp.h ?? viewportDims.height ?? 1) || 1;
+    return { pageW, pageH };
+  };
 
     if(state.modes.rawData){
     let boxPx = null;
@@ -3127,6 +3145,10 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   let result = null, method=null, score=null, comp=null, basePx=null;
+  let keywordPrediction = null;
+  let keywordMatch = null;
+  let keywordWeight = 1;
+  let triangulatedBox = null;
   let selectionRaw = '';
   let firstAttempt = null;
   if(fieldSpec.bbox){
@@ -3137,6 +3159,9 @@ function labelValueHeuristic(fieldSpec, tokens){
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
         { field: fieldSpec.fieldKey, page: basePx.page, configBox: fieldSpec.bbox, transformed: basePx, viewport: viewportDims, rawBox: raw }
       );
+    }
+    if(staticRun && keywordRelations){
+      await ensureKeywordIndexForPage(basePx.page);
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
@@ -3195,6 +3220,27 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
   }
+  if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length){
+    const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
+    const { pageW, pageH } = getPageSize(page);
+    if(!state.keywordIndexByPage?.[page]){
+      await ensureKeywordIndexForPage(page);
+    }
+    const keywordIndex = state.keywordIndexByPage?.[page] || [];
+    triangulatedBox = KeywordWeighting?.triangulateBox
+      ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx)
+      : null;
+    if(triangulatedBox){
+      for(const pad of [0,3]){
+        const probe = { x: triangulatedBox.x - pad, y: triangulatedBox.y - pad, w: triangulatedBox.w + pad*2, h: triangulatedBox.h + pad*2, page: triangulatedBox.page };
+        const r = await attempt(probe);
+        if(r && anchorMatchesCandidate(r) && r.value){
+          r.confidence = Math.min(r.confidence || 0.45, 0.45);
+          result = r; method='keyword-triangulation'; comp='keyword'; score = score || null; break;
+        }
+      }
+    }
+  }
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
@@ -3219,6 +3265,22 @@ function labelValueHeuristic(fieldSpec, tokens){
     const raw = selectionRaw.trim();
     result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
   }
+  if(staticRun && keywordRelations && result && basePx){
+    const page = result.boxPx?.page || basePx.page || fieldSpec.page || state.pageNum || 1;
+    const { pageW, pageH } = getPageSize(page);
+    if(!state.keywordIndexByPage?.[page]){
+      await ensureKeywordIndexForPage(page);
+    }
+    const keywordIndex = state.keywordIndexByPage?.[page] || [];
+    if(KeywordWeighting?.chooseKeywordMatch && keywordRelations.mother){
+      const refBox = result.boxPx || basePx;
+      const match = KeywordWeighting.chooseKeywordMatch(keywordRelations.mother, keywordIndex, refBox, pageW, pageH);
+      if(match?.predictedBox){
+        keywordMatch = match.entry;
+        keywordPrediction = match.predictedBox;
+      }
+    }
+  }
   const baseConfidence = result?.confidence ?? 0;
   let landmarkBoost = null;
   if(runMode && ftype==='static' && fieldSpec.landmark && basePx && RunLandmarkOnce?.maybeBoostWithLandmark){
@@ -3240,6 +3302,34 @@ function labelValueHeuristic(fieldSpec, tokens){
         comp = comp || 'ring_once';
       }
     }
+  }
+  if(staticRun && keywordRelations){
+    const page = keywordPrediction?.page || result.boxPx?.page || basePx?.page || fieldSpec.page || 1;
+    const { pageW, pageH } = getPageSize(page);
+    const strongAnchor = !!(result.fingerprintOk || result.method === 'anchor' || result.method?.startsWith('ring') || baseConfidence >= 0.9);
+    const beforeKeyword = result.confidence;
+    if(keywordPrediction && KeywordWeighting?.computeKeywordWeight && result.boxPx){
+      keywordWeight = KeywordWeighting.computeKeywordWeight(result.boxPx, keywordPrediction, { strongAnchor, pageW, pageH });
+      if(keywordWeight && keywordWeight !== 1){
+        result.confidence = clamp(result.confidence * keywordWeight, 0, 1);
+      }
+    }
+    if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      logStaticDebug(
+        `keyword field=${fieldSpec.fieldKey||''} hasRel=${!!keywordRelations} match=${keywordMatch?.keyword || '<none>'} weight=${(keywordWeight||1).toFixed(2)} conf=${result.confidence?.toFixed ? result.confidence.toFixed(3) : result.confidence}`,
+        {
+          prediction: keywordPrediction,
+          candidateBox: result.boxPx,
+          keywordWeight,
+          beforeKeyword,
+          afterKeyword: result.confidence,
+          landmarkBoost: landmarkBoost?.confidence,
+          triangulatedBox
+        }
+      );
+    }
+  } else if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+    logStaticDebug(`keyword field=${fieldSpec.fieldKey||''} hasRel=false`, { keywordRelations: false });
   }
   result.method = result.method || method || 'fallback';
   result.score = score;
