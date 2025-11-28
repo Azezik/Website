@@ -115,28 +115,49 @@
   }
 
   function triangulateBox(relations, keywordIndex, pageW, pageH, referenceBox){
-    if(!relations || !relations.secondaries || !relations.secondaries.length) return null;
-    const predictions = [];
+    if(!relations) return null;
+    const seeds = [];
+    const seed = (pred, source, weight=1, entry=null)=>{
+      if(!pred) return;
+      seeds.push({ box: pred, source, weight, entry });
+    };
+
     const motherPred = chooseKeywordMatch(relations.mother, keywordIndex, referenceBox, pageW, pageH);
-    if(motherPred?.predictedBox){ predictions.push(motherPred.predictedBox); }
-    for(const rel of relations.secondaries){
+    if(motherPred?.predictedBox){ seed(motherPred.predictedBox, 'mother', 1.1, motherPred.entry || relations.mother); }
+
+    const secondaryMatches = [];
+    for(const rel of (relations.secondaries || [])){
       const pred = chooseKeywordMatch(rel, keywordIndex, referenceBox, pageW, pageH);
-      if(pred?.predictedBox){ predictions.push(pred.predictedBox); }
+      if(pred?.predictedBox){
+        secondaryMatches.push(pred);
+        seed(pred.predictedBox, 'secondary', 0.9, pred.entry || rel);
+      }
     }
-    if(!predictions.length) return null;
-    const center = predictions.reduce((acc, box)=>{
-      acc.x += box.x + (box.w||0)/2;
-      acc.y += box.y + (box.h||0)/2;
-      acc.w += box.w || 0;
-      acc.h += box.h || 0;
+
+    if(referenceBox){
+      seed(referenceBox, 'config', 0.6, null);
+    }
+
+    if(!seeds.length) return null;
+
+    const totals = seeds.reduce((acc, { box, weight })=>{
+      const w = weight || 1;
+      acc.weight += w;
+      acc.cx += (box.x + (box.w||0)/2) * w;
+      acc.cy += (box.y + (box.h||0)/2) * w;
+      acc.w += (box.w || 0) * w;
+      acc.h += (box.h || 0) * w;
+      if(acc.page === null && box.page){ acc.page = box.page; }
       return acc;
-    }, { x:0, y:0, w:0, h:0 });
-    const count = predictions.length;
-    const cx = center.x / count;
-    const cy = center.y / count;
-    const w = Math.max(4, center.w / count);
-    const h = Math.max(4, center.h / count);
-    return { x: cx - w/2, y: cy - h/2, w, h, page: predictions[0].page };
+    }, { cx:0, cy:0, w:0, h:0, weight:0, page: null });
+
+    const weight = totals.weight || 1;
+    const cx = totals.cx / weight;
+    const cy = totals.cy / weight;
+    const w = Math.max(4, totals.w / weight);
+    const h = Math.max(4, totals.h / weight);
+    const box = { x: cx - w/2, y: cy - h/2, w, h, page: totals.page || referenceBox?.page || 1 };
+    return { box, seeds, motherPred, secondaryMatches };
   }
 
   const api = {

@@ -47,8 +47,8 @@ const {
     { keyword: 'amount due', category: 'invoice_total', bboxPx: { x: 150, y: 105, w: 40, h: 20, page: 1 } }
   ];
   const predicted = triangulateBox(relations, keywordIndex, 1000, 1000, { x: 200, y: 100, w: 40, h: 20 });
-  assert.ok(predicted, 'triangulation should produce a predicted box');
-  const centerX = predicted.x + predicted.w / 2;
+  assert.ok(predicted && predicted.box, 'triangulation should produce a predicted box');
+  const centerX = predicted.box.x + predicted.box.w / 2;
   const expectedCenters = [220, 290];
   assert.ok(centerX >= Math.min(...expectedCenters) && centerX <= Math.max(...expectedCenters), 'triangulated center should sit between predicted anchors');
 })();

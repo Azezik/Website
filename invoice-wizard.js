@@ -3148,11 +3148,93 @@ function labelValueHeuristic(fieldSpec, tokens){
     return attemptResult;
   }
 
+  function scoreTriangulatedCandidates(opts){
+    const { triBox, keywordPrediction, baseBox, existingResult, pageW, pageH } = opts;
+    if(!triBox) return null;
+    const triCx = triBox.x + (triBox.w||0)/2;
+    const triCy = triBox.y + (triBox.h||0)/2;
+    const maxRadius = KeywordWeighting?.MAX_KEYWORD_RADIUS || 0.35;
+    const lines = groupIntoLines(tokens);
+    const candidates = [];
+
+    const evaluateCandidate = (candTokens, source='line')=>{
+      if(!candTokens || !candTokens.length) return null;
+      const box = mergeTokenBounds(candTokens);
+      if(!box) return null;
+      const cx = box.x + (box.w||0)/2;
+      const cy = box.y + (box.h||0)/2;
+      const distNorm = Math.hypot((cx - triCx)/pageW, (cy - triCy)/pageH);
+      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius));
+      const rawText = candTokens.map(t=>t.text).join(' ').trim();
+      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
+      const anchorOk = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
+      const keywordScore = keywordPrediction && KeywordWeighting?.computeKeywordWeight
+        ? KeywordWeighting.computeKeywordWeight(box, keywordPrediction, { pageW, pageH, strongAnchor: anchorOk || fingerprintOk })
+        : 1;
+      const anchorScore = anchorOk ? 1 : 0.82;
+      const fpScore = fingerprintOk ? 1.1 : 0.65;
+      const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
+      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore, 0, 2);
+      const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
+      return {
+        source,
+        box,
+        cx,
+        cy,
+        text: cleaned.value || cleaned.raw || rawText,
+        rawText,
+        cleaned,
+        fingerprintCode: cleaned.code,
+        fpOk: fingerprintOk,
+        anchorOk,
+        anchorScore,
+        keywordScore,
+        distanceScore,
+        totalScore,
+        confidence,
+        tokens: candTokens
+      };
+    };
+
+    for(const line of lines){
+      if(line.page !== triBox.page) continue;
+      const bounds = lineBounds(line);
+      const cx = (bounds.left + bounds.right) / 2;
+      const cy = bounds.cy || ((bounds.top + bounds.bottom) / 2);
+      const distNorm = Math.hypot((cx - triCx)/pageW, (cy - triCy)/pageH);
+      if(distNorm > maxRadius) continue;
+      const candidate = evaluateCandidate(line.tokens, 'line');
+      if(candidate) candidates.push(candidate);
+    }
+
+    const currentTokens = existingResult?.tokens?.length
+      ? existingResult.tokens
+      : (existingResult?.boxPx ? tokensInBox(tokens, existingResult.boxPx, { minOverlap: staticMinOverlap }) : []);
+    const currentCandidate = existingResult?.boxPx
+      ? evaluateCandidate(currentTokens, 'current')
+      : null;
+    if(currentCandidate){ candidates.push(currentCandidate); }
+
+    if(!candidates.length) return null;
+    const sorted = candidates.slice().sort((a,b)=> b.totalScore - a.totalScore);
+    const best = sorted[0];
+    const current = currentCandidate || existingResult;
+    const currentScore = currentCandidate?.totalScore ?? 0;
+    const preferBest = best && best !== currentCandidate && (
+      best.totalScore > (currentScore || 0) * 1.05
+      || (!currentCandidate?.fpOk && best.fpOk && best.distanceScore > (currentCandidate?.distanceScore || 0))
+    );
+    return { candidates: sorted, best, current: currentCandidate, preferBest };
+  }
+
   let result = null, method=null, score=null, comp=null, basePx=null;
   let keywordPrediction = null;
   let keywordMatch = null;
   let keywordWeight = 1;
   let triangulatedBox = null;
+  let keywordIndex = null;
+  let keywordContext = null;
   let selectionRaw = '';
   let firstAttempt = null;
   if(fieldSpec.bbox){
@@ -3166,6 +3248,16 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     if(staticRun && keywordRelations){
       await ensureKeywordIndexForPage(basePx.page);
+      keywordIndex = state.keywordIndexByPage?.[basePx.page] || [];
+      const { pageW, pageH } = getPageSize(basePx.page);
+      keywordContext = KeywordWeighting?.triangulateBox
+        ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx)
+        : null;
+      triangulatedBox = keywordContext?.box || keywordContext || triangulatedBox;
+      if(!keywordPrediction && keywordContext?.motherPred?.predictedBox){
+        keywordPrediction = keywordContext.motherPred.predictedBox;
+        keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
+      }
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
@@ -3230,10 +3322,11 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!state.keywordIndexByPage?.[page]){
       await ensureKeywordIndexForPage(page);
     }
-    const keywordIndex = state.keywordIndexByPage?.[page] || [];
-    triangulatedBox = KeywordWeighting?.triangulateBox
+    keywordIndex = keywordIndex || state.keywordIndexByPage?.[page] || [];
+    keywordContext = keywordContext || (KeywordWeighting?.triangulateBox
       ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx)
-      : null;
+      : null);
+    triangulatedBox = keywordContext?.box || keywordContext || triangulatedBox;
     if(triangulatedBox){
       for(const pad of [0,3]){
         const probe = { x: triangulatedBox.x - pad, y: triangulatedBox.y - pad, w: triangulatedBox.w + pad*2, h: triangulatedBox.h + pad*2, page: triangulatedBox.page };
@@ -3275,14 +3368,75 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!state.keywordIndexByPage?.[page]){
       await ensureKeywordIndexForPage(page);
     }
-    const keywordIndex = state.keywordIndexByPage?.[page] || [];
-    if(KeywordWeighting?.chooseKeywordMatch && keywordRelations.mother){
+    keywordIndex = keywordIndex || state.keywordIndexByPage?.[page] || [];
+    if(!keywordPrediction && keywordContext?.motherPred?.predictedBox){
+      keywordPrediction = keywordContext.motherPred.predictedBox;
+      keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
+    }
+    if(!keywordPrediction && KeywordWeighting?.chooseKeywordMatch && keywordRelations.mother){
       const refBox = result.boxPx || basePx;
       const match = KeywordWeighting.chooseKeywordMatch(keywordRelations.mother, keywordIndex, refBox, pageW, pageH);
       if(match?.predictedBox){
         keywordMatch = match.entry;
         keywordPrediction = match.predictedBox;
       }
+    }
+    if(!triangulatedBox && keywordContext?.box){
+      triangulatedBox = keywordContext.box;
+    }
+  }
+  let triangulationAudit = null;
+  if(staticRun && keywordRelations && triangulatedBox){
+    const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
+    const { pageW, pageH } = getPageSize(page);
+    const scored = scoreTriangulatedCandidates({
+      triBox: triangulatedBox,
+      keywordPrediction,
+      baseBox: basePx,
+      existingResult: result,
+      pageW,
+      pageH
+    });
+    if(scored){
+      const { best, current, preferBest, candidates } = scored;
+      if(preferBest && best){
+        result = {
+          value: best.text,
+          raw: best.rawText,
+          corrected: best.cleaned?.corrected,
+          code: best.cleaned?.code,
+          shape: best.cleaned?.shape,
+          score: best.cleaned?.score,
+          correctionsApplied: best.cleaned?.correctionsApplied,
+          corrections: best.cleaned?.correctionsApplied,
+          boxPx: best.box,
+          confidence: best.confidence,
+          tokens: best.tokens,
+          cleanedOk: !!(best.cleaned?.value || best.cleaned?.raw),
+          fingerprintOk: best.fpOk,
+          method: 'keyword-triangulation',
+          comparator: 'keyword'
+        };
+      }
+      triangulationAudit = {
+        field: fieldSpec.fieldKey,
+        page,
+        prediction: triangulatedBox,
+        keywordPrediction,
+        candidates: candidates.map(c => ({
+          text: c.text,
+          box: c.box,
+          fingerprintCode: c.fingerprintCode,
+          fpOk: c.fpOk,
+          anchorScore: Number(c.anchorScore?.toFixed ? c.anchorScore.toFixed(3) : c.anchorScore),
+          keywordScore: Number(c.keywordScore?.toFixed ? c.keywordScore.toFixed(3) : c.keywordScore),
+          distanceScore: Number(c.distanceScore?.toFixed ? c.distanceScore.toFixed(3) : c.distanceScore),
+          totalScore: Number(c.totalScore?.toFixed ? c.totalScore.toFixed(3) : c.totalScore),
+          source: c.source
+        })),
+        chosen: (preferBest ? best?.text : current?.text || result?.value || ''),
+        switched: !!preferBest && !!best
+      };
     }
   }
   const baseConfidence = result?.confidence ?? 0;
@@ -3312,6 +3466,9 @@ function labelValueHeuristic(fieldSpec, tokens){
     const { pageW, pageH } = getPageSize(page);
     const strongAnchor = !!(result.fingerprintOk || result.method === 'anchor' || result.method?.startsWith('ring') || baseConfidence >= 0.9);
     const beforeKeyword = result.confidence;
+    if(triangulationAudit && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      logStaticDebug(`[triangulation] field=${fieldSpec.fieldKey||''} page=${triangulationAudit.page || page} chosen="${triangulationAudit.chosen||''}"`, triangulationAudit);
+    }
     if(keywordPrediction && KeywordWeighting?.computeKeywordWeight && result.boxPx){
       keywordWeight = KeywordWeighting.computeKeywordWeight(result.boxPx, keywordPrediction, { strongAnchor, pageW, pageH });
       if(keywordWeight && keywordWeight !== 1){
