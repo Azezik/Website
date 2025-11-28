@@ -2901,6 +2901,10 @@ function labelValueHeuristic(fieldSpec, tokens){
   const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
     ? (fieldSpec.keywordRelations || null)
     : null;
+  if(staticRun && keywordRelations && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+    logStaticDebug(`keyword-rel load ${fieldSpec.fieldKey||''} page=${keywordRelations.page || fieldSpec.page || state.pageNum || 1}`,
+      { keywordRelations });
+  }
   const ensureKeywordIndexForPage = async (page)=>{
     if(!page) return [];
     const vp = state.pageViewports[(page||1)-1] || state.viewport || viewportDims;
@@ -4795,8 +4799,13 @@ function computeKeywordRelationsForConfig(fieldKey, boxPx, normBox, page, pageW,
   const secondaries = scored.slice(1, 4).map(mapEntry);
 
   logStaticDebug(
-    `keyword-rel ${fieldKey}: candidates=${candidates.length}`,
-    { mother: { text: mother.text, score: mother.score }, secondaries: secondaries.map(s => ({ text: s.text, score: s.score })), page }
+    `keyword-rel ${fieldKey}: candidates=${candidates.length} page=${page}`,
+    {
+      valueBox: valueNorm,
+      mother: { text: mother.text, score: mother.score, normBox: mother.normBox, offset: mother.offset },
+      secondaries: secondaries.map(s => ({ text: s.text, score: s.score, normBox: s.normBox, offset: s.offset })),
+      page
+    }
   );
 
   return { mother, secondaries, page };
@@ -6277,6 +6286,10 @@ async function runModeExtractFileWithProfile(file, profile){
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
       const tokens = state.tokensByPage[targetPage] || [];
       const bboxArr = placement?.bbox || spec.bbox;
+      const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
+      if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){
+        keywordRelations.page = targetPage;
+      }
       const fieldSpec = {
         fieldKey: spec.fieldKey,
         regex: spec.regex,
@@ -6284,7 +6297,8 @@ async function runModeExtractFileWithProfile(file, profile){
         bbox: bboxArr,
         page: targetPage,
         type: spec.type,
-        anchorMetrics: spec.anchorMetrics || null
+        anchorMetrics: spec.anchorMetrics || null,
+        keywordRelations
       };
       if(spec.type === 'static'){
         const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
