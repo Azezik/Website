@@ -402,7 +402,6 @@ const LS = {
 
 /* ---------- Profile versioning & persistence helpers ---------- */
 const PROFILE_VERSION = 7;
-const DEFAULT_CONFIG_MASK = [1,1,1,1];
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -532,7 +531,12 @@ const migrations = {
     const fields = p.fields || [];
     fields.forEach(f => {
       if(f.type !== 'static') return;
-      f.configMask = normalizeConfigMask(f);
+      const mask = Array.isArray(f.configMask) ? f.configMask.slice(0,4) : null;
+      const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
+      // Always trust the user-drawn box for static fields unless explicitly removed.
+      normalized[0] = 1; normalized[1] = 1;
+      const allZero = normalized.every(v => v === 0);
+      f.configMask = allZero ? [1,1,1,1] : normalized;
     });
   }
 };
@@ -545,7 +549,6 @@ function migrateProfile(p){
     if(m) m(p);
     v++; p.version = v;
   }
-  normalizeProfileMasks(p);
   return p;
 }
 
@@ -600,7 +603,6 @@ let saveTimer=null;
 function saveProfile(u, d, p){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    normalizeProfileMasks(p);
     try{ LS.setProfile(u, d, p); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
     try{ traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { docType:d }); }catch{}
@@ -684,30 +686,14 @@ function normBoxFromField(field){
   return { x0n: nbRaw.x0n, y0n: nbRaw.y0n, wN: nbRaw.wN, hN: nbRaw.hN };
 }
 
-function normalizeConfigMask(fieldOrMask){
-  const rawMask = Array.isArray(fieldOrMask?.configMask)
-    ? fieldOrMask.configMask
-    : Array.isArray(fieldOrMask) ? fieldOrMask : null;
-  const normalized = (rawMask && rawMask.length === 4)
-    ? rawMask.slice(0,4).map(v => Number(v) || 0)
-    : DEFAULT_CONFIG_MASK.slice();
-  const malformed = !rawMask || rawMask.length !== 4;
-  const allZero = normalized.every(v => v === 0);
-  if(malformed || allZero){
-    return DEFAULT_CONFIG_MASK.slice();
-  }
+function normalizeConfigMask(field){
+  if(!field) return [1,1,1,1];
+  const mask = Array.isArray(field.configMask) ? field.configMask.slice(0,4) : null;
+  const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
   normalized[0] = 1; // always trust x
   normalized[1] = 1; // always trust y
+  if(normalized.every(v => v === 0)) return [1,1,1,1];
   return normalized;
-}
-
-function normalizeProfileMasks(profile){
-  if(!profile?.fields) return profile;
-  profile.fields.forEach(f => {
-    if(!f || f.type !== 'static') return;
-    f.configMask = normalizeConfigMask(f);
-  });
-  return profile;
 }
 
 function buildStaticGeometry(normBox, anchor){
