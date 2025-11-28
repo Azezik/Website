@@ -114,8 +114,9 @@
     return weight;
   }
 
-  function triangulateBox(relations, keywordIndex, pageW, pageH, referenceBox){
+  function triangulateBox(relations, keywordIndex, pageW, pageH, referenceBox, opts={}){
     if(!relations) return null;
+    const configWeight = Number.isFinite(opts.configWeight) ? opts.configWeight : 0.6;
     const seeds = [];
     const seed = (pred, source, weight=1, entry=null)=>{
       if(!pred) return;
@@ -135,7 +136,7 @@
     }
 
     if(referenceBox){
-      seed(referenceBox, 'config', 0.6, null);
+      seed(referenceBox, 'config', configWeight, null);
     }
 
     if(!seeds.length) return null;
