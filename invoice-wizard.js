@@ -8,6 +8,11 @@ let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
+const MAX_STATIC_CANDIDATES = 12;
+const MIN_STATIC_ACCEPT_SCORE = 0.7;
+const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
+const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
+
 function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
@@ -2885,6 +2890,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
+  const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
@@ -2901,6 +2907,17 @@ function labelValueHeuristic(fieldSpec, tokens){
   const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
     ? (fieldSpec.keywordRelations || null)
     : null;
+  const computeLineDiff = (observedLineCount, expectedHint)=>{
+    const expected = expectedHint ?? fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount ?? 0;
+    const observed = observedLineCount ?? 0;
+    return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
+  };
+  const lineScoreForDiff = diff => {
+    if(Object.prototype.hasOwnProperty.call(STATIC_LINE_DIFF_WEIGHTS, diff)){
+      return STATIC_LINE_DIFF_WEIGHTS[diff];
+    }
+    return STATIC_LINE_DIFF_WEIGHTS.default;
+  };
   if(staticRun && keywordRelations && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword-rel load ${fieldSpec.fieldKey||''} page=${keywordRelations.page || fieldSpec.page || state.pageNum || 1}`,
       { keywordRelations });
@@ -3018,6 +3035,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
     const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
+    const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
     const adjustConfidenceForLines = (confidence)=>{
       const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
       if(!expected || !observedLineCount) return { confidence, expected, factor: 1 };
@@ -3043,10 +3061,9 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     if(!hits.length){
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-        const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
         logStaticDebug(
-          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=0 anchorsOk=${anchorsOk} fingerprintOk=false finalText=<empty> conf=0`,
-          { anchorsOk, fingerprintOk:false, text:'', confidence:0, box: searchBox }
+          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=0 anchorsOk=${anchorOk} fingerprintOk=false finalText=<empty> conf=0`,
+          { anchorsOk: anchorOk, fingerprintOk:false, text:'', confidence:0, box: searchBox }
         );
       }
       return null;
@@ -3067,6 +3084,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         lineAdj = adjustConfidenceForLines(confidence);
         confidence = lineAdj.confidence;
       }
+      const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
@@ -3081,11 +3099,12 @@ function labelValueHeuristic(fieldSpec, tokens){
         tokens: hits,
         cleanedOk,
         fingerprintOk,
+        anchorOk,
         lineCount: observedLineCount,
-        expectedLineCount: lineAdj?.expected ?? (fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount)
+        expectedLineCount: lineInfo.expectedLineCount,
+        lineDiff: lineInfo.lineDiff
       };
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-        const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
         if(lineAdj && lineAdj.factor !== 1){
           logStaticDebug(
             `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
@@ -3093,8 +3112,8 @@ function labelValueHeuristic(fieldSpec, tokens){
           );
         }
         logStaticDebug(
-          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
-          { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+          { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
         );
       }
       return attemptResult;
@@ -3115,6 +3134,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       lineAdj = adjustConfidenceForLines(confidence);
       confidence = lineAdj.confidence;
     }
+    const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
     const attemptResult = {
       value: sel.value,
       raw: sel.raw,
@@ -3129,11 +3149,12 @@ function labelValueHeuristic(fieldSpec, tokens){
       tokens: hits,
       cleanedOk,
       fingerprintOk,
+      anchorOk,
       lineCount: observedLineCount,
-      expectedLineCount: lineAdj?.expected ?? (fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount)
+      expectedLineCount: lineInfo.expectedLineCount,
+      lineDiff: lineInfo.lineDiff
     };
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-      const anchorsOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
       if(lineAdj && lineAdj.factor !== 1){
         logStaticDebug(
           `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
@@ -3141,8 +3162,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         );
       }
       logStaticDebug(
-        `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorsOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
-        { anchorsOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+        `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+        { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
       );
     }
     return attemptResult;
@@ -3173,9 +3194,14 @@ function labelValueHeuristic(fieldSpec, tokens){
         ? KeywordWeighting.computeKeywordWeight(box, keywordPrediction, { pageW, pageH, strongAnchor: anchorOk || fingerprintOk })
         : 1;
       const anchorScore = anchorOk ? 1 : 0.82;
-      const fpScore = fingerprintOk ? 1.1 : 0.65;
+      const fpScore = staticRun
+        ? (fingerprintOk ? STATIC_FP_SCORES.ok : STATIC_FP_SCORES.fail)
+        : (fingerprintOk ? 1.1 : 0.65);
+      const observedLineCount = groupIntoLines(candTokens)?.length || 0;
+      const lineInfo = computeLineDiff(observedLineCount);
+      const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
-      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore, 0, 2);
+      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
       const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
       return {
         source,
@@ -3191,6 +3217,10 @@ function labelValueHeuristic(fieldSpec, tokens){
         anchorScore,
         keywordScore,
         distanceScore,
+        lineCount: observedLineCount,
+        expectedLineCount: lineInfo.expectedLineCount,
+        lineDiff: lineInfo.lineDiff,
+        lineScore,
         totalScore,
         confidence,
         tokens: candTokens
@@ -3217,14 +3247,27 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(currentCandidate){ candidates.push(currentCandidate); }
 
     if(!candidates.length) return null;
-    const sorted = candidates.slice().sort((a,b)=> b.totalScore - a.totalScore);
+    let sorted = candidates.slice().sort((a,b)=> b.totalScore - a.totalScore);
+    if(staticRun && sorted.length > MAX_STATIC_CANDIDATES){
+      sorted = sorted.slice(0, MAX_STATIC_CANDIDATES);
+      if(currentCandidate && !sorted.includes(currentCandidate)){
+        sorted.push(currentCandidate);
+        sorted = sorted.sort((a,b)=> b.totalScore - a.totalScore);
+      }
+    }
     const best = sorted[0];
     const current = currentCandidate || existingResult;
     const currentScore = currentCandidate?.totalScore ?? 0;
-    const preferBest = best && best !== currentCandidate && (
+    let preferBest = best && best !== currentCandidate && (
       best.totalScore > (currentScore || 0) * 1.05
       || (!currentCandidate?.fpOk && best.fpOk && best.distanceScore > (currentCandidate?.distanceScore || 0))
     );
+    if(staticRun && best){
+      const lineOk = (best.lineDiff ?? Infinity) <= 1 || best.fpOk;
+      if(best.totalScore < MIN_STATIC_ACCEPT_SCORE || !lineOk){
+        preferBest = false;
+      }
+    }
     return { candidates: sorted, best, current: currentCandidate, preferBest };
   }
 
@@ -3261,22 +3304,31 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
-    if(initialAttempt && !anchorMatchesCandidate(initialAttempt)){ initialAttempt.cleanedOk = false; }
+    if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
     if(initialAttempt && initialAttempt.cleanedOk){
       firstAttempt = initialAttempt;
     } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
       firstAttempt = initialAttempt;
     }
     selectionRaw = firstAttempt?.raw || '';
-    if(firstAttempt && firstAttempt.cleanedOk){
+    if(staticRun && firstAttempt){
+      const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
+      const hasAnchor = firstAttempt.anchorOk !== false;
+      if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
+        result = firstAttempt; method='bbox'; stageUsed.value = 0;
+      } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
+        result = firstAttempt; method='bbox'; stageUsed.value = 1;
+      }
+    }
+    if(!result && firstAttempt && firstAttempt.cleanedOk){
       result = firstAttempt; method='bbox';
-    } else {
-    const pads = isConfigMode() ? [4] : [4,8,12];
+    } else if(!result){
+      const pads = isConfigMode() ? [4] : [4,8,12];
       for(const pad of pads){
         const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
         const r = await attempt(search);
         if(r && !anchorMatchesCandidate(r)){ continue; }
-        if(r && r.cleanedOk){ result = r; method='bbox'; break; }
+        if(r && r.cleanedOk){ result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } break; }
       }
     }
   }
@@ -3414,9 +3466,13 @@ function labelValueHeuristic(fieldSpec, tokens){
           tokens: best.tokens,
           cleanedOk: !!(best.cleaned?.value || best.cleaned?.raw),
           fingerprintOk: best.fpOk,
+          lineDiff: best.lineDiff,
+          lineScore: best.lineScore,
+          totalScore: best.totalScore,
           method: 'keyword-triangulation',
           comparator: 'keyword'
         };
+        if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
       }
       triangulationAudit = {
         field: fieldSpec.fieldKey,
@@ -3431,6 +3487,10 @@ function labelValueHeuristic(fieldSpec, tokens){
           anchorScore: Number(c.anchorScore?.toFixed ? c.anchorScore.toFixed(3) : c.anchorScore),
           keywordScore: Number(c.keywordScore?.toFixed ? c.keywordScore.toFixed(3) : c.keywordScore),
           distanceScore: Number(c.distanceScore?.toFixed ? c.distanceScore.toFixed(3) : c.distanceScore),
+          lineDiff: c.lineDiff,
+          lineScore: Number(c.lineScore?.toFixed ? c.lineScore.toFixed(3) : c.lineScore),
+          lineCount: c.lineCount,
+          expectedLineCount: c.expectedLineCount,
           totalScore: Number(c.totalScore?.toFixed ? c.totalScore.toFixed(3) : c.totalScore),
           source: c.source
         })),
@@ -3491,6 +3551,16 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   } else if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword field=${fieldSpec.fieldKey||''} hasRel=false`, { keywordRelations: false });
+  }
+  if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
+  if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+    const lineInfo = computeLineDiff(result?.lineCount, result?.expectedLineCount);
+    const lineScore = lineScoreForDiff(lineInfo.lineDiff);
+    const totalScoreLog = result?.totalScore ?? result?.score ?? result?.confidence ?? 0;
+    logStaticDebug(
+      `stage-winner field=${fieldSpec.fieldKey||''} stage=${stageUsed.value} lineDiff=${lineInfo.lineDiff} lineScore=${lineScore.toFixed(2)} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
+      { stage: stageUsed.value, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog }
+    );
   }
   result.method = result.method || method || 'fallback';
   result.score = score;
