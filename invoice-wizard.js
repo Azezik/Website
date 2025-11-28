@@ -401,7 +401,7 @@ const LS = {
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 6;
+const PROFILE_VERSION = 7;
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -525,6 +525,18 @@ const migrations = {
       } else if(!f.staticGeom.anchor){
         f.staticGeom.anchor = anchor;
       }
+    });
+  },
+  6: p => {
+    const fields = p.fields || [];
+    fields.forEach(f => {
+      if(f.type !== 'static') return;
+      const mask = Array.isArray(f.configMask) ? f.configMask.slice(0,4) : null;
+      const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
+      // Always trust the user-drawn box for static fields unless explicitly removed.
+      normalized[0] = 1; normalized[1] = 1;
+      const allZero = normalized.every(v => v === 0);
+      f.configMask = allZero ? [1,1,1,1] : normalized;
     });
   }
 };
@@ -674,6 +686,16 @@ function normBoxFromField(field){
   return { x0n: nbRaw.x0n, y0n: nbRaw.y0n, wN: nbRaw.wN, hN: nbRaw.hN };
 }
 
+function normalizeConfigMask(field){
+  if(!field) return [1,1,1,1];
+  const mask = Array.isArray(field.configMask) ? field.configMask.slice(0,4) : null;
+  const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
+  normalized[0] = 1; // always trust x
+  normalized[1] = 1; // always trust y
+  if(normalized.every(v => v === 0)) return [1,1,1,1];
+  return normalized;
+}
+
 function buildStaticGeometry(normBox, anchor){
   if(!normBox) return null;
   const geom = {
@@ -709,6 +731,7 @@ function resolveStaticPlacement(field, viewports=[], totalPages){
   const pages = Math.max(1, Number.isFinite(totalPages) ? totalPages : (viewports?.length || 1));
   const role = inferPageRole(field, field.page || 1);
   const anchor = inferVerticalAnchor(field);
+  const configMask = normalizeConfigMask(field);
   const pageIdx = role === PAGE_ROLE.LAST
     ? pages - 1
     : (role === PAGE_ROLE.FIRST ? 0 : clamp(Number.isFinite(field.pageIndex) ? field.pageIndex : ((field.page||1) - 1), 0, pages - 1));
@@ -724,7 +747,7 @@ function resolveStaticPlacement(field, viewports=[], totalPages){
     boxPx = applyTransform({ x: sx, y: sy, w: sw, h: sh, page: pageNumber });
   }
   const bboxArr = normBox ? [normBox.x0n, normBox.y0n, normBox.x0n + normBox.wN, normBox.y0n + normBox.hN] : null;
-  return { pageNumber, pageRole: role, anchor, normBox, bbox: bboxArr, boxPx };
+  return { pageNumber, pageRole: role, anchor, normBox, bbox: bboxArr, boxPx, configMask };
 }
 
 function summarizeTokens(tokens=[], max=5){
@@ -2889,6 +2912,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
+  const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
@@ -3175,6 +3199,8 @@ function labelValueHeuristic(fieldSpec, tokens){
     const triCx = triBox.x + (triBox.w||0)/2;
     const triCy = triBox.y + (triBox.h||0)/2;
     const maxRadius = KeywordWeighting?.MAX_KEYWORD_RADIUS || 0.35;
+    const baseCx = baseBox ? baseBox.x + (baseBox.w||0)/2 : null;
+    const baseCy = baseBox ? baseBox.y + (baseBox.h||0)/2 : null;
     const lines = groupIntoLines(tokens);
     const candidates = [];
 
@@ -3185,7 +3211,13 @@ function labelValueHeuristic(fieldSpec, tokens){
       const cx = box.x + (box.w||0)/2;
       const cy = box.y + (box.h||0)/2;
       const distNorm = Math.hypot((cx - triCx)/pageW, (cy - triCy)/pageH);
-      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius));
+      const baseDistNorm = (baseCx === null || baseCy === null)
+        ? null
+        : Math.hypot((cx - baseCx)/pageW, (cy - baseCy)/pageH);
+      const baseBias = baseDistNorm === null
+        ? 1
+        : Math.max(0.65, 1 - Math.min(1, baseDistNorm / maxRadius));
+      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius)) * baseBias;
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
@@ -3294,7 +3326,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       keywordIndex = state.keywordIndexByPage?.[basePx.page] || [];
       const { pageW, pageH } = getPageSize(basePx.page);
       keywordContext = KeywordWeighting?.triangulateBox
-        ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx)
+        ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx, { configWeight: 1.2 })
         : null;
       triangulatedBox = keywordContext?.box || keywordContext || triangulatedBox;
       if(!keywordPrediction && keywordContext?.motherPred?.predictedBox){
@@ -3376,7 +3408,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     keywordIndex = keywordIndex || state.keywordIndexByPage?.[page] || [];
     keywordContext = keywordContext || (KeywordWeighting?.triangulateBox
-      ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx)
+      ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx, { configWeight: 1.2 })
       : null);
     triangulatedBox = keywordContext?.box || keywordContext || triangulatedBox;
     if(triangulatedBox){
@@ -3570,6 +3602,13 @@ function labelValueHeuristic(fieldSpec, tokens){
   state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence });
   if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
     state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
+  }
+  if(runMode && ftype==='static' && staticDebugEnabled()){
+    const finalBox = result.boxPx || basePx || null;
+    logStaticDebug(
+      `final-box field=${fieldSpec.fieldKey||''} page=${finalBox?.page || fieldSpec.page || ''} box=${formatBoxForLog(finalBox)} mask=${(configMask||[]).join(',')}`,
+      { box: finalBox, configMask }
+    );
   }
   traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method });
   result.tokens = result.tokens || [];
@@ -6512,6 +6551,7 @@ async function runModeExtractFileWithProfile(file, profile){
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
       const tokens = state.tokensByPage[targetPage] || [];
+      const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
       const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
       if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){
@@ -6525,7 +6565,8 @@ async function runModeExtractFileWithProfile(file, profile){
         page: targetPage,
         type: spec.type,
         anchorMetrics: spec.anchorMetrics || null,
-        keywordRelations
+        keywordRelations,
+        configMask
       };
       if(spec.type === 'static'){
         const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
