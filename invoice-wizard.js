@@ -1577,17 +1577,9 @@ function snapStaticToLines(tokens, hintPx, opts={}){
     const metrics = summarizeLineMetrics([]);
     return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
   }
-  const overlapsHint = (t)=>{
-    if(!hintPx) return true;
-    const overlap = Math.max(0, Math.min(t.x + t.w, hintPx.x + hintPx.w) - Math.max(t.x, hintPx.x));
-    const threshold = Math.min(t.w, hintPx.w) * 0.15;
-    return overlap >= threshold;
-  };
   const selectedTokens = selected.flatMap(L => L.tokens);
-  const inHintTokens = selectedTokens.filter(overlapsHint);
-  const tokensForBox = inHintTokens.length ? inHintTokens : selectedTokens;
-  const left = Math.min(...tokensForBox.map(t=>t.x));
-  const right = Math.max(...tokensForBox.map(t=>t.x + t.w));
+  const left = Math.min(...selectedTokens.map(t=>t.x));
+  const right = Math.max(...selectedTokens.map(t=>t.x + t.w));
   const top = Math.min(...selected.map(L => L.top));
   const bottom = Math.max(...selected.map(L => L.bottom));
   let box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
@@ -1595,9 +1587,7 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   let finalBox = expanded;
   if(hintPx && hintPx.w > 0){
     const widthCap = hintPx.w * 1.1;
-    const tokensForWidth = inHintTokens.length ? inHintTokens : tokensForBox;
-    const minTokenX = Math.min(...tokensForWidth.map(t => t.x));
-    const tokensWidth = Math.max(1, Math.max(...tokensForWidth.map(t => (t.x + t.w) - minTokenX)));
+    const tokensWidth = right - left;
     const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
     if(finalBox.w > targetWidth){
       const minLeft = Math.max(finalBox.x, right - targetWidth);
@@ -1609,11 +1599,7 @@ function snapStaticToLines(tokens, hintPx, opts={}){
       finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
     }
   }
-  const lineTexts = selected.map(L => {
-    const lt = (L.tokens||[]).filter(overlapsHint);
-    const toks = lt.length ? lt : L.tokens || [];
-    return toks.map(t=>t.text).join(' ').trim();
-  }).filter(Boolean);
+  const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
   const metrics = summarizeLineMetrics(selected);
   return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
