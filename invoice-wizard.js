@@ -2914,6 +2914,20 @@ function labelValueHeuristic(fieldSpec, tokens){
   const staticRun = runMode && ftype === 'static';
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
+  const assembleStaticField = ({ boxPx, snappedText='' })=>{
+    if(!boxPx) return null;
+    const snap = snapStaticToLines(tokens, boxPx, { multiline: !!fieldSpec.isMultiline });
+    const searchBox = snap?.box || boxPx;
+    const pipeline = StaticFieldMode?.assembleStaticFieldPipeline || null;
+    const assembled = pipeline
+      ? pipeline({ tokens, selectionBox: boxPx, searchBox, snappedText: snappedText || snap?.text || '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap })
+      : null;
+    const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
+    const lines = assembled?.lines || groupIntoLines(hits);
+    const lineMetrics = assembled?.lineMetrics || summarizeLineMetrics(lines);
+    const text = assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
+    return { snap, searchBox, hits, lines, text, lineMetrics, lineCount: assembled?.lineCount ?? lineMetrics.lineCount };
+  };
   const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
@@ -3009,21 +3023,29 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!boxPx){
       return { value:'', raw:'', corrected:'', code:null, shape:null, score:null, correctionsApplied:[], boxPx:null, confidence:0, tokens:[], method:'config-permissive' };
     }
-    const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
     let text = '';
     let hits = [];
     let usedBox = boxPx;
     let cleaned = null;
+    let lineMetrics = null;
+    let lineCount = 0;
+    const assembled = assembleStaticField({ boxPx, snappedText: state.snappedText });
+    if(assembled){
+      text = assembled.text || '';
+      hits = assembled.hits || [];
+      usedBox = assembled.searchBox || boxPx;
+      lineMetrics = assembled.lineMetrics || null;
+      lineCount = assembled.lineCount || (assembled.lines?.length ?? 0);
+    }
+    const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
     if(extractor){
       const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey, multiline: !!fieldSpec.isMultiline });
-      text = res?.text || res?.value || '';
-      hits = res?.hits || [];
-      usedBox = res?.box || boxPx;
+      text = text || res?.text || res?.value || '';
+      hits = hits.length ? hits : (res?.hits || []);
+      usedBox = res?.box || usedBox;
       cleaned = res?.cleaned || null;
-    } else {
-      hits = tokensInBox(tokens, boxPx);
-      const lines = groupIntoLines(hits);
-      text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
+      lineMetrics = lineMetrics || res?.lineMetrics || null;
+      lineCount = lineCount || res?.lineCount || 0;
     }
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
@@ -3041,21 +3063,20 @@ function labelValueHeuristic(fieldSpec, tokens){
       boxPx: usedBox,
       confidence: cleaned.conf ?? 1,
       tokens: hits,
-      method:'config-permissive'
+      method:'config-permissive',
+      lineMetrics: lineMetrics || null,
+      lineCount
     };
+    if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      logStaticDebug(`config-static field=${fieldSpec.fieldKey||''} page=${usedBox?.page||''} lines=${lineCount} box=${formatBoxForLog(usedBox)}`, { box: usedBox, lineMetrics, lineCount });
+    }
     traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method, mode:'CONFIG' });
     return result;
   }
 
   async function attempt(box){
-    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
-    let searchBox = snap.box;
-    if(fieldSpec.fieldKey === 'customer_address'){
-      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
-    }
-    const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
-    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
-    const assembled = assembler ? assembler(assembleOpts) : null;
+    const assembled = assembleStaticField({ boxPx: box, snappedText: state.snappedText });
+    const searchBox = assembled?.searchBox || box;
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
     const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
@@ -3075,7 +3096,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     };
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
-      : '';
+      : (assembled?.text || (lines[0]?.tokens?.map(t=>t.text).join(' ').trim() || ''));
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       const tokenPreview = hits.slice(0,3).map(t => ({ text: t.text, box: { x:t.x, y:t.y, w:t.w, h:t.h } }));
       logStaticDebug(
@@ -3316,6 +3337,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      logStaticDebug(
+        `config-state field=${fieldSpec.fieldKey||''} page=${basePx.page||''} cfgLines=${fieldSpec?.lineMetrics?.lineCount||fieldSpec?.lineCount||0}`,
+        { bbox: fieldSpec.bbox, lineMetrics: fieldSpec.lineMetrics, lineCount: fieldSpec.lineCount }
+      );
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
         { field: fieldSpec.fieldKey, page: basePx.page, configBox: fieldSpec.bbox, transformed: basePx, viewport: viewportDims, rawBox: raw }

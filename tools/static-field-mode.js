@@ -95,6 +95,16 @@
     return assembleTextFromBox({ tokens, box, snappedText, multiline, minOverlap, lineTol });
   }
 
+  // Shared helper for CONFIG and RUN flows. Given the user's saved selection
+  // (or an already-snapped search box), assemble the text in a consistent way
+  // so both modes agree on the final value and line metrics.
+  function assembleStaticFieldPipeline(opts={}){
+    const { tokens=[], selectionBox=null, searchBox=null, snappedText='', multiline=true, minOverlap=0.5, lineTol=4 } = opts || {};
+    const box = searchBox || selectionBox;
+    const assembled = assembleTextFromBox({ tokens, box, snappedText, multiline, minOverlap, lineTol });
+    return { ...assembled, usedBox: box };
+  }
+
   function extractConfigStatic(opts){
     const { tokens=[], box, snappedText='', cleanFn, fieldKey, mode='CONFIG', multiline=true } = opts || {};
     const { hits, text, box: usedBox, lineMetrics, lineCount, lineHeights } = collectFullText(tokens, box, snappedText, { multiline });
@@ -111,5 +121,5 @@
     return { hits, text: raw, value: raw, raw, box, cleaned, lineMetrics, lineCount, lineHeights };
   }
 
-  return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox, assembleTextFromBox };
+  return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox, assembleTextFromBox, assembleStaticFieldPipeline };
 });
