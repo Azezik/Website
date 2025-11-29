@@ -1534,48 +1534,50 @@ function summarizeLineMetrics(lines=[]){
     }
   };
 }
-function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
+function selectLinesForStatic(lines, hintPx, { multiline=false, minOverlap=0.5, lineTol=4 }={}){
   if(!hintPx) return [];
   const horizontalOverlap = (L)=> Math.max(0, Math.min(L.right, hintPx.x + hintPx.w) - Math.max(L.left, hintPx.x));
-  const overlapThreshold = (L)=> Math.max(L.width, hintPx.w) * 0.15;
-  const verticalPad = 2;
+  const verticalOverlap = (L)=> Math.max(0, Math.min(L.bottom, hintPx.y + hintPx.h) - Math.max(L.top, hintPx.y));
+  const overlapThreshold = (L)=> Math.max(L.width, hintPx.w) * Math.max(0.15, minOverlap * 0.3);
+  const verticalPad = Math.max(2, lineTol);
   const candidates = lines
     .filter(L => L.page === hintPx.page)
     .filter(L => horizontalOverlap(L) >= overlapThreshold(L))
     .filter(L => (L.bottom > hintPx.y - verticalPad) && (L.top < hintPx.y + hintPx.h + verticalPad))
+    .map(L => ({ ...L, overlapW: horizontalOverlap(L), overlapH: verticalOverlap(L) }))
+    .filter(L => L.overlapH > 0)
     .sort((a,b)=> a.top - b.top || a.left - b.left);
   if(!candidates.length) return [];
   if(!multiline){
     const cy = hintPx.y + hintPx.h/2;
     let best = candidates[0];
-    let bestScore = Infinity;
+    let bestScore = -Infinity;
     for(const L of candidates){
-      const overlap = horizontalOverlap(L) / Math.max(1, Math.max(L.width, hintPx.w));
+      const overlapRatio = L.overlapW / Math.max(1, Math.max(L.width, hintPx.w));
+      const vertRatio = L.overlapH / Math.max(1, Math.max(L.height, hintPx.h));
       const dy = Math.abs(((L.top + L.bottom)/2) - cy);
-      const score = dy + (1 - overlap) * 20;
-      if(score < bestScore){ bestScore = score; best = L; }
+      const score = overlapRatio * 100 + vertRatio * 40 - dy;
+      if(score > bestScore){ bestScore = score; best = L; }
     }
     return best ? [best] : [];
   }
-  const anchorLine = candidates.find(L => L.cy >= hintPx.y - verticalPad && L.cy <= hintPx.y + hintPx.h + verticalPad) || candidates[0];
-  const ordered = candidates.filter(L => L.top >= anchorLine.top);
-  const maxGap = Math.max(4, Math.min(anchorLine.height * 0.6, 12));
-  const selected = [anchorLine];
-  let prev = anchorLine;
-  for(const L of ordered){
-    if(L === anchorLine) continue;
-    if(L.top - prev.bottom <= maxGap){ selected.push(L); prev = L; }
-  }
-  return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
+  return candidates;
 }
 function snapStaticToLines(tokens, hintPx, opts={}){
-  const { multiline=false, marginPx=4 } = opts || {};
-  const lines = groupIntoLines(tokens, 4).map(lineBounds);
-  const selected = selectLinesForStatic(lines, hintPx, { multiline });
+  const { multiline=false, marginPx=4, minOverlap=0.5, lineTol=4 } = opts || {};
+  const lines = groupIntoLines(tokens, lineTol).map(lineBounds);
+  let selected = selectLinesForStatic(lines, hintPx, { multiline, minOverlap, lineTol });
+  if(!selected.length){
+    const hits = tokensInBox(tokens, hintPx, { minOverlap });
+    const fallbackLines = groupIntoLines(hits, lineTol).map(lineBounds);
+    if(fallbackLines.length){
+      selected = multiline ? fallbackLines : [fallbackLines[0]];
+    }
+  }
   if(!selected.length){
     const fallback = snapToLine(tokens, hintPx, marginPx, opts);
     const metrics = summarizeLineMetrics([]);
-    return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+    return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, foundLines: 0 };
   }
   const selectedTokens = selected.flatMap(L => L.tokens);
   const left = Math.min(...selectedTokens.map(t=>t.x));
@@ -1602,7 +1604,7 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
   const metrics = summarizeLineMetrics(selected);
-  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, foundLines: selected.length };
 }
 function resolveStaticOverlap(entries){
   const groups = [];
@@ -2916,7 +2918,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   const assembleStaticField = ({ boxPx, snappedText='' })=>{
     if(!boxPx) return null;
-    const snap = snapStaticToLines(tokens, boxPx, { multiline: !!fieldSpec.isMultiline });
+    const snap = snapStaticToLines(tokens, boxPx, { multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap });
     const searchBox = snap?.box || boxPx;
     const pipeline = StaticFieldMode?.assembleStaticFieldPipeline || null;
     const assembled = pipeline
@@ -2926,7 +2928,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const lines = assembled?.lines || groupIntoLines(hits);
     const lineMetrics = assembled?.lineMetrics || summarizeLineMetrics(lines);
     const text = assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
-    return { snap, searchBox, hits, lines, text, lineMetrics, lineCount: assembled?.lineCount ?? lineMetrics.lineCount };
+    return { snap, searchBox, hits, lines, text, lineMetrics, lineCount: assembled?.lineCount ?? lineMetrics.lineCount, foundLines: lines.length };
   };
   const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
@@ -3029,6 +3031,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     let cleaned = null;
     let lineMetrics = null;
     let lineCount = 0;
+    let lines = [];
     const assembled = assembleStaticField({ boxPx, snappedText: state.snappedText });
     if(assembled){
       text = assembled.text || '';
@@ -3036,6 +3039,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       usedBox = assembled.searchBox || boxPx;
       lineMetrics = assembled.lineMetrics || null;
       lineCount = assembled.lineCount || (assembled.lines?.length ?? 0);
+      lines = assembled.lines || [];
     }
     const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
     if(extractor){
@@ -3043,14 +3047,22 @@ function labelValueHeuristic(fieldSpec, tokens){
       text = text || res?.text || res?.value || '';
       hits = hits.length ? hits : (res?.hits || []);
       usedBox = res?.box || usedBox;
-      cleaned = res?.cleaned || null;
-      lineMetrics = lineMetrics || res?.lineMetrics || null;
-      lineCount = lineCount || res?.lineCount || 0;
+      cleaned = cleaned || res?.cleaned || null;
+      const resLines = res?.lines || [];
+      if(!lines.length) lines = resLines;
+      const chooseLineMetrics = (...cands)=>{
+        const flattened = cands.filter(Boolean);
+        const withCounts = flattened.find(m => (m.lineCount || 0) > 0);
+        return withCounts || flattened[0] || null;
+      };
+      lineMetrics = chooseLineMetrics(lineMetrics, res?.lineMetrics, summarizeLineMetrics(lines));
+      lineCount = lineMetrics?.lineCount ?? lineCount || res?.lineCount || (lines.length || 0);
     }
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
     const value = text || state.snappedText || cleaned.value || cleaned.raw || '';
+    const foundLines = lines.length || lineMetrics?.lineCount || assembled?.foundLines || 0;
     const result = {
       value,
       raw: text || state.snappedText || '',
@@ -3068,7 +3080,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       lineCount
     };
     if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-      logStaticDebug(`config-static field=${fieldSpec.fieldKey||''} page=${usedBox?.page||''} lines=${lineCount} box=${formatBoxForLog(usedBox)}`, { box: usedBox, lineMetrics, lineCount });
+      logStaticDebug(`config-static field=${fieldSpec.fieldKey||''} page=${usedBox?.page||''} lines=${lineCount} foundLines=${foundLines} box=${formatBoxForLog(usedBox)}`, { box: usedBox, lineMetrics, lineCount, foundLines });
     }
     traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method, mode:'CONFIG' });
     return result;
@@ -5373,7 +5385,7 @@ async function finalizeSelection(e) {
   const step = state.steps[state.stepIdx] || {};
   let snap = null;
   if(isConfigMode() && (step.type||'static') === 'static'){
-    const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
+    const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline, minOverlap: 0.5 });
     const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
     if(siblings.length){
       const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount }]);
