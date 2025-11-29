@@ -37,6 +37,8 @@ assert.strictEqual(configAddress.text, 'ACME INC\n123 MAPLE RD\nTORONTO ON\nM4B 
 assert.strictEqual(runAddress.text, configAddress.text);
 assert.strictEqual(configAddress.lineCount, runAddress.lineCount);
 assert.deepStrictEqual(configAddress.lineMetrics, runAddress.lineMetrics);
+assert.ok(configAddress.lineMetrics.lineCount > 0, 'customer_address should capture OCR lines');
+assert.ok(configAddress.lineMetrics.lineHeights.min > 0, 'customer_address line heights should be measured');
 
 // Single-line salesperson style field
 const singleTokens = [
@@ -51,5 +53,6 @@ assert.strictEqual(configSales.text, 'Jamie Lee');
 assert.strictEqual(runSales.text, configSales.text);
 assert.strictEqual(configSales.lineCount, 1);
 assert.deepStrictEqual(configSales.lineMetrics, runSales.lineMetrics);
+assert.strictEqual(configSales.lineMetrics.lineCount, 1, 'salesperson should keep single line metrics');
 
 console.log('Static pipeline consistency tests passed.');
