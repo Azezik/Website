@@ -47,12 +47,12 @@
 - **Secondary keywords:** Select up to 3 remaining scored candidates (K = 3) within a reasonable radius; store their offsets for triangulation.
 - **Stored config payload (per static field):**
   - Normalized field bbox (already saved).
-  - Anchor metrics, ring landmark, line metrics (existing behavior).
+  - Anchor metrics and ring landmark (existing behavior).
   - `keywordRelations` object:
     - `mother`: `{ text, category, normBox, offset: {dx,dy,dw,dh}, score }` where offset is relative (value bbox minus keyword bbox normalized by page dims).
     - `secondaries`: array of up to 3 entries (K = 3) with the same shape as mother.
     - `page` to ensure page-specific association when fields are reprojected.
-- **Persistence:** Extend `upsertFieldInProfile` extras for static fields to include `keywordRelations`; save these per-field relations (mother + up to 3 secondaries, offsets, scores, page) alongside `landmark`/`lineMetrics`. The per-page `keywordIndexByPage` cache remains runtime-only and is never persisted.
+- **Persistence:** Extend `upsertFieldInProfile` extras for static fields to include `keywordRelations`; save these per-field relations (mother + up to 3 secondaries, offsets, scores, page) alongside `landmark`. The per-page `keywordIndexByPage` cache remains runtime-only and is never persisted.
 
 ## 5. RUN MODE Integration
 - **Base flow preserved:** Keep existing bbox → ring/landmark/anchor → OCR/text assembly → fingerprint/line scoring sequence intact.【F:invoice-wizard.js†L3061-L3170】
