@@ -19,36 +19,6 @@
     return lines;
   }
 
-  function median(nums=[]){
-    if(!nums.length) return 0;
-    const sorted = nums.slice().sort((a,b)=>a-b);
-    const mid = Math.floor(sorted.length/2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
-  }
-
-  function summarizeLineMetrics(lines=[]){
-    const heights = (lines||[]).map(L => {
-      if(L?.height && Number.isFinite(L.height)) return L.height;
-      const tokens = L?.tokens || [];
-      if(!tokens.length) return 0;
-      const ys = tokens.map(t=>t.y||0);
-      const y2s = tokens.map(t=>(t.y||0)+(t.h||0));
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...y2s);
-      return maxY - minY;
-    }).filter(h => Number.isFinite(h) && h > 0);
-    const lineCount = (lines||[]).length;
-    if(!heights.length) return { lineCount, lineHeights: { min:0, max:0, median:0 } };
-    return {
-      lineCount,
-      lineHeights: {
-        min: Math.min(...heights),
-        max: Math.max(...heights),
-        median: median(heights)
-      }
-    };
-  }
-
   function tokensInBox(tokens, box, opts={}){
     const { minOverlap=0.5 } = opts || {};
     if(!box) return [];
@@ -79,15 +49,14 @@
       line.bottom = bottom;
       line.height = Math.max(0, bottom - top);
     }
-    const lineMetrics = summarizeLineMetrics(lines);
     if(!hits.length && snappedText){
-      return { hits, lines, text: snappedText.trim(), box, lineMetrics, lineCount: lineMetrics.lineCount, lineHeights: lineMetrics.lineHeights };
+      return { hits, lines, text: snappedText.trim(), box };
     }
     const joined = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
     const text = (multiline || joined.length > 1)
       ? joined.join('\n')
       : (joined[0] || '');
-    return { hits, lines, text, box, lineMetrics, lineCount: lineMetrics.lineCount, lineHeights: lineMetrics.lineHeights };
+    return { hits, lines, text, box };
   }
 
   function collectFullText(tokens, box, snappedText='', opts={}){
@@ -97,18 +66,18 @@
 
   function extractConfigStatic(opts){
     const { tokens=[], box, snappedText='', cleanFn, fieldKey, mode='CONFIG', multiline=true } = opts || {};
-    const { hits, text, box: usedBox, lineMetrics, lineCount, lineHeights } = collectFullText(tokens, box, snappedText, { multiline });
+    const { hits, text, box: usedBox } = collectFullText(tokens, box, snappedText, { multiline });
     const cleaned = cleanFn ? cleanFn(fieldKey || '', text, mode) : null;
-    return { hits, text, box: usedBox, cleaned, lineMetrics, lineCount, lineHeights };
+    return { hits, text, box: usedBox, cleaned };
   }
 
   function finalizeConfigValue(opts){
     const { tokens=[], selectionBox=null, snappedBox=null, snappedText='', cleanFn, fieldKey, multiline=true } = opts || {};
     const chosenBox = selectionBox || snappedBox || null;
-    const { hits, text, box, lineMetrics, lineCount, lineHeights } = extractConfigStatic({ tokens, box: chosenBox, snappedText, cleanFn, fieldKey, mode:'CONFIG', multiline });
+    const { hits, text, box } = extractConfigStatic({ tokens, box: chosenBox, snappedText, cleanFn, fieldKey, mode:'CONFIG', multiline });
     const raw = text || snappedText || '';
     const cleaned = cleanFn ? cleanFn(fieldKey || '', raw, 'CONFIG') : null;
-    return { hits, text: raw, value: raw, raw, box, cleaned, lineMetrics, lineCount, lineHeights };
+    return { hits, text: raw, value: raw, raw, box, cleaned };
   }
 
   return { extractConfigStatic, finalizeConfigValue, collectFullText, groupIntoLines, tokensInBox, assembleTextFromBox };

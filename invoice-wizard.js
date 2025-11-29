@@ -259,7 +259,6 @@ let state = {
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
-  snappedLineMetrics: null,
   debugLineAnchors: [],
 };
 
@@ -315,7 +314,6 @@ function clearTransientStateLocal(){
   state.selectionCss = null; state.selectionPx = null;
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
   state.pendingSelection = null; state.matchPoints = [];
-  state.snappedLineMetrics = null;
   state.overlayMetrics = null; state.overlayPinned = false;
   state.pdf = null; state.isImage = false;
   state.pageNum = 1; state.numPages = 0;
@@ -1608,63 +1606,6 @@ function resolveStaticOverlap(entries){
   const groups = [];
   const overlapX = (a,b)=> Math.max(0, Math.min(a.box.x + a.box.w, b.box.x + b.box.w) - Math.max(a.box.x, b.box.x));
   const sameBand = (a,b)=> overlapX(a,b) >= Math.max(4, Math.min(a.box.w, b.box.w) * 0.3);
-  const expectedLines = entry => entry?.expectedLineCount ?? entry?.lineMetrics?.lineCount ?? entry?.lineCount ?? (entry?.lines?.length || 0);
-  const observedLines = entry => entry?.lines?.length || 0;
-  const lineOverlaps = (line, top, bottom) => {
-    const lTop = line?.top ?? (line?.cy ?? 0) - (line?.height ?? 0)/2;
-    const lBottom = line?.bottom ?? lTop + (line?.height ?? 0);
-    return lBottom > top && lTop < bottom;
-  };
-  const linesInSpan = (entry, top, bottom)=> (entry?.lines||[]).filter(L => lineOverlaps(L, top, bottom));
-  const trimBoxToLines = (entry, keepLines=[], pad=0, trimTop=true)=>{
-    if(!entry?.box) return;
-    const bottomEdge = entry.box.y + entry.box.h;
-    if(trimTop){
-      const anchor = keepLines[0] || {};
-      const targetTop = anchor.top ?? entry.box.y;
-      const newTop = clamp(targetTop - pad, entry.box.y, targetTop);
-      entry.box.y = newTop;
-      entry.box.h = Math.max(1, bottomEdge - entry.box.y);
-    } else {
-      const anchor = keepLines[keepLines.length-1] || {};
-      const targetBottom = anchor.bottom ?? bottomEdge;
-      const newBottom = clamp(targetBottom + pad, entry.box.y + 1, bottomEdge);
-      entry.box.h = Math.max(1, newBottom - entry.box.y);
-    }
-    entry.lines = (entry.lines||[]).filter(L => lineOverlaps(L, entry.box.y, entry.box.y + entry.box.h));
-  };
-  const resolveWithLineCounts = (topEntry, bottomEntry, overlapTop, overlapBottom) => {
-    const aExp = expectedLines(topEntry) || 0;
-    const bExp = expectedLines(bottomEntry) || 0;
-    const aObs = observedLines(topEntry) || 0;
-    const bObs = observedLines(bottomEntry) || 0;
-    if(!aObs && !bObs) return false;
-    const aDiff = Math.abs(aObs - (aExp || aObs));
-    const bDiff = Math.abs(bObs - (bExp || bObs));
-    if(aDiff === bDiff) return false;
-    const winner = aDiff < bDiff ? topEntry : bottomEntry;
-    const loser = winner === topEntry ? bottomEntry : topEntry;
-    const overlapLinesWinner = linesInSpan(winner, overlapTop, overlapBottom);
-    const overlapLinesLoser = linesInSpan(loser, overlapTop, overlapBottom);
-    if(!overlapLinesWinner.length || !overlapLinesLoser.length) return false;
-    const keepLines = (loser.lines||[]).filter(L => !lineOverlaps(L, overlapTop, overlapBottom));
-    if(!keepLines.length) return false;
-    const metrics = summarizeLineMetrics(overlapLinesLoser);
-    const pad = (metrics?.lineHeights?.median || 0) * 0.35;
-    const keepTop = Math.min(...keepLines.map(l=>l.top));
-    const keepBottom = Math.max(...keepLines.map(l=>l.bottom));
-    const overlapCenter = (overlapTop + overlapBottom)/2;
-    const trimTop = overlapCenter <= ((loser.box.y + loser.box.h/2)) || (Math.max(...overlapLinesLoser.map(l=>l.bottom)) <= keepTop);
-    const trimBottom = Math.min(...overlapLinesLoser.map(l=>l.top)) >= keepBottom;
-    trimBoxToLines(loser, keepLines, pad, trimBottom ? false : trimTop);
-    if(staticDebugEnabled()){
-      logStaticDebug(
-        `overlap-resolve winner=${winner.fieldKey||''} loser=${loser.fieldKey||''} aDiff=${aDiff} bDiff=${bDiff} pad=${pad.toFixed(2)}`,
-        { overlapTop, overlapBottom, winner: winner.fieldKey, loser: loser.fieldKey, winnerExpected: expectedLines(winner), winnerObserved: observedLines(winner), loserExpected: expectedLines(loser), loserObserved: observedLines(loser), pad }
-      );
-    }
-    return true;
-  };
   for(const entry of entries){
     let group = groups.find(g => g.some(e => sameBand(e, entry)));
     if(group) group.push(entry); else groups.push([entry]);
@@ -1678,8 +1619,6 @@ function resolveStaticOverlap(entries){
       if(overlapY <= 0) continue;
       const overlapTop = b.box.y;
       const overlapBottom = Math.min(a.box.y + a.box.h, b.box.y + b.box.h);
-      const resolved = resolveWithLineCounts(a, b, overlapTop, overlapBottom);
-      if(resolved) continue;
       const aBottoms = (a.lines||[]).map(L=>L.bottom);
       const bTops = (b.lines||[]).map(L=>L.top);
       const aBottom = Math.max(a.box.y + 1, aBottoms.length ? Math.max(...aBottoms) : (a.box.y + a.box.h));
@@ -1719,8 +1658,7 @@ function buildStaticOverlapEntries(page, currentFieldKey, tokens){
     if(!box) return null;
     const spec = stepSpecForField(f.fieldKey || '');
     const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline });
-    const expectedLineCount = f.lineMetrics?.lineCount ?? f.lineCount ?? snap.lineCount;
-    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [], expectedLineCount } : null;
+    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [] } : null;
   }).filter(Boolean);
 }
 function snapToLine(tokens, hintPx, marginPx=6, opts={}){
@@ -2136,7 +2074,7 @@ function goToStep(idx){
   els.confirmBtn.disabled = false;
   els.skipBtn.disabled = false;
   updatePrompt();
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; state.matchPoints=[]; drawOverlay();
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.matchPoints=[]; drawOverlay();
 }
 
 function finishWizard(){
@@ -2931,17 +2869,6 @@ function labelValueHeuristic(fieldSpec, tokens){
   const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
     ? (fieldSpec.keywordRelations || null)
     : null;
-  const computeLineDiff = (observedLineCount, expectedHint)=>{
-    const expected = expectedHint ?? fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount ?? 0;
-    const observed = observedLineCount ?? 0;
-    return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
-  };
-  const lineScoreForDiff = diff => {
-    if(Object.prototype.hasOwnProperty.call(STATIC_LINE_DIFF_WEIGHTS, diff)){
-      return STATIC_LINE_DIFF_WEIGHTS[diff];
-    }
-    return STATIC_LINE_DIFF_WEIGHTS.default;
-  };
   if(staticRun && keywordRelations && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword-rel load ${fieldSpec.fieldKey||''} page=${keywordRelations.page || fieldSpec.page || state.pageNum || 1}`,
       { keywordRelations });
@@ -3058,21 +2985,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const assembled = assembler ? assembler(assembleOpts) : null;
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
-    const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
     const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
-    const adjustConfidenceForLines = (confidence)=>{
-      const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
-      if(!expected || !observedLineCount) return { confidence, expected, factor: 1 };
-      const tolerance = expected >= 3 ? 1 : 0;
-      const diff = Math.abs(observedLineCount - expected);
-      let factor = 1;
-      let reason = 'exact';
-      if(diff === 0){ factor = 1.1; reason = 'exact'; }
-      else if(diff <= tolerance){ factor = 1.05; reason = 'near'; }
-      else { factor = Math.max(0.6, 1 - diff * 0.15); reason = 'mismatch'; }
-      const next = clamp(confidence * factor, 0, 1);
-      return { confidence: next, expected, factor, reason };
-    };
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
@@ -3103,12 +3016,6 @@ function labelValueHeuristic(fieldSpec, tokens){
       let confidence = fingerprintOk
         ? baseConf
         : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
-      let lineAdj = null;
-      if(runMode && ftype==='static'){
-        lineAdj = adjustConfidenceForLines(confidence);
-        confidence = lineAdj.confidence;
-      }
-      const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
@@ -3123,18 +3030,9 @@ function labelValueHeuristic(fieldSpec, tokens){
         tokens: hits,
         cleanedOk,
         fingerprintOk,
-        anchorOk,
-        lineCount: observedLineCount,
-        expectedLineCount: lineInfo.expectedLineCount,
-        lineDiff: lineInfo.lineDiff
+        anchorOk
       };
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-        if(lineAdj && lineAdj.factor !== 1){
-          logStaticDebug(
-            `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
-            { expected: lineAdj.expected, observed: observedLineCount, factor: lineAdj.factor, reason: lineAdj.reason }
-          );
-        }
         logStaticDebug(
           `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
           { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
@@ -3153,12 +3051,6 @@ function labelValueHeuristic(fieldSpec, tokens){
     let confidence = fingerprintOk
       ? baseConf
       : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
-    let lineAdj = null;
-    if(runMode && ftype==='static'){
-      lineAdj = adjustConfidenceForLines(confidence);
-      confidence = lineAdj.confidence;
-    }
-    const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
     const attemptResult = {
       value: sel.value,
       raw: sel.raw,
@@ -3173,18 +3065,9 @@ function labelValueHeuristic(fieldSpec, tokens){
       tokens: hits,
       cleanedOk,
       fingerprintOk,
-      anchorOk,
-      lineCount: observedLineCount,
-      expectedLineCount: lineInfo.expectedLineCount,
-      lineDiff: lineInfo.lineDiff
+      anchorOk
     };
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-      if(lineAdj && lineAdj.factor !== 1){
-        logStaticDebug(
-          `line-count field=${fieldSpec.fieldKey||''} expected=${lineAdj.expected} observed=${observedLineCount} factor=${lineAdj.factor.toFixed(2)} reason=${lineAdj.reason}`,
-          { expected: lineAdj.expected, observed: observedLineCount, factor: lineAdj.factor, reason: lineAdj.reason }
-        );
-      }
       logStaticDebug(
         `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
         { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
@@ -3229,11 +3112,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       const fpScore = staticRun
         ? (fingerprintOk ? STATIC_FP_SCORES.ok : STATIC_FP_SCORES.fail)
         : (fingerprintOk ? 1.1 : 0.65);
-      const observedLineCount = groupIntoLines(candTokens)?.length || 0;
-      const lineInfo = computeLineDiff(observedLineCount);
-      const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
-      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
+      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore, 0, 2);
       const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
       return {
         source,
@@ -3249,10 +3129,6 @@ function labelValueHeuristic(fieldSpec, tokens){
         anchorScore,
         keywordScore,
         distanceScore,
-        lineCount: observedLineCount,
-        expectedLineCount: lineInfo.expectedLineCount,
-        lineDiff: lineInfo.lineDiff,
-        lineScore,
         totalScore,
         confidence,
         tokens: candTokens
@@ -3294,11 +3170,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       best.totalScore > (currentScore || 0) * 1.05
       || (!currentCandidate?.fpOk && best.fpOk && best.distanceScore > (currentCandidate?.distanceScore || 0))
     );
-    if(staticRun && best){
-      const lineOk = (best.lineDiff ?? Infinity) <= 1 || best.fpOk;
-      if(best.totalScore < MIN_STATIC_ACCEPT_SCORE || !lineOk){
-        preferBest = false;
-      }
+    if(staticRun && best && best.totalScore < MIN_STATIC_ACCEPT_SCORE){
+      preferBest = false;
     }
     return { candidates: sorted, best, current: currentCandidate, preferBest };
   }
@@ -3344,12 +3217,9 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     selectionRaw = firstAttempt?.raw || '';
     if(staticRun && firstAttempt){
-      const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
       const hasAnchor = firstAttempt.anchorOk !== false;
-      if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
+      if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk){
         result = firstAttempt; method='bbox'; stageUsed.value = 0;
-      } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
-        result = firstAttempt; method='bbox'; stageUsed.value = 1;
       }
     }
     if(!result && firstAttempt && firstAttempt.cleanedOk){
@@ -3498,8 +3368,6 @@ function labelValueHeuristic(fieldSpec, tokens){
           tokens: best.tokens,
           cleanedOk: !!(best.cleaned?.value || best.cleaned?.raw),
           fingerprintOk: best.fpOk,
-          lineDiff: best.lineDiff,
-          lineScore: best.lineScore,
           totalScore: best.totalScore,
           method: 'keyword-triangulation',
           comparator: 'keyword'
@@ -3519,10 +3387,6 @@ function labelValueHeuristic(fieldSpec, tokens){
           anchorScore: Number(c.anchorScore?.toFixed ? c.anchorScore.toFixed(3) : c.anchorScore),
           keywordScore: Number(c.keywordScore?.toFixed ? c.keywordScore.toFixed(3) : c.keywordScore),
           distanceScore: Number(c.distanceScore?.toFixed ? c.distanceScore.toFixed(3) : c.distanceScore),
-          lineDiff: c.lineDiff,
-          lineScore: Number(c.lineScore?.toFixed ? c.lineScore.toFixed(3) : c.lineScore),
-          lineCount: c.lineCount,
-          expectedLineCount: c.expectedLineCount,
           totalScore: Number(c.totalScore?.toFixed ? c.totalScore.toFixed(3) : c.totalScore),
           source: c.source
         })),
@@ -3586,12 +3450,10 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
   if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
   if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-    const lineInfo = computeLineDiff(result?.lineCount, result?.expectedLineCount);
-    const lineScore = lineScoreForDiff(lineInfo.lineDiff);
     const totalScoreLog = result?.totalScore ?? result?.score ?? result?.confidence ?? 0;
     logStaticDebug(
-      `stage-winner field=${fieldSpec.fieldKey||''} stage=${stageUsed.value} lineDiff=${lineInfo.lineDiff} lineScore=${lineScore.toFixed(2)} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
-      { stage: stageUsed.value, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog }
+      `stage-winner field=${fieldSpec.fieldKey||''} stage=${stageUsed.value} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
+      { stage: stageUsed.value, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog }
     );
   }
   result.method = result.method || method || 'fallback';
@@ -5351,7 +5213,7 @@ async function finalizeSelection(e) {
     const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
     const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
     if(siblings.length){
-      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount }]);
+      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [] }]);
       const mine = resolved.find(e => e.fieldKey === step.fieldKey);
       if(mine){ snap = { ...baseSnap, box: mine.box, lines: mine.lines || baseSnap.lines }; }
     } else {
@@ -5363,8 +5225,6 @@ async function finalizeSelection(e) {
   }
   state.snappedPx = snap.box;
   state.snappedText = snap.text;
-  const snapMetrics = snap.lineMetrics || { lineCount: snap.lineCount ?? 0, lineHeights: snap.lineHeights || { min:0, max:0, median:0 } };
-  state.snappedLineMetrics = snapMetrics.lineCount ? snapMetrics : null;
   const { scaleX, scaleY } = getScaleFactors();
   state.snappedCss = {
     x: state.snappedPx.x/scaleX,
@@ -6030,11 +5890,6 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     correctionsApplied: corrections,
     tokens
   };
-  if(extras.lineMetrics){
-    entry.lineMetrics = clonePlain(extras.lineMetrics);
-    if(extras.lineMetrics.lineCount !== undefined) entry.lineCount = extras.lineMetrics.lineCount;
-    if(extras.lineMetrics.lineHeights) entry.lineHeights = clonePlain(extras.lineMetrics.lineHeights);
-  }
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
     entry.pageIndex = (page || 1) - 1;
@@ -6351,7 +6206,7 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; drawOverlay();
+  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
@@ -6423,9 +6278,6 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     const lm = captureRingLandmark(boxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
     extras.landmark = lm;
-    if(state.snappedLineMetrics){
-      extras.lineMetrics = clonePlain(state.snappedLineMetrics);
-    }
     extras.keywordRelations = keywordRelations || null;
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
