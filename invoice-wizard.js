@@ -2,7 +2,6 @@
 const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
-const StaticFieldPipeline = window.StaticFieldPipeline || null;
 const KeywordWeighting = window.KeywordWeighting || null;
 
 let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
@@ -1880,17 +1879,6 @@ function ensureProfile(){
       fieldKey: FIELD_ALIASES[f.fieldKey] || f.fieldKey
     }));
     state.profile.fields.forEach(f=>{
-      if(f.type === 'static'){
-        const defaults = defaultStaticFieldOptions(f.fieldKey);
-        if(f.isMultiline === undefined){ f.isMultiline = defaults.isMultiline; }
-        if(!Number.isFinite(f.staticPad)){ f.staticPad = defaults.staticPad; }
-        if(f.lineMetrics && f.lineMetrics.lineCount !== undefined && f.lineCount === undefined){
-          f.lineCount = f.lineMetrics.lineCount;
-        }
-        if(f.lineMetrics?.lineHeights && !f.lineHeights){
-          f.lineHeights = f.lineMetrics.lineHeights;
-        }
-      }
       if(f.normBox){
         const chk = validateSelection(f.normBox);
         if(!chk.ok){
@@ -2002,7 +1990,6 @@ const DEFAULT_FIELDS = [
     kind: 'block',
     mode: 'cell',
     isMultiline: true,
-    staticPad: 3,
     required: false,
     type: 'static'
   },
@@ -2120,20 +2107,6 @@ const DEFAULT_FIELDS = [
   }
 ];
 
-const STATIC_FIELD_DEFAULTS = DEFAULT_FIELDS
-  .filter(f => f.type === 'static')
-  .reduce((acc, f) => {
-    acc[f.fieldKey] = {
-      isMultiline: !!f.isMultiline,
-      staticPad: Number.isFinite(f.staticPad) ? f.staticPad : 1
-    };
-    return acc;
-  }, {});
-
-function defaultStaticFieldOptions(fieldKey=''){
-  return STATIC_FIELD_DEFAULTS[fieldKey] || { isMultiline: false, staticPad: 1 };
-}
-
 function initStepsFromProfile(){
   const profFields = (state.profile?.fields || []).map(f => ({...f}));
   const byKey = Object.fromEntries(profFields.map(f=>[f.fieldKey, f]));
@@ -2146,11 +2119,7 @@ function initStepsFromProfile(){
     label: d.label,
     mode: d.mode,
     required: d.required,
-    type: d.type,
-    isMultiline: byKey[d.fieldKey]?.isMultiline ?? d.isMultiline ?? defaultStaticFieldOptions(d.fieldKey).isMultiline,
-    staticPad: Number.isFinite(byKey[d.fieldKey]?.staticPad)
-      ? byKey[d.fieldKey].staticPad
-      : (Number.isFinite(d.staticPad) ? d.staticPad : defaultStaticFieldOptions(d.fieldKey).staticPad)
+    type: d.type
   }));
   state.stepIdx = 0;
   updatePrompt();
@@ -2945,15 +2914,6 @@ function labelValueHeuristic(fieldSpec, tokens){
   const staticRun = runMode && ftype === 'static';
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
-  const staticDefaults = defaultStaticFieldOptions(fieldSpec.fieldKey || '');
-  const staticOptions = StaticFieldPipeline?.normalizeOptions({ ...staticDefaults, ...fieldSpec }, staticDefaults)
-    || {
-      isMultiline: fieldSpec.isMultiline ?? staticDefaults.isMultiline,
-      staticPad: Number.isFinite(fieldSpec.staticPad) ? fieldSpec.staticPad : staticDefaults.staticPad,
-      lineMetrics: fieldSpec.lineMetrics || staticDefaults.lineMetrics || null,
-      lineCount: fieldSpec.lineCount ?? staticDefaults.lineCount ?? fieldSpec.lineMetrics?.lineCount,
-      lineHeights: fieldSpec.lineHeights || staticDefaults.lineHeights || fieldSpec.lineMetrics?.lineHeights || null
-    };
   const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
@@ -2972,11 +2932,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     ? (fieldSpec.keywordRelations || null)
     : null;
   const computeLineDiff = (observedLineCount, expectedHint)=>{
-    const expected = expectedHint
-      ?? staticOptions?.lineMetrics?.lineCount
-      ?? staticOptions?.lineCount
-      ?? observedLineCount
-      ?? 0;
+    const expected = expectedHint ?? fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount ?? 0;
     const observed = observedLineCount ?? 0;
     return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
   };
@@ -3053,23 +3009,13 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!boxPx){
       return { value:'', raw:'', corrected:'', code:null, shape:null, score:null, correctionsApplied:[], boxPx:null, confidence:0, tokens:[], method:'config-permissive' };
     }
-    const extractor = StaticFieldPipeline?.finalizeConfig || StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
+    const extractor = StaticFieldMode?.finalizeConfigValue || StaticFieldMode?.extractConfigStatic;
     let text = '';
     let hits = [];
     let usedBox = boxPx;
     let cleaned = null;
     if(extractor){
-      const res = extractor({
-        tokens,
-        selectionBox: boxPx,
-        snappedBox: state.snappedPx,
-        snappedText: state.snappedText,
-        cleanFn: FieldDataEngine.clean,
-        fieldKey: fieldSpec.fieldKey,
-        fieldSpec: { ...fieldSpec, ...staticOptions },
-        multiline: !!staticOptions.isMultiline,
-        mode: state.mode
-      });
+      const res = extractor({ tokens, selectionBox: boxPx, snappedBox: state.snappedPx, snappedText: state.snappedText, cleanFn: FieldDataEngine.clean, fieldKey: fieldSpec.fieldKey, multiline: !!fieldSpec.isMultiline });
       text = res?.text || res?.value || '';
       hits = res?.hits || [];
       usedBox = res?.box || boxPx;
@@ -3102,24 +3048,20 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const snap = snapStaticToLines(tokens, box, { multiline: !!staticOptions.isMultiline, marginPx: 6 });
-    const searchBox = StaticFieldPipeline?.expandSearchBox
-      ? StaticFieldPipeline.expandSearchBox(snap.box, staticOptions)
-      : snap.box;
-    const assembled = StaticFieldPipeline?.assembleForRun
-      ? StaticFieldPipeline.assembleForRun({ tokens, snapBox: searchBox, snappedText: snap.text || '', options: staticOptions, minOverlap: staticMinOverlap })
-      : (StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText)
-        ? (StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText)({ tokens, box: searchBox, snappedText: snap.text || '', multiline: !!staticOptions.isMultiline, minOverlap: staticMinOverlap })
-        : null;
+    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
+    let searchBox = snap.box;
+    if(fieldSpec.fieldKey === 'customer_address'){
+      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
+    }
+    const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
+    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
+    const assembled = assembler ? assembler(assembleOpts) : null;
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
     const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
     const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
     const adjustConfidenceForLines = (confidence)=>{
-      if(staticOptions.isMultiline){
-        return { confidence, expected: observedLineCount, factor: 1, reason: 'multiline' };
-      }
-      const expected = staticOptions?.lineMetrics?.lineCount ?? staticOptions?.lineCount ?? observedLineCount;
+      const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
       if(!expected || !observedLineCount) return { confidence, expected, factor: 1 };
       const tolerance = expected >= 3 ? 1 : 0;
       const diff = Math.abs(observedLineCount - expected);
@@ -3131,7 +3073,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const next = clamp(confidence * factor, 0, 1);
       return { confidence: next, expected, factor, reason };
     };
-    const multilineValue = (staticOptions.isMultiline || (lines?.length || 0) > 1)
+    const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
@@ -3288,10 +3230,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         ? (fingerprintOk ? STATIC_FP_SCORES.ok : STATIC_FP_SCORES.fail)
         : (fingerprintOk ? 1.1 : 0.65);
       const observedLineCount = groupIntoLines(candTokens)?.length || 0;
-      const lineInfo = staticOptions.isMultiline
-        ? { lineDiff: 0, expectedLineCount: observedLineCount }
-        : computeLineDiff(observedLineCount);
-      const lineScore = staticRun ? (staticOptions.isMultiline ? 1 : lineScoreForDiff(lineInfo.lineDiff)) : 1;
+      const lineInfo = computeLineDiff(observedLineCount);
+      const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
       const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
       const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
@@ -6096,10 +6036,6 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     if(extras.lineMetrics.lineHeights) entry.lineHeights = clonePlain(extras.lineMetrics.lineHeights);
   }
   if(step.type === 'static'){
-    entry.isMultiline = extras.isMultiline ?? !!step.isMultiline;
-    entry.staticPad = Number.isFinite(extras.staticPad)
-      ? extras.staticPad
-      : (Number.isFinite(step.staticPad) ? step.staticPad : defaultStaticFieldOptions(step.fieldKey).staticPad);
     entry.pageRole = inferPageRole(step, page);
     entry.pageIndex = (page || 1) - 1;
     entry.verticalAnchor = inferVerticalAnchor(step);
@@ -6491,8 +6427,6 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       extras.lineMetrics = clonePlain(state.snappedLineMetrics);
     }
     extras.keywordRelations = keywordRelations || null;
-    extras.isMultiline = step.isMultiline ?? defaultStaticFieldOptions(step.fieldKey).isMultiline;
-    extras.staticPad = Number.isFinite(step.staticPad) ? step.staticPad : defaultStaticFieldOptions(step.fieldKey).staticPad;
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
@@ -6623,16 +6557,6 @@ async function runModeExtractFileWithProfile(file, profile){
       if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){
         keywordRelations.page = targetPage;
       }
-      const staticOpts = spec.type === 'static'
-        ? (StaticFieldPipeline?.normalizeOptions({ ...defaultStaticFieldOptions(spec.fieldKey), ...spec })
-          || {
-            isMultiline: spec.isMultiline ?? defaultStaticFieldOptions(spec.fieldKey).isMultiline,
-            staticPad: Number.isFinite(spec.staticPad) ? spec.staticPad : defaultStaticFieldOptions(spec.fieldKey).staticPad,
-            lineMetrics: spec.lineMetrics || null,
-            lineCount: spec.lineCount ?? spec.lineMetrics?.lineCount,
-            lineHeights: spec.lineHeights || spec.lineMetrics?.lineHeights || null
-          })
-        : null;
       const fieldSpec = {
         fieldKey: spec.fieldKey,
         regex: spec.regex,
@@ -6642,12 +6566,7 @@ async function runModeExtractFileWithProfile(file, profile){
         type: spec.type,
         anchorMetrics: spec.anchorMetrics || null,
         keywordRelations,
-        configMask,
-        isMultiline: staticOpts?.isMultiline,
-        staticPad: staticOpts?.staticPad,
-        lineMetrics: staticOpts?.lineMetrics || spec.lineMetrics || null,
-        lineCount: staticOpts?.lineCount ?? spec.lineCount ?? spec.lineMetrics?.lineCount,
-        lineHeights: staticOpts?.lineHeights || spec.lineHeights || spec.lineMetrics?.lineHeights || null
+        configMask
       };
       if(spec.type === 'static'){
         const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];

@@ -1,6 +1,5 @@
 const assert = require('assert');
 const { extractConfigStatic, finalizeConfigValue, assembleTextFromBox } = require('../tools/static-field-mode.js');
-const StaticFieldPipeline = require('../tools/static-field-pipeline.js');
 const selectionFirst = require('../orchestrator.js');
 
 const tokens = [
@@ -53,38 +52,5 @@ const runResult = selectionFirst(tokens, strictClean);
 assert.strictEqual(runResult.raw, '176 RAYMOND L ARNPRIOR ONTARIO K7S 3G8');
 assert.strictEqual(runResult.value, 'ARNPRIOR ONTARIO');
 assert.strictEqual(runResult.cleanedOk, true);
-
-const nameTokens = [
-  { text: 'Alice', x: 10, y: 10, w: 30, h: 8, page: 1 },
-  { text: 'Smith', x: 44, y: 10, w: 32, h: 8, page: 1 },
-  { text: '123', x: 10, y: 22, w: 18, h: 8, page: 1 },
-  { text: 'Maple', x: 30, y: 22, w: 36, h: 8, page: 1 },
-  { text: 'St', x: 68, y: 22, w: 12, h: 8, page: 1 },
-  { text: 'Toronto', x: 10, y: 34, w: 50, h: 8, page: 1 },
-  { text: 'ON', x: 62, y: 34, w: 14, h: 8, page: 1 },
-  { text: 'A1A', x: 82, y: 34, w: 18, h: 8, page: 1 },
-  { text: '1A1', x: 104, y: 34, w: 18, h: 8, page: 1 }
-];
-const nameSnap = { x: 6, y: 8, w: 130, h: 12, page: 1 };
-const salespersonOpts = StaticFieldPipeline.normalizeOptions({ isMultiline: false, staticPad: 1 });
-const customerNameOpts = StaticFieldPipeline.normalizeOptions({ isMultiline: false, staticPad: 1 });
-const customerAddressOpts = StaticFieldPipeline.normalizeOptions({
-  isMultiline: true,
-  staticPad: 5,
-  lineMetrics: { lineCount: 3, lineHeights: { median: 8 } },
-  lineCount: 3,
-  lineHeights: { median: 8 }
-});
-
-const salespersonAssembly = StaticFieldPipeline.assembleForRun({ tokens: nameTokens, snapBox: nameSnap, options: salespersonOpts, minOverlap: 0.5 });
-const customerNameAssembly = StaticFieldPipeline.assembleForRun({ tokens: nameTokens, snapBox: nameSnap, options: customerNameOpts, minOverlap: 0.5 });
-const customerAddressAssembly = StaticFieldPipeline.assembleForRun({ tokens: nameTokens, snapBox: nameSnap, options: customerAddressOpts, minOverlap: 0.5 });
-
-assert.strictEqual(salespersonAssembly.text, 'Alice Smith');
-assert.strictEqual(customerNameAssembly.text, 'Alice Smith');
-assert.ok(customerAddressAssembly.text.includes('\n'));
-assert.strictEqual(customerAddressAssembly.text.split('\n').length, 3);
-assert.deepStrictEqual(salespersonAssembly.box, customerNameAssembly.box);
-assert.ok(customerAddressAssembly.box.h > salespersonAssembly.box.h);
 
 console.log('Static mode tests passed.');
