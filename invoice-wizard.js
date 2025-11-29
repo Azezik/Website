@@ -3056,8 +3056,12 @@ function labelValueHeuristic(fieldSpec, tokens){
         return withCounts || flattened[0] || null;
       };
       lineMetrics = chooseLineMetrics(lineMetrics, res?.lineMetrics, summarizeLineMetrics(lines));
-      lineCount = lineMetrics?.lineCount ?? lineCount || res?.lineCount || (lines.length || 0);
-    }
+      // Replace the current line with this:
+lineCount =
+  (lineMetrics?.lineCount ?? lineCount) ||
+  res?.lineCount ||
+  (lines.length || 0);
+    
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
