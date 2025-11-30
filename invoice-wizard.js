@@ -1987,9 +1987,8 @@ const DEFAULT_FIELDS = [
     fieldKey: 'customer_address',
     label: 'Customer Address',
     prompt: 'Draw a box around the Customer Address (include city, province/state, postal code).',
-    kind: 'block',
+    kind: 'value',
     mode: 'cell',
-    isMultiline: true,
     required: false,
     type: 'static'
   },
@@ -3050,9 +3049,6 @@ function labelValueHeuristic(fieldSpec, tokens){
   async function attempt(box){
     const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
     let searchBox = snap.box;
-    if(fieldSpec.fieldKey === 'customer_address'){
-      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
-    }
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
     const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
     const assembled = assembler ? assembler(assembleOpts) : null;
