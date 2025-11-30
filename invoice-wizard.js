@@ -4519,7 +4519,8 @@ async function extractLineItems(profile){
   return results;
 }
 
-}
+// Make line-item extraction available in both config and run flows regardless of scope quirks.
+window.extractLineItems = extractLineItems;
 
 /* ---------------------- PDF/Image Loading ------------------------ */
 const overlayCtx = els.overlayCanvas.getContext('2d');
