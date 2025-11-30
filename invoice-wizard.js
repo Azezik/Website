@@ -4519,6 +4519,8 @@ async function extractLineItems(profile){
   return results;
 }
 
+}
+
 /* ---------------------- PDF/Image Loading ------------------------ */
 const overlayCtx = els.overlayCanvas.getContext('2d');
 const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/100 : 'err';
