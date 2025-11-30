@@ -6409,83 +6409,89 @@ els.skipBtn?.addEventListener('click', ()=>{
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
-  const tokens = await ensureTokensForPage(state.pageNum);
-  const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
+  try {
+    ensureProfile();
+    const tokens = await ensureTokensForPage(state.pageNum);
+    const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
 
-  let value = '', boxPx = state.snappedPx;
-  let confidence = 0, raw = '', corrections=[];
-  let fieldTokens = [];
-  if(step.kind === 'landmark'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else if (step.type === 'static'){
-    const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value;
-    if(!value && state.snappedText){
-      bumpDebugBlank();
+    let value = '', boxPx = state.snappedPx;
+    let confidence = 0, raw = '', corrections=[];
+    let fieldTokens = [];
+    if(step.kind === 'landmark'){
       value = (state.snappedText || '').trim();
-    }
-    boxPx = res.boxPx || state.snappedPx;
-    confidence = res.confidence || 0;
-    raw = res.raw || (state.snappedText || '').trim();
-    corrections = res.correctionsApplied || res.corrections || [];
-    fieldTokens = res.tokens || [];
-  } else if (step.kind === 'block'){
-    value = (state.snappedText || '').trim();
-    raw = value;
-  } else {
-    const res = await extractFieldValue(step, tokens, state.viewport);
-    value = res.value;
-    if(!value && state.snappedText){
-      bumpDebugBlank();
+      raw = value;
+    } else if (step.type === 'static'){
+      const res = await extractFieldValue(step, tokens, state.viewport);
+      value = res.value;
+      if(!value && state.snappedText){
+        bumpDebugBlank();
+        value = (state.snappedText || '').trim();
+      }
+      boxPx = res.boxPx || state.snappedPx;
+      confidence = res.confidence || 0;
+      raw = res.raw || (state.snappedText || '').trim();
+      corrections = res.correctionsApplied || res.corrections || [];
+      fieldTokens = res.tokens || [];
+    } else if (step.kind === 'block'){
       value = (state.snappedText || '').trim();
+      raw = value;
+    } else {
+      const res = await extractFieldValue(step, tokens, state.viewport);
+      value = res.value;
+      if(!value && state.snappedText){
+        bumpDebugBlank();
+        value = (state.snappedText || '').trim();
+      }
+      boxPx = res.boxPx || state.snappedPx;
+      confidence = res.confidence || 0;
+      raw = res.raw || (state.snappedText || '').trim();
+      corrections = res.correctionsApplied || res.corrections || [];
+      fieldTokens = res.tokens || [];
     }
-    boxPx = res.boxPx || state.snappedPx;
-    confidence = res.confidence || 0;
-    raw = res.raw || (state.snappedText || '').trim();
-    corrections = res.correctionsApplied || res.corrections || [];
-    fieldTokens = res.tokens || [];
-  }
 
-  if(els.ocrToggle?.checked){
-    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
-    catch(err){ console.error('auditCropSelfTest failed', err); }
-  }
-
-  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-  const canvasW = (vp.width ?? vp.w) || 1;
-  const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
-  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
-  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
-  const keywordRelations = (step.type === 'static')
-    ? computeKeywordRelationsForConfig(step.fieldKey, boxPx, normBox, state.pageNum, canvasW, canvasH)
-    : null;
-  const extras = {};
-  if(step.type === 'static'){
-    const lm = captureRingLandmark(boxPx);
-    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
-    extras.landmark = lm;
-    if(state.snappedLineMetrics){
-      extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+    if(els.ocrToggle?.checked){
+      try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
+      catch(err){ console.error('auditCropSelfTest failed', err); }
     }
-    extras.keywordRelations = keywordRelations || null;
-  } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, pct, boxPx, tokens);
-  }
-  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
-  ensureAnchorFor(step.fieldKey);
-  state.currentLineItems = await extractLineItems(state.profile);
 
-  const fid = state.currentFileId;
-  if(fid){
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
-    rawStore.upsert(fid, rec);
-    compileDocument(fid, state.currentLineItems);
-  }
-  renderSavedFieldsTable();
+    const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+    const canvasW = (vp.width ?? vp.w) || 1;
+    const canvasH = (vp.height ?? vp.h) || 1;
+    const normBox = normalizeBox(boxPx, canvasW, canvasH);
+    const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+    const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+    const keywordRelations = (step.type === 'static')
+      ? computeKeywordRelationsForConfig(step.fieldKey, boxPx, normBox, state.pageNum, canvasW, canvasH)
+      : null;
+    const extras = {};
+    if(step.type === 'static'){
+      const lm = captureRingLandmark(boxPx);
+      lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+      extras.landmark = lm;
+      if(state.snappedLineMetrics){
+        extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+      }
+      extras.keywordRelations = keywordRelations || null;
+    } else if(step.type === 'column'){
+      extras.column = buildColumnModel(step, pct, boxPx, tokens);
+    }
+    upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
+    ensureAnchorFor(step.fieldKey);
+    state.currentLineItems = await extractLineItems(state.profile);
 
-  afterConfirmAdvance();
+    const fid = state.currentFileId;
+    if(fid){
+      const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
+      rawStore.upsert(fid, rec);
+      compileDocument(fid, state.currentLineItems);
+    }
+    renderSavedFieldsTable();
+
+    afterConfirmAdvance();
+  } catch(err){
+    console.error('Confirm handler failed', err);
+    alert(err?.message || 'Failed to confirm selection. Check console for details.');
+  }
 });
 
 // Export JSON (profile)
