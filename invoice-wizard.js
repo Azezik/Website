@@ -3312,6 +3312,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   let keywordContext = null;
   let selectionRaw = '';
   let firstAttempt = null;
+  let bboxFingerprintOk = false;
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
@@ -3363,6 +3364,9 @@ function labelValueHeuristic(fieldSpec, tokens){
         if(r && r.cleanedOk){ result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } break; }
       }
     }
+    if(result && result.method === 'bbox' && result.fingerprintOk){
+      bboxFingerprintOk = true;
+    }
   }
 
   if(!result && ftype==='static' && fieldSpec.landmark && basePx){
@@ -3400,7 +3404,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
   }
-  if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length){
+  if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length && !bboxFingerprintOk){
     const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     if(!state.keywordIndexByPage?.[page]){
@@ -3553,7 +3557,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
   }
-  if(staticRun && keywordRelations){
+  if(staticRun && keywordRelations && !bboxFingerprintOk){
     const page = keywordPrediction?.page || result.boxPx?.page || basePx?.page || fieldSpec.page || 1;
     const { pageW, pageH } = getPageSize(page);
     const strongAnchor = !!(result.fingerprintOk || result.method === 'anchor' || result.method?.startsWith('ring') || baseConfidence >= 0.9);
