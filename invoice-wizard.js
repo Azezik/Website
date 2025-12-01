@@ -3299,6 +3299,58 @@ function labelValueHeuristic(fieldSpec, tokens){
     return { candidates: sorted, best, current: currentCandidate, preferBest };
   }
 
+  const StaticFieldResolver = {
+    /**
+     * Static-only wrapper introduced in the static resolver plan (Task 1).
+     * The resolver will eventually own the bbox/keyword/triangulation hierarchy.
+     * For now it is a contract-only stub that mirrors existing behaviour.
+     */
+    resolve(resolveOpts = {}){
+      const {
+        fieldSpec: resolverFieldSpec,
+        basePx: resolverBasePx,
+        tokens: resolverTokens,
+        viewportDims: resolverViewport,
+        keywordIndex: resolverKeywordIndex,
+        keywordContext: resolverKeywordContext,
+        triangulatedBox: resolverTriangulatedBox,
+        helpers = {},
+        passthroughResult = null,
+        stage = 'bbox'
+      } = resolveOpts;
+
+      const {
+        attempt: resolverAttempt,
+        anchorMatchesCandidate: resolverAnchorMatch,
+        computeLineDiff: resolverLineDiff,
+        lineScoreForDiff: resolverLineScore
+      } = helpers;
+
+      const boxed = passthroughResult || null;
+      if(boxed){
+        return {
+          value: boxed.value ?? '',
+          confidence: boxed.confidence ?? 0,
+          boxPx: boxed.boxPx || resolverBasePx || null,
+          tokens: boxed.tokens || [],
+          stage: stage,
+          locked: false,
+          method: boxed.method || 'bbox'
+        };
+      }
+
+      return {
+        value: '',
+        confidence: 0,
+        boxPx: resolverBasePx || null,
+        tokens: [],
+        stage: null,
+        locked: false,
+        method: null
+      };
+    }
+  };
+
   let result = null, method=null, score=null, comp=null, basePx=null;
   let keywordPrediction = null;
   let keywordMatch = null;
