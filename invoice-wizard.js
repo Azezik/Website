@@ -3677,6 +3677,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   let selectionRaw = '';
   let firstAttempt = null;
   let bboxFingerprintOk = false;
+  const shouldUseStaticResolver = staticRun && ftype === 'static';
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
@@ -3700,26 +3701,28 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
-    const bboxStage = await StaticFieldResolver.resolve({
-      fieldSpec,
-      basePx,
-      tokens,
-      viewportDims,
-      keywordIndex,
-      keywordContext,
-      keywordPrediction,
-      triangulatedBox,
-      runMode,
-      staticRun,
-      ftype,
-      staticMinOverlap,
-      helpers: {
-        attempt,
-        anchorMatchesCandidate,
-        computeLineDiff,
-        lineScoreForDiff
-      }
-    });
+    const bboxStage = shouldUseStaticResolver
+      ? await StaticFieldResolver.resolve({
+        fieldSpec,
+        basePx,
+        tokens,
+        viewportDims,
+        keywordIndex,
+        keywordContext,
+        keywordPrediction,
+        triangulatedBox,
+        runMode,
+        staticRun,
+        ftype,
+        staticMinOverlap,
+        helpers: {
+          attempt,
+          anchorMatchesCandidate,
+          computeLineDiff,
+          lineScoreForDiff
+        }
+      })
+      : null;
     if(bboxStage){
       triangulationAudit = bboxStage.triangulationAudit || triangulationAudit;
       selectionRaw = bboxStage.selectionRaw || selectionRaw;
@@ -3727,7 +3730,10 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
         stageUsed.value = bboxStage.stageUsedValue;
       }
-      if(bboxStage.locked && bboxStage.value){
+      if(staticRun){
+        result = bboxStage;
+        method = bboxStage.method || bboxStage.stage || method || 'bbox';
+      } else if(bboxStage.locked && bboxStage.value){
         result = bboxStage; method='bbox';
       } else if(bboxStage.stage === 'triangulation' && bboxStage.value){
         result = bboxStage; method = bboxStage.method || 'keyword-triangulation';
