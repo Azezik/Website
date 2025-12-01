@@ -1654,8 +1654,16 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   const invalidHeight = metrics.lineHeights.median > 0 && finalBox.h < metrics.lineHeights.median * 0.5;
   const invalidAspect = (metrics.lineCount || 0) <= 1 && aspectRatio > 14;
   if(isConfigMode() && hintPx && (invalidHeight || invalidAspect)){
-    logStaticDebug('snap validation fallback', { reason: invalidHeight ? 'short_height' : 'extreme_aspect', finalBox, hintBox: hintPx, metrics, aspectRatio });
-    return { box: hintPx, text, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+    const localPad = Math.max(2, marginPx);
+    const safeBox = {
+      x: hintPx.x - localPad,
+      y: hintPx.y - localPad,
+      w: hintPx.w + localPad * 2,
+      h: hintPx.h + localPad * 2,
+      page: hintPx.page
+    };
+    logStaticDebug('snap validation fallback', { reason: invalidHeight ? 'short_height' : 'extreme_aspect', finalBox, hintBox: hintPx, fallbackBox: safeBox, metrics, aspectRatio });
+    return { box: safeBox, text, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
   }
   return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
 }
@@ -5522,25 +5530,36 @@ function pageFromYPx(yPx){
   return 1;
 }
 
+// Coordinate systems:
+// - CSS/view space: what the user draws on. Uses getBoundingClientRect() units.
+// - Page/canvas space: PDF/OCR token coordinates (viewport units from pdf.js).
+// - Normalized space: [0,1] boxes per page.
+// Selections must be converted from CSS -> page space before snapping so that
+// they intersect OCR lines correctly. We derive the scale from the rendered
+// PDF viewport instead of device pixel ratio to avoid the previous 1.18x drift.
 function getScaleFactors(){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
-  if(!src) return { scaleX:1, scaleY:1 };
+  if(!src) return { scaleX:1, scaleY:1, cssToPage:1 };
   const rect = src.getBoundingClientRect();
-  const scaleX = src.width / rect.width;
-  const scaleY = src.height / rect.height;
+  const totalPxH = (state.pageOffsets?.length ? (state.pageOffsets[state.pageOffsets.length-1] + (state.pageViewports?.[state.pageViewports.length-1]?.height || 0)) : src.height) || 1;
+  const pageW = state.pageViewports?.[0]?.width || src.width || rect.width || 1;
+  const scaleX = pageW / (rect.width || 1);
+  const scaleY = totalPxH / (rect.height || 1);
   const symmetricScale = ((scaleX || 0) + (scaleY || 0)) / 2 || 1;
   const maxScale = Math.max(Math.abs(scaleX) || 0, Math.abs(scaleY) || 0, 1);
   const drift = Math.abs(scaleX - scaleY) / maxScale;
-  if(drift > 0.01){
+  if(drift > 0.02){
     console.warn('getScaleFactors: divergent scales detected; using symmetric scale', {
       scaleX,
       scaleY,
       symmetricScale,
       cssRect: { w: rect.width, h: rect.height },
-      pxRect: { w: src.width, h: src.height }
+      pxRect: { w: src.width, h: src.height },
+      totalPxH,
     });
   }
-  return { scaleX: symmetricScale, scaleY: symmetricScale };
+  // cssToPage is the multiplier applied to CSS selections to land in page/token space.
+  return { scaleX: symmetricScale, scaleY: symmetricScale, cssToPage: symmetricScale };
 }
 
 function paintOverlay(ctx, options = {}){
@@ -5737,9 +5756,9 @@ els.overlayCanvas.addEventListener('pointerdown', e => {
     state.pendingSelection = { startCss: css, endCss: css, active: true };
     return;
   }
-  const { scaleX, scaleY } = getScaleFactors();
+  const { cssToPage } = getScaleFactors();
   startCss = css;
-  start = { x: css.x*scaleX, y: css.y*scaleY };
+  start = { x: css.x*cssToPage, y: css.y*cssToPage };
   drawing = true;
   els.overlayCanvas.setPointerCapture?.(e.pointerId);
 }, { passive: false });
@@ -5755,11 +5774,11 @@ els.overlayCanvas.addEventListener('pointermove', e => {
   e.preventDefault();
   const rect = els.overlayCanvas.getBoundingClientRect();
   const curCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  const { scaleX, scaleY } = getScaleFactors();
-  const curPx = { x: curCss.x*scaleX, y: curCss.y*scaleY };
+  const { cssToPage } = getScaleFactors();
+  const curPx = { x: curCss.x*cssToPage, y: curCss.y*cssToPage };
   const page = pageFromYPx(start.y);
   const offPx = state.pageOffsets[page - 1] || 0;
-  const offCss = offPx/scaleY;
+  const offCss = offPx/cssToPage;
   const boxCss = {
     x: Math.min(startCss.x, curCss.x),
     y: Math.min(startCss.y, curCss.y) - offCss,
@@ -5815,12 +5834,12 @@ async function finalizeSelection(e) {
   state.snappedText = snap.text;
   const snapMetrics = snap.lineMetrics || { lineCount: snap.lineCount ?? 0, lineHeights: snap.lineHeights || { min:0, max:0, median:0 } };
   state.snappedLineMetrics = snapMetrics.lineCount ? snapMetrics : null;
-  const { scaleX, scaleY } = getScaleFactors();
+  const { scaleX, scaleY, cssToPage } = getScaleFactors();
   state.snappedCss = {
-    x: state.snappedPx.x/scaleX,
-    y: state.snappedPx.y/scaleY,
-    w: state.snappedPx.w/scaleX,
-    h: state.snappedPx.h/scaleY,
+    x: state.snappedPx.x/cssToPage,
+    y: state.snappedPx.y/cssToPage,
+    w: state.snappedPx.w/cssToPage,
+    h: state.snappedPx.h/cssToPage,
     page: state.snappedPx.page
   };
   if(isConfigMode() && staticDebugEnabled()){
@@ -5834,7 +5853,7 @@ async function finalizeSelection(e) {
       height: Math.round(L.height ?? ((L.bottom ?? 0) - (L.top ?? 0))),
       text: (L.tokens || []).map(t=>t.text).join(' ').trim()
     });
-    logStaticDebug('snap.trace selection', { selectionCss: state.selectionCss, selectionPx: state.selectionPx, scaleX, scaleY });
+    logStaticDebug('snap.trace selection', { selectionCss: state.selectionCss, selectionPx: state.selectionPx, scaleX, scaleY, cssToPage });
     logStaticDebug('snap.trace lines', { lines: (snap.lines || []).map(summarizeLine) });
     logStaticDebug('snap.trace final', { snappedBox: state.snappedPx, snappedText: state.snappedText, lineCount: snap.lineCount, lineHeights: snap.lineHeights });
   }
