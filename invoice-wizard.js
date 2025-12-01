@@ -3305,7 +3305,7 @@ function labelValueHeuristic(fieldSpec, tokens){
      * The resolver will eventually own the bbox/keyword/triangulation hierarchy.
      * For now it is a contract-only stub that mirrors existing behaviour.
      */
-    resolve(resolveOpts = {}){
+    async resolve(resolveOpts = {}){
       const {
         fieldSpec: resolverFieldSpec,
         basePx: resolverBasePx,
@@ -3316,7 +3316,11 @@ function labelValueHeuristic(fieldSpec, tokens){
         triangulatedBox: resolverTriangulatedBox,
         helpers = {},
         passthroughResult = null,
-        stage = 'bbox'
+        stage = 'bbox',
+        runMode: resolverRunMode,
+        staticRun: resolverStaticRun,
+        ftype: resolverFieldType,
+        staticMinOverlap: resolverStaticMinOverlap
       } = resolveOpts;
 
       const {
@@ -3325,6 +3329,95 @@ function labelValueHeuristic(fieldSpec, tokens){
         computeLineDiff: resolverLineDiff,
         lineScoreForDiff: resolverLineScore
       } = helpers;
+
+      const runBBoxStage = async (bboxOpts = {})=>{
+        const {
+          basePx: bboxBasePx,
+          attempt: bboxAttempt,
+          anchorMatchesCandidate: bboxAnchorMatch = () => true,
+          runMode: bboxRunMode,
+          staticRun: bboxStaticRun,
+          ftype: bboxFieldType
+        } = bboxOpts;
+
+        if(!bboxBasePx || typeof bboxAttempt !== 'function'){
+          return {
+            value: '',
+            confidence: 0,
+            boxPx: bboxBasePx || null,
+            tokens: [],
+            stage: 'bbox',
+            locked: false,
+            method: 'bbox',
+            selectionRaw: '',
+            stageUsedValue: null,
+            firstAttempt: null
+          };
+        }
+
+        const initialAttempt = await bboxAttempt(bboxBasePx);
+        if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
+        let firstAttempt = null;
+        if(initialAttempt && initialAttempt.cleanedOk){
+          firstAttempt = initialAttempt;
+        } else if(initialAttempt && bboxAnchorMatch(initialAttempt)){
+          firstAttempt = initialAttempt;
+        }
+
+        let selectionRaw = firstAttempt?.raw || '';
+        let stageUsedValue = null;
+        let result = null;
+
+        if(bboxStaticRun && firstAttempt){
+          const lineInfo = bboxRunMode && bboxFieldType === 'static'
+            ? (resolverLineDiff ? resolverLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount) : { lineDiff: 0, expectedLineCount: firstAttempt.expectedLineCount || 0 })
+            : { lineDiff: 0, expectedLineCount: firstAttempt.expectedLineCount || 0 };
+          const hasAnchor = firstAttempt.anchorOk !== false;
+          if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
+            result = firstAttempt; stageUsedValue = 0;
+          } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
+            result = firstAttempt; stageUsedValue = 1;
+          }
+        }
+
+        if(!result && firstAttempt && firstAttempt.cleanedOk){
+          result = firstAttempt;
+        } else if(!result){
+          const pads = isConfigMode() ? [4] : [4,8,12];
+          for(const pad of pads){
+            const search = { x: bboxBasePx.x - pad, y: bboxBasePx.y - pad, w: bboxBasePx.w + pad*2, h: bboxBasePx.h + pad*2, page: bboxBasePx.page };
+            const r = await bboxAttempt(search);
+            if(r && !bboxAnchorMatch(r)){ continue; }
+            if(r && r.cleanedOk){ result = r; if(bboxStaticRun && stageUsedValue === null){ stageUsedValue = 2; } break; }
+          }
+        }
+
+        if(result){
+          return {
+            ...result,
+            boxPx: result.boxPx || bboxBasePx || null,
+            stage: 'bbox',
+            locked: true,
+            method: result.method || 'bbox',
+            selectionRaw,
+            stageUsedValue,
+            firstAttempt
+          };
+        }
+
+        return {
+          value: '',
+          confidence: 0,
+          boxPx: bboxBasePx || null,
+          tokens: [],
+          stage: 'bbox',
+          locked: false,
+          method: 'bbox',
+          selectionRaw,
+          stageUsedValue,
+          firstAttempt
+        };
+      };
 
       const boxed = passthroughResult || null;
       if(boxed){
@@ -3337,6 +3430,17 @@ function labelValueHeuristic(fieldSpec, tokens){
           locked: false,
           method: boxed.method || 'bbox'
         };
+      }
+
+      if(stage === 'bbox'){
+        return await runBBoxStage({
+          basePx: resolverBasePx,
+          attempt: resolverAttempt,
+          anchorMatchesCandidate: resolverAnchorMatch,
+          runMode: resolverRunMode,
+          staticRun: resolverStaticRun,
+          ftype: resolverFieldType
+        });
       }
 
       return {
@@ -3384,36 +3488,34 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
-    const initialAttempt = await attempt(basePx);
-    if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
-    if(initialAttempt && initialAttempt.cleanedOk){
-      firstAttempt = initialAttempt;
-    } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
-      firstAttempt = initialAttempt;
-    }
-    selectionRaw = firstAttempt?.raw || '';
-    if(staticRun && firstAttempt){
-      const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
-      const hasAnchor = firstAttempt.anchorOk !== false;
-      if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
-        result = firstAttempt; method='bbox'; stageUsed.value = 0;
-      } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
-        result = firstAttempt; method='bbox'; stageUsed.value = 1;
+    const bboxStage = await StaticFieldResolver.resolve({
+      fieldSpec,
+      basePx,
+      tokens,
+      viewportDims,
+      runMode,
+      staticRun,
+      ftype,
+      staticMinOverlap,
+      helpers: {
+        attempt,
+        anchorMatchesCandidate,
+        computeLineDiff,
+        lineScoreForDiff
       }
-    }
-    if(!result && firstAttempt && firstAttempt.cleanedOk){
-      result = firstAttempt; method='bbox';
-    } else if(!result){
-      const pads = isConfigMode() ? [4] : [4,8,12];
-      for(const pad of pads){
-        const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-        const r = await attempt(search);
-        if(r && !anchorMatchesCandidate(r)){ continue; }
-        if(r && r.cleanedOk){ result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } break; }
+    });
+    if(bboxStage){
+      selectionRaw = bboxStage.selectionRaw || selectionRaw;
+      firstAttempt = bboxStage.firstAttempt || firstAttempt;
+      if(bboxStage.locked && bboxStage.value){
+        result = bboxStage; method='bbox';
+        if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
+          stageUsed.value = bboxStage.stageUsedValue;
+        }
       }
-    }
-    if(result && result.method === 'bbox' && result.fingerprintOk){
-      bboxFingerprintOk = true;
+      if(result && result.method === 'bbox' && result.fingerprintOk){
+        bboxFingerprintOk = true;
+      }
     }
   }
 
