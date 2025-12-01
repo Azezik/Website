@@ -3313,6 +3313,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         viewportDims: resolverViewport,
         keywordIndex: resolverKeywordIndex,
         keywordContext: resolverKeywordContext,
+        keywordPrediction: resolverKeywordPrediction,
         triangulatedBox: resolverTriangulatedBox,
         helpers = {},
         passthroughResult = null,
@@ -3331,6 +3332,91 @@ function labelValueHeuristic(fieldSpec, tokens){
       } = helpers;
 
       const resolverKeywordRelations = resolverFieldSpec?.keywordRelations || null;
+      const resolvedKeywordPrediction = resolverKeywordPrediction || resolverKeywordContext?.motherPred?.predictedBox || null;
+      const resolvedTriangulationBox = resolverTriangulatedBox || resolverKeywordContext?.box || resolverKeywordContext || null;
+
+      const runTriangulationStage = (triangulationOpts = {}) => {
+        const {
+          triangulatedBox: triStageBox,
+          keywordPrediction: triStageKeywordPrediction,
+          basePx: triStageBasePx,
+          existingResult: triExistingResult
+        } = triangulationOpts;
+
+        const triBox = triStageBox || null;
+        if(!triBox){ return null; }
+
+        const page = triBox.page || triExistingResult?.boxPx?.page || triStageBasePx?.page || resolverFieldSpec?.page || state.pageNum || 1;
+        const { pageW, pageH } = getPageSize(page);
+        const scored = scoreTriangulatedCandidates({
+          triBox,
+          keywordPrediction: triStageKeywordPrediction,
+          baseBox: triStageBasePx,
+          existingResult: triExistingResult,
+          pageW,
+          pageH
+        });
+
+        if(!scored){ return null; }
+
+        const { best, current, preferBest, candidates } = scored;
+        const audit = {
+          field: resolverFieldSpec?.fieldKey,
+          page,
+          prediction: triBox,
+          keywordPrediction: triStageKeywordPrediction,
+          candidates: candidates.map(c => ({
+            text: c.text,
+            box: c.box,
+            fingerprintCode: c.fingerprintCode,
+            fpOk: c.fpOk,
+            anchorScore: Number(c.anchorScore?.toFixed ? c.anchorScore.toFixed(3) : c.anchorScore),
+            keywordScore: Number(c.keywordScore?.toFixed ? c.keywordScore.toFixed(3) : c.keywordScore),
+            distanceScore: Number(c.distanceScore?.toFixed ? c.distanceScore.toFixed(3) : c.distanceScore),
+            lineDiff: c.lineDiff,
+            lineScore: Number(c.lineScore?.toFixed ? c.lineScore.toFixed(3) : c.lineScore),
+            lineCount: c.lineCount,
+            expectedLineCount: c.expectedLineCount,
+            totalScore: Number(c.totalScore?.toFixed ? c.totalScore.toFixed(3) : c.totalScore),
+            source: c.source
+          })),
+          chosen: (preferBest ? best?.text : current?.text || triExistingResult?.value || ''),
+          switched: !!preferBest && !!best
+        };
+
+        if(preferBest && best){
+          const cleanedOk = !!(best.cleaned?.value || best.cleaned?.raw);
+          return {
+            result: {
+              value: best.text,
+              raw: best.rawText,
+              corrected: best.cleaned?.corrected,
+              code: best.cleaned?.code,
+              shape: best.cleaned?.shape,
+              score: best.cleaned?.score,
+              correctionsApplied: best.cleaned?.correctionsApplied,
+              corrections: best.cleaned?.correctionsApplied,
+              boxPx: best.box,
+              confidence: best.confidence,
+              tokens: best.tokens,
+              cleanedOk,
+              fingerprintOk: best.fpOk,
+              lineDiff: best.lineDiff,
+              lineScore: best.lineScore,
+              totalScore: best.totalScore,
+              stage: 'triangulation',
+              locked: false,
+              method: 'keyword-triangulation',
+              comparator: 'keyword',
+              stageUsedValue: 2,
+              triangulationAudit: audit
+            },
+            audit
+          };
+        }
+
+        return { audit };
+      };
 
       const runBBoxStage = async (bboxOpts = {})=>{
         const {
@@ -3528,6 +3614,7 @@ function labelValueHeuristic(fieldSpec, tokens){
           staticRun: resolverStaticRun,
           ftype: resolverFieldType
         });
+        let stageResult = bboxStage;
         const bboxValid = bboxStage && bboxStage.locked && bboxStage.value;
         if(bboxValid){ return bboxStage; }
 
@@ -3546,10 +3633,25 @@ function labelValueHeuristic(fieldSpec, tokens){
             priorSelectionRaw: bboxStage?.selectionRaw || ''
           });
           if(kdStage && kdStage.locked && kdStage.value){ return kdStage; }
-          if(kdStage){ return kdStage; }
+          if(kdStage){ stageResult = kdStage; }
         }
 
-        return bboxStage;
+        if(stageResult?.locked && stageResult.value){ return stageResult; }
+
+        if(resolverStaticRun && resolverFieldType === 'static' && resolvedTriangulationBox){
+          const triStage = runTriangulationStage({
+            triangulatedBox: resolvedTriangulationBox,
+            keywordPrediction: resolvedKeywordPrediction,
+            basePx: resolverBasePx,
+            existingResult: stageResult
+          });
+          if(triStage?.result){ return triStage.result; }
+          if(triStage?.audit && stageResult){
+            return { ...stageResult, triangulationAudit: triStage.audit };
+          }
+        }
+
+        return stageResult;
       }
 
       return {
@@ -3571,6 +3673,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   let triangulatedBox = null;
   let keywordIndex = null;
   let keywordContext = null;
+  let triangulationAudit = null;
   let selectionRaw = '';
   let firstAttempt = null;
   let bboxFingerprintOk = false;
@@ -3604,6 +3707,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       viewportDims,
       keywordIndex,
       keywordContext,
+      keywordPrediction,
       triangulatedBox,
       runMode,
       staticRun,
@@ -3617,13 +3721,16 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     });
     if(bboxStage){
+      triangulationAudit = bboxStage.triangulationAudit || triangulationAudit;
       selectionRaw = bboxStage.selectionRaw || selectionRaw;
       firstAttempt = bboxStage.firstAttempt || firstAttempt;
+      if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
+        stageUsed.value = bboxStage.stageUsedValue;
+      }
       if(bboxStage.locked && bboxStage.value){
         result = bboxStage; method='bbox';
-        if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
-          stageUsed.value = bboxStage.stageUsedValue;
-        }
+      } else if(bboxStage.stage === 'triangulation' && bboxStage.value){
+        result = bboxStage; method = bboxStage.method || 'keyword-triangulation';
       }
       if(result && result.method === 'bbox' && result.fingerprintOk){
         bboxFingerprintOk = true;
@@ -3733,68 +3840,6 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     if(!triangulatedBox && keywordContext?.box){
       triangulatedBox = keywordContext.box;
-    }
-  }
-  let triangulationAudit = null;
-  if(staticRun && keywordRelations && triangulatedBox){
-    const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
-    const { pageW, pageH } = getPageSize(page);
-    const scored = scoreTriangulatedCandidates({
-      triBox: triangulatedBox,
-      keywordPrediction,
-      baseBox: basePx,
-      existingResult: result,
-      pageW,
-      pageH
-    });
-    if(scored){
-      const { best, current, preferBest, candidates } = scored;
-      if(preferBest && best){
-        result = {
-          value: best.text,
-          raw: best.rawText,
-          corrected: best.cleaned?.corrected,
-          code: best.cleaned?.code,
-          shape: best.cleaned?.shape,
-          score: best.cleaned?.score,
-          correctionsApplied: best.cleaned?.correctionsApplied,
-          corrections: best.cleaned?.correctionsApplied,
-          boxPx: best.box,
-          confidence: best.confidence,
-          tokens: best.tokens,
-          cleanedOk: !!(best.cleaned?.value || best.cleaned?.raw),
-          fingerprintOk: best.fpOk,
-          lineDiff: best.lineDiff,
-          lineScore: best.lineScore,
-          totalScore: best.totalScore,
-          method: 'keyword-triangulation',
-          comparator: 'keyword'
-        };
-        if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
-      }
-      triangulationAudit = {
-        field: fieldSpec.fieldKey,
-        page,
-        prediction: triangulatedBox,
-        keywordPrediction,
-        candidates: candidates.map(c => ({
-          text: c.text,
-          box: c.box,
-          fingerprintCode: c.fingerprintCode,
-          fpOk: c.fpOk,
-          anchorScore: Number(c.anchorScore?.toFixed ? c.anchorScore.toFixed(3) : c.anchorScore),
-          keywordScore: Number(c.keywordScore?.toFixed ? c.keywordScore.toFixed(3) : c.keywordScore),
-          distanceScore: Number(c.distanceScore?.toFixed ? c.distanceScore.toFixed(3) : c.distanceScore),
-          lineDiff: c.lineDiff,
-          lineScore: Number(c.lineScore?.toFixed ? c.lineScore.toFixed(3) : c.lineScore),
-          lineCount: c.lineCount,
-          expectedLineCount: c.expectedLineCount,
-          totalScore: Number(c.totalScore?.toFixed ? c.totalScore.toFixed(3) : c.totalScore),
-          source: c.source
-        })),
-        chosen: (preferBest ? best?.text : current?.text || result?.value || ''),
-        switched: !!preferBest && !!best
-      };
     }
   }
   const baseConfidence = result?.confidence ?? 0;
