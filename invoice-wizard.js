@@ -13,6 +13,19 @@ const MIN_STATIC_ACCEPT_SCORE = 0.7;
 const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
 const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
+function computeLineDiff(observedLineCount, expectedHint, fallbackExpected){
+  const expected = expectedHint ?? fallbackExpected ?? observedLineCount ?? 0;
+  const observed = observedLineCount ?? 0;
+  return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
+}
+
+function lineScoreForDiff(diff){
+  if(Object.prototype.hasOwnProperty.call(STATIC_LINE_DIFF_WEIGHTS, diff)){
+    return STATIC_LINE_DIFF_WEIGHTS[diff];
+  }
+  return STATIC_LINE_DIFF_WEIGHTS.default;
+}
+
 function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
@@ -1792,6 +1805,24 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
   return { box: finalBox, text };
 }
 
+function assembleTokensFromBox({ tokens, box, minOverlap=0, multiline=false }){
+  const snapped = snapToLine(tokens, box, 6, { minOverlap });
+  const searchBox = snapped?.box || box;
+  const hits = tokensInBox(tokens, searchBox, { minOverlap });
+  const lines = groupIntoLines(hits);
+  const lineTexts = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
+  const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || lineTexts.join('\n'));
+  return {
+    searchBox,
+    hits,
+    lines,
+    lineCount: lines.length,
+    text,
+    snappedBox: snapped?.box || null,
+    snappedText: snapped?.text || ''
+  };
+}
+
 /* ---------------------------- Regexes ----------------------------- */
 const RE = {
   currency: /([-$]?\s?\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{2})?)/,
@@ -2954,17 +2985,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
     ? (fieldSpec.keywordRelations || null)
     : null;
-  const computeLineDiff = (observedLineCount, expectedHint)=>{
-    const expected = expectedHint ?? fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount ?? 0;
-    const observed = observedLineCount ?? 0;
-    return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
-  };
-  const lineScoreForDiff = diff => {
-    if(Object.prototype.hasOwnProperty.call(STATIC_LINE_DIFF_WEIGHTS, diff)){
-      return STATIC_LINE_DIFF_WEIGHTS[diff];
-    }
-    return STATIC_LINE_DIFF_WEIGHTS.default;
-  };
+  const expectedLineCountHint = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? null;
+  const resolverLineDiff = (observedLineCount, expectedHint) => computeLineDiff(observedLineCount, expectedHint, expectedLineCountHint);
   if(staticRun && keywordRelations && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword-rel load ${fieldSpec.fieldKey||''} page=${keywordRelations.page || fieldSpec.page || state.pageNum || 1}`,
       { keywordRelations });
@@ -3044,9 +3066,9 @@ function labelValueHeuristic(fieldSpec, tokens){
       usedBox = res?.box || boxPx;
       cleaned = res?.cleaned || null;
     } else {
-      hits = tokensInBox(tokens, boxPx);
-      const lines = groupIntoLines(hits);
-      text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
+      const assembled = assembleTokensFromBox({ tokens, box: boxPx, minOverlap: staticMinOverlap, multiline: true });
+      hits = assembled.hits || [];
+      text = assembled.text || '';
     }
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
@@ -3071,14 +3093,11 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
-    let searchBox = snap.box;
-    const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
-    const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
-    const assembled = assembler ? assembler(assembleOpts) : null;
-    const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
-    const lines = assembled?.lines || groupIntoLines(hits);
-    const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
+    const assembled = assembleTokensFromBox({ tokens, box, minOverlap: staticMinOverlap, multiline: !!fieldSpec.isMultiline });
+    const searchBox = assembled.searchBox || box;
+    const hits = assembled.hits || [];
+    const lines = assembled.lines || groupIntoLines(hits);
+    const observedLineCount = assembled.lineCount ?? (assembled.lines?.length ?? lines.length ?? 0);
     const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
     const adjustConfidenceForLines = (confidence)=>{
       const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
@@ -3128,7 +3147,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         lineAdj = adjustConfidenceForLines(confidence);
         confidence = lineAdj.confidence;
       }
-      const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
+      const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected, expectedLineCountHint);
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
@@ -3178,7 +3197,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       lineAdj = adjustConfidenceForLines(confidence);
       confidence = lineAdj.confidence;
     }
-    const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
+    const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected, expectedLineCountHint);
     const attemptResult = {
       value: sel.value,
       raw: sel.raw,
@@ -3222,7 +3241,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const baseCx = baseBox ? baseBox.x + (baseBox.w||0)/2 : null;
     const baseCy = baseBox ? baseBox.y + (baseBox.h||0)/2 : null;
     const lines = groupIntoLines(tokens);
-    const candidates = [];
+    const candidateSpans = [];
 
     const evaluateCandidate = (candTokens, source='line')=>{
       if(!candTokens || !candTokens.length) return null;
@@ -3250,7 +3269,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         ? (fingerprintOk ? STATIC_FP_SCORES.ok : STATIC_FP_SCORES.fail)
         : (fingerprintOk ? 1.1 : 0.65);
       const observedLineCount = groupIntoLines(candTokens)?.length || 0;
-      const lineInfo = computeLineDiff(observedLineCount);
+      const lineInfo = computeLineDiff(observedLineCount, null, expectedLineCountHint);
       const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
       const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
@@ -3279,6 +3298,12 @@ function labelValueHeuristic(fieldSpec, tokens){
       };
     };
 
+    const pushCandidateSpan = (candTokens, source='line') => {
+      if(candTokens && candTokens.length){
+        candidateSpans.push({ tokens: candTokens, source });
+      }
+    };
+
     for(const line of lines){
       if(line.page !== triBox.page) continue;
       const bounds = lineBounds(line);
@@ -3286,8 +3311,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const cy = bounds.cy || ((bounds.top + bounds.bottom) / 2);
       const distNorm = Math.hypot((cx - triCx)/pageW, (cy - triCy)/pageH);
       if(distNorm > maxRadius) continue;
-      const candidate = evaluateCandidate(line.tokens, 'line');
-      if(candidate) candidates.push(candidate);
+      pushCandidateSpan(line.tokens, 'line');
     }
 
     const currentTokens = existingResult?.tokens?.length
@@ -3296,6 +3320,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     const currentCandidate = existingResult?.boxPx
       ? evaluateCandidate(currentTokens, 'current')
       : null;
+
+    const candidates = candidateSpans
+      .map(span => evaluateCandidate(span.tokens, span.source))
+      .filter(Boolean);
     if(currentCandidate){ candidates.push(currentCandidate); }
 
     if(!candidates.length) return null;
@@ -3744,7 +3772,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         helpers: {
           attempt,
           anchorMatchesCandidate,
-          computeLineDiff,
+          computeLineDiff: resolverLineDiff,
           lineScoreForDiff
         }
       })
@@ -3960,7 +3988,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
   if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
   if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-    const lineInfo = computeLineDiff(result?.lineCount, result?.expectedLineCount);
+    const lineInfo = computeLineDiff(result?.lineCount, result?.expectedLineCount, expectedLineCountHint);
     const lineScore = lineScoreForDiff(lineInfo.lineDiff);
     const totalScoreLog = result?.totalScore ?? result?.score ?? result?.confidence ?? 0;
     logStaticDebug(
