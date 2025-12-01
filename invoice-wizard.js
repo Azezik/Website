@@ -5426,7 +5426,19 @@ function getScaleFactors(){
   const rect = src.getBoundingClientRect();
   const scaleX = src.width / rect.width;
   const scaleY = src.height / rect.height;
-  return { scaleX, scaleY };
+  const symmetricScale = ((scaleX || 0) + (scaleY || 0)) / 2 || 1;
+  const maxScale = Math.max(Math.abs(scaleX) || 0, Math.abs(scaleY) || 0, 1);
+  const drift = Math.abs(scaleX - scaleY) / maxScale;
+  if(drift > 0.01){
+    console.warn('getScaleFactors: divergent scales detected; using symmetric scale', {
+      scaleX,
+      scaleY,
+      symmetricScale,
+      cssRect: { w: rect.width, h: rect.height },
+      pxRect: { w: src.width, h: src.height }
+    });
+  }
+  return { scaleX: symmetricScale, scaleY: symmetricScale };
 }
 
 function paintOverlay(ctx, options = {}){
