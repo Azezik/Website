@@ -3,10 +3,15 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
+const StaticResolverRollout = window.StaticResolverRollout || null;
 
 let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
+
+const STATIC_RESOLVER_ENABLED = StaticResolverRollout?.isEnabled
+  ? StaticResolverRollout.isEnabled({ windowOverride: window })
+  : !(window.FEATURE_STATIC_RESOLVER_ALL === false);
 
 const MAX_STATIC_CANDIDATES = 12;
 const MIN_STATIC_ACCEPT_SCORE = 0.7;
@@ -2968,7 +2973,6 @@ function labelValueHeuristic(fieldSpec, tokens){
   const staticRun = runMode && ftype === 'static';
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
-  const stageUsed = { value: null };
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
@@ -3398,6 +3402,17 @@ function labelValueHeuristic(fieldSpec, tokens){
         const triBox = triStageBox || null;
         if(!triBox){ return null; }
 
+        const lockedExisting = !!triExistingResult?.locked;
+        if(lockedExisting){
+          if(staticDebugEnabled() && resolverStaticRun && resolverFieldType === 'static' && isStaticFieldDebugTarget(resolverFieldSpec?.fieldKey)){
+            logStaticDebug(
+              `[triangulation.skip] field=${resolverFieldSpec?.fieldKey||''} locked=${lockedExisting} existingStage=${triExistingResult?.stage || 'unknown'}`,
+              { lockedExisting, stage: triExistingResult?.stage || null, method: triExistingResult?.method || null }
+            );
+          }
+          return { audit: { skippedLocked: true, stage: triExistingResult?.stage || null, locked: true } };
+        }
+
         const page = triBox.page || triExistingResult?.boxPx?.page || triStageBasePx?.page || resolverFieldSpec?.page || state.pageNum || 1;
         const { pageW, pageH } = getPageSize(page);
         const scored = scoreTriangulatedCandidates({
@@ -3412,6 +3427,12 @@ function labelValueHeuristic(fieldSpec, tokens){
         if(!scored){ return null; }
 
         const { best, current, preferBest, candidates } = scored;
+        if(staticDebugEnabled() && resolverStaticRun && resolverFieldType === 'static' && isStaticFieldDebugTarget(resolverFieldSpec?.fieldKey)){
+          logStaticDebug(
+            `[triangulation.run] field=${resolverFieldSpec?.fieldKey||''} locked=${lockedExisting} preferBest=${preferBest} candidates=${candidates.length}`,
+            { lockedExisting, preferBest, best: best?.text, current: current?.text, triBox }
+          );
+        }
         const audit = {
           field: resolverFieldSpec?.fieldKey,
           page,
@@ -3460,7 +3481,6 @@ function labelValueHeuristic(fieldSpec, tokens){
               locked: false,
               method: 'keyword-triangulation',
               comparator: 'keyword',
-              stageUsedValue: 2,
               triangulationAudit: audit
             },
             audit
@@ -3490,7 +3510,6 @@ function labelValueHeuristic(fieldSpec, tokens){
             locked: false,
             method: 'bbox',
             selectionRaw: '',
-            stageUsedValue: null,
             firstAttempt: null
           };
         }
@@ -3505,7 +3524,6 @@ function labelValueHeuristic(fieldSpec, tokens){
         }
 
         let selectionRaw = firstAttempt?.raw || '';
-        let stageUsedValue = null;
         let result = null;
 
         if(bboxStaticRun && firstAttempt){
@@ -3514,9 +3532,9 @@ function labelValueHeuristic(fieldSpec, tokens){
             : { lineDiff: 0, expectedLineCount: firstAttempt.expectedLineCount || 0 };
           const hasAnchor = firstAttempt.anchorOk !== false;
           if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
-            result = firstAttempt; stageUsedValue = 0;
+            result = firstAttempt;
           } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
-            result = firstAttempt; stageUsedValue = 1;
+            result = firstAttempt;
           }
         }
 
@@ -3528,7 +3546,7 @@ function labelValueHeuristic(fieldSpec, tokens){
             const search = { x: bboxBasePx.x - pad, y: bboxBasePx.y - pad, w: bboxBasePx.w + pad*2, h: bboxBasePx.h + pad*2, page: bboxBasePx.page };
             const r = await bboxAttempt(search);
             if(r && !bboxAnchorMatch(r)){ continue; }
-            if(r && r.cleanedOk){ result = r; if(bboxStaticRun && stageUsedValue === null){ stageUsedValue = 2; } break; }
+            if(r && r.cleanedOk){ result = r; break; }
           }
         }
 
@@ -3540,7 +3558,6 @@ function labelValueHeuristic(fieldSpec, tokens){
             locked: true,
             method: result.method || 'bbox',
             selectionRaw,
-            stageUsedValue,
             firstAttempt
           };
         }
@@ -3554,7 +3571,6 @@ function labelValueHeuristic(fieldSpec, tokens){
           locked: false,
           method: 'bbox',
           selectionRaw,
-          stageUsedValue,
           firstAttempt
         };
       };
@@ -3637,7 +3653,6 @@ function labelValueHeuristic(fieldSpec, tokens){
             locked: true,
             method: deltaStage.method || 'bbox',
             selectionRaw: deltaStage.selectionRaw || priorSelectionRaw,
-            stageUsedValue: 3,
             motherMatch: motherEntry,
             motherPredicted
           };
@@ -3652,7 +3667,6 @@ function labelValueHeuristic(fieldSpec, tokens){
           locked: false,
           method: 'bbox',
           selectionRaw: deltaStage?.selectionRaw || priorSelectionRaw,
-          stageUsedValue: 3,
           firstAttempt: deltaStage?.firstAttempt || null
         };
       };
@@ -3731,7 +3745,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   let bboxFingerprintOk = false;
   let staticResolverHasValue = false;
   let staticResolverLocked = false;
-  const shouldUseStaticResolver = staticRun && ftype === 'static';
+  const shouldUseStaticResolver = staticRun && ftype === 'static' && STATIC_RESOLVER_ENABLED;
+  const shouldUseLegacyStatic = staticRun && ftype === 'static' && !STATIC_RESOLVER_ENABLED;
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
@@ -3755,6 +3770,27 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
+    const runLegacyStaticBBox = async () => {
+      if(!shouldUseLegacyStatic || !basePx){ return null; }
+      const pads = isConfigMode() ? [0,4] : [0,4,8,12];
+      for(const pad of pads){
+        const probe = pad ? { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page } : basePx;
+        const r = await attempt(probe);
+        if(!r || r.anchorOk === false){ continue; }
+        if(r.cleanedOk){
+          return {
+            ...r,
+            boxPx: r.boxPx || probe,
+            stage: 'legacy-bbox',
+            locked: false,
+            method: r.method || 'bbox',
+            selectionRaw: r.raw || selectionRaw,
+            firstAttempt: r
+          };
+        }
+      }
+      return null;
+    };
     const bboxStage = shouldUseStaticResolver
       ? await StaticFieldResolver.resolve({
         fieldSpec,
@@ -3776,7 +3812,7 @@ function labelValueHeuristic(fieldSpec, tokens){
           lineScoreForDiff
         }
       })
-      : null;
+      : await runLegacyStaticBBox();
     if(bboxStage){
       triangulationAudit = bboxStage.triangulationAudit || triangulationAudit;
       selectionRaw = bboxStage.selectionRaw || selectionRaw;
@@ -3784,9 +3820,6 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(shouldUseStaticResolver){
         staticResolverHasValue = !!bboxStage.value;
         staticResolverLocked = !!(bboxStage.locked && bboxStage.value);
-      }
-      if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
-        stageUsed.value = bboxStage.stageUsedValue;
       }
       if(staticRun){
         result = bboxStage;
@@ -3986,19 +4019,22 @@ function labelValueHeuristic(fieldSpec, tokens){
   } else if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword field=${fieldSpec.fieldKey||''} hasRel=false`, { keywordRelations: false });
   }
-  if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
   if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     const lineInfo = computeLineDiff(result?.lineCount, result?.expectedLineCount, expectedLineCountHint);
     const lineScore = lineScoreForDiff(lineInfo.lineDiff);
     const totalScoreLog = result?.totalScore ?? result?.score ?? result?.confidence ?? 0;
+    const resolverStage = result?.stage || (shouldUseStaticResolver ? 'resolver' : 'legacy-static');
     logStaticDebug(
-      `stage-winner field=${fieldSpec.fieldKey||''} stage=${stageUsed.value} lineDiff=${lineInfo.lineDiff} lineScore=${lineScore.toFixed(2)} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
-      { stage: stageUsed.value, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog, resolverStage: result?.stage || null, locked: !!result?.locked }
+      `stage-winner field=${fieldSpec.fieldKey||''} stage=${resolverStage} lineDiff=${lineInfo.lineDiff} lineScore=${lineScore.toFixed(2)} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
+      { stage: resolverStage, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog, resolverStage: result?.stage || null, locked: !!result?.locked }
     );
   }
   result.method = result.method || method || 'fallback';
   result.score = score;
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
+  if(staticRun && !result.stage){
+    result.stage = shouldUseStaticResolver ? 'fallback' : (shouldUseLegacyStatic ? 'legacy-static' : result.stage);
+  }
   const shouldScaleConfidence = result.score && !(runMode && result.comparator === 'ring_once');
   if(shouldScaleConfidence){ result.confidence = clamp(result.confidence * result.score, 0, 1); }
   state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence, stage: result.stage, locked: !!result.locked });
