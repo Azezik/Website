@@ -3330,6 +3330,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         lineScoreForDiff: resolverLineScore
       } = helpers;
 
+      const resolverKeywordRelations = resolverFieldSpec?.keywordRelations || null;
+
       const runBBoxStage = async (bboxOpts = {})=>{
         const {
           basePx: bboxBasePx,
@@ -3432,8 +3434,93 @@ function labelValueHeuristic(fieldSpec, tokens){
         };
       }
 
+      const runKeywordDeltaStage = async (deltaOpts = {}) => {
+        const {
+          basePx: deltaBasePx,
+          attempt: deltaAttempt,
+          anchorMatchesCandidate: deltaAnchorMatch,
+          runMode: deltaRunMode,
+          staticRun: deltaStaticRun,
+          ftype: deltaFieldType,
+          priorSelectionRaw = ''
+        } = deltaOpts;
+
+        if(!deltaStaticRun || deltaFieldType !== 'static'){ return null; }
+        if(!resolverKeywordRelations || !resolverKeywordRelations.mother){ return null; }
+        if(!deltaAttempt || !deltaBasePx || !resolverViewport){ return null; }
+
+        const pageW = resolverViewport.width || resolverViewport.w || 1;
+        const pageH = resolverViewport.height || resolverViewport.h || 1;
+        const motherContext = resolverKeywordContext?.motherPred || null;
+        let motherEntry = motherContext?.entry || null;
+        let motherPredicted = motherContext?.predictedBox || null;
+        const keywordIndex = resolverKeywordIndex || [];
+
+        if(!motherEntry && KeywordWeighting?.chooseKeywordMatch){
+          const refBox = resolverTriangulatedBox || deltaBasePx;
+          const match = KeywordWeighting.chooseKeywordMatch(resolverKeywordRelations.mother, keywordIndex, refBox, pageW, pageH);
+          motherEntry = match?.entry || null;
+          motherPredicted = motherPredicted || match?.predictedBox || null;
+        }
+
+        const motherBox = motherEntry?.bboxPx || motherEntry?.bbox || null;
+        if(!motherBox){ return null; }
+
+        const configMother = resolverKeywordRelations.mother.normBox || {};
+        const configMotherPx = {
+          x: (configMother.x || 0) * pageW,
+          y: (configMother.y || 0) * pageH,
+          w: (configMother.w || 0) * pageW,
+          h: (configMother.h || 0) * pageH
+        };
+
+        const dx = (motherBox.x || 0) - (configMotherPx.x || 0);
+        const dy = (motherBox.y || 0) - (configMotherPx.y || 0);
+        const shiftedBox = {
+          ...deltaBasePx,
+          x: (deltaBasePx.x || 0) + dx,
+          y: (deltaBasePx.y || 0) + dy
+        };
+
+        const deltaStage = await runBBoxStage({
+          basePx: shiftedBox,
+          attempt: deltaAttempt,
+          anchorMatchesCandidate: deltaAnchorMatch,
+          runMode: deltaRunMode,
+          staticRun: deltaStaticRun,
+          ftype: deltaFieldType
+        });
+
+        if(deltaStage && deltaStage.locked && deltaStage.value){
+          return {
+            ...deltaStage,
+            boxPx: deltaStage.boxPx || shiftedBox,
+            stage: 'keyword-delta',
+            locked: true,
+            method: deltaStage.method || 'bbox',
+            selectionRaw: deltaStage.selectionRaw || priorSelectionRaw,
+            stageUsedValue: 3,
+            motherMatch: motherEntry,
+            motherPredicted
+          };
+        }
+
+        return {
+          value: '',
+          confidence: 0,
+          boxPx: shiftedBox,
+          tokens: [],
+          stage: 'keyword-delta',
+          locked: false,
+          method: 'bbox',
+          selectionRaw: deltaStage?.selectionRaw || priorSelectionRaw,
+          stageUsedValue: 3,
+          firstAttempt: deltaStage?.firstAttempt || null
+        };
+      };
+
       if(stage === 'bbox'){
-        return await runBBoxStage({
+        const bboxStage = await runBBoxStage({
           basePx: resolverBasePx,
           attempt: resolverAttempt,
           anchorMatchesCandidate: resolverAnchorMatch,
@@ -3441,6 +3528,28 @@ function labelValueHeuristic(fieldSpec, tokens){
           staticRun: resolverStaticRun,
           ftype: resolverFieldType
         });
+        const bboxValid = bboxStage && bboxStage.locked && bboxStage.value;
+        if(bboxValid){ return bboxStage; }
+
+        const shouldRunKeywordDelta = resolverStaticRun && resolverFieldType === 'static'
+          && resolverKeywordRelations && resolverKeywordRelations.mother
+          && (!bboxStage || !bboxStage.value || bboxStage.anchorOk === false || bboxStage.cleanedOk === false);
+
+        if(shouldRunKeywordDelta){
+          const kdStage = await runKeywordDeltaStage({
+            basePx: resolverBasePx,
+            attempt: resolverAttempt,
+            anchorMatchesCandidate: resolverAnchorMatch,
+            runMode: resolverRunMode,
+            staticRun: resolverStaticRun,
+            ftype: resolverFieldType,
+            priorSelectionRaw: bboxStage?.selectionRaw || ''
+          });
+          if(kdStage && kdStage.locked && kdStage.value){ return kdStage; }
+          if(kdStage){ return kdStage; }
+        }
+
+        return bboxStage;
       }
 
       return {
@@ -3493,6 +3602,9 @@ function labelValueHeuristic(fieldSpec, tokens){
       basePx,
       tokens,
       viewportDims,
+      keywordIndex,
+      keywordContext,
+      triangulatedBox,
       runMode,
       staticRun,
       ftype,
