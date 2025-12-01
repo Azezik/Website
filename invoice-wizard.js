@@ -1818,9 +1818,9 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
   return { box: finalBox, text };
 }
 
-function assembleTokensFromBox({ tokens, box, minOverlap=0, multiline=false }){
-  const snapped = snapToLine(tokens, box, 6, { minOverlap });
-  const searchBox = snapped?.box || box;
+function assembleTokensFromBox({ tokens, box, minOverlap=0, multiline=false, strict=false }){
+  const snapped = strict ? null : snapToLine(tokens, box, 6, { minOverlap });
+  const searchBox = strict ? box : (snapped?.box || box);
   const hits = tokensInBox(tokens, searchBox, { minOverlap });
   const lines = groupIntoLines(hits);
   const lineTexts = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
@@ -2985,6 +2985,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
   }
+  const viewportLogical = { width: viewportDims.width, height: viewportDims.height };
   const enforceAnchors = isRunMode() && !!fieldSpec.anchorMetrics;
   const anchorMatchesCandidate = cand => {
     if(!enforceAnchors) return true;
@@ -3024,7 +3025,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       boxPx = state.snappedPx;
       traceEvent(spanKey,'selection.captured',{ boxPx });
     } else if(fieldSpec.bbox){
-      const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      const raw = toPx(viewportLogical,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       boxPx = applyTransform(raw);
       traceEvent(spanKey,'selection.captured',{ boxPx });
     }
@@ -3059,7 +3060,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const selectionBox = state.selectionPx || state.snappedPx || null;
     let boxPx = selectionBox;
     if(fieldSpec.bbox && !boxPx){
-      const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      const raw = toPx(viewportLogical, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       boxPx = applyTransform(raw);
     }
     if(boxPx){ traceEvent(spanKey,'selection.captured',{ boxPx }); }
@@ -3105,7 +3106,13 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const assembled = assembleTokensFromBox({ tokens, box, minOverlap: staticMinOverlap, multiline: !!fieldSpec.isMultiline });
+    const assembled = assembleTokensFromBox({
+      tokens,
+      box,
+      minOverlap: staticMinOverlap,
+      multiline: !!fieldSpec.isMultiline,
+      strict: staticRun && runMode
+    });
     const searchBox = assembled.searchBox || box;
     const hits = assembled.hits || [];
     const lines = assembled.lines || groupIntoLines(hits);
@@ -3177,7 +3184,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         anchorOk,
         lineCount: observedLineCount,
         expectedLineCount: lineInfo.expectedLineCount,
-        lineDiff: lineInfo.lineDiff
+        lineDiff: lineInfo.lineDiff,
+        usable: cleanedOk || anchorOk
       };
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
         if(lineAdj && lineAdj.factor !== 1){
@@ -3227,7 +3235,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       anchorOk,
       lineCount: observedLineCount,
       expectedLineCount: lineInfo.expectedLineCount,
-      lineDiff: lineInfo.lineDiff
+      lineDiff: lineInfo.lineDiff,
+      usable: cleanedOk || anchorOk
     };
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       if(lineAdj && lineAdj.factor !== 1){
@@ -3525,9 +3534,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         const initialAttempt = await bboxAttempt(bboxBasePx);
         if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
         let firstAttempt = null;
-        if(initialAttempt && initialAttempt.cleanedOk){
-          firstAttempt = initialAttempt;
-        } else if(initialAttempt && bboxAnchorMatch(initialAttempt)){
+        if(initialAttempt && initialAttempt.usable){
           firstAttempt = initialAttempt;
         }
 
@@ -3553,7 +3560,7 @@ function labelValueHeuristic(fieldSpec, tokens){
           for(const pad of pads){
             const search = { x: bboxBasePx.x - pad, y: bboxBasePx.y - pad, w: bboxBasePx.w + pad*2, h: bboxBasePx.h + pad*2, page: bboxBasePx.page };
             const r = await bboxAttempt(search);
-            if(r && !bboxAnchorMatch(r)){ continue; }
+            if(r && !r.usable){ continue; }
             if(r && r.cleanedOk){ result = r; break; }
           }
         }
@@ -3756,7 +3763,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   const shouldUseStaticResolver = staticRun && ftype === 'static' && STATIC_RESOLVER_ENABLED;
   const shouldUseLegacyStatic = staticRun && ftype === 'static' && !STATIC_RESOLVER_ENABLED;
   if(fieldSpec.bbox){
-    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+    const raw = toPx(viewportLogical, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
