@@ -3744,19 +3744,26 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   }
 
-  if(!result && ftype==='static' && fieldSpec.landmark && basePx){
+  const isLockedStaticResult = () => !!(result?.locked && shouldUseStaticResolver);
+  const canReplaceCurrentResult = () => (!result) || (shouldUseStaticResolver && !isLockedStaticResult());
+
+  if(ftype==='static' && fieldSpec.landmark && basePx && !isLockedStaticResult()){
     if(!runMode){
       let m = matchRingLandmark(fieldSpec.landmark, basePx);
       if(m){
         const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
         const r = await attempt(box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+        if(r && anchorMatchesCandidate(r) && r.value && (!isLockedStaticResult() && (!result || (r.confidence||0) > (result?.confidence||0)))){
+          result=r; method='ring'; score=m.score; comp=m.comparator;
+        }
       }
       if(!result){
         const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
         if(a){
           const r = await attempt(a.box);
-          if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+          if(r && anchorMatchesCandidate(r) && r.value && (!isLockedStaticResult() && (!result || (r.confidence||0) > (result?.confidence||0)))){
+            result=r; method='anchor'; comp='text_anchor'; score:null;
+          }
         }
       }
       if(!result){
@@ -3767,7 +3774,9 @@ function labelValueHeuristic(fieldSpec, tokens){
             const r = await attempt(box);
             const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
             const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-            if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+            if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk && (!isLockedStaticResult() && (!result || (r.confidence||0) > (result?.confidence||0)))){
+              result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break;
+            }
           }
         }
       }
@@ -3775,11 +3784,13 @@ function labelValueHeuristic(fieldSpec, tokens){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        if(r && anchorMatchesCandidate(r) && r.value && (!isLockedStaticResult() && (!result || (r.confidence||0) > (result?.confidence||0)))){
+          result=r; method='anchor'; comp='text_anchor'; score:null;
+        }
       }
     }
   }
-  if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length && !bboxFingerprintOk){
+  if(canReplaceCurrentResult() && staticRun && keywordRelations && keywordRelations.secondaries?.length && !bboxFingerprintOk){
     const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     if(!state.keywordIndexByPage?.[page]){
@@ -3796,29 +3807,37 @@ function labelValueHeuristic(fieldSpec, tokens){
         const r = await attempt(probe);
         if(r && anchorMatchesCandidate(r) && r.value){
           r.confidence = Math.min(r.confidence || 0.45, 0.45);
-          result = r; method='keyword-triangulation'; comp='keyword'; score = score || null; break;
+          if(!result || (r.confidence || 0) > (result?.confidence || 0)){
+            r.stage = r.stage || 'keyword-triangulation';
+            r.locked = false;
+            result = r; method='keyword-triangulation'; comp='keyword'; score = score || null;
+          }
+          if(result === r){ break; }
         }
       }
     }
   }
-  if(!result){
+  if(canReplaceCurrentResult()){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
       let candidateTokens = [];
       if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
       const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
-      if(boxOk){
+      if(boxOk && (!isLockedStaticResult() && (!result || (lv.confidence||0) > (result?.confidence||0)))){
         result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
       }
     }
   }
 
-  if(!result){
+  if(canReplaceCurrentResult()){
     traceEvent(spanKey,'fallback.search',{});
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
     traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
-    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    const fallbackCandidate = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    if(!isLockedStaticResult() && (!result || (fallbackCandidate.confidence || 0) > (result?.confidence || 0))){
+      result = fallbackCandidate;
+    }
   }
   if(!result.value && selectionRaw){
     bumpDebugBlank();
@@ -3908,7 +3927,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const totalScoreLog = result?.totalScore ?? result?.score ?? result?.confidence ?? 0;
     logStaticDebug(
       `stage-winner field=${fieldSpec.fieldKey||''} stage=${stageUsed.value} lineDiff=${lineInfo.lineDiff} lineScore=${lineScore.toFixed(2)} fpOk=${!!result?.fingerprintOk} totalScore=${Number(totalScoreLog||0).toFixed(3)}`,
-      { stage: stageUsed.value, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog }
+      { stage: stageUsed.value, lineDiff: lineInfo.lineDiff, lineScore, fpOk: !!result?.fingerprintOk, totalScore: totalScoreLog, resolverStage: result?.stage || null, locked: !!result?.locked }
     );
   }
   result.method = result.method || method || 'fallback';
@@ -3916,7 +3935,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   result.comparator = comp || (result.method==='anchor' ? 'text_anchor' : result.method);
   const shouldScaleConfidence = result.score && !(runMode && result.comparator === 'ring_once');
   if(shouldScaleConfidence){ result.confidence = clamp(result.confidence * result.score, 0, 1); }
-  state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence });
+  state.telemetry.push({ field: fieldSpec.fieldKey, method: result.method, comparator: result.comparator, score: result.score, confidence: result.confidence, stage: result.stage, locked: !!result.locked });
   if(result.boxPx && (result.method.startsWith('ring') || result.method.startsWith('partial') || result.method==='anchor')){
     state.matchPoints.push({ x: result.boxPx.x + result.boxPx.w/2, y: result.boxPx.y + result.boxPx.h/2, page: result.boxPx.page });
   }
@@ -3924,10 +3943,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     const finalBox = result.boxPx || basePx || null;
     logStaticDebug(
       `final-box field=${fieldSpec.fieldKey||''} page=${finalBox?.page || fieldSpec.page || ''} box=${formatBoxForLog(finalBox)} mask=${(configMask||[]).join(',')}`,
-      { box: finalBox, configMask }
+      { box: finalBox, configMask, stage: result?.stage || null, locked: !!result?.locked }
     );
   }
-  traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method });
+  traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method, stage: result.stage, locked: !!result.locked });
   result.tokens = result.tokens || [];
   return result;
 }
@@ -6292,7 +6311,11 @@ function syncRawModeUI(){
 
 function renderTelemetry(){
   if(!els.telemetryPanel) return;
-  els.telemetryPanel.textContent = state.telemetry.map(t=>`${t.field}: ${t.comparator} (${(t.score||0).toFixed(2)}) -> ${(t.confidence||0).toFixed(2)}`).join('\n');
+  els.telemetryPanel.textContent = state.telemetry.map(t=>{
+    const stageLabel = t.stage ? ` stage=${t.stage}` : '';
+    const lockLabel = t.locked !== undefined ? ` locked=${t.locked?'1':'0'}` : '';
+    return `${t.field}: ${t.comparator} (${(t.score||0).toFixed(2)}) -> ${(t.confidence||0).toFixed(2)}${stageLabel}${lockLabel}`;
+  }).join('\n');
 }
 
 function renderReports(){
