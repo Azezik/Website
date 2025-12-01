@@ -3701,6 +3701,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   let selectionRaw = '';
   let firstAttempt = null;
   let bboxFingerprintOk = false;
+  let staticResolverHasValue = false;
+  let staticResolverLocked = false;
   const shouldUseStaticResolver = staticRun && ftype === 'static';
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
@@ -3751,6 +3753,10 @@ function labelValueHeuristic(fieldSpec, tokens){
       triangulationAudit = bboxStage.triangulationAudit || triangulationAudit;
       selectionRaw = bboxStage.selectionRaw || selectionRaw;
       firstAttempt = bboxStage.firstAttempt || firstAttempt;
+      if(shouldUseStaticResolver){
+        staticResolverHasValue = !!bboxStage.value;
+        staticResolverLocked = !!(bboxStage.locked && bboxStage.value);
+      }
       if(staticRun && bboxStage.stageUsedValue !== null && bboxStage.stageUsedValue !== undefined && stageUsed.value === null){
         stageUsed.value = bboxStage.stageUsedValue;
       }
@@ -3768,10 +3774,18 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   }
 
-  const isLockedStaticResult = () => !!(result?.locked && shouldUseStaticResolver);
-  const canReplaceCurrentResult = () => (!result) || (shouldUseStaticResolver && !isLockedStaticResult());
+  const isLockedStaticResult = () => shouldUseStaticResolver && (staticResolverLocked || !!result?.locked);
+  const canReplaceCurrentResult = () => {
+    if(!result){ return true; }
+    if(shouldUseStaticResolver){
+      // Task 7: only allow static fallbacks when the resolver failed to supply a value.
+      if(staticResolverHasValue){ return false; }
+      return !isLockedStaticResult();
+    }
+    return true;
+  };
 
-  if(ftype==='static' && fieldSpec.landmark && basePx && !isLockedStaticResult()){
+  if(ftype==='static' && fieldSpec.landmark && basePx && !isLockedStaticResult() && !staticResolverHasValue){
     if(!runMode){
       let m = matchRingLandmark(fieldSpec.landmark, basePx);
       if(m){
