@@ -531,12 +531,8 @@ const migrations = {
     const fields = p.fields || [];
     fields.forEach(f => {
       if(f.type !== 'static') return;
-      const mask = Array.isArray(f.configMask) ? f.configMask.slice(0,4) : null;
-      const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
-      // Always trust the user-drawn box for static fields unless explicitly removed.
-      normalized[0] = 1; normalized[1] = 1;
-      const allZero = normalized.every(v => v === 0);
-      f.configMask = allZero ? [1,1,1,1] : normalized;
+      // Normalize anchoring: all static fields lock all edges to the user box.
+      f.configMask = [1,1,1,1];
     });
   }
 };
@@ -688,6 +684,8 @@ function normBoxFromField(field){
 
 function normalizeConfigMask(field){
   if(!field) return [1,1,1,1];
+  // Static fields must always lock to the configured box; ignore weaker masks.
+  if(field.type === 'static') return [1,1,1,1];
   const mask = Array.isArray(field.configMask) ? field.configMask.slice(0,4) : null;
   const normalized = mask && mask.length === 4 ? mask.map(v => Number(v) || 0) : [1,1,1,1];
   normalized[0] = 1; // always trust x
@@ -2928,7 +2926,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       : null;
     return anchorMatchForBox(fieldSpec.anchorMetrics, cand.boxPx, cand.tokens || [], viewportDims.width, viewportDims.height, debugCtx);
   };
-  const keywordRelations = (staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
+  const hasConfigBox = staticRun && !!fieldSpec.bbox;
+  const keywordRelations = (!hasConfigBox && staticRun && KEYWORD_RELATION_SCOPE.has(fieldSpec.fieldKey))
     ? (fieldSpec.keywordRelations || null)
     : null;
   const computeLineDiff = (observedLineCount, expectedHint)=>{
@@ -3048,8 +3047,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
-    let searchBox = snap.box;
+    const snap = staticRun ? { box } : snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
+    let searchBox = staticRun ? box : snap.box;
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
     const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
     const assembled = assembler ? assembler(assembleOpts) : null;
@@ -3095,7 +3094,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
         : null;
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-      const cleanedOk = !!(cleaned.value || cleaned.raw);
+      const cleanedOkBase = !!(cleaned.value || cleaned.raw);
+      const cleanedOk = staticRun ? (cleanedOkBase && fingerprintOk) : cleanedOkBase;
       const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
       let confidence = fingerprintOk
         ? baseConf
@@ -3145,7 +3145,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
       : null;
     const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-    const cleanedOk = staticRun ? !!sel.cleanedOk : !!sel.cleanedOk && fingerprintOk;
+    const cleanedOkBase = !!sel.cleanedOk;
+    const cleanedOk = staticRun ? (cleanedOkBase && fingerprintOk) : (cleanedOkBase && fingerprintOk);
     const baseConf = cleaned.conf || (sel.cleanedOk ? 1 : 0.1);
     let confidence = fingerprintOk
       ? baseConf
@@ -3218,6 +3219,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
+      if(staticRun && !fingerprintOk){ return null; }
       const anchorOk = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
       const keywordScore = keywordPrediction && KeywordWeighting?.computeKeywordWeight
         ? KeywordWeighting.computeKeywordWeight(box, keywordPrediction, { pageW, pageH, strongAnchor: anchorOk || fingerprintOk })
@@ -3334,6 +3336,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
     if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
+    if(staticRun && initialAttempt && initialAttempt.fingerprintOk === false){ initialAttempt.cleanedOk = false; }
     if(initialAttempt && initialAttempt.cleanedOk){
       firstAttempt = initialAttempt;
     } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
@@ -3368,13 +3371,13 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(m){
         const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
         const r = await attempt(box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+        if(r && r.fingerprintOk !== false && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
       }
       if(!result){
         const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
         if(a){
           const r = await attempt(a.box);
-          if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+          if(r && r.fingerprintOk !== false && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
         }
       }
       if(!result){
@@ -3385,7 +3388,7 @@ function labelValueHeuristic(fieldSpec, tokens){
             const r = await attempt(box);
             const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
             const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-            if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+            if(r && r.fingerprintOk !== false && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
           }
         }
       }
@@ -3393,7 +3396,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        if(r && r.fingerprintOk !== false && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
   }
@@ -3412,7 +3415,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       for(const pad of [0,3]){
         const probe = { x: triangulatedBox.x - pad, y: triangulatedBox.y - pad, w: triangulatedBox.w + pad*2, h: triangulatedBox.h + pad*2, page: triangulatedBox.page };
         const r = await attempt(probe);
-        if(r && anchorMatchesCandidate(r) && r.value){
+        if(r && r.fingerprintOk !== false && anchorMatchesCandidate(r) && r.value){
           r.confidence = Math.min(r.confidence || 0.45, 0.45);
           result = r; method='keyword-triangulation'; comp='keyword'; score = score || null; break;
         }
@@ -3433,12 +3436,16 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   if(!result){
-    traceEvent(spanKey,'fallback.search',{});
-    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
-    traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
-    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    if(staticRun){
+      result = { value: '', raw: '', corrected: '', code: null, shape: null, score: null, correctionsApplied: [], corrections: [], boxPx: basePx || null, confidence: 0, method: method||'bbox', fingerprintOk: false, tokens: [] };
+    } else {
+      traceEvent(spanKey,'fallback.search',{});
+      const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
+      traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
+      result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    }
   }
-  if(!result.value && selectionRaw){
+  if(!result.value && selectionRaw && !staticRun){
     bumpDebugBlank();
     const raw = selectionRaw.trim();
     result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
