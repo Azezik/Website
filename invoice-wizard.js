@@ -3050,9 +3050,6 @@ function labelValueHeuristic(fieldSpec, tokens){
   async function attempt(box){
     const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
     let searchBox = snap.box;
-    if(fieldSpec.fieldKey === 'customer_address'){
-      searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
-    }
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
     const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
     const assembled = assembler ? assembler(assembleOpts) : null;
@@ -3422,7 +3419,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
   }
-  if(!result){
+  if(!result && !staticRun){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
@@ -3470,7 +3467,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   }
   let triangulationAudit = null;
-  if(staticRun && keywordRelations && triangulatedBox){
+  if(staticRun && keywordRelations && triangulatedBox && !(result?.tokens?.length)){
     const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     const scored = scoreTriangulatedCandidates({
