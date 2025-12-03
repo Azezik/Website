@@ -3156,7 +3156,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
         : null;
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-      const cleanedOk = !!(cleaned.value || cleaned.raw);
+      const hasText = !!(multilineValue || cleaned.value || cleaned.raw);
+      const cleanedOk = (!staticRun || fingerprintOk) && hasText;
       const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
       let confidence = fingerprintOk
         ? baseConf
@@ -3185,7 +3186,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         lineCount: observedLineCount,
         expectedLineCount: lineInfo.expectedLineCount,
         lineDiff: lineInfo.lineDiff,
-        usable: cleanedOk || anchorOk
+        usable: cleanedOk || anchorOk || (staticRun && hasText)
       };
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
         if(lineAdj && lineAdj.factor !== 1){
@@ -3207,7 +3208,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
       : null;
     const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-    const cleanedOk = staticRun ? !!sel.cleanedOk : !!sel.cleanedOk && fingerprintOk;
+    const hasText = !!(sel.value || sel.raw || cleaned.value || cleaned.raw);
+    const cleanedOk = (!staticRun || fingerprintOk) && !!sel.cleanedOk;
     const baseConf = cleaned.conf || (sel.cleanedOk ? 1 : 0.1);
     let confidence = fingerprintOk
       ? baseConf
@@ -3236,7 +3238,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       lineCount: observedLineCount,
       expectedLineCount: lineInfo.expectedLineCount,
       lineDiff: lineInfo.lineDiff,
-      usable: cleanedOk || anchorOk
+      usable: cleanedOk || anchorOk || (staticRun && hasText)
     };
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       if(lineAdj && lineAdj.factor !== 1){
@@ -3364,8 +3366,9 @@ function labelValueHeuristic(fieldSpec, tokens){
       || (!currentCandidate?.fpOk && best.fpOk && best.distanceScore > (currentCandidate?.distanceScore || 0))
     );
     if(staticRun && best){
-      const lineOk = (best.lineDiff ?? Infinity) <= 1 || best.fpOk;
-      if(best.totalScore < MIN_STATIC_ACCEPT_SCORE || !lineOk){
+      const lineOk = (best.lineDiff ?? Infinity) <= 1;
+      const reliabilityOk = best.fpOk || best.anchorOk;
+      if(best.totalScore < MIN_STATIC_ACCEPT_SCORE || !lineOk || !reliabilityOk){
         preferBest = false;
       }
     }
@@ -3514,7 +3517,8 @@ function labelValueHeuristic(fieldSpec, tokens){
           anchorMatchesCandidate: bboxAnchorMatch = () => true,
           runMode: bboxRunMode,
           staticRun: bboxStaticRun,
-          ftype: bboxFieldType
+          ftype: bboxFieldType,
+          pads: bboxPads = null
         } = bboxOpts;
 
         if(!bboxBasePx || typeof bboxAttempt !== 'function'){
@@ -3540,6 +3544,9 @@ function labelValueHeuristic(fieldSpec, tokens){
 
         let selectionRaw = firstAttempt?.raw || '';
         let result = null;
+        const pads = Array.isArray(bboxPads)
+          ? bboxPads
+          : (isConfigMode() ? [4] : [4,8,12]);
 
         if(bboxStaticRun && firstAttempt){
           const lineInfo = bboxRunMode && bboxFieldType === 'static'
@@ -3556,7 +3563,6 @@ function labelValueHeuristic(fieldSpec, tokens){
         if(!result && firstAttempt && firstAttempt.cleanedOk){
           result = firstAttempt;
         } else if(!result){
-          const pads = isConfigMode() ? [4] : [4,8,12];
           for(const pad of pads){
             const search = { x: bboxBasePx.x - pad, y: bboxBasePx.y - pad, w: bboxBasePx.w + pad*2, h: bboxBasePx.h + pad*2, page: bboxBasePx.page };
             const r = await bboxAttempt(search);
@@ -3577,7 +3583,19 @@ function labelValueHeuristic(fieldSpec, tokens){
           };
         }
 
-        return {
+        const fallback = firstAttempt && (firstAttempt.value || firstAttempt.raw)
+          ? {
+              ...firstAttempt,
+              boxPx: firstAttempt.boxPx || bboxBasePx || null,
+              stage: 'bbox',
+              locked: false,
+              method: firstAttempt.method || 'bbox',
+              selectionRaw,
+              firstAttempt
+            }
+          : null;
+
+        return fallback || {
           value: '',
           confidence: 0,
           boxPx: bboxBasePx || null,
@@ -3657,7 +3675,8 @@ function labelValueHeuristic(fieldSpec, tokens){
           anchorMatchesCandidate: deltaAnchorMatch,
           runMode: deltaRunMode,
           staticRun: deltaStaticRun,
-          ftype: deltaFieldType
+          ftype: deltaFieldType,
+          pads: []
         });
 
         if(deltaStage && deltaStage.locked && deltaStage.value){
@@ -3693,9 +3712,11 @@ function labelValueHeuristic(fieldSpec, tokens){
           anchorMatchesCandidate: resolverAnchorMatch,
           runMode: resolverRunMode,
           staticRun: resolverStaticRun,
-          ftype: resolverFieldType
+          ftype: resolverFieldType,
+          pads: []
         });
         let stageResult = bboxStage;
+        let stageSelectionRaw = bboxStage?.selectionRaw || '';
         const bboxValid = bboxStage && bboxStage.locked && bboxStage.value;
         if(bboxValid){ return bboxStage; }
 
@@ -3714,7 +3735,30 @@ function labelValueHeuristic(fieldSpec, tokens){
             priorSelectionRaw: bboxStage?.selectionRaw || ''
           });
           if(kdStage && kdStage.locked && kdStage.value){ return kdStage; }
-          if(kdStage){ stageResult = kdStage; }
+          if(kdStage){
+            stageResult = kdStage;
+            stageSelectionRaw = kdStage.selectionRaw || stageSelectionRaw;
+          }
+        }
+
+        const needsPaddingBBox = !stageResult?.locked || !stageResult.value;
+        if(needsPaddingBBox){
+          const paddedBBoxStage = await runBBoxStage({
+            basePx: resolverBasePx,
+            attempt: resolverAttempt,
+            anchorMatchesCandidate: resolverAnchorMatch,
+            runMode: resolverRunMode,
+            staticRun: resolverStaticRun,
+            ftype: resolverFieldType
+          });
+          if(paddedBBoxStage){
+            if(paddedBBoxStage.locked && paddedBBoxStage.value){
+              stageResult = paddedBBoxStage;
+            } else if(!stageResult || !stageResult.value){
+              stageResult = paddedBBoxStage;
+            }
+            stageSelectionRaw = stageResult?.selectionRaw || stageSelectionRaw;
+          }
         }
 
         if(stageResult?.locked && stageResult.value){ return stageResult; }
@@ -3728,7 +3772,7 @@ function labelValueHeuristic(fieldSpec, tokens){
           });
           if(triStage?.result){ return triStage.result; }
           if(triStage?.audit && stageResult){
-            return { ...stageResult, triangulationAudit: triStage.audit };
+            return { ...stageResult, selectionRaw: stageSelectionRaw, triangulationAudit: triStage.audit };
           }
         }
 
