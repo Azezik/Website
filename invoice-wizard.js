@@ -1801,6 +1801,7 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
   const tokenRight = Math.max(...lineTokens.map(t => t.x + t.w));
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
+  const keepInsideHint = opts.keepInsideHint && hintPx;
   let finalBox = expanded;
   if(isConfigMode() && hintPx){
     const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
@@ -1812,6 +1813,19 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
       const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
       finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
     }
+    if(keepInsideHint){
+      const clampLeft = Math.max(finalBox.x, hintPx.x);
+      const clampTop = Math.max(finalBox.y, hintPx.y);
+      const clampRight = Math.min(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
+      const clampBottom = Math.min(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
+      finalBox = {
+        x: clampLeft,
+        y: clampTop,
+        w: Math.max(0, clampRight - clampLeft),
+        h: Math.max(0, clampBottom - clampTop),
+        page: hintPx.page
+      };
+    }
   }
   finalBox = clampBoxWidthToContent(finalBox, tokenLeft, tokenRight, hintPx, { marginPx });
   const text = lineTokens.map(t => t.text).join(' ').trim();
@@ -1819,7 +1833,7 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
 }
 
 function assembleTokensFromBox({ tokens, box, minOverlap=0, multiline=false, strict=false }){
-  const snapped = strict ? null : snapToLine(tokens, box, 6, { minOverlap });
+  const snapped = strict ? null : snapToLine(tokens, box, 6, { minOverlap, keepInsideHint: isConfigMode() });
   const searchBox = strict ? box : (snapped?.box || box);
   const hits = tokensInBox(tokens, searchBox, { minOverlap });
   const lines = groupIntoLines(hits);
@@ -2980,7 +2994,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
   const configMask = normalizeConfigMask(fieldSpec);
-  const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
+  const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.7 : 0.7);
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
@@ -3079,7 +3093,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       usedBox = res?.box || boxPx;
       cleaned = res?.cleaned || null;
     } else {
-      const assembled = assembleTokensFromBox({ tokens, box: boxPx, minOverlap: staticMinOverlap, multiline: true });
+      const assembled = assembleTokensFromBox({ tokens, box: boxPx, minOverlap: staticMinOverlap, multiline: true, strict: true });
       hits = assembled.hits || [];
       text = assembled.text || '';
     }
