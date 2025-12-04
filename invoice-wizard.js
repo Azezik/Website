@@ -232,6 +232,7 @@ let state = {
   selectionPx: null,         // current user-drawn selection (px, page-relative)
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
+  snappedNormBox: null,      // snapped line box (normalized to page)
   snappedText: '',           // snapped line text
   pageTransform: { scale:1, rotation:0 }, // calibration transform per page
   telemetry: [],            // extraction telemetry
@@ -1602,11 +1603,13 @@ function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
     .filter(L => (L.bottom > hintPx.y - verticalPad) && (L.top < hintPx.y + hintPx.h + verticalPad))
     .sort((a,b)=> a.top - b.top || a.left - b.left);
   if(!candidates.length) return [];
+  const intersectsHint = (L)=> (L.bottom > hintPx.y - verticalPad) && (L.top < hintPx.y + hintPx.h + verticalPad);
+  const intersecting = candidates.filter(intersectsHint);
   if(!multiline){
     const cy = hintPx.y + hintPx.h/2;
-    let best = candidates[0];
+    let best = (intersecting[0] || candidates[0]);
     let bestScore = Infinity;
-    for(const L of candidates){
+    for(const L of (intersecting.length ? intersecting : candidates)){
       const overlap = horizontalOverlap(L) / Math.max(1, Math.max(L.width, hintPx.w));
       const dy = Math.abs(((L.top + L.bottom)/2) - cy);
       const score = dy + (1 - overlap) * 20;
@@ -1614,54 +1617,46 @@ function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
     }
     return best ? [best] : [];
   }
-  const anchorLine = candidates.find(L => L.cy >= hintPx.y - verticalPad && L.cy <= hintPx.y + hintPx.h + verticalPad) || candidates[0];
-  const ordered = candidates.filter(L => L.top >= anchorLine.top);
+  const anchorLine = (intersecting.find(L => L.cy >= hintPx.y - verticalPad && L.cy <= hintPx.y + hintPx.h + verticalPad) || intersecting[0] || candidates[0]);
+  const ordered = candidates.slice().sort((a,b)=> a.top - b.top || a.left - b.left);
+  const anchorIdx = ordered.indexOf(anchorLine);
   const maxGap = Math.max(4, Math.min(anchorLine.height * 0.6, 12));
   const selected = [anchorLine];
   let prev = anchorLine;
-  for(const L of ordered){
-    if(L === anchorLine) continue;
-    if(L.top - prev.bottom <= maxGap){ selected.push(L); prev = L; }
+  for(let i=anchorIdx+1; i<ordered.length; i++){
+    const L = ordered[i];
+    if(L.top - prev.bottom <= maxGap){ selected.push(L); prev = L; } else { break; }
+  }
+  prev = anchorLine;
+  for(let i=anchorIdx-1; i>=0; i--){
+    const L = ordered[i];
+    if(prev.top - L.bottom <= maxGap){ selected.push(L); prev = L; } else { break; }
   }
   return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
 }
 function snapStaticToLines(tokens, hintPx, opts={}){
-  const { multiline=false, marginPx=4 } = opts || {};
+  const { multiline=false } = opts || {};
   const lines = groupIntoLines(tokens, 4).map(lineBounds);
   const selected = selectLinesForStatic(lines, hintPx, { multiline });
   if(!selected.length){
-    const fallback = snapToLine(tokens, hintPx, marginPx, opts);
-    const metrics = summarizeLineMetrics([]);
-    return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+    const fallback = snapToLine(tokens, hintPx, opts);
+    const metrics = fallback.lineMetrics || summarizeLineMetrics([]);
+    return { ...fallback, lines: fallback.lines || [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, tokenSpan: fallback.tokenSpan };
   }
   const selectedTokens = selected.flatMap(L => L.tokens);
-  const left = Math.min(...selectedTokens.map(t=>t.x));
-  const right = Math.max(...selectedTokens.map(t=>t.x + t.w));
-  const top = Math.min(...selected.map(L => L.top));
-  const bottom = Math.max(...selected.map(L => L.bottom));
-  let box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
-  const expanded = { x: box.x - marginPx, y: box.y - marginPx, w: box.w + marginPx*2, h: box.h + marginPx*2, page: hintPx.page };
-  let finalBox = expanded;
-  if(hintPx && hintPx.w > 0){
-    const widthCap = hintPx.w * 1.1;
-    const tokensWidth = right - left;
-    const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
-    if(finalBox.w > targetWidth){
-      const minLeft = Math.max(finalBox.x, right - targetWidth);
-      const maxLeft = Math.min(finalBox.x + finalBox.w - targetWidth, left);
-      let newLeft = finalBox.x + (finalBox.w - targetWidth) / 2;
-      if(newLeft < minLeft) newLeft = minLeft;
-      if(newLeft > maxLeft) newLeft = maxLeft;
-      const newRight = newLeft + targetWidth;
-      finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
-    }
-  }
+  const tokenSpan = mergeTokenBounds(selectedTokens);
+  const vp = state.pageViewports?.[(hintPx?.page || 1) - 1] || state.viewport || {};
+  const pageW = Math.max(1, vp.width ?? vp.w ?? 1);
+  const pageH = Math.max(1, vp.height ?? vp.h ?? 1);
+  const finalBox = normalizeStaticSpanBox(hintPx, tokenSpan, { pageW, pageH, mode:'snapStaticToLines' });
   const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
   const metrics = summarizeLineMetrics(selected);
-  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+  const normBox = normalizeBBoxForPage(finalBox, pageW, pageH);
+  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, tokenSpan, normBox };
 }
-function resolveStaticOverlap(entries){
+function resolveStaticOverlap(entries, opts={}){
+  const { pageW=1, pageH=1 } = opts || {};
   const groups = [];
   const overlapX = (a,b)=> Math.max(0, Math.min(a.box.x + a.box.w, b.box.x + b.box.w) - Math.max(a.box.x, b.box.x));
   const sameBand = (a,b)=> overlapX(a,b) >= Math.max(4, Math.min(a.box.w, b.box.w) * 0.3);
@@ -1752,6 +1747,13 @@ function resolveStaticOverlap(entries){
       b.box.h = Math.max(1, bBottom - b.box.y);
     }
   }
+  for(const entry of entries){
+    if(entry?.tokenSpan && (entry.hintBox || entry.box)){
+      const clamped = normalizeStaticSpanBox(entry.hintBox || entry.box, entry.tokenSpan, { pageW, pageH, mode:'overlap-clamp' });
+      entry.box = clamped;
+      entry.normBox = normalizeBBoxForPage(clamped, pageW, pageH);
+    }
+  }
   return entries;
 }
 function stepSpecForField(fieldKey=''){
@@ -1777,52 +1779,27 @@ function buildStaticOverlapEntries(page, currentFieldKey, tokens){
     const spec = stepSpecForField(f.fieldKey || '');
     const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline });
     const expectedLineCount = f.lineMetrics?.lineCount ?? f.lineCount ?? snap.lineCount;
-    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [], expectedLineCount } : null;
+    return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [], expectedLineCount, tokenSpan: snap.tokenSpan, hintBox: box } : null;
   }).filter(Boolean);
 }
-function snapToLine(tokens, hintPx, marginPx=6, opts={}){
-  const hits = tokensInBox(tokens, hintPx, opts);
-  if(!hits.length) return { box: hintPx, text: '' };
+function snapToLine(tokens, hintPx, opts={}){
+  const { minOverlap=0.5, multiline=false } = opts || {};
+  const hits = tokensInBox(tokens, hintPx, { ...opts, minOverlap });
+  if(!hits.length) return { box: hintPx, text: '', normBox: null };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
   const line = groupIntoLines(tokens, 4).find(L => Math.abs(L.cy - bandCy) <= 4);
-  const lineTokens = line ? tokensInBox(line.tokens, hintPx, opts) : hits;
-  // Horizontally limit to tokens inside the hint box, but keep full line height
-  const left   = Math.min(...hits.map(t => t.x));
-  const right  = Math.max(...hits.map(t => t.x + t.w));
-  const top    = Math.min(...lineTokens.map(t => t.y));
-  const bottom = Math.max(...lineTokens.map(t => t.y + t.h));
-  const tokenLeft = Math.min(...lineTokens.map(t => t.x));
-  const tokenRight = Math.max(...lineTokens.map(t => t.x + t.w));
-  const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
-  const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
-  let finalBox = expanded;
-  if(isConfigMode() && hintPx){
-    const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
-    const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
-    if(needsWidth || needsHeight){
-      const unionLeft = Math.min(finalBox.x, hintPx.x);
-      const unionTop = Math.min(finalBox.y, hintPx.y);
-      const unionRight = Math.max(finalBox.x + finalBox.w, hintPx.x + hintPx.w);
-      const unionBottom = Math.max(finalBox.y + finalBox.h, hintPx.y + hintPx.h);
-      finalBox = { x: unionLeft, y: unionTop, w: unionRight - unionLeft, h: unionBottom - unionTop, page: hintPx.page };
-    }
-  }
-  if(hintPx && hintPx.w > 0){
-    const widthCap = hintPx.w * 1.1;
-    const tokensWidth = tokenRight - tokenLeft;
-    const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
-    if(finalBox.w > targetWidth){
-      const minLeft = Math.max(finalBox.x, tokenRight - targetWidth);
-      const maxLeft = Math.min(finalBox.x + finalBox.w - targetWidth, tokenLeft);
-      let newLeft = finalBox.x + (finalBox.w - targetWidth) / 2;
-      if(newLeft < minLeft) newLeft = minLeft;
-      if(newLeft > maxLeft) newLeft = maxLeft;
-      const newRight = newLeft + targetWidth;
-      finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
-    }
-  }
-  const text = lineTokens.map(t => t.text).join(' ').trim();
-  return { box: finalBox, text };
+  const lineTokens = line ? line.tokens : hits;
+  const tokenSpan = mergeTokenBounds(lineTokens) || hintPx;
+  const vp = state.pageViewports?.[(hintPx?.page || tokenSpan?.page || 1) - 1] || state.viewport || {};
+  const pageW = Math.max(1, vp.width ?? vp.w ?? 1);
+  const pageH = Math.max(1, vp.height ?? vp.h ?? 1);
+  const finalBox = normalizeStaticSpanBox(hintPx || tokenSpan, tokenSpan, { pageW, pageH, mode:'snapToLine' });
+  const text = (multiline && line)
+    ? groupIntoLines(lineTokens, 4).map(L => (L.tokens||[]).map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n')
+    : lineTokens.map(t => t.text).join(' ').trim();
+  const metrics = summarizeLineMetrics(line ? [lineBounds(line)] : []);
+  const normBox = normalizeBBoxForPage(finalBox, pageW, pageH);
+  return { box: finalBox, text, tokenSpan, lineMetrics: metrics, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lines: line ? [lineBounds(line)] : [], normBox };
 }
 
 /* ---------------------------- Regexes ----------------------------- */
@@ -2872,7 +2849,9 @@ async function auditCropSelfTest(question, boxPx){
   const vp = state.pageViewports[pageIndex] || state.viewport || {width:1,height:1};
   const canvasW = (vp.width ?? vp.w) || 1;
   const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const normBox = state.snappedNormBox
+    ? { x0n: state.snappedNormBox.x, y0n: state.snappedNormBox.y, wN: state.snappedNormBox.w, hN: state.snappedNormBox.h }
+    : normalizeBox(boxPx, canvasW, canvasH);
   const { cropBitmap, meta } = getOcrCropForSelection({ docId, pageIndex, normBox });
   meta.question = question;
   const fs = window.fs || (window.require && window.require('fs'));
@@ -3106,7 +3085,7 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const snap = staticRun ? { box } : snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
+    const snap = staticRun ? { box } : snapToLine(tokens, box, { minOverlap: staticMinOverlap });
     let searchBox = staticRun ? box : snap.box;
     const assembler = StaticFieldMode?.assembleTextFromBox || StaticFieldMode?.collectFullText || null;
     const assembleOpts = { tokens, box: searchBox, snappedText: '', multiline: !!fieldSpec.isMultiline, minOverlap: staticMinOverlap };
@@ -4735,7 +4714,7 @@ function cleanupDoc(){
   state.pageRenderReady = [];
   state.lineLayout = null;
   clearCropThumbs();
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
+  state.selectionPx = null; state.snappedPx = null; state.snappedNormBox = null; state.snappedText = '';
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
 
@@ -5420,14 +5399,17 @@ async function finalizeSelection(e) {
   updatePageIndicator();
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || {};
+  const vpForSnap = state.pageViewports[state.pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const pageW = (vpForSnap.width ?? vpForSnap.w) || 1;
+  const pageH = (vpForSnap.height ?? vpForSnap.h) || 1;
   let snap = null;
   if(isConfigMode() && (step.type||'static') === 'static'){
     const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
     const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
     if(siblings.length){
-      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount }]);
+      const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount, tokenSpan: baseSnap.tokenSpan, hintBox: state.selectionPx, normBox: baseSnap.normBox }], { pageW, pageH });
       const mine = resolved.find(e => e.fieldKey === step.fieldKey);
-      if(mine){ snap = { ...baseSnap, box: mine.box, lines: mine.lines || baseSnap.lines }; }
+      if(mine){ snap = { ...baseSnap, box: mine.box, lines: mine.lines || baseSnap.lines, normBox: mine.normBox || baseSnap.normBox }; }
     } else {
       snap = baseSnap;
     }
@@ -5436,6 +5418,7 @@ async function finalizeSelection(e) {
     snap = snapToLine(tokens, state.selectionPx);
   }
   state.snappedPx = snap.box;
+  state.snappedNormBox = snap.normBox || normalizeBBoxForPage(snap.box, pageW, pageH);
   state.snappedText = snap.text;
   const snapMetrics = snap.lineMetrics || { lineCount: snap.lineCount ?? 0, lineHeights: snap.lineHeights || { min:0, max:0, median:0 } };
   state.snappedLineMetrics = snapMetrics.lineCount ? snapMetrics : null;
@@ -5449,7 +5432,9 @@ async function finalizeSelection(e) {
   };
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: state.pageNum-1, fieldKey: step.fieldKey || step.prompt || '' };
   const vp = state.pageViewports[state.pageNum - 1] || { width: state.viewport.w, height: state.viewport.h };
-  const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
+  const nb = state.snappedNormBox
+    ? { x0n: state.snappedNormBox.x, y0n: state.snappedNormBox.y, wN: state.snappedNormBox.w, hN: state.snappedNormBox.h }
+    : normalizeBox(state.snappedPx, vp.width, vp.height);
   const pinned = isOverlayPinned();
   const srcRect = (state.isImage?els.imgCanvas:els.pdfCanvas).getBoundingClientRect();
   traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, cssBox: state.snappedCss, cssSize:{ w:srcRect.width, h:srcRect.height }, pxSize:{ w:vp.width, h:vp.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
@@ -6425,7 +6410,7 @@ els.nextPageBtn?.addEventListener('click', ()=>{
 
 // Clear selection
 els.clearSelectionBtn?.addEventListener('click', ()=>{
-  state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; drawOverlay();
+  state.selectionPx = null; state.snappedPx = null; state.snappedNormBox = null; state.snappedText = ''; state.snappedLineMetrics = null; drawOverlay();
 });
 
 els.backBtn?.addEventListener('click', ()=>{
@@ -6486,7 +6471,9 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
   const canvasW = (vp.width ?? vp.w) || 1;
   const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const normBox = state.snappedNormBox
+    ? { x0n: state.snappedNormBox.x, y0n: state.snappedNormBox.y, wN: state.snappedNormBox.w, hN: state.snappedNormBox.h }
+    : normalizeBox(boxPx, canvasW, canvasH);
   const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
   const keywordRelations = (step.type === 'static')
