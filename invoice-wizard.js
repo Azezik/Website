@@ -2933,6 +2933,9 @@ function labelValueHeuristic(fieldSpec, tokens){
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   const stageUsed = { value: null };
+  const fieldKeyLower = (fieldSpec.fieldKey || '').toLowerCase();
+  const isCustomerNameField = fieldKeyLower === 'customer_name';
+  const isCustomerAddressField = fieldKeyLower === 'customer_address';
   let hintLocked = false;
   let bestHintCandidate = null;
   let hintCenter = null;
@@ -3276,6 +3279,44 @@ function labelValueHeuristic(fieldSpec, tokens){
     const lines = groupIntoLines(tokens);
     const candidates = [];
 
+    const streetRe = /\b(?:STREET|ST\.?|RD\.?|ROAD|AVE|AVENUE|BLVD|DR\.?|DRIVE|WAY|LANE|LN\.?|CRES|COURT|CT\.?|TRL|TRAIL)\b/i;
+    const postalCaRe = /\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/i;
+    const postalUsRe = /\b\d{5}(?:-\d{4})?\b/;
+    const phoneRe = /\b\(?\d{3}\)?[\s./-]?\d{3}[\s./-]?\d{4}\b/;
+
+    const applyFieldBias = cand => {
+      if(!cand) return cand;
+      const text = (cand.cleaned?.value || cand.text || '').toUpperCase();
+      const hasDigit = /\d/.test(text);
+      const hasPostal = postalCaRe.test(text) || postalUsRe.test(text);
+      const hasStreet = streetRe.test(text);
+      const hasPhone = phoneRe.test(text);
+      if(isCustomerNameField){
+        const addressLike = hasDigit || hasPostal || hasStreet || hasPhone;
+        const nameLike = /[A-Z]{3,}\s+[A-Z]{3,}(?:\s+[A-Z]{2,})?/.test(text);
+        if(addressLike){
+          cand.totalScore = clamp(cand.totalScore * 0.6, 0, 2);
+          cand.confidence = clamp(cand.confidence * 0.65, 0, 1);
+        }
+        if(nameLike && !addressLike){
+          cand.totalScore = clamp(cand.totalScore * 1.15, 0, 2);
+          cand.confidence = clamp(cand.confidence * 1.1, 0, 1);
+        }
+      } else if(isCustomerAddressField){
+        const addressStrong = hasPostal || (hasDigit && hasStreet);
+        const phoneOnly = hasPhone && !hasStreet && !hasPostal;
+        if(addressStrong){
+          cand.totalScore = clamp(cand.totalScore * 1.15, 0, 2);
+          cand.confidence = clamp(cand.confidence * 1.1, 0, 1);
+        }
+        if(phoneOnly){
+          cand.totalScore = clamp(cand.totalScore * 0.6, 0, 2);
+          cand.confidence = clamp(cand.confidence * 0.65, 0, 1);
+        }
+      }
+      return cand;
+    };
+
     const evaluateCandidate = (candTokens, source='line')=>{
       if(!candTokens || !candTokens.length) return null;
       const box = mergeTokenBounds(candTokens);
@@ -3311,7 +3352,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
       const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
       const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
-      return {
+      return applyFieldBias({
         source,
         box,
         cx,
@@ -3332,7 +3373,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         totalScore,
         confidence,
         tokens: candTokens
-      };
+      });
     };
 
     for(const line of lines){
