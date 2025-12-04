@@ -1662,6 +1662,27 @@ function resolveStaticOverlap(entries, opts={}){
   const sameBand = (a,b)=> overlapX(a,b) >= Math.max(4, Math.min(a.box.w, b.box.w) * 0.3);
   const expectedLines = entry => entry?.expectedLineCount ?? entry?.lineMetrics?.lineCount ?? entry?.lineCount ?? (entry?.lines?.length || 0);
   const observedLines = entry => entry?.lines?.length || 0;
+  const minSize = entry => {
+    const normW = (entry?.normBox?.w || 0) * pageW * 0.9;
+    const normH = (entry?.normBox?.h || 0) * pageH * 0.9;
+    const tokenW = entry?.tokenSpan?.w || 0;
+    const tokenH = entry?.tokenSpan?.h || 0;
+    return {
+      w: tokenW || normW,
+      h: tokenH || normH
+    };
+  };
+  const enforceMinimumSize = (entry)=>{
+    if(!entry?.box) return { changed:false };
+    const mins = minSize(entry);
+    const prev = { ...entry.box };
+    entry.box.w = Math.max(entry.box.w, mins.w || 1);
+    entry.box.h = Math.max(entry.box.h, mins.h || 1);
+    entry.box.x = clamp(entry.box.x, 0, Math.max(0, pageW - entry.box.w));
+    entry.box.y = clamp(entry.box.y, 0, Math.max(0, pageH - entry.box.h));
+    const changed = prev.x !== entry.box.x || prev.y !== entry.box.y || prev.w !== entry.box.w || prev.h !== entry.box.h;
+    return { changed, previous: prev, next: { ...entry.box } };
+  };
   const lineOverlaps = (line, top, bottom) => {
     const lTop = line?.top ?? (line?.cy ?? 0) - (line?.height ?? 0)/2;
     const lBottom = line?.bottom ?? lTop + (line?.height ?? 0);
@@ -1709,10 +1730,11 @@ function resolveStaticOverlap(entries, opts={}){
     const trimTop = overlapCenter <= ((loser.box.y + loser.box.h/2)) || (Math.max(...overlapLinesLoser.map(l=>l.bottom)) <= keepTop);
     const trimBottom = Math.min(...overlapLinesLoser.map(l=>l.top)) >= keepBottom;
     trimBoxToLines(loser, keepLines, pad, trimBottom ? false : trimTop);
+    const enforced = enforceMinimumSize(loser);
     if(staticDebugEnabled()){
       logStaticDebug(
         `overlap-resolve winner=${winner.fieldKey||''} loser=${loser.fieldKey||''} aDiff=${aDiff} bDiff=${bDiff} pad=${pad.toFixed(2)}`,
-        { overlapTop, overlapBottom, winner: winner.fieldKey, loser: loser.fieldKey, winnerExpected: expectedLines(winner), winnerObserved: observedLines(winner), loserExpected: expectedLines(loser), loserObserved: observedLines(loser), pad }
+        { overlapTop, overlapBottom, winner: winner.fieldKey, loser: loser.fieldKey, winnerExpected: expectedLines(winner), winnerObserved: observedLines(winner), loserExpected: expectedLines(loser), loserObserved: observedLines(loser), pad, enforced }
       );
     }
     return true;
@@ -1742,14 +1764,27 @@ function resolveStaticOverlap(entries, opts={}){
       const newABottom = Math.max(a.box.y + 1, split - gap/2);
       const bBottom = b.box.y + b.box.h;
       const newBTop = Math.min(split + gap/2, bBottom - 1);
+      const before = { a: { ...a.box }, b: { ...b.box } };
       a.box.h = Math.max(1, newABottom - a.box.y);
       b.box.y = Math.max(b.box.y, newBTop);
       b.box.h = Math.max(1, bBottom - b.box.y);
+      const enforceA = enforceMinimumSize(a);
+      const enforceB = enforceMinimumSize(b);
+      if(staticDebugEnabled()){
+        logStaticDebug(
+          'overlap-resolve split',
+          { before, after:{ a:{ ...a.box }, b:{ ...b.box } }, enforceA, enforceB, overlapY }
+        );
+      }
     }
   }
   for(const entry of entries){
     if(entry?.tokenSpan && (entry.hintBox || entry.box)){
+      const enforced = enforceMinimumSize(entry);
       const clamped = normalizeStaticSpanBox(entry.hintBox || entry.box, entry.tokenSpan, { pageW, pageH, mode:'overlap-clamp' });
+      if(staticDebugEnabled() && enforced.changed){
+        logStaticDebug('overlap-resolve enforce-min', { entry: entry.fieldKey, enforced });
+      }
       entry.box = clamped;
       entry.normBox = normalizeBBoxForPage(clamped, pageW, pageH);
     }
