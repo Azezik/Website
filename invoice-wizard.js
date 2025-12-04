@@ -1455,16 +1455,25 @@ function groupIntoLines(tokens, tol=4){
   return lines;
 }
 function tokensInBox(tokens, box, opts={}){
-  const { minOverlap } = opts || {};
+  const { minOverlap, minContainFraction=null, boxPad=0 } = opts || {};
+  if(!box) return [];
+  const padded = boxPad ? { x: box.x - boxPad, y: box.y - boxPad, w: box.w + boxPad*2, h: box.h + boxPad*2, page: box.page } : box;
   return tokens.filter(t => {
-    if(t.page !== box.page) return false;
-    const cx = t.x + t.w/2;
-    if(cx < box.x || cx > box.x + box.w) return false;
-    const overlapY = Math.min(t.y + t.h, box.y + box.h) - Math.max(t.y, box.y);
+    if(t.page !== padded.page) return false;
+    const overlapX = Math.min(t.x + t.w, padded.x + padded.w) - Math.max(t.x, padded.x);
+    const overlapY = Math.min(t.y + t.h, padded.y + padded.h) - Math.max(t.y, padded.y);
+    if(overlapX <= 0 || overlapY <= 0) return false;
+    const overlapArea = overlapX * overlapY;
+    const containFraction = overlapArea / (t.w * t.h);
+    if(minContainFraction !== null && containFraction < minContainFraction) return false;
     const needOverlap = typeof minOverlap === 'number'
       ? minOverlap
       : (isConfigMode() ? 0.5 : 0.7);
     if(overlapY / t.h < needOverlap) return false;
+    if(minContainFraction === null){
+      const cx = t.x + t.w/2;
+      if(cx < padded.x || cx > padded.x + padded.w) return false;
+    }
     return true;
   }).sort((a,b)=>{
     const ay = a.y + a.h/2, by = b.y + b.h/2;
@@ -1536,57 +1545,65 @@ function summarizeLineMetrics(lines=[]){
 }
 function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
   if(!hintPx) return [];
-  const horizontalOverlap = (L)=> Math.max(0, Math.min(L.right, hintPx.x + hintPx.w) - Math.max(L.left, hintPx.x));
-  const overlapThreshold = (L)=> Math.max(L.width, hintPx.w) * 0.15;
+  const containFraction = 0.75;
   const verticalPad = 2;
-  const candidates = lines
-    .filter(L => L.page === hintPx.page)
-    .filter(L => horizontalOverlap(L) >= overlapThreshold(L))
-    .filter(L => (L.bottom > hintPx.y - verticalPad) && (L.top < hintPx.y + hintPx.h + verticalPad))
-    .sort((a,b)=> a.top - b.top || a.left - b.left);
-  if(!candidates.length) return [];
+  const paddedBox = { x: hintPx.x, y: hintPx.y - verticalPad, w: hintPx.w, h: hintPx.h + verticalPad*2, page: hintPx.page };
+  const scored = lines
+    .filter(L => L.page === paddedBox.page)
+    .map(L => {
+      const insideTokens = tokensInBox(L.tokens, paddedBox, { minContainFraction: containFraction });
+      const coverage = insideTokens.length / Math.max(1, L.tokens.length);
+      const cy = (L.top + L.bottom) / 2;
+      return { line: L, insideTokens, coverage, cy };
+    })
+    .filter(entry => entry.insideTokens.length && entry.coverage >= 0.5)
+    .filter(entry => (entry.line.bottom > paddedBox.y) && (entry.line.top < paddedBox.y + paddedBox.h))
+    .sort((a,b)=> a.line.top - b.line.top || a.line.left - b.line.left);
+  if(!scored.length) return [];
   if(!multiline){
-    const cy = hintPx.y + hintPx.h/2;
-    let best = candidates[0];
+    const cy = paddedBox.y + paddedBox.h/2;
+    let best = scored[0];
     let bestScore = Infinity;
-    for(const L of candidates){
-      const overlap = horizontalOverlap(L) / Math.max(1, Math.max(L.width, hintPx.w));
-      const dy = Math.abs(((L.top + L.bottom)/2) - cy);
-      const score = dy + (1 - overlap) * 20;
-      if(score < bestScore){ bestScore = score; best = L; }
+    for(const entry of scored){
+      const dy = Math.abs(entry.cy - cy);
+      const score = dy + (1 - entry.coverage) * 20;
+      if(score < bestScore){ bestScore = score; best = entry; }
     }
     return best ? [best] : [];
   }
-  const anchorLine = candidates.find(L => L.cy >= hintPx.y - verticalPad && L.cy <= hintPx.y + hintPx.h + verticalPad) || candidates[0];
-  const ordered = candidates.filter(L => L.top >= anchorLine.top);
-  const maxGap = Math.max(4, Math.min(anchorLine.height * 0.6, 12));
-  const selected = [anchorLine];
-  let prev = anchorLine;
-  for(const L of ordered){
-    if(L === anchorLine) continue;
-    if(L.top - prev.bottom <= maxGap){ selected.push(L); prev = L; }
+  const anchor = scored.find(entry => entry.cy >= paddedBox.y && entry.cy <= paddedBox.y + paddedBox.h) || scored[0];
+  const ordered = scored.filter(entry => entry.line.top >= anchor.line.top);
+  const maxGap = Math.max(4, Math.min(anchor.line.height * 0.6, 12));
+  const selected = [anchor];
+  let prev = anchor;
+  for(const entry of ordered){
+    if(entry === anchor) continue;
+    if(entry.line.top - prev.line.bottom <= maxGap){ selected.push(entry); prev = entry; }
   }
-  return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
+  return selected.sort((a,b)=> a.line.top - b.line.top || a.line.left - b.line.left);
 }
 function snapStaticToLines(tokens, hintPx, opts={}){
   const { multiline=false, marginPx=4 } = opts || {};
+  const containFraction = 0.75;
+  const verticalPad = 2;
   const lines = groupIntoLines(tokens, 4).map(lineBounds);
   const selected = selectLinesForStatic(lines, hintPx, { multiline });
   if(!selected.length){
-    const fallback = snapToLine(tokens, hintPx, marginPx, opts);
+    const fallback = snapToLine(tokens, hintPx, marginPx, { ...opts, minContainFraction: containFraction, boxPad: verticalPad, skipConfigUnion: true });
     const metrics = summarizeLineMetrics([]);
     return { ...fallback, lines: [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
   }
-  const selectedTokens = selected.flatMap(L => L.tokens);
+  const selectedTokens = selected.flatMap(entry => entry.insideTokens.length ? entry.insideTokens : entry.line.tokens);
+  const selectedLines = selected.map(entry => entry.line);
   const left = Math.min(...selectedTokens.map(t=>t.x));
   const right = Math.max(...selectedTokens.map(t=>t.x + t.w));
-  const top = Math.min(...selected.map(L => L.top));
-  const bottom = Math.max(...selected.map(L => L.bottom));
+  const top = Math.min(...selectedTokens.map(t=>t.y));
+  const bottom = Math.max(...selectedTokens.map(t=>t.y + t.h));
   let box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x: box.x - marginPx, y: box.y - marginPx, w: box.w + marginPx*2, h: box.h + marginPx*2, page: hintPx.page };
   let finalBox = expanded;
   if(hintPx && hintPx.w > 0){
-    const widthCap = hintPx.w * 1.1;
+    const widthCap = Math.max(hintPx.w + marginPx*2, hintPx.w * 1.05);
     const tokensWidth = right - left;
     const targetWidth = Math.max(Math.min(finalBox.w, widthCap), tokensWidth);
     if(finalBox.w > targetWidth){
@@ -1599,10 +1616,10 @@ function snapStaticToLines(tokens, hintPx, opts={}){
       finalBox = { x: newLeft, y: finalBox.y, w: newRight - newLeft, h: finalBox.h, page: finalBox.page };
     }
   }
-  const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
+  const lineTexts = selected.map(entry => (entry.insideTokens.length ? entry.insideTokens : entry.line.tokens).map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
-  const metrics = summarizeLineMetrics(selected);
-  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
+  const metrics = summarizeLineMetrics(selectedLines);
+  return { box: finalBox, text, lines: selectedLines, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics };
 }
 function resolveStaticOverlap(entries){
   const groups = [];
@@ -1724,6 +1741,7 @@ function buildStaticOverlapEntries(page, currentFieldKey, tokens){
   }).filter(Boolean);
 }
 function snapToLine(tokens, hintPx, marginPx=6, opts={}){
+  const { skipConfigUnion=false } = opts || {};
   const hits = tokensInBox(tokens, hintPx, opts);
   if(!hits.length) return { box: hintPx, text: '' };
   const bandCy = hits.map(t => t.y + t.h/2).reduce((a,b)=>a+b,0)/hits.length;
@@ -1739,7 +1757,7 @@ function snapToLine(tokens, hintPx, marginPx=6, opts={}){
   const box = { x:left, y:top, w:right-left, h:bottom-top, page:hintPx.page };
   const expanded = { x:box.x - marginPx, y:box.y - marginPx, w:box.w + marginPx*2, h:box.h + marginPx*2, page:hintPx.page };
   let finalBox = expanded;
-  if(isConfigMode() && hintPx){
+  if(isConfigMode() && hintPx && !skipConfigUnion){
     const needsWidth = hintPx.w > 0 && finalBox.w < hintPx.w * 0.75;
     const needsHeight = hintPx.h > 0 && finalBox.h < hintPx.h * 0.75;
     if(needsWidth || needsHeight){
@@ -3048,7 +3066,11 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   async function attempt(box){
-    const snap = snapToLine(tokens, box, 6, { minOverlap: staticMinOverlap });
+    const snapOpts = { minOverlap: staticMinOverlap };
+    if(ftype === 'static'){
+      Object.assign(snapOpts, { minContainFraction: 0.75, boxPad: 2, skipConfigUnion: true });
+    }
+    const snap = snapToLine(tokens, box, 6, snapOpts);
     let searchBox = snap.box;
     if(fieldSpec.fieldKey === 'customer_address'){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
