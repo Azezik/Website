@@ -3108,7 +3108,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const next = clamp(confidence * factor, 0, 1);
       return { confidence: next, expected, factor, reason, observed };
     };
-    const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
+    let multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
@@ -4852,12 +4852,13 @@ async function prepareRunDocument(file){
   let totalH = 0;
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vp = page.getViewport({ scale });
-    vp.w = vp.width; vp.h = vp.height; vp.pageNumber = i;
+    const vpRaw = page.getViewport({ scale });
+    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height, pageNumber: i };
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
-    const tokens = await readTokensForPage(page, vp);
-    tokens.forEach(t => { t.page = i; });
+    const rawTokens = await readTokensForPage(page, vp);
+    // pdf.js text items may be non-extensible in some browsers; clone before annotating
+    const tokens = rawTokens.map(t => ({ ...t, page: i }));
     state.tokensByPage[i] = tokens;
     if(isRunMode()) console.log(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
     totalH += vp.height;
@@ -4908,9 +4909,8 @@ async function renderAllPages(){
   const pageCanvases = [];
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vp = page.getViewport({ scale });
-    vp.w = vp.width; // ensure width/height aliases for downstream calcs
-    vp.h = vp.height;
+    const vpRaw = page.getViewport({ scale });
+    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height };
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     maxW = Math.max(maxW, vp.width);
@@ -6742,12 +6742,18 @@ async function processBatch(files){
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
   const profile = model ? model.profile : state.profile;
 
-  for(const f of files){
-    await runModeExtractFileWithProfile(f, profile);
+  try {
+    for(const f of files){
+      await runModeExtractFileWithProfile(f, profile);
+    }
+  } catch(err){
+    console.error('Batch extraction failed', err);
+    alert(err?.message || 'Batch extraction failed. Please try again.');
+  } finally {
+    els.wizardSection.style.display = 'none';
+    els.app.style.display = 'block';
+    showTab('extracted-data');
   }
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
 }
 
 /* ------------------------ Init on load ---------------------------- */
