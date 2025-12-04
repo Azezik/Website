@@ -1654,7 +1654,7 @@ function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
   return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
 }
 function snapStaticToLines(tokens, hintPx, opts={}){
-  const { multiline=false, debugCtx=null } = opts || {};
+  const { multiline=false, debugCtx=null, tokenOverlapThreshold=0.5 } = opts || {};
   const lines = groupIntoLines(tokens, 4).map(lineBounds);
   const selected = selectLinesForStatic(lines, hintPx, { multiline });
   if(!selected.length){
@@ -1662,17 +1662,36 @@ function snapStaticToLines(tokens, hintPx, opts={}){
     const metrics = fallback.lineMetrics || summarizeLineMetrics([]);
     return { ...fallback, lines: fallback.lines || [], lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, tokenSpan: fallback.tokenSpan };
   }
+  const overlapRatio = (tok)=>{
+    if(!tok || tok.page !== hintPx?.page) return 0;
+    const overlapW = Math.min(tok.x + tok.w, hintPx.x + hintPx.w) - Math.max(tok.x, hintPx.x);
+    if(overlapW <= 0) return 0;
+    return overlapW / Math.max(1, tok.w || 1);
+  };
+  const filteredLines = selected.map(L => {
+    const filteredTokens = (L.tokens || []).filter(t => overlapRatio(t) >= tokenOverlapThreshold);
+    return filteredTokens.length ? lineBounds({ ...L, tokens: filteredTokens }) : null;
+  }).filter(Boolean);
+  const filteredTokens = filteredLines.flatMap(L => L.tokens || []);
   const selectedTokens = selected.flatMap(L => L.tokens);
-  const tokenSpan = mergeTokenBounds(selectedTokens);
+  const filteredSpan = mergeTokenBounds(filteredTokens);
+  const tokenSpan = filteredSpan || mergeTokenBounds(selectedTokens);
   const vp = state.pageViewports?.[(hintPx?.page || 1) - 1] || state.viewport || {};
   const pageW = Math.max(1, vp.width ?? vp.w ?? 1);
   const pageH = Math.max(1, vp.height ?? vp.h ?? 1);
-  const finalBox = normalizeStaticSpanBox(hintPx, tokenSpan, { pageW, pageH, mode:'snapStaticToLines', debugCtx });
-  const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
-  const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
-  const metrics = summarizeLineMetrics(selected);
-  const normBox = normalizeBBoxForPage(finalBox, pageW, pageH);
-  return { box: finalBox, text, lines: selected, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, tokenSpan, normBox };
+  const snapFromLines = (linesForSnap, spanTokens)=>{
+    const span = mergeTokenBounds(spanTokens) || tokenSpan || hintPx;
+    const finalBox = normalizeStaticSpanBox(hintPx, span, { pageW, pageH, mode:'snapStaticToLines', debugCtx });
+    const lineTexts = linesForSnap.map(L => (L.tokens||[]).map(t=>t.text).join(' ').trim()).filter(Boolean);
+    const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
+    const metrics = summarizeLineMetrics(linesForSnap);
+    const normBox = normalizeBBoxForPage(finalBox, pageW, pageH);
+    return { box: finalBox, text, lines: linesForSnap, lineCount: metrics.lineCount, lineHeights: metrics.lineHeights, lineMetrics: metrics, tokenSpan: span, normBox };
+  };
+  const tokenSnap = filteredTokens.length ? snapFromLines(filteredLines, filteredTokens) : null;
+  const lineSnap = snapFromLines(selected, selectedTokens);
+  if(tokenSnap){ return { ...tokenSnap, fallback: lineSnap, usedTokenFilter: true }; }
+  return { ...lineSnap, fallback: lineSnap, usedTokenFilter: false };
 }
 function resolveStaticOverlap(entries, opts={}){
   const { pageW=1, pageH=1 } = opts || {};
@@ -3414,12 +3433,13 @@ function labelValueHeuristic(fieldSpec, tokens){
       const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       basePx = applyTransform(raw);
       if(staticRun){
-      const baseDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
-        ? { enabled:true, fieldKey: fieldSpec.fieldKey, page: basePx.page, mode:'run-basesnap', source:'baseLineSnap' }
-        : null;
-      baseLineSnap = snapStaticToLines(tokens, basePx, { multiline: !!fieldSpec.isMultiline, debugCtx: baseDebugCtx });
-      if(baseLineSnap?.box){
-        basePx = baseLineSnap.box;
+        const baseDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
+          ? { enabled:true, fieldKey: fieldSpec.fieldKey, page: basePx.page, mode:'run-basesnap', source:'baseLineSnap' }
+          : null;
+        baseLineSnap = snapStaticToLines(tokens, basePx, { multiline: !!fieldSpec.isMultiline, debugCtx: baseDebugCtx });
+        if(baseLineSnap?.box){
+          basePx = baseLineSnap.box;
+        }
       }
     }
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
@@ -3442,9 +3462,24 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
-    const initialAttempt = await attempt(basePx);
+    let initialAttempt = await attempt(basePx);
     if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
     if(staticRun && initialAttempt && initialAttempt.fingerprintOk === false){ initialAttempt.cleanedOk = false; }
+    if(staticRun && baseLineSnap?.fallback && baseLineSnap?.usedTokenFilter){
+      const needFallback = !initialAttempt || initialAttempt.cleanedOk === false || initialAttempt.fingerprintOk === false;
+      if(needFallback){
+        const fallbackAttempt = await attempt(baseLineSnap.fallback.box);
+        if(fallbackAttempt && fallbackAttempt.anchorOk === false){ fallbackAttempt.cleanedOk = false; }
+        if(fallbackAttempt && fallbackAttempt.fingerprintOk === false){ fallbackAttempt.cleanedOk = false; }
+        if(fallbackAttempt && fallbackAttempt.cleanedOk && anchorMatchesCandidate(fallbackAttempt)){
+          initialAttempt = fallbackAttempt;
+          basePx = baseLineSnap.fallback.box;
+          if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+            logStaticDebug(`static-fallback-token-snap ${fieldSpec.fieldKey||''} page=${basePx.page||''}`, { usedFallback:true, baseBox: basePx, reason:'token-snap-weak', fallbackBox: baseLineSnap.fallback.box });
+          }
+        }
+      }
+    }
     if(initialAttempt && initialAttempt.cleanedOk){
       firstAttempt = initialAttempt;
     } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
