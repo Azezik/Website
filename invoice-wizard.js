@@ -3108,7 +3108,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const next = clamp(confidence * factor, 0, 1);
       return { confidence: next, expected, factor, reason, observed };
     };
-    const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
+    let multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
       : '';
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
