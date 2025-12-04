@@ -4852,8 +4852,8 @@ async function prepareRunDocument(file){
   let totalH = 0;
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vp = page.getViewport({ scale });
-    vp.w = vp.width; vp.h = vp.height; vp.pageNumber = i;
+    const vpRaw = page.getViewport({ scale });
+    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height, pageNumber: i };
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     const rawTokens = await readTokensForPage(page, vp);
@@ -4909,9 +4909,8 @@ async function renderAllPages(){
   const pageCanvases = [];
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vp = page.getViewport({ scale });
-    vp.w = vp.width; // ensure width/height aliases for downstream calcs
-    vp.h = vp.height;
+    const vpRaw = page.getViewport({ scale });
+    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height };
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     maxW = Math.max(maxW, vp.width);
