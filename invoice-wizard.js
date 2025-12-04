@@ -3266,13 +3266,14 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   function scoreTriangulatedCandidates(opts){
-    const { triBox, keywordPrediction, baseBox, existingResult, pageW, pageH, hintCenter: hc, hintBand: hb, nearHintCount: nh } = opts;
+    const { triBox, keywordPrediction, baseBox, anchorBox: anchorRefBox, existingResult, pageW, pageH, hintCenter: hc, hintBand: hb, nearHintCount: nh } = opts;
     if(!triBox) return null;
     const triCx = triBox.x + (triBox.w||0)/2;
     const triCy = triBox.y + (triBox.h||0)/2;
     const maxRadius = KeywordWeighting?.MAX_KEYWORD_RADIUS || 0.35;
-    const baseCx = baseBox ? baseBox.x + (baseBox.w||0)/2 : null;
-    const baseCy = baseBox ? baseBox.y + (baseBox.h||0)/2 : null;
+    const anchorRef = anchorRefBox || baseBox;
+    const baseCx = anchorRef ? anchorRef.x + (anchorRef.w||0)/2 : null;
+    const baseCy = anchorRef ? anchorRef.y + (anchorRef.h||0)/2 : null;
     const hintCx = hc?.x || null;
     const hintCy = hc?.y || null;
     const hintBand = hb;
@@ -3352,6 +3353,19 @@ function labelValueHeuristic(fieldSpec, tokens){
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
       const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
       const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
+      if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey) && anchorRef){
+        const anchorDeltas = {
+          top: Math.round(box.y - anchorRef.y),
+          bottom: Math.round((box.y + box.h) - (anchorRef.y + anchorRef.h)),
+          left: Math.round(box.x - anchorRef.x),
+          right: Math.round((box.x + box.w) - (anchorRef.x + anchorRef.w)),
+          height: Math.round(box.h - anchorRef.h)
+        };
+        logStaticDebug(
+          `field=${fieldSpec.fieldKey||''} anchors: top=${anchorDeltas.top} bottom=${anchorDeltas.bottom} left=${anchorDeltas.left} right=${anchorDeltas.right} height=${anchorDeltas.height} anchor=${formatBoxForLog(anchorRef)} cand=${formatBoxForLog(box)}`,
+          { anchorBox: anchorRef, candidateBox: box, deltas: anchorDeltas, stage: 'stage-2' }
+        );
+      }
       return applyFieldBias({
         source,
         box,
@@ -3420,7 +3434,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     return { candidates: sorted, best, current: currentCandidate, preferBest };
   }
 
-  let result = null, method=null, score=null, comp=null, basePx=null;
+  let result = null, method=null, score=null, comp=null, basePx=null, anchorBox=null;
   let keywordPrediction = null;
   let keywordMatch = null;
   let keywordWeight = 1;
@@ -3444,12 +3458,17 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    anchorBox = { ...basePx };
     hintCenter = { x: basePx.x + (basePx.w||0)/2, y: basePx.y + (basePx.h||0)/2 };
     hintBand = (basePx.h || 0) * 1.5;
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
         { field: fieldSpec.fieldKey, page: basePx.page, configBox: fieldSpec.bbox, transformed: basePx, viewport: viewportDims, rawBox: raw }
+      );
+      logStaticDebug(
+        `field=${fieldSpec.fieldKey||''} using anchorBox from config for stage-2 proximity ${formatBoxForLog(anchorBox)}`,
+        { anchorBox, stage: 'stage-2' }
       );
     }
     if(staticRun && keywordRelations){
@@ -3610,7 +3629,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
     }
     if(!keywordPrediction && KeywordWeighting?.chooseKeywordMatch && keywordRelations.mother){
-      const refBox = result.boxPx || basePx;
+      const refBox = anchorBox || result.boxPx || basePx;
       const match = KeywordWeighting.chooseKeywordMatch(keywordRelations.mother, keywordIndex, refBox, pageW, pageH);
       if(match?.predictedBox){
         keywordMatch = match.entry;
@@ -3629,6 +3648,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       triBox: triangulatedBox,
       keywordPrediction,
       baseBox: basePx,
+      anchorBox,
       existingResult: result,
       pageW,
       pageH,
