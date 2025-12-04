@@ -11,6 +11,7 @@
 - Net effect: Run mode starts from the persisted street-line bbox, never sees “WHEATON MIKE” in-box, and downstream ranking then jumps to the far “Sold To” label.
 
 ## Fix adjustments to add (static fields only)
+- **Save the drawn bbox, not the snap:** When persisting a static field in Config, serialize the user-drawn rectangle, not `state.snappedPx`. That guarantees Run starts from the same geometry that produced the fingerprint. If we need to store the snap for preview, keep it separately and never overwrite the source bbox.
 - **Hint-first lock:** If the snap/hint box already contains a candidate that passes the fingerprint/format checks, keep that candidate and stop. Do not look outside the user box in that case—micro-expansion is only for when the box is empty or the in-box text fails the expected pattern.
 - **Hint-centric ranking:** When the snap/hint yields any tokens but none pass the fingerprint, penalize candidates whose boxes sit outside a tight halo of the hint (e.g., >1–1.5× box height away), even if their fingerprints match. That keeps distant labels from outranking nearby but imperfect in-box text while still allowing a gentle fallback.
 - **Nearest-line fallback:** If the snapped text fails the fingerprint but the box clearly intersects a line, prefer the best candidate within a small vertical expansion above/below the hint before considering far-off lines. This would pick “WHEATON MIKE” above the street line instead of jumping to the header label.
@@ -19,4 +20,7 @@
 ## Expected run-time flow vs. previous behavior
 - **Intended flow (per spec):** Load the saved bbox from Config, re-snap to tokens that are ≥75% inside that original box, extract text, and, if it matches the stored fingerprint, stop. Only when the in-box text fails the fingerprint should we expand slightly or try triangulation/keyword assists.
 - **What was happening:** After re-snapping, even fingerprint-valid, in-box results could still be replaced later by keyword triangulation; fingerprint-failing in-box text was sometimes immediately accepted without exploring better nearby lines; and distant labels could outrank hint-adjacent text because the hint candidate was not locked.
-- **Updated behavior:** In-box fingerprint hits now lock the result and skip triangulation. If the hint text fails the fingerprint, we keep searching but stay near the hint: small padded re-snaps look for a fingerprint-valid line first, we retain the best hint-adjacent candidate for fallback, and distant keyword matches are only considered after these nearby attempts fail.
+- **Updated behavior to implement:**
+  - In-box fingerprint hits lock the result and skip triangulation.
+  - If the hint text fails the fingerprint, keep searching but stay near the hint: small padded re-snaps look for a fingerprint-valid line first, retain the best hint-adjacent candidate for fallback, and consider distant keyword matches only after these nearby attempts fail.
+  - Persist the drawn bbox so the re-snap starts from the same geometry seen in Config; use a separate, non-persisted snap box for UI preview only.
