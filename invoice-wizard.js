@@ -2935,6 +2935,9 @@ function labelValueHeuristic(fieldSpec, tokens){
   const stageUsed = { value: null };
   let hintLocked = false;
   let bestHintCandidate = null;
+  let hintCenter = null;
+  let hintBand = null;
+  let nearHintCount = 0;
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
@@ -2955,6 +2958,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     const expected = expectedHint ?? fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount ?? 0;
     const observed = observedLineCount ?? 0;
     return { lineDiff: Math.abs(observed - (expected || 0)), expectedLineCount: expected || 0 };
+  };
+  const distanceToHint = box => {
+    if(!box || !hintCenter) return Infinity;
+    return Math.abs((box.y + (box.h||0)/2) - hintCenter.y);
   };
   const lineScoreForDiff = diff => {
     if(Object.prototype.hasOwnProperty.call(STATIC_LINE_DIFF_WEIGHTS, diff)){
@@ -3074,6 +3081,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
     const snap = snapToLine(tokens, box, 6, snapOpts);
     let searchBox = snap.box;
+    const hintDistance = distanceToHint(searchBox);
+    const withinHintBand = Number.isFinite(hintDistance) && Number.isFinite(hintBand)
+      ? hintDistance <= hintBand
+      : false;
     if(fieldSpec.fieldKey === 'customer_address'){
       searchBox = { x:snap.box.x, y:snap.box.y, w:snap.box.w, h:snap.box.h*4, page:snap.box.page };
     }
@@ -3084,18 +3095,18 @@ function labelValueHeuristic(fieldSpec, tokens){
     const lines = assembled?.lines || groupIntoLines(hits);
     const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
     const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
-    const adjustConfidenceForLines = (confidence)=>{
-      const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observedLineCount;
-      if(!expected || !observedLineCount) return { confidence, expected, factor: 1 };
+    const adjustConfidenceForLines = (confidence, observed=observedLineCount)=>{
+      const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observed;
+      if(!expected || !observed) return { confidence, expected, factor: 1 };
       const tolerance = expected >= 3 ? 1 : 0;
-      const diff = Math.abs(observedLineCount - expected);
+      const diff = Math.abs(observed - expected);
       let factor = 1;
       let reason = 'exact';
       if(diff === 0){ factor = 1.1; reason = 'exact'; }
       else if(diff <= tolerance){ factor = 1.05; reason = 'near'; }
       else { factor = Math.max(0.6, 1 - diff * 0.15); reason = 'mismatch'; }
       const next = clamp(confidence * factor, 0, 1);
-      return { confidence: next, expected, factor, reason };
+      return { confidence: next, expected, factor, reason, observed };
     };
     const multilineValue = (fieldSpec.isMultiline || (lines?.length || 0) > 1)
       ? (assembled?.text || lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n'))
@@ -3121,34 +3132,66 @@ function labelValueHeuristic(fieldSpec, tokens){
       const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
         : null;
-      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
-      const cleanedOk = !!(cleaned.value || cleaned.raw);
-      const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
+      let fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
+      let cleanedOk = !!(cleaned.value || cleaned.raw);
+      const labelSplit = /(sold\s*to|ship\s*to|store\s*:|salesperson\s*:)/i;
+      let chosenLine = null;
+      if(!fingerprintOk && lines?.length){
+        const segments = [];
+        for(const line of lines){
+          const text = (line.tokens||[]).map(t=>t.text).join(' ').trim();
+          if(!text) continue;
+          const bounds = lineBounds(line);
+          const dist = Number.isFinite(bounds?.cy) ? Math.abs(bounds.cy - (hintCenter?.y ?? bounds.cy)) : distanceToHint(bounds);
+          const segClean = FieldDataEngine.clean(fieldSpec.fieldKey||'', text, state.mode, spanKey);
+          const segFp = fingerprintMatches(fieldSpec.fieldKey||'', segClean.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
+          segments.push({ text: segClean.value || segClean.raw || text, raw: text, cleaned: segClean, fpOk: segFp, dist, tokens: line.tokens, hasLabel: labelSplit.test(text) });
+        }
+        const ranked = segments.sort((a,b)=>{
+          if(a.fpOk !== b.fpOk) return a.fpOk ? -1 : 1;
+          if(a.hasLabel !== b.hasLabel) return a.hasLabel ? 1 : -1;
+          if(a.dist !== b.dist) return a.dist - b.dist;
+          return (b.cleaned?.conf||0) - (a.cleaned?.conf||0);
+        });
+        const bestSeg = ranked[0];
+        if(bestSeg){
+          chosenLine = bestSeg;
+          fingerprintOk = bestSeg.fpOk;
+          cleanedOk = !!(bestSeg.cleaned?.value || bestSeg.cleaned?.raw);
+          multilineValue = bestSeg.text;
+          hits.splice(0, hits.length, ...(bestSeg.tokens || hits));
+        }
+      }
+      const baseClean = chosenLine?.cleaned || cleaned;
+      const baseConf = baseClean.conf || (cleanedOk ? 1 : 0.1);
       let confidence = fingerprintOk
         ? baseConf
         : (staticRun ? Math.max(0.2, Math.min(baseConf * 0.6, 0.5)) : 0);
+      const lineCountForEval = chosenLine ? 1 : observedLineCount;
       let lineAdj = null;
       if(runMode && ftype==='static'){
-        lineAdj = adjustConfidenceForLines(confidence);
+        lineAdj = adjustConfidenceForLines(confidence, lineCountForEval);
         confidence = lineAdj.confidence;
       }
-      const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
+      const lineInfo = computeLineDiff(lineCountForEval, lineAdj?.expected);
       const attemptResult = {
         value: multilineValue || cleaned.value || cleaned.raw,
         raw: multilineValue,
-        corrected: cleaned.corrected,
-        code: cleaned.code,
-        shape: cleaned.shape,
-        score: cleaned.score,
-        correctionsApplied: cleaned.correctionsApplied,
-        corrections: cleaned.correctionsApplied,
+        corrected: baseClean.corrected,
+        code: baseClean.code,
+        shape: baseClean.shape,
+        score: baseClean.score,
+        correctionsApplied: baseClean.correctionsApplied,
+        corrections: baseClean.correctionsApplied,
         boxPx: searchBox,
         confidence,
         tokens: hits,
         cleanedOk,
         fingerprintOk,
         anchorOk,
-        lineCount: observedLineCount,
+        hintDistance,
+        withinHint: withinHintBand,
+        lineCount: lineCountForEval,
         expectedLineCount: lineInfo.expectedLineCount,
         lineDiff: lineInfo.lineDiff
       };
@@ -3198,6 +3241,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       cleanedOk,
       fingerprintOk,
       anchorOk,
+      hintDistance,
+      withinHint: withinHintBand,
       lineCount: observedLineCount,
       expectedLineCount: lineInfo.expectedLineCount,
       lineDiff: lineInfo.lineDiff
@@ -3218,13 +3263,16 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   function scoreTriangulatedCandidates(opts){
-    const { triBox, keywordPrediction, baseBox, existingResult, pageW, pageH } = opts;
+    const { triBox, keywordPrediction, baseBox, existingResult, pageW, pageH, hintCenter: hc, hintBand: hb, nearHintCount: nh } = opts;
     if(!triBox) return null;
     const triCx = triBox.x + (triBox.w||0)/2;
     const triCy = triBox.y + (triBox.h||0)/2;
     const maxRadius = KeywordWeighting?.MAX_KEYWORD_RADIUS || 0.35;
     const baseCx = baseBox ? baseBox.x + (baseBox.w||0)/2 : null;
     const baseCy = baseBox ? baseBox.y + (baseBox.h||0)/2 : null;
+    const hintCx = hc?.x || null;
+    const hintCy = hc?.y || null;
+    const hintBand = hb;
     const lines = groupIntoLines(tokens);
     const candidates = [];
 
@@ -3234,6 +3282,9 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(!box) return null;
       const cx = box.x + (box.w||0)/2;
       const cy = box.y + (box.h||0)/2;
+      const hintDist = (hintCy === null) ? null : Math.abs(cy - hintCy);
+      const farFromHint = hintBand !== null && hintDist !== null && hintDist > hintBand;
+      if(farFromHint && (nh || 0) > 0){ return null; }
       const distNorm = Math.hypot((cx - triCx)/pageW, (cy - triCy)/pageH);
       const baseDistNorm = (baseCx === null || baseCy === null)
         ? null
@@ -3241,7 +3292,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       const baseBias = baseDistNorm === null
         ? 1
         : Math.max(0.65, 1 - Math.min(1, baseDistNorm / maxRadius));
-      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius)) * baseBias;
+      const hintPenalty = farFromHint ? 0.6 : 1;
+      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius)) * baseBias * hintPenalty;
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
@@ -3336,9 +3388,23 @@ function labelValueHeuristic(fieldSpec, tokens){
   let keywordContext = null;
   let selectionRaw = '';
   let firstAttempt = null;
+  const recordHintCandidate = cand => {
+    if(!cand || !cand.boxPx) return;
+    const dist = cand.hintDistance ?? distanceToHint(cand.boxPx);
+    cand.hintDistance = dist;
+    if(!cand.withinHint){ cand.withinHint = Number.isFinite(dist) && Number.isFinite(hintBand) ? dist <= hintBand : false; }
+    if(cand.withinHint){ nearHintCount += 1; }
+    if(!bestHintCandidate){ bestHintCandidate = cand; return; }
+    const bestDist = bestHintCandidate.hintDistance ?? distanceToHint(bestHintCandidate.boxPx);
+    if(dist < (bestDist ?? Infinity) - 0.5 || (Math.abs(dist - (bestDist ?? Infinity)) < 0.5 && (cand.confidence||0) > (bestHintCandidate.confidence||0))){
+      bestHintCandidate = cand;
+    }
+  };
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    hintCenter = { x: basePx.x + (basePx.w||0)/2, y: basePx.y + (basePx.h||0)/2 };
+    hintBand = (basePx.h || 0) * 1.5;
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
@@ -3361,23 +3427,21 @@ function labelValueHeuristic(fieldSpec, tokens){
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
     if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
-    if(initialAttempt && (initialAttempt.cleanedOk || anchorMatchesCandidate(initialAttempt))){
+    if(initialAttempt){
       firstAttempt = initialAttempt;
-      bestHintCandidate = initialAttempt.cleanedOk ? initialAttempt : bestHintCandidate;
+      recordHintCandidate(initialAttempt);
     }
     selectionRaw = firstAttempt?.raw || '';
     if(staticRun && firstAttempt && firstAttempt.fingerprintOk && firstAttempt.cleanedOk){
       const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
-      const hasAnchor = firstAttempt.anchorOk !== false;
-      if(hasAnchor && lineInfo.lineDiff <= 1){
-        result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
-      }
+      result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
     }
     if(!hintLocked){
       const pads = isConfigMode() ? [4] : [4,8,12];
       for(const pad of pads){
         const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
         const r = await attempt(search);
+        if(r){ recordHintCandidate(r); }
         if(r && !anchorMatchesCandidate(r)){ continue; }
         if(r && r.fingerprintOk && r.cleanedOk){
           result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
@@ -3387,6 +3451,23 @@ function labelValueHeuristic(fieldSpec, tokens){
             bestHintCandidate = r;
           }
         }
+      }
+    }
+    if(!hintLocked && staticRun){
+      const verticalFactors = [0.5, 1, 1.5];
+      for(const factor of verticalFactors){
+        for(const dir of [-1,1]){
+          const delta = basePx.h * factor * dir;
+          const vy = Math.max(0, basePx.y + delta);
+          const vh = basePx.h;
+          const probe = { x: basePx.x - 2, y: vy, w: basePx.w + 4, h: vh, page: basePx.page };
+          const r = await attempt(probe);
+          if(r){ recordHintCandidate(r); }
+          if(r && r.fingerprintOk && r.cleanedOk){
+            result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
+          }
+        }
+        if(hintLocked) break;
       }
     }
   }
@@ -3509,7 +3590,10 @@ function labelValueHeuristic(fieldSpec, tokens){
       baseBox: basePx,
       existingResult: result,
       pageW,
-      pageH
+      pageH,
+      hintCenter,
+      hintBand,
+      nearHintCount
     });
     if(scored){
       const { best, current, preferBest, candidates } = scored;
@@ -6434,23 +6518,26 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     fieldTokens = res.tokens || [];
   }
 
+  const storedBoxPx = (isConfigMode() && step.type === 'static' && state.selectionPx)
+    ? (state.selectionPx || boxPx)
+    : boxPx;
   if(els.ocrToggle?.checked){
-    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', boxPx); }
+    try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', storedBoxPx || boxPx); }
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
   const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
   const canvasW = (vp.width ?? vp.w) || 1;
   const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(boxPx, canvasW, canvasH);
+  const normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
   const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
-  const rawBoxData = { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, canvasW, canvasH };
+  const rawBoxData = { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h, canvasW, canvasH };
   const keywordRelations = (step.type === 'static')
-    ? computeKeywordRelationsForConfig(step.fieldKey, boxPx, normBox, state.pageNum, canvasW, canvasH)
+    ? computeKeywordRelationsForConfig(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH)
     : null;
   const extras = {};
   if(step.type === 'static'){
-    const lm = captureRingLandmark(boxPx);
+    const lm = captureRingLandmark(storedBoxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
     extras.landmark = lm;
     if(state.snappedLineMetrics){
