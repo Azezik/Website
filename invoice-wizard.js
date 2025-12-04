@@ -6742,12 +6742,18 @@ async function processBatch(files){
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
   const profile = model ? model.profile : state.profile;
 
-  for(const f of files){
-    await runModeExtractFileWithProfile(f, profile);
+  try {
+    for(const f of files){
+      await runModeExtractFileWithProfile(f, profile);
+    }
+  } catch(err){
+    console.error('Batch extraction failed', err);
+    alert(err?.message || 'Batch extraction failed. Please try again.');
+  } finally {
+    els.wizardSection.style.display = 'none';
+    els.app.style.display = 'block';
+    showTab('extracted-data');
   }
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
 }
 
 /* ------------------------ Init on load ---------------------------- */
