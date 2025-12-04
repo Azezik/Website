@@ -1501,6 +1501,65 @@ function mergeTokenBounds(tokens){
   };
 }
 
+function normalizeStaticSpanBox(hintBox, tokenBox, { pageW=1, pageH=1, mode='final' }={}){
+  const boxA = hintBox || tokenBox;
+  if(!boxA) return null;
+  const pad = 2;
+  const baseLeft = Math.min(hintBox?.x ?? Infinity, tokenBox?.x ?? Infinity);
+  const baseTop = Math.min(hintBox?.y ?? Infinity, tokenBox?.y ?? Infinity);
+  const baseRight = Math.max(
+    Number.isFinite(hintBox?.x) ? (hintBox.x + (hintBox.w||0)) : -Infinity,
+    Number.isFinite(tokenBox?.x) ? (tokenBox.x + (tokenBox.w||0)) : -Infinity
+  );
+  const baseBottom = Math.max(
+    Number.isFinite(hintBox?.y) ? (hintBox.y + (hintBox.h||0)) : -Infinity,
+    Number.isFinite(tokenBox?.y) ? (tokenBox.y + (tokenBox.h||0)) : -Infinity
+  );
+  const union = {
+    x: Math.max(0, baseLeft) - pad,
+    y: Math.max(0, baseTop) - pad,
+    w: Math.max(1, (baseRight - baseLeft) + pad * 2),
+    h: Math.max(1, (baseBottom - baseTop) + pad * 2),
+    page: hintBox?.page || tokenBox?.page || 1
+  };
+  const maxW = Math.max(hintBox?.w || 0, tokenBox?.w || 0, union.w);
+  const maxH = Math.max(hintBox?.h || 0, tokenBox?.h || 0, union.h);
+  const targetW = clamp(union.w, maxW * 0.9, maxW * 1.1);
+  const targetH = clamp(union.h, maxH * 0.9, maxH * 1.1);
+  const cx = union.x + union.w/2;
+  const cy = union.y + union.h/2;
+  let next = {
+    x: clamp(cx - targetW/2, 0, Math.max(0, pageW - targetW)),
+    y: clamp(cy - targetH/2, 0, Math.max(0, pageH - targetH)),
+    w: Math.min(targetW, pageW),
+    h: Math.min(targetH, pageH),
+    page: union.page
+  };
+  const ensureCoverage = (box, target)=>{
+    if(!target) return box;
+    let { x, y, w, h } = box;
+    const tRight = target.x + (target.w||0);
+    const tBottom = target.y + (target.h||0);
+    w = Math.max(w, target.w || 0);
+    h = Math.max(h, target.h || 0);
+    if(x > target.x){ x = target.x; }
+    if(y > target.y){ y = target.y; }
+    if(x + w < tRight){ x = Math.max(0, tRight - w); }
+    if(y + h < tBottom){ y = Math.max(0, tBottom - h); }
+    if(x + w > pageW){ x = Math.max(0, pageW - w); }
+    if(y + h > pageH){ y = Math.max(0, pageH - h); }
+    return { x, y, w, h, page: box.page };
+  };
+  next = ensureCoverage(next, tokenBox);
+  if(staticDebugEnabled()){
+    logStaticDebug(
+      `[span-normalize:${mode}] hint=${formatBoxForLog(hintBox)} token=${formatBoxForLog(tokenBox)} -> ${formatBoxForLog(next)}`,
+      { mode, hintBox, tokenBox, normalized: next }
+    );
+  }
+  return next;
+}
+
 function normalizeBBoxForPage(box, pageW, pageH){
   if(!box || !pageW || !pageH) return null;
   return {
@@ -3587,6 +3646,17 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   } else if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
     logStaticDebug(`keyword field=${fieldSpec.fieldKey||''} hasRel=false`, { keywordRelations: false });
+  }
+  if(staticRun && result){
+    const page = result.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
+    const vpDims = getPageSize(page);
+    const tokenBox = mergeTokenBounds(result.tokens || []);
+    const normalized = normalizeStaticSpanBox(basePx || result.boxPx || tokenBox, tokenBox, {
+      pageW: vpDims.pageW,
+      pageH: vpDims.pageH,
+      mode: result.method || method || 'final'
+    });
+    if(normalized){ result.boxPx = normalized; }
   }
   if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
   if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
