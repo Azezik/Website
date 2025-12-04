@@ -4856,8 +4856,9 @@ async function prepareRunDocument(file){
     vp.w = vp.width; vp.h = vp.height; vp.pageNumber = i;
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
-    const tokens = await readTokensForPage(page, vp);
-    tokens.forEach(t => { t.page = i; });
+    const rawTokens = await readTokensForPage(page, vp);
+    // pdf.js text items may be non-extensible in some browsers; clone before annotating
+    const tokens = rawTokens.map(t => ({ ...t, page: i }));
     state.tokensByPage[i] = tokens;
     if(isRunMode()) console.log(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
     totalH += vp.height;
