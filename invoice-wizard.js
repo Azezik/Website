@@ -29,6 +29,19 @@ function formatBoxForLog(box){
 function formatArrayBox(boxArr){
   return Array.isArray(boxArr) ? `[${boxArr.map(v=>Math.round(v??0)).join(',')}]` : '<none>';
 }
+function formatNormBoxForLog(nb){
+  if(!nb) return '<null>';
+  const { x=0, y=0, w=0, h=0, page } = nb;
+  return `{x:${x.toFixed(3)},y:${y.toFixed(3)},w:${w.toFixed(3)},h:${h.toFixed(3)},page:${page||'?'}}`;
+}
+function logSpanSnapshot(mode, { fieldKey, page, hintBox, tokenSpan, normalized, normBox, extra }={}){
+  if(!staticDebugEnabled() || !isStaticFieldDebugTarget(fieldKey)) return;
+  const pageTag = page || hintBox?.page || tokenSpan?.page || normalized?.page || '';
+  logStaticDebug(
+    `[span:${mode}] field=${fieldKey||''} page=${pageTag} hint=${formatBoxForLog(hintBox)} token=${formatBoxForLog(tokenSpan)} norm=${formatBoxForLog(normalized)} normN=${formatNormBoxForLog(normBox)}`,
+    { field: fieldKey, page: pageTag, hintBox, tokenSpan, normalized, normBox, ...(extra||{}) }
+  );
+}
 
 (function sanityLog(){
   console.log('[pdf.js] version:', pdfjsLibRef?.version,
@@ -1502,7 +1515,7 @@ function mergeTokenBounds(tokens){
   };
 }
 
-function normalizeStaticSpanBox(hintBox, tokenBox, { pageW=1, pageH=1, mode='final' }={}){
+function normalizeStaticSpanBox(hintBox, tokenBox, { pageW=1, pageH=1, mode='final', debugCtx=null }={}){
   const boxA = hintBox || tokenBox;
   if(!boxA) return null;
   const pad = 2;
@@ -1552,11 +1565,17 @@ function normalizeStaticSpanBox(hintBox, tokenBox, { pageW=1, pageH=1, mode='fin
     return { x, y, w, h, page: box.page };
   };
   next = ensureCoverage(next, tokenBox);
-  if(staticDebugEnabled()){
-    logStaticDebug(
-      `[span-normalize:${mode}] hint=${formatBoxForLog(hintBox)} token=${formatBoxForLog(tokenBox)} -> ${formatBoxForLog(next)}`,
-      { mode, hintBox, tokenBox, normalized: next }
-    );
+  const normBox = normalizeBBoxForPage(next, pageW, pageH);
+  if(staticDebugEnabled() && (debugCtx?.enabled ?? false)){
+    logSpanSnapshot(debugCtx?.mode || mode, {
+      fieldKey: debugCtx?.fieldKey,
+      page: debugCtx?.page || next.page,
+      hintBox,
+      tokenSpan: tokenBox,
+      normalized: next,
+      normBox,
+      extra: { mode, source: debugCtx?.source || 'normalizeStaticSpanBox' }
+    });
   }
   return next;
 }
@@ -1635,7 +1654,7 @@ function selectLinesForStatic(lines, hintPx, { multiline=false }={}){
   return selected.sort((a,b)=> a.top - b.top || a.left - b.left);
 }
 function snapStaticToLines(tokens, hintPx, opts={}){
-  const { multiline=false } = opts || {};
+  const { multiline=false, debugCtx=null } = opts || {};
   const lines = groupIntoLines(tokens, 4).map(lineBounds);
   const selected = selectLinesForStatic(lines, hintPx, { multiline });
   if(!selected.length){
@@ -1648,7 +1667,7 @@ function snapStaticToLines(tokens, hintPx, opts={}){
   const vp = state.pageViewports?.[(hintPx?.page || 1) - 1] || state.viewport || {};
   const pageW = Math.max(1, vp.width ?? vp.w ?? 1);
   const pageH = Math.max(1, vp.height ?? vp.h ?? 1);
-  const finalBox = normalizeStaticSpanBox(hintPx, tokenSpan, { pageW, pageH, mode:'snapStaticToLines' });
+  const finalBox = normalizeStaticSpanBox(hintPx, tokenSpan, { pageW, pageH, mode:'snapStaticToLines', debugCtx });
   const lineTexts = selected.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean);
   const text = multiline ? lineTexts.join('\n') : (lineTexts[0] || '');
   const metrics = summarizeLineMetrics(selected);
@@ -1773,7 +1792,7 @@ function resolveStaticOverlap(entries, opts={}){
       if(staticDebugEnabled()){
         logStaticDebug(
           'overlap-resolve split',
-          { before, after:{ a:{ ...a.box }, b:{ ...b.box } }, enforceA, enforceB, overlapY }
+          { before, after:{ a:{ ...a.box, field: a.fieldKey }, b:{ ...b.box, field: b.fieldKey } }, enforceA, enforceB, overlapY, fields:[a.fieldKey, b.fieldKey] }
         );
       }
     }
@@ -1781,12 +1800,16 @@ function resolveStaticOverlap(entries, opts={}){
   for(const entry of entries){
     if(entry?.tokenSpan && (entry.hintBox || entry.box)){
       const enforced = enforceMinimumSize(entry);
-      const clamped = normalizeStaticSpanBox(entry.hintBox || entry.box, entry.tokenSpan, { pageW, pageH, mode:'overlap-clamp' });
+      const clampCtx = staticDebugEnabled() && isStaticFieldDebugTarget(entry.fieldKey)
+        ? { enabled:true, fieldKey: entry.fieldKey, page: entry.box?.page || entry.tokenSpan?.page, mode:'overlap-clamp', source:'resolveStaticOverlap' }
+        : null;
+      const clamped = normalizeStaticSpanBox(entry.hintBox || entry.box, entry.tokenSpan, { pageW, pageH, mode:'overlap-clamp', debugCtx: clampCtx });
       if(staticDebugEnabled() && enforced.changed){
-        logStaticDebug('overlap-resolve enforce-min', { entry: entry.fieldKey, enforced });
+        logStaticDebug('overlap-resolve enforce-min', { entry: entry.fieldKey, enforced, page: entry.box?.page });
       }
       entry.box = clamped;
       entry.normBox = normalizeBBoxForPage(clamped, pageW, pageH);
+      logSpanSnapshot('overlap', { fieldKey: entry.fieldKey, page: entry.box?.page, hintBox: entry.hintBox, tokenSpan: entry.tokenSpan, normalized: clamped, normBox: entry.normBox, extra:{ source:'resolveStaticOverlap' } });
     }
   }
   return entries;
@@ -1812,7 +1835,10 @@ function buildStaticOverlapEntries(page, currentFieldKey, tokens){
     const box = pxBoxFromField(f);
     if(!box) return null;
     const spec = stepSpecForField(f.fieldKey || '');
-    const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline });
+    const debugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(f.fieldKey)
+      ? { enabled:true, fieldKey: f.fieldKey, page: box.page, mode:'config-overlap', source:'buildStaticOverlapEntries' }
+      : null;
+    const snap = snapStaticToLines(tokens, box, { multiline: !!spec.isMultiline, debugCtx });
     const expectedLineCount = f.lineMetrics?.lineCount ?? f.lineCount ?? snap.lineCount;
     return snap ? { fieldKey: f.fieldKey, box: snap.box, lines: snap.lines || [], expectedLineCount, tokenSpan: snap.tokenSpan, hintBox: box } : null;
   }).filter(Boolean);
@@ -3384,11 +3410,14 @@ function labelValueHeuristic(fieldSpec, tokens){
   let keywordContext = null;
   let selectionRaw = '';
   let firstAttempt = null;
-  if(fieldSpec.bbox){
-    const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
-    basePx = applyTransform(raw);
-    if(staticRun){
-      baseLineSnap = snapStaticToLines(tokens, basePx, { multiline: !!fieldSpec.isMultiline });
+    if(fieldSpec.bbox){
+      const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      basePx = applyTransform(raw);
+      if(staticRun){
+      const baseDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
+        ? { enabled:true, fieldKey: fieldSpec.fieldKey, page: basePx.page, mode:'run-basesnap', source:'baseLineSnap' }
+        : null;
+      baseLineSnap = snapStaticToLines(tokens, basePx, { multiline: !!fieldSpec.isMultiline, debugCtx: baseDebugCtx });
       if(baseLineSnap?.box){
         basePx = baseLineSnap.box;
       }
@@ -3672,10 +3701,16 @@ function labelValueHeuristic(fieldSpec, tokens){
     const vpDims = getPageSize(page);
     const tokenBox = mergeTokenBounds(result.tokens || []) || baseLineSnap?.tokenSpan || null;
     const hintBox = baseLineSnap?.box || basePx || result.boxPx || tokenBox;
+    // Wheaton Mike scenario: CONFIG keeps the whole line we highlighted; RUN re-snaps against live tokens so even if that line drifts,
+    // the adjusted box still tracks and captures the "WHEATON MIKE" string after layout shifts.
+    const normDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
+      ? { enabled:true, fieldKey: fieldSpec.fieldKey, page, mode:'run-final', source:'run-normalize' }
+      : null;
     const normalized = normalizeStaticSpanBox(hintBox, tokenBox, {
       pageW: vpDims.pageW,
       pageH: vpDims.pageH,
-      mode: 'run'
+      mode: 'run',
+      debugCtx: normDebugCtx
     });
     if(normalized){ result.boxPx = normalized; }
   }
@@ -5445,8 +5480,11 @@ async function finalizeSelection(e) {
   const pageW = (vpForSnap.width ?? vpForSnap.w) || 1;
   const pageH = (vpForSnap.height ?? vpForSnap.h) || 1;
   let snap = null;
+  const configDebugCtx = (staticDebugEnabled() && isStaticFieldDebugTarget(step.fieldKey) && (step.type||'static') === 'static')
+    ? { enabled:true, fieldKey: step.fieldKey, page: state.selectionPx?.page, mode:'config-select', source:'finalizeSelection' }
+    : null;
   if(isConfigMode() && (step.type||'static') === 'static'){
-    const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline });
+    const baseSnap = snapStaticToLines(tokens, state.selectionPx, { multiline: !!step.isMultiline, debugCtx: configDebugCtx });
     const siblings = buildStaticOverlapEntries(state.selectionPx.page, step.fieldKey, tokens);
     if(siblings.length){
       const resolved = resolveStaticOverlap([...siblings, { fieldKey: step.fieldKey, box: { ...baseSnap.box }, lines: baseSnap.lines || [], expectedLineCount: baseSnap.lineCount, tokenSpan: baseSnap.tokenSpan, hintBox: state.selectionPx, normBox: baseSnap.normBox }], { pageW, pageH });
@@ -5477,6 +5515,17 @@ async function finalizeSelection(e) {
   const nb = state.snappedNormBox
     ? { x0n: state.snappedNormBox.x, y0n: state.snappedNormBox.y, wN: state.snappedNormBox.w, hN: state.snappedNormBox.h }
     : normalizeBox(state.snappedPx, vp.width, vp.height);
+  if(configDebugCtx){
+    logSpanSnapshot('config', {
+      fieldKey: step.fieldKey,
+      page: state.selectionPx?.page,
+      hintBox: state.selectionPx,
+      tokenSpan: snap.tokenSpan || snap.box,
+      normalized: snap.box,
+      normBox: state.snappedNormBox,
+      extra: { source: 'finalizeSelection' }
+    });
+  }
   const pinned = isOverlayPinned();
   const srcRect = (state.isImage?els.imgCanvas:els.pdfCanvas).getBoundingClientRect();
   traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, cssBox: state.snappedCss, cssSize:{ w:srcRect.width, h:srcRect.height }, pxSize:{ w:vp.width, h:vp.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
