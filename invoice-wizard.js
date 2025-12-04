@@ -3340,7 +3340,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     return { candidates: sorted, best, current: currentCandidate, preferBest };
   }
 
-  let result = null, method=null, score=null, comp=null, basePx=null;
+  let result = null, method=null, score=null, comp=null, basePx=null, baseLineSnap=null;
   let keywordPrediction = null;
   let keywordMatch = null;
   let keywordWeight = 1;
@@ -3352,6 +3352,12 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    if(staticRun){
+      baseLineSnap = snapStaticToLines(tokens, basePx, { multiline: !!fieldSpec.isMultiline });
+      if(baseLineSnap?.box){
+        basePx = baseLineSnap.box;
+      }
+    }
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       logStaticDebug(
         `bbox-transform field=${fieldSpec.fieldKey||''} page=${basePx.page||''} config=${formatArrayBox(fieldSpec.bbox)} transformed=${formatBoxForLog(basePx)} viewport=${viewportDims.width}x${viewportDims.height}`,
@@ -3629,11 +3635,12 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(staticRun && result){
     const page = result.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
     const vpDims = getPageSize(page);
-    const tokenBox = mergeTokenBounds(result.tokens || []);
-    const normalized = normalizeStaticSpanBox(basePx || result.boxPx || tokenBox, tokenBox, {
+    const tokenBox = mergeTokenBounds(result.tokens || []) || baseLineSnap?.tokenSpan || null;
+    const hintBox = baseLineSnap?.box || basePx || result.boxPx || tokenBox;
+    const normalized = normalizeStaticSpanBox(hintBox, tokenBox, {
       pageW: vpDims.pageW,
       pageH: vpDims.pageH,
-      mode: result.method || method || 'final'
+      mode: 'run'
     });
     if(normalized){ result.boxPx = normalized; }
   }
