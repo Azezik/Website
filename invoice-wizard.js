@@ -2933,6 +2933,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   const stageUsed = { value: null };
+  let hintLocked = false;
+  let bestHintCandidate = null;
   let viewportDims = getViewportDimensions(viewportPx);
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
@@ -3359,30 +3361,32 @@ function labelValueHeuristic(fieldSpec, tokens){
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
     const initialAttempt = await attempt(basePx);
     if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
-    if(initialAttempt && initialAttempt.cleanedOk){
+    if(initialAttempt && (initialAttempt.cleanedOk || anchorMatchesCandidate(initialAttempt))){
       firstAttempt = initialAttempt;
-    } else if(initialAttempt && anchorMatchesCandidate(initialAttempt)){
-      firstAttempt = initialAttempt;
+      bestHintCandidate = initialAttempt.cleanedOk ? initialAttempt : bestHintCandidate;
     }
     selectionRaw = firstAttempt?.raw || '';
-    if(staticRun && firstAttempt){
+    if(staticRun && firstAttempt && firstAttempt.fingerprintOk && firstAttempt.cleanedOk){
       const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
       const hasAnchor = firstAttempt.anchorOk !== false;
-      if(hasAnchor && firstAttempt.fingerprintOk && lineInfo.lineDiff === 0){
-        result = firstAttempt; method='bbox'; stageUsed.value = 0;
-      } else if(hasAnchor && firstAttempt.fingerprintOk && firstAttempt.cleanedOk && lineInfo.lineDiff === 1){
-        result = firstAttempt; method='bbox'; stageUsed.value = 1;
+      if(hasAnchor && lineInfo.lineDiff <= 1){
+        result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
       }
     }
-    if(!result && firstAttempt && firstAttempt.cleanedOk){
-      result = firstAttempt; method='bbox';
-    } else if(!result){
+    if(!hintLocked){
       const pads = isConfigMode() ? [4] : [4,8,12];
       for(const pad of pads){
         const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
         const r = await attempt(search);
         if(r && !anchorMatchesCandidate(r)){ continue; }
-        if(r && r.cleanedOk){ result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } break; }
+        if(r && r.fingerprintOk && r.cleanedOk){
+          result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
+        }
+        if(r && r.cleanedOk){
+          if(!bestHintCandidate || (r.confidence || 0) > (bestHintCandidate.confidence || 0)){
+            bestHintCandidate = r;
+          }
+        }
       }
     }
   }
@@ -3444,6 +3448,10 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
   }
+  if(!result && bestHintCandidate){
+    result = bestHintCandidate; method = method || 'bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
+  }
+
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
     if(lv.value){
@@ -3468,7 +3476,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     const raw = selectionRaw.trim();
     result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
   }
-  if(staticRun && keywordRelations && result && basePx){
+  if(staticRun && keywordRelations && result && basePx && !hintLocked){
     const page = result.boxPx?.page || basePx.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     if(!state.keywordIndexByPage?.[page]){
@@ -3492,7 +3500,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   }
   let triangulationAudit = null;
-  if(staticRun && keywordRelations && triangulatedBox){
+  if(staticRun && keywordRelations && triangulatedBox && !hintLocked){
     const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     const scored = scoreTriangulatedCandidates({
