@@ -3458,7 +3458,19 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
-    anchorBox = { ...basePx };
+    if(fieldSpec.configBox){
+      const cx0 = Number.isFinite(fieldSpec.configBox.x0) ? fieldSpec.configBox.x0 : fieldSpec.configBox[0];
+      const cy0 = Number.isFinite(fieldSpec.configBox.y0) ? fieldSpec.configBox.y0 : fieldSpec.configBox[1];
+      const cx1 = Number.isFinite(fieldSpec.configBox.x1) ? fieldSpec.configBox.x1 : fieldSpec.configBox[2];
+      const cy1 = Number.isFinite(fieldSpec.configBox.y1) ? fieldSpec.configBox.y1 : fieldSpec.configBox[3];
+      if([cx0, cy0, cx1, cy1].every(v => typeof v === 'number' && Number.isFinite(v))){
+        const anchorRaw = toPx(viewportPx, { x0: cx0, y0: cy0, x1: cx1, y1: cy1, page: fieldSpec.page });
+        anchorBox = applyTransform(anchorRaw);
+      }
+    }
+    if(!anchorBox){
+      anchorBox = { ...basePx };
+    }
     hintCenter = { x: basePx.x + (basePx.w||0)/2, y: basePx.y + (basePx.h||0)/2 };
     hintBand = (basePx.h || 0) * 1.5;
     if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
