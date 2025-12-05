@@ -21,7 +21,8 @@
     'Invoice Total',
     'Payment Method',
     'Payment Status',
-    'Line No'
+    'Line No',
+    'File ID'
   ];
 
   function cleanText(value){
@@ -321,7 +322,7 @@
     }
 
     const rows = [HEADERS];
-    selected.forEach(({ invoice, items }) => {
+    selected.forEach(({ invoice, items, record }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
         if(lineTotal === '' && item.quantity && item.unitPrice){
@@ -350,7 +351,8 @@
           invoice.total,
           invoice.paymentMethod,
           invoice.paymentStatus,
-          lineNo
+          lineNo,
+          record?.fileId || record?.fileHash || ''
         ]);
       });
     });
@@ -358,10 +360,27 @@
     return { rows, missingMap };
   }
 
+  function normalizeRowInput(row){
+    if(!row) return null;
+    if(Array.isArray(row)) return row;
+    if(Array.isArray(row.cells)) return row.cells;
+    return null;
+  }
+
+  function flattenRows(rows){
+    const dataRows = Array.isArray(rows) ? rows.map(normalizeRowInput).filter(Boolean) : [];
+    return { rows: [HEADERS, ...dataRows] };
+  }
+
   function toCsv(ssot){
     const { rows } = flatten(ssot);
     return rows.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
-  return { HEADERS, flatten, toCsv };
+  function toCsvRows(rows){
+    const table = flattenRows(rows).rows;
+    return table.map(r => r.map(csvEscape).join(',')).join('\n');
+  }
+
+  return { HEADERS, flatten, flattenRows, toCsv, toCsvRows };
 });

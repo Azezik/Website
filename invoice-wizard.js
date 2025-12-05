@@ -390,14 +390,82 @@ function bumpDebugBlank(){
 const LS = {
   profileKey: (u, d) => `wiz.profile.${u}.${d}`,
   dbKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb`,
+  rowsKey: (u, d) => `accounts.${u}.wizards.${d}.masterdb_rows`,
   getDb(u, d) {
     const raw = localStorage.getItem(this.dbKey(u, d));
     return raw ? JSON.parse(raw) : [];
     },
   setDb(u, d, arr){ localStorage.setItem(this.dbKey(u, d), JSON.stringify(arr)); },
+  hasRows(u, d){ return localStorage.getItem(this.rowsKey(u, d)) !== null; },
+  getRows(u, d){ const raw = localStorage.getItem(this.rowsKey(u, d)); return raw ? JSON.parse(raw) : []; },
+  setRows(u, d, rows){ localStorage.setItem(this.rowsKey(u, d), JSON.stringify(rows)); },
   getProfile(u,d){ const raw = localStorage.getItem(this.profileKey(u,d)); return raw ? JSON.parse(raw, jsonReviver) : null; },
   setProfile(u,d,p){ localStorage.setItem(this.profileKey(u,d), serializeProfile(p)); },
   removeProfile(u,d){ localStorage.removeItem(this.profileKey(u,d)); }
+};
+
+const MASTERDB_FILE_ID_HEADER = 'File ID';
+function extractFileIdFromRow(row){
+  const fileIdx = MasterDB?.HEADERS ? MasterDB.HEADERS.indexOf(MASTERDB_FILE_ID_HEADER) : -1;
+  if(row && typeof row === 'object' && row.fileId) return row.fileId;
+  const cells = Array.isArray(row) ? row : (row && Array.isArray(row.cells) ? row.cells : null);
+  if(!cells || fileIdx < 0) return '';
+  return cells[fileIdx] || '';
+}
+
+function buildMasterDbRowsFromRecord(record){
+  try {
+    const { rows } = MasterDB.flatten(record);
+    return rows.slice(1).map(r => ({ fileId: record.fileId || record.fileHash || '', cells: r }));
+  } catch(err){
+    console.error('Failed to build MasterDB rows from record', record?.fileId || record?.fileHash, err);
+    return [];
+  }
+}
+
+function rebuildMasterDbRows(db){
+  const rows = [];
+  (db || []).forEach(rec => {
+    rows.push(...buildMasterDbRowsFromRecord(rec));
+  });
+  return rows;
+}
+
+function refreshMasterDbRowsStore(db, compiled){
+  const dt = state.docType;
+  const user = state.username;
+  const hadRows = LS.hasRows(user, dt);
+  let rows = hadRows ? (LS.getRows(user, dt) || []) : [];
+  if(!hadRows && Array.isArray(db)){
+    rows = rebuildMasterDbRows(db);
+  }
+  const builtRows = compiled ? buildMasterDbRowsFromRecord(compiled) : [];
+  const targetFile = compiled?.fileId;
+  if(targetFile && builtRows.length){
+    rows = rows.filter(r => extractFileIdFromRow(r) !== targetFile);
+  }
+  if(compiled){
+    rows = rows.concat(builtRows);
+  }
+  LS.setRows(user, dt, rows);
+  return rows;
+}
+
+function getOrHydrateMasterRows(user, docType){
+  let rows = LS.getRows(user, docType) || [];
+  if(rows.length) return rows;
+  const db = LS.getDb(user, docType);
+  if(!db.length) return rows;
+  rows = rebuildMasterDbRows(db);
+  LS.setRows(user, docType, rows);
+  return rows;
+}
+
+window.dumpMaster = function(){
+  const dt = els.dataDocType?.value || state.docType;
+  const rows = getOrHydrateMasterRows(state.username, dt);
+  console.log('[MasterDB rows]', rows);
+  return rows;
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
@@ -6145,6 +6213,7 @@ function compileDocument(fileId, lineItems){
     compiled.snapshotManifestId = state.lastSnapshotManifestId;
   }
   LS.setDb(state.username, state.docType, db);
+  refreshMasterDbRowsStore(db, compiled);
   renderResultsTable();
   renderTelemetry();
   renderReports();
@@ -6505,6 +6574,7 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType));
   setModels(models);
   localStorage.removeItem(LS.dbKey(state.username, state.docType));
+  localStorage.removeItem(LS.rowsKey(state.username, state.docType));
   state.profile = null;
   hydrateFingerprintsFromProfile(null);
   renderSavedFieldsTable();
@@ -6763,13 +6833,14 @@ function resolveRecordForDocType(docType, preferred){
 }
 
 function downloadMasterDb(record, docType){
-  const { record: target, dt } = resolveRecordForDocType(docType, record);
-  if(!target){
-    alert('No extraction record available for export.');
+  const dt = docType || els.dataDocType?.value || state.docType;
+  const rows = getOrHydrateMasterRows(state.username, dt);
+  if(!rows.length){
+    alert('No MasterDB rows available for export.');
     return;
   }
   try {
-    const csv = MasterDB.toCsv(target);
+    const csv = MasterDB.toCsvRows(rows);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
