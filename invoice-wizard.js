@@ -3496,50 +3496,120 @@ function labelValueHeuristic(fieldSpec, tokens){
         keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
       }
     }
+
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
-    const initialAttempt = await attempt(basePx);
-    if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
-    if(initialAttempt){
-      firstAttempt = initialAttempt;
-      recordHintCandidate(initialAttempt);
-    }
-    selectionRaw = firstAttempt?.raw || '';
-    if(staticRun && firstAttempt && firstAttempt.fingerprintOk && firstAttempt.cleanedOk){
-      const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
-      result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
-    }
-    if(!hintLocked){
-      const pads = isConfigMode() ? [4] : [4,8,12];
-      for(const pad of pads){
-        const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
-        const r = await attempt(search);
-        if(r){ recordHintCandidate(r); }
-        if(r && !anchorMatchesCandidate(r)){ continue; }
-        if(r && r.fingerprintOk && r.cleanedOk){
-          result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
-        }
-        if(r && r.cleanedOk){
-          if(!bestHintCandidate || (r.confidence || 0) > (bestHintCandidate.confidence || 0)){
-            bestHintCandidate = r;
-          }
+
+    if(staticRun && anchorBox){
+      const mostlyInside = (tok, box) => {
+        const xOverlap = Math.max(0, Math.min(tok.x + tok.w, box.x + box.w) - Math.max(tok.x, box.x));
+        const yOverlap = Math.max(0, Math.min(tok.y + tok.h, box.y + box.h) - Math.max(tok.y, box.y));
+        const fracX = (tok.w || 1) > 0 ? xOverlap / (tok.w || 1) : 0;
+        const fracY = (tok.h || 1) > 0 ? yOverlap / (tok.h || 1) : 0;
+        return fracX >= 0.75 && fracY >= 0.75;
+      };
+      const boxLockedTokens = tokens.filter(t => (!t.page || !anchorBox.page || t.page === anchorBox.page) && mostlyInside(t, anchorBox));
+      if(boxLockedTokens.length){
+        const ordered = boxLockedTokens.slice().sort((a,b)=> (a.y - b.y) || (a.x - b.x));
+        const lines = groupIntoLines(ordered);
+        const textLines = lines.map(L => (L.tokens||[]).map(t=>t.text).join(' ').trim()).filter(Boolean);
+        const rawText = textLines.join('\n');
+        const box = mergeTokenBounds(ordered) || { ...anchorBox };
+        if(box && !box.page){ box.page = anchorBox.page; }
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+        const fpDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
+          ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
+          : null;
+        const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
+        const cleanedOk = !!(cleaned.value || cleaned.raw);
+        const anchorOk = anchorMatchesCandidate({ boxPx: box, tokens: ordered });
+        const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
+        let confidence = fingerprintOk ? baseConf : Math.max(0.2, Math.min(baseConf * 0.6, 0.5));
+        const lineInfo = computeLineDiff(lines.length);
+        const lineAdj = { confidence, expected: lineInfo.expectedLineCount, factor: 1, reason: 'boxLocked', observed: lines.length };
+        confidence = clamp(confidence * (lineAdj.factor || 1), 0, 1);
+        const hintDistance = distanceToHint(box);
+        const withinHintBand = Number.isFinite(hintDistance) && Number.isFinite(hintBand)
+          ? hintDistance <= hintBand
+          : false;
+        result = {
+          value: cleaned.value || cleaned.raw || rawText,
+          raw: rawText,
+          corrected: cleaned.corrected,
+          code: cleaned.code,
+          shape: cleaned.shape,
+          score: cleaned.score,
+          correctionsApplied: cleaned.correctionsApplied,
+          corrections: cleaned.correctionsApplied,
+          boxPx: box,
+          confidence,
+          tokens: ordered,
+          cleanedOk,
+          fingerprintOk,
+          anchorOk,
+          hintDistance,
+          withinHint: withinHintBand,
+          lineCount: lines.length,
+          expectedLineCount: lineAdj.expected,
+          lineDiff: lineInfo.lineDiff,
+          method: 'box-locked'
+        };
+        stageUsed.value = 1;
+        hintLocked = true;
+        if(runMode && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+          logStaticDebug(
+            `box-locked field=${fieldSpec.fieldKey||''} page=${box.page||basePx.page||''} hits=${ordered.length} box=${formatBoxForLog(box)} raw="${rawText.replace(/\s+/g,' ').trim()}"`,
+            { hits: ordered.length, tokenPreview: ordered.slice(0,3).map(t=>({ text:t.text, box:{ x:t.x, y:t.y, w:t.w, h:t.h } })), box, lineAdj }
+          );
         }
       }
     }
-    if(!hintLocked && staticRun){
-      const verticalFactors = [0.5, 1, 1.5];
-      for(const factor of verticalFactors){
-        for(const dir of [-1,1]){
-          const delta = basePx.h * factor * dir;
-          const vy = Math.max(0, basePx.y + delta);
-          const vh = basePx.h;
-          const probe = { x: basePx.x - 2, y: vy, w: basePx.w + 4, h: vh, page: basePx.page };
-          const r = await attempt(probe);
+
+    if(!result){
+      traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
+      const initialAttempt = await attempt(basePx);
+      if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
+      if(initialAttempt){
+        firstAttempt = initialAttempt;
+        recordHintCandidate(initialAttempt);
+      }
+      selectionRaw = firstAttempt?.raw || '';
+      if(staticRun && firstAttempt && firstAttempt.fingerprintOk && firstAttempt.cleanedOk){
+        const lineInfo = computeLineDiff(firstAttempt.lineCount, firstAttempt.expectedLineCount);
+        result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
+      }
+      if(!hintLocked){
+        const pads = isConfigMode() ? [4] : [4,8,12];
+        for(const pad of pads){
+          const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
+          const r = await attempt(search);
           if(r){ recordHintCandidate(r); }
+          if(r && !anchorMatchesCandidate(r)){ continue; }
           if(r && r.fingerprintOk && r.cleanedOk){
             result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
           }
+          if(r && r.cleanedOk){
+            if(!bestHintCandidate || (r.confidence || 0) > (bestHintCandidate.confidence || 0)){
+              bestHintCandidate = r;
+            }
+          }
         }
-        if(hintLocked) break;
+      }
+      if(!hintLocked && staticRun){
+        const verticalFactors = [0.5, 1, 1.5];
+        for(const factor of verticalFactors){
+          for(const dir of [-1,1]){
+            const delta = basePx.h * factor * dir;
+            const vy = Math.max(0, basePx.y + delta);
+            const vh = basePx.h;
+            const probe = { x: basePx.x - 2, y: vy, w: basePx.w + 4, h: vh, page: basePx.page };
+            const r = await attempt(probe);
+            if(r){ recordHintCandidate(r); }
+            if(r && r.fingerprintOk && r.cleanedOk){
+              result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
+            }
+          }
+          if(hintLocked) break;
+        }
       }
     }
   }
