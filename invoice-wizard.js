@@ -6179,12 +6179,48 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const parsePctBox = box => {
+    if(!box) return null;
+    const x0 = Number.isFinite(box.x0) ? box.x0 : (Array.isArray(box) ? box[0] : null);
+    const y0 = Number.isFinite(box.y0) ? box.y0 : (Array.isArray(box) ? box[1] : null);
+    const x1 = Number.isFinite(box.x1) ? box.x1 : (Array.isArray(box) ? box[2] : null);
+    const y1 = Number.isFinite(box.y1) ? box.y1 : (Array.isArray(box) ? box[3] : null);
+    if([x0,y0,x1,y1].every(v => typeof v === 'number' && Number.isFinite(v))) return { x0, y0, x1, y1 };
+    return null;
+  };
+  const pctFromRawBox = sel => {
+    if(!sel) return null;
+    const chk = validateSelection(sel);
+    if(!chk.ok || !chk.normBox) return null;
+    const nb = chk.normBox;
+    return { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+  };
+  const configPctBox = pctFromRawBox(rawBox) || parsePctBox(existing?.configBox) || null;
+  const getConfigPctBox = field => parsePctBox(field?.configBox) || pctFromRawBox(field?.rawBox) || null;
+  const boxesOverlap = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0;
+  let overlapDetails = null;
   if(step.type === 'static'){
-    const clash = (state.profile.fields||[]).find(f=>f.fieldKey!==step.fieldKey && f.type==='static' && f.page===page && Math.min(pctBox.y1,f.bboxPct.y1) - Math.max(pctBox.y0,f.bboxPct.y0) > 0);
+    const clash = (state.profile.fields||[]).find(f=>{
+      if(f.fieldKey===step.fieldKey || f.type!=='static' || f.page!==page) return false;
+      const mine = configPctBox || pctBox;
+      const otherConfig = getConfigPctBox(f);
+      const other = otherConfig || f.bboxPct;
+      if(!mine || !other) return false;
+      const useConfigOnly = !!configPctBox && !!otherConfig;
+      const overlapping = useConfigOnly
+        ? boxesOverlap(mine, other)
+        : Math.min(mine.y1, other.y1) - Math.max(mine.y0, other.y0) > 0;
+      if(overlapping){ overlapDetails = { mine, other, useConfigOnly, clashField: f.fieldKey }; }
+      return overlapping;
+    });
     if(clash){
+      if(overlapDetails?.useConfigOnly){
+        console.warn('[overlap-check] using original user CONFIG boxes only', { currentField: step.fieldKey, clashField: clash.fieldKey, mine: overlapDetails.mine, clash: overlapDetails.other });
+      }
       console.warn('Overlapping static bboxes, adjusting', step.fieldKey, clash.fieldKey);
-      const shift = (clash.bboxPct.y1 - clash.bboxPct.y0) + 0.001;
-      pctBox.y0 = clash.bboxPct.y1 + 0.001;
+      const clashBox = overlapDetails?.other || clash.bboxPct;
+      const shift = (clashBox.y1 - clashBox.y0) + 0.001;
+      pctBox.y0 = clashBox.y1 + 0.001;
       pctBox.y1 = pctBox.y0 + shift;
       normBox.y0n = pctBox.y0;
       normBox.hN = pctBox.y1 - pctBox.y0;
@@ -6198,6 +6234,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     bbox:[pctBox.x0, pctBox.y0, pctBox.x1, pctBox.y1],
     bboxPct:{x0:pctBox.x0, y0:pctBox.y0, x1:pctBox.x1, y1:pctBox.y1},
     normBox,
+    configBox: configPctBox || null,
     rawBox,
     value,
     confidence,
