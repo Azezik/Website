@@ -1319,6 +1319,55 @@ function clonePlain(obj){
 const FieldDataEngine = (() => {
   const patterns = {};
 
+  function normalizeOcrDigits(text){
+    if(text === null || text === undefined) return text;
+    const str = String(text);
+    const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
+    const isDigit = ch => ch >= '0' && ch <= '9';
+    const isDecimalPunct = ch => ch === '.' || ch === ',';
+    const firstNonSpaceFrom = (idx) => {
+      for(let i=idx;i<str.length;i++){
+        if(str[i] !== ' ') return { ch: str[i], index: i };
+      }
+      return null;
+    };
+
+    let out = '';
+    for(let i=0;i<str.length;i++){
+      const ch = str[i];
+      const prev = i>0 ? str[i-1] : '';
+      const next = i<str.length-1 ? str[i+1] : '';
+
+      if(ch === 'I' || ch === 'l'){
+        let shouldConvert = false;
+        if(i === 0){
+          const ahead = firstNonSpaceFrom(1);
+          if(ahead){
+            if(isDigit(ahead.ch) || isDecimalPunct(ahead.ch)) shouldConvert = true;
+            else if(currencySymbols.has(ahead.ch)){
+              const afterCurrency = firstNonSpaceFrom(ahead.index + 1);
+              if(afterCurrency && isDigit(afterCurrency.ch)) shouldConvert = true;
+            }
+          }
+        }
+        if(!shouldConvert && isDigit(prev) && isDigit(next)) shouldConvert = true;
+        if(!shouldConvert && isDigit(prev) && isDecimalPunct(next)) shouldConvert = true;
+        if(!shouldConvert && isDecimalPunct(next) && isDigit(str[i+2]||'')) shouldConvert = true;
+        out += shouldConvert ? '1' : ch;
+        continue;
+      }
+
+      if(ch === 'O' && isDigit(prev) && isDigit(next)){
+        out += '0';
+        continue;
+      }
+
+      out += ch;
+    }
+
+    return out;
+  }
+
   function learn(ftype, value){
     if(!value) return;
     const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}, digit:{}});
@@ -1349,7 +1398,9 @@ const FieldDataEngine = (() => {
     let invalidReason = null;
     if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
-      const n=txt.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
+      // Normalize common OCR digit confusions (e.g., $I3999 -> 13999.00) before stripping non-numeric chars.
+      const digitSafe = normalizeOcrDigits(txt);
+      const n=digitSafe.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
     } else if(/sku|product_code/.test(ftype)){
       txt = txt.replace(/\s+/g,'').toUpperCase();
       const sanitized = txt.replace(/[^A-Z0-9\-_.\/]/g,'');
