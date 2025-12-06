@@ -95,6 +95,71 @@
     return counts;
   }
 
+  function inferLineCalculations(items){
+    items.forEach(item => {
+      const quantityNum = item.quantity !== '' ? parseFloat(item.quantity) : null;
+      const unitPriceNum = item.unitPrice !== '' ? parseFloat(item.unitPrice) : null;
+      const amountNum = item.amount !== '' ? parseFloat(item.amount) : null;
+
+      if(item.quantity === '' && unitPriceNum !== null && amountNum !== null){
+        const inferredQty = amountNum / unitPriceNum;
+        if(isFinite(inferredQty)){
+          const rounded = Math.round(inferredQty);
+          if(Math.abs(inferredQty - rounded) < 1e-2){
+            item.quantity = rounded.toFixed(2);
+          }
+        }
+      }
+
+      if(item.quantity === '' && item.amount === '' && unitPriceNum !== null){
+        item.quantity = '1.00';
+        item.amount = item.unitPrice;
+        item.__assumedQuantity = true;
+      }
+
+      if(item.amount === '' && item.quantity !== '' && unitPriceNum !== null){
+        const q = parseFloat(item.quantity);
+        if(!isNaN(q)){
+          item.amount = (q * unitPriceNum).toFixed(2);
+        }
+      }
+    });
+  }
+
+  function computeUsableRows(items){
+    return items.reduce((acc, item) => {
+      const hasDescription = item.description !== '';
+      const hasNumericField = item.quantity !== '' || item.unitPrice !== '' || item.amount !== '';
+      return acc + (hasDescription && hasNumericField ? 1 : 0);
+    }, 0);
+  }
+
+  function synthesizeLineNumbers(items){
+    const hasRealLineNo = items.some(item => {
+      if(item.lineNo === '') return false;
+      const parsed = parseFloat(item.lineNo);
+      return !isNaN(parsed) && isFinite(parsed);
+    });
+
+    if(hasRealLineNo) return { synthetic: false, usableAssigned: 0 };
+
+    let counter = 1;
+    let assigned = 0;
+    items.forEach(item => {
+      const hasDescription = item.description !== '';
+      const hasNumericField = item.quantity !== '' || item.unitPrice !== '' || item.amount !== '';
+      if(hasDescription && hasNumericField){
+        if(!item.lineNo){
+          item.lineNo = String(counter++);
+          item.__virtualLineNo = true;
+          assigned += 1;
+        }
+      }
+    });
+
+    return { synthetic: assigned > 0, usableAssigned: assigned };
+  }
+
   function collectPositiveCounts(counts, keys){
     return keys
       .map(key => counts[key])
@@ -233,11 +298,17 @@
 
     const allItems = selected.flatMap(r => r.items);
 
+    inferLineCalculations(allItems);
+    const usableRowCount = computeUsableRows(allItems);
+    const syntheticLineNo = synthesizeLineNumbers(allItems);
+
     const counts = {
       sku_count: allItems.filter(it => it.sku !== '').length,
       qty_count: allItems.filter(it => it.quantity !== '').length,
       price_count: allItems.filter(it => it.unitPrice !== '').length,
-      line_no_count: allItems.filter(it => it.lineNo !== '').length
+      line_no_count: allItems.filter(it => it.lineNo !== '').length,
+      usable_row_count: usableRowCount,
+      synthetic_line_no: syntheticLineNo.synthetic
     };
 
     const firstItem = allItems[0]?.original || null;
@@ -251,7 +322,7 @@
     }));
     console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem, row_majority: rowMajority });
 
-    if(counts.sku_count === 0){
+    if(usableRowCount === 0){
       throw new Error('Exporter input empty—SSOT not wired.');
     }
 
