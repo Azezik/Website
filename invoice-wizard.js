@@ -1396,11 +1396,17 @@ const FieldDataEngine = (() => {
     const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
     const isDigit = ch => ch >= '0' && ch <= '9';
     const isDecimalPunct = ch => ch === '.' || ch === ',';
-    const firstNonSpaceFrom = (idx) => {
-      for(let i=idx;i<str.length;i++){
-        if(str[i] !== ' ') return { ch: str[i], index: i };
+    const prevNonSpace = (idx) => {
+      for(let i=idx;i>=0;i--){
+        if(str[i] !== ' ') return str[i];
       }
-      return null;
+      return '';
+    };
+    const nextNonSpace = (idx) => {
+      for(let i=idx;i<str.length;i++){
+        if(str[i] !== ' ') return str[i];
+      }
+      return '';
     };
 
     let out = '';
@@ -1408,19 +1414,23 @@ const FieldDataEngine = (() => {
       const ch = str[i];
       const prev = i>0 ? str[i-1] : '';
       const next = i<str.length-1 ? str[i+1] : '';
+      const prevNs = prevNonSpace(i-1);
+      const nextNs = nextNonSpace(i+1);
+
+      const prevCurrencyOrDigit = isDigit(prevNs) || currencySymbols.has(prevNs);
+      const nextLooksNumeric = isDigit(nextNs) || isDecimalPunct(nextNs);
 
       if(ch === 'I' || ch === 'l'){
         let shouldConvert = false;
         if(i === 0){
-          const ahead = firstNonSpaceFrom(1);
-          if(ahead){
-            if(isDigit(ahead.ch) || isDecimalPunct(ahead.ch)) shouldConvert = true;
-            else if(currencySymbols.has(ahead.ch)){
-              const afterCurrency = firstNonSpaceFrom(ahead.index + 1);
-              if(afterCurrency && isDigit(afterCurrency.ch)) shouldConvert = true;
-            }
+          const ahead = nextNonSpace(1);
+          if(isDigit(ahead) || isDecimalPunct(ahead)) shouldConvert = true;
+          else if(currencySymbols.has(ahead)){
+            const afterCurrency = nextNonSpace(str.indexOf(ahead, i+1) + 1);
+            if(isDigit(afterCurrency)) shouldConvert = true;
           }
         }
+        if(!shouldConvert && prevCurrencyOrDigit && nextLooksNumeric) shouldConvert = true;
         if(!shouldConvert && isDigit(prev) && isDigit(next)) shouldConvert = true;
         if(!shouldConvert && isDigit(prev) && isDecimalPunct(next)) shouldConvert = true;
         if(!shouldConvert && isDecimalPunct(next) && isDigit(str[i+2]||'')) shouldConvert = true;
@@ -1428,9 +1438,18 @@ const FieldDataEngine = (() => {
         continue;
       }
 
-      if(ch === 'O' && isDigit(prev) && isDigit(next)){
-        out += '0';
-        continue;
+      if(ch === 'O'){
+        if((isDigit(prev) && isDigit(next)) || (prevCurrencyOrDigit && isDigit(nextNs))) {
+          out += '0';
+          continue;
+        }
+      }
+
+      if(ch === 'T'){
+        if(prevCurrencyOrDigit && nextLooksNumeric) {
+          out += '7';
+          continue;
+        }
       }
 
       out += ch;
