@@ -416,6 +416,45 @@ function genId(prefix='wiz'){
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function looksLikeGeneratedId(val=''){
+  if(typeof val !== 'string') return false;
+  return /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i.test(val)
+    || /^field-\d{13}-/i.test(val)
+    || /^wiz-\d{13}-/i.test(val);
+}
+
+function normalizeFieldKey(name='', usedKeys=new Set(), fallbackPrefix='field'){
+  const base = (name || '').toLowerCase()
+    .replace(/[^a-z0-9]+/gi, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || fallbackPrefix;
+  let candidate = base;
+  let suffix = 2;
+  while(usedKeys.has(candidate)){
+    candidate = `${base}_${suffix++}`;
+  }
+  usedKeys.add(candidate);
+  return candidate;
+}
+
+function normalizeTemplateFields(fields){
+  const used = new Set();
+  return (fields || []).map((field, idx) => {
+    const name = (field?.name || '').trim();
+    const fallback = `field_${idx + 1}`;
+    const preferredKey = field?.fieldKey && !looksLikeGeneratedId(field.fieldKey) ? field.fieldKey : '';
+    const key = normalizeFieldKey(preferredKey || name, used, fallback);
+    return { ...field, fieldKey: key };
+  });
+}
+
+function normalizeTemplate(template){
+  if(!template) return template;
+  const fields = normalizeTemplateFields(template.fields);
+  return { ...template, fields };
+}
+
 function getStoredTemplates(){
   try{ return JSON.parse(localStorage.getItem(CUSTOM_WIZARD_KEY) || '[]'); }
   catch{ return []; }
@@ -427,15 +466,47 @@ function setStoredTemplates(arr){
 
 function loadTemplatesForUser(user, docType){
   if(!user) return [];
-  return getStoredTemplates().filter(t => t.username === user && t.documentTypeId === docType);
+  const all = getStoredTemplates().map(normalizeTemplate);
+  return all.filter(t => t.username === user && t.documentTypeId === docType);
+}
+
+function remapProfileFieldKeys(profile, mapping = {}, templateFields = []){
+  if(!profile || !mapping || !Object.keys(mapping).length) return false;
+  let changed = false;
+  const templateByKey = Object.fromEntries((templateFields || []).map(f => [f.fieldKey, f]));
+  const mapKey = key => {
+    if(mapping[key]){ changed = true; return mapping[key]; }
+    return key;
+  };
+  if(Array.isArray(profile.fields)){
+    profile.fields.forEach(f => {
+      const newKey = mapKey(f.fieldKey);
+      if(newKey !== f.fieldKey) f.fieldKey = newKey;
+      const tpl = templateByKey[newKey];
+      if(tpl){
+        const nextLabel = tpl.label || tpl.name || tpl.fieldKey;
+        if(f.label !== nextLabel) f.label = nextLabel;
+        if(!f.type) f.type = tpl.type || ((tpl.fieldType || tpl.type) === 'dynamic' ? 'column' : 'static');
+      }
+    });
+  }
+  if(profile.tableHints){
+    const cols = profile.tableHints.columns || {};
+    Object.values(cols).forEach(col => { if(col?.fieldKey) col.fieldKey = mapKey(col.fieldKey); });
+    if(profile.tableHints.rowAnchor?.fieldKey){
+      profile.tableHints.rowAnchor.fieldKey = mapKey(profile.tableHints.rowAnchor.fieldKey);
+    }
+  }
+  return changed;
 }
 
 function persistTemplate(user, docType, template){
   const templates = getStoredTemplates();
   const idx = templates.findIndex(t => t.id === template.id);
-  const normalized = { ...template, username: user, documentTypeId: docType };
-  if(idx >= 0) templates[idx] = normalized; else templates.push(normalized);
-  setStoredTemplates(templates);
+  const normalized = normalizeTemplate({ ...template, username: user, documentTypeId: docType });
+  const nextTemplates = templates.map(normalizeTemplate);
+  if(idx >= 0) nextTemplates[idx] = normalized; else nextTemplates.push(normalized);
+  setStoredTemplates(nextTemplates);
   return normalized;
 }
 
@@ -2047,15 +2118,19 @@ function ensureProfile(){
   if(state.profile && state.profile.wizardId === wizardId) return;
 
   const existing = loadProfile(state.username, state.docType, wizardId);
-  const template = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
+  const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
+  const template = normalizeTemplate(templateRaw);
   const templateFields = template ? (template.fields || []).map(f => ({
-    fieldKey: f.id,
-    label: f.name,
+    fieldId: f.id,
+    fieldKey: f.fieldKey,
+    label: f.name || f.fieldKey,
     type: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'static',
     kind: (f.fieldType || 'static') === 'dynamic' ? 'block' : 'value',
     mode: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'cell',
     order: f.order || 0
   })) : [];
+  const remapById = template ? Object.fromEntries((template.fields || []).map(f => [f.id, f.fieldKey])) : {};
+  if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
 
   state.profile = existing || {
     username: state.username,
@@ -2350,8 +2425,9 @@ const DEFAULT_FIELDS = [
 ];
 
 function generateQuestionsFromTemplate(template){
-  if(!template) return [];
-  const sorted = (template.fields || []).slice().sort((a,b)=>{
+  const normalized = normalizeTemplate(template);
+  if(!normalized) return [];
+  const sorted = (normalized.fields || []).slice().sort((a,b)=>{
     const typeA = (a.fieldType || 'static').toLowerCase();
     const typeB = (b.fieldType || 'static').toLowerCase();
     if(typeA !== typeB){ return typeA === 'static' ? -1 : 1; }
@@ -2360,8 +2436,8 @@ function generateQuestionsFromTemplate(template){
   const total = sorted.length || 0;
   return sorted.map((f, idx) => ({
     fieldId: f.id,
-    fieldKey: f.id,
-    name: f.name,
+    fieldKey: f.fieldKey,
+    name: f.name || f.fieldKey,
     fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic' ? 'dynamic' : 'static',
     prompt: `Please highlight the ${f.name}`,
     order: idx + 1,
@@ -2413,7 +2489,7 @@ function initStepsFromActiveWizard(){
     initStepsFromProfile();
     return;
   }
-  const template = getWizardTemplateById(wizardId);
+  const template = normalizeTemplate(getWizardTemplateById(wizardId));
   if(!template){
     state.activeWizardId = DEFAULT_WIZARD_ID;
     initStepsFromProfile();
@@ -2444,6 +2520,13 @@ function renderBuilderFields(){
     idxBadge.className = 'field-index';
     idxBadge.textContent = `Field ${idx + 1}`;
 
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'delete-field-btn';
+    deleteBtn.title = 'Delete field';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', ()=> removeBuilderField(idx));
+
     const typeSel = document.createElement('select');
     typeSel.className = 'field-type';
     ['static','dynamic'].forEach(opt => {
@@ -2463,6 +2546,7 @@ function renderBuilderFields(){
     row.appendChild(idxBadge);
     row.appendChild(typeSel);
     row.appendChild(nameInput);
+    row.appendChild(deleteBtn);
     list.appendChild(row);
   });
   if(els.builderFieldCount) els.builderFieldCount.textContent = String(fields.length);
@@ -2473,7 +2557,7 @@ function renderBuilderFields(){
 
 function ensureBuilderField(){
   if(state.builderFields && state.builderFields.length) return;
-  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1 }];
+  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1, fieldKey: '' }];
 }
 
 function addBuilderField(){
@@ -2483,17 +2567,26 @@ function addBuilderField(){
     return;
   }
   const nextOrder = state.builderFields.length + 1;
-  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder });
+  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder, fieldKey: '' });
+  renderBuilderFields();
+}
+
+function removeBuilderField(idx){
+  if(!Array.isArray(state.builderFields)) state.builderFields = [];
+  if(idx < 0 || idx >= state.builderFields.length) return;
+  state.builderFields.splice(idx, 1);
+  state.builderFields.forEach((f, i) => { f.order = i + 1; });
   renderBuilderFields();
 }
 
 function openBuilder(template=null){
   resetBuilderErrors();
   if(template){
-    state.builderEditingId = template.id;
-    const sortedFields = (template.fields || []).slice().sort((a,b)=> (a.order||0) - (b.order||0));
+    const normalizedTemplate = normalizeTemplate(template);
+    state.builderEditingId = normalizedTemplate.id;
+    const sortedFields = (normalizedTemplate.fields || []).slice().sort((a,b)=> (a.order||0) - (b.order||0));
     state.builderFields = sortedFields.map(f => ({ ...f }));
-    if(els.builderNameInput) els.builderNameInput.value = template.wizardName || '';
+    if(els.builderNameInput) els.builderNameInput.value = normalizedTemplate.wizardName || '';
   } else {
     state.builderEditingId = null;
     if(els.builderNameInput) els.builderNameInput.value = '';
@@ -2515,11 +2608,19 @@ function closeBuilder(){
 function saveBuilderTemplate(){
   resetBuilderErrors();
   const name = (els.builderNameInput?.value || '').trim();
-  const normalizedFields = (state.builderFields || []).map((f, idx) => ({
+  const preparedFields = (state.builderFields || []).map((f, idx) => ({
+    ...f,
     id: f.id || genId('field'),
     name: (f.name || '').trim(),
     fieldType: (f.fieldType || 'static') === 'dynamic' ? 'dynamic' : 'static',
     order: idx + 1
+  }));
+  const normalizedFields = normalizeTemplateFields(preparedFields).map(f => ({
+    id: f.id || genId('field'),
+    name: f.name,
+    fieldType: f.fieldType,
+    order: f.order,
+    fieldKey: f.fieldKey
   }));
   const hasName = !!name;
   const hasFields = normalizedFields.length > 0;
@@ -6579,8 +6680,9 @@ function renderResultsTable(){
   db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
   const keys = Array.from(keySet);
   const showRaw = state.modes.rawData || els.showRawToggle?.checked;
+  const labelMap = getFieldLabelMap();
 
-  const thead = `<tr><th>file</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>line items</th></tr>`;
+  const thead = `<tr><th>file</th>${keys.map(k=>`<th>${labelMap[k] || k}</th>`).join('')}<th>line items</th></tr>`;
   const rows = db.map(r=>{
     const rowClass = r.fileId === state.selectedRunId ? 'results-selected' : '';
     const cells = keys.map(k=>{
@@ -6821,18 +6923,32 @@ function ensureAnchorFor(fieldKey){
     saveProfile(state.username, state.docType, state.profile);
   }
 }
+
+function getFieldLabelMap(){
+  const map = {};
+  (state.profile?.fields || []).forEach(f => {
+    map[f.fieldKey] = f.label || f.name || f.fieldKey;
+  });
+  return map;
+}
+
+function getFieldLabel(key){
+  const map = getFieldLabelMap();
+  return map[key] || key;
+}
 function renderSavedFieldsTable(){
   const wizardId = currentWizardId();
   const db = LS.getDb(state.username, state.docType, wizardId);
   const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
   state.savedFieldsRecord = latest || null;
   const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+  const labelMap = getFieldLabelMap();
   const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
     .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
   if(!fields.length){
     els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
   } else {
-    const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${f.fieldKey}</th>`).join('')}</tr>`;
+    const thead = `<tr>${fields.map(f=>`<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border)">${labelMap[f.fieldKey] || f.fieldKey}</th>`).join('')}</tr>`;
     const row = `<tr>${fields.map(f=>`<td style="padding:6px;border-bottom:1px solid var(--border)">${(f.value||'').toString().replace(/</g,'&lt;')}</td>`).join('')}</tr>`;
     els.fieldsPreview.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${row}</tbody></table></div>`;
   }
@@ -6857,13 +6973,15 @@ function renderConfirmedTables(rec){
     if(fDiv){
       const typeMap = {};
       (state.profile?.fields||[]).forEach(f=>{ typeMap[f.fieldKey]=f.type; });
+      const labelMap = getFieldLabelMap();
       const statics = Object.entries(latest?.fields||{}).filter(([k,v])=>typeMap[k]==='static' && v.value);
       if(!statics.length){ fDiv.innerHTML = '<p class="sub">No fields yet.</p>'; }
       else {
         const rows = statics.map(([k,f])=>{
           const warn = (f.confidence||0) < 0.8 || (f.correctionsApplied&&f.correctionsApplied.length) ? '<span class="warn">⚠️</span>' : '';
           const conf = `<span class="confidence">${Math.round((f.confidence||0)*100)}%</span>`;
-          return `<tr><td>${k}</td><td><input class="confirmEdit" data-field="${k}" value="${f.value}"/>${warn}${conf}</td></tr>`;
+          const label = labelMap[k] || k;
+          return `<tr><td>${label}</td><td><input class="confirmEdit" data-field="${k}" value="${f.value}"/>${warn}${conf}</td></tr>`;
         }).join('');
         fDiv.innerHTML = `<table class="line-items-table"><tbody>${rows}</tbody></table>`;
         fDiv.querySelectorAll('input.confirmEdit').forEach(inp=>inp.addEventListener('change',()=>{
