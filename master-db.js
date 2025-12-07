@@ -299,8 +299,45 @@
     const allItems = selected.flatMap(r => r.items);
 
     inferLineCalculations(allItems);
-    const usableRowCount = computeUsableRows(allItems);
-    const syntheticLineNo = synthesizeLineNumbers(allItems);
+    let usableRowCount = computeUsableRows(allItems);
+    let syntheticLineNo = synthesizeLineNumbers(allItems);
+
+    const totalsInfo = selected.map(entry => {
+      const recordTotals = entry.record?.totals || {};
+      const subtotal = entry.invoice.subtotal || cleanNumeric(recordTotals.subtotal);
+      const total = entry.invoice.total || cleanNumeric(recordTotals.total);
+      return { entry, subtotal, total };
+    });
+
+    const hasStaticTotals = totalsInfo.some(info => info.subtotal || info.total);
+    let singleItemFallback = false;
+
+    if(usableRowCount === 0 && hasStaticTotals){
+      const sourceTotals = totalsInfo.find(info => info.subtotal || info.total);
+      const amountValue = sourceTotals?.subtotal || sourceTotals?.total;
+      if(amountValue){
+        const syntheticItem = {
+          original: null,
+          sku: '',
+          description: 'Primary Item (single-item contract)',
+          quantity: '1.00',
+          unitPrice: amountValue,
+          amount: amountValue,
+          lineNo: '1',
+          missing: {},
+          rowNumber: 1,
+          _synthetic: 'single_item_total'
+        };
+        sourceTotals.entry.items.push(syntheticItem);
+        allItems.push(syntheticItem);
+        singleItemFallback = true;
+        console.log('[MasterDB] synthetic single-item row generated from static totals');
+
+        inferLineCalculations(allItems);
+        usableRowCount = computeUsableRows(allItems);
+        syntheticLineNo = synthesizeLineNumbers(allItems);
+      }
+    }
 
     const counts = {
       sku_count: allItems.filter(it => it.sku !== '').length,
@@ -308,7 +345,9 @@
       price_count: allItems.filter(it => it.unitPrice !== '').length,
       line_no_count: allItems.filter(it => it.lineNo !== '').length,
       usable_row_count: usableRowCount,
-      synthetic_line_no: syntheticLineNo.synthetic
+      synthetic_line_no: syntheticLineNo.synthetic,
+      static_totals_present: hasStaticTotals,
+      single_item_fallback: singleItemFallback
     };
 
     const firstItem = allItems[0]?.original || null;

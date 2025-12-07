@@ -73,6 +73,28 @@ assert.strictEqual(csv1.split('\n').length, rows.length);
 
 assert.throws(() => MasterDB.toCsv({ fields: {}, lineItems: [] }), /Exporter input empty—SSOT not wired./);
 
+const totalsOnly = {
+  fields: {
+    invoice_total: { value: '250' },
+    subtotal_amount: { value: '250' }
+  },
+  lineItems: []
+};
+
+const { rows: totalsOnlyRows, missingMap: totalsOnlyMissing } = MasterDB.flatten(totalsOnly);
+assert.strictEqual(totalsOnlyRows.length, 2);
+assert.strictEqual(totalsOnlyRows[1][8], 'Primary Item (single-item contract)');
+assert.strictEqual(totalsOnlyRows[1][9], '1.00');
+assert.strictEqual(totalsOnlyRows[1][10], '250.00');
+assert.strictEqual(totalsOnlyRows[1][11], '250.00');
+assert.strictEqual(totalsOnlyRows[1][18], '1');
+assert.deepStrictEqual(totalsOnlyMissing.summary, {
+  sku: [1],
+  quantity: [],
+  unit_price: [],
+  line_no: []
+});
+
 const noisyLineItems = [];
 for(let i = 1; i <= 8; i++){
   noisyLineItems.push({
