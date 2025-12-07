@@ -87,6 +87,57 @@
     }));
   }
 
+  function markSyntheticZeroItems(items){
+    const isNumericFilled = item => {
+      return ['quantity', 'unitPrice', 'amount'].some(key => {
+        const value = item[key];
+        if(value === '') return false;
+        const parsed = parseFloat(value);
+        return !isNaN(parsed) && isFinite(parsed);
+      });
+    };
+
+    const looksLikeHeader = description => {
+      const trimmed = description.trim();
+      if(!trimmed) return true;
+      const normalized = trimmed.toLowerCase();
+      const headerWords = new Set(['item', 'description', 'qty', 'quantity', 'unit', 'price', 'amount', 'total']);
+      if(headerWords.has(normalized)) return true;
+      if(normalized.length <= 2) return true;
+      return false;
+    };
+
+    const hasNumericFlags = items.map(isNumericFilled);
+
+    items.forEach((item, idx) => {
+      if(item.synthetic_zero) return;
+      const hasDescription = item.description !== '';
+      if(!hasDescription || looksLikeHeader(item.description)) return;
+      const hasNumeric = hasNumericFlags[idx];
+      if(hasNumeric) return;
+
+      const neighbors = [idx - 1, idx + 1]
+        .filter(i => i >= 0 && i < items.length)
+        .map(i => ({ idx: i, item: items[i], hasNumeric: hasNumericFlags[i] }));
+      const candidateNeighbors = neighbors.filter(entry => entry.hasNumeric);
+      if(!candidateNeighbors.length) return;
+
+      const thisRow = typeof item.rowNumber === 'number' ? item.rowNumber : (idx + 1);
+      const closeNeighbor = candidateNeighbors.some(({ item: neighbor, idx: neighborIdx }) => {
+        const neighborRow = typeof neighbor.rowNumber === 'number' ? neighbor.rowNumber : (neighborIdx + 1);
+        return Math.abs(thisRow - neighborRow) <= 1;
+      });
+      if(!closeNeighbor) return;
+
+      if(item.quantity === '') item.quantity = '1.00';
+      if(item.unitPrice === '') item.unitPrice = '0.00';
+      if(item.amount === '') item.amount = '0.00';
+      item.synthetic_zero = true;
+    });
+
+    return items;
+  }
+
   function summarizeDynamicCounts(items){
     const counts = {};
     DYNAMIC_ITEM_KEYS.forEach(key => {
@@ -283,7 +334,7 @@
     const prepared = records.map(record => ({
       record,
       invoice: buildInvoiceCells(record),
-      items: prepareItems(record)
+      items: markSyntheticZeroItems(prepareItems(record))
     }));
 
     const selected = prepared.map(entry => {
@@ -339,6 +390,9 @@
       }
     }
 
+    const syntheticZeroCount = allItems.filter(it => it.synthetic_zero).length;
+    const zeroPriceCount = allItems.filter(it => it.unitPrice === '0.00' && it.amount === '0.00').length;
+
     const counts = {
       sku_count: allItems.filter(it => it.sku !== '').length,
       qty_count: allItems.filter(it => it.quantity !== '').length,
@@ -346,6 +400,8 @@
       line_no_count: allItems.filter(it => it.lineNo !== '').length,
       usable_row_count: usableRowCount,
       synthetic_line_no: syntheticLineNo.synthetic,
+      synthetic_zero_count: syntheticZeroCount,
+      zero_price_row_count: zeroPriceCount,
       static_totals_present: hasStaticTotals,
       single_item_fallback: singleItemFallback
     };
