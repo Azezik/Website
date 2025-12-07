@@ -109,3 +109,13 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .modal-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
 .modal-controls{ margin-bottom:8px; }
 .log-viewer{ width:100%; min-height:260px; max-height:55vh; background:#0b1111; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:12px; white-space:pre-wrap; overflow:auto; font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* Custom Wizard Builder */
+#builder-section .builder-header{ display:flex; align-items:center; gap:12px; }
+.custom-fields{ display:flex; flex-direction:column; gap:10px; width:100%; }
+.custom-field-row{ display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px; border-radius:12px; background:#111; border:1px solid #1f1f1f; box-shadow:0 2px 10px rgba(0,0,0,0.35); }
+.custom-field-row label{ color:#cdd0d5; min-width:68px; }
+.custom-field-row select, .custom-field-row input{ flex:1; min-width:140px; }
+.custom-field-row .field-index{ display:inline-flex; align-items:center; justify-content:center; background:#20242c; border-radius:999px; padding:6px 10px; font-size:13px; font-weight:600; letter-spacing:0.3px; color:#dfe8ff; }
+.custom-field-row .field-type{ max-width:160px; }
+.custom-field-row .field-name{ flex:1; min-width:200px; }

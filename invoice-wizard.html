@@ -81,6 +81,7 @@
               <label>Quick Actions</label>
               <div class="actions">
                 <button id="configure-btn" class="btn">Configure Wizard</button>
+                <button id="configure-custom-btn" class="btn">Configure Custom Wizard</button>
                 <button id="new-wizard-btn" class="btn" style="display:none">New Wizard</button>
                 <button id="demo-btn" class="btn">Demo Wizard</button>
                 <button id="static-debug-btn" class="btn" type="button">Static Debug Logs</button>
@@ -187,15 +188,40 @@
           </div>
         </section>
 
-        <section id="reports" class="panel" style="display:none">
-          <p class="sub">Reports coming soon.</p>
-        </section>
+      <section id="reports" class="panel" style="display:none">
+        <p class="sub">Reports coming soon.</p>
       </section>
+    </section>
 
-      <div id="staticDebugModal" class="modal" style="display:none;">
-        <div class="modal-content panel">
-          <div class="modal-header">
-            <h3>Static Debug Logs</h3>
+    <section id="builder-section" class="panel" style="display:none;">
+      <h2>Build Your Wizard</h2>
+      <p class="sub">Name your wizard and add fields (Static or Dynamic). Static fields are captured as single values; Dynamic fields behave like dynamic columns.</p>
+      <div class="field">
+        <label for="custom-wizard-name">Wizard Name <span class="req">*</span></label>
+        <input id="custom-wizard-name" placeholder="e.g., CIBC BANK STATEMENTS" />
+        <p class="sub" id="wizard-name-error" style="display:none;color:#ffb347;">Please give your wizard a name.</p>
+      </div>
+
+      <div class="field" style="flex-direction:column;align-items:flex-start;gap:12px;">
+        <div class="builder-header">
+          <strong>Total fields: <span id="custom-field-count">0</span></strong>
+          <span id="field-limit-msg" class="sub" style="color:#ffb347;display:none;">Max number of Fields reached.</span>
+        </div>
+        <div id="custom-fields-list" class="custom-fields"></div>
+        <p class="sub" id="field-name-error" style="display:none;color:#ffb347;">Please name all of your fields.</p>
+      </div>
+
+      <div class="actions" style="justify-content:flex-start;gap:12px;flex-wrap:wrap;">
+        <button id="add-custom-field" class="btn" type="button">Add Field</button>
+        <button id="save-custom-wizard" class="btn" type="button">Save Custom Wizard</button>
+        <button id="cancel-custom-wizard" class="btn" type="button">Cancel</button>
+      </div>
+    </section>
+
+    <div id="staticDebugModal" class="modal" style="display:none;">
+      <div class="modal-content panel">
+        <div class="modal-header">
+          <h3>Static Debug Logs</h3>
             <button id="closeStaticDebug" class="btn" type="button">Close</button>
           </div>
           <div class="modal-controls">
