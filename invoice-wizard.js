@@ -6636,6 +6636,29 @@ function compileDocument(fileId, lineItems){
   if((!hasExplicitLineItems || !items.length) && state.currentFileId === fileId && Array.isArray(state.currentLineItems) && state.currentLineItems.length){
     items = state.currentLineItems;
   }
+  const profileFields = state.profile?.fields || [];
+  const hasDynamicColumns = profileFields.some(f => (f.type || f.fieldType) === 'column' || (f.fieldType || f.type) === 'dynamic');
+  if(!hasDynamicColumns && (!items || !items.length)){
+    const pickAmount = () => {
+      const total = parseFloat(byKey['invoice_total']?.value);
+      if(isFinite(total)) return total.toFixed(2);
+      const subtotal = parseFloat(byKey['subtotal_amount']?.value);
+      if(isFinite(subtotal)) return subtotal.toFixed(2);
+      return '0.00';
+    };
+    const amountVal = pickAmount();
+    const desc = cleanScalar(byKey['store_name']?.value) || cleanScalar(byKey['invoice_number']?.value) || 'Invoice';
+    items = [{
+      sku: '',
+      description: desc,
+      quantity: '1',
+      unit_price: amountVal,
+      amount: amountVal,
+      line_no: '1',
+      __synthetic: 'static_only_invoice'
+    }];
+    // Custom Wizard/static-only path: synthesize a single item so master-db.flatten can export without dynamic columns.
+  }
   let existingIdx = findExistingIndex();
   if((!items || !items.length) && existingIdx >= 0){
     const prevItems = db[existingIdx]?.lineItems;
