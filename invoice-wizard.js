@@ -282,6 +282,10 @@ let state = {
   debugLineAnchors: [],
   builderFields: [],
   builderEditingId: null,
+  canonicalSsotSnapshot: null,
+  customFieldRemap: {},
+  customDisplayLabels: {},
+  customCanonicalFieldKeys: [],
 };
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
@@ -581,6 +585,86 @@ function extractFileIdFromRow(row){
   return cells[fileIdx] || '';
 }
 
+function canonicalFieldKeys(){
+  if(state.canonicalSsotSnapshot?.fieldKeys?.length) return state.canonicalSsotSnapshot.fieldKeys;
+  if(state.customCanonicalFieldKeys?.length) return state.customCanonicalFieldKeys;
+  return DEFAULT_FIELDS.map(f => f.fieldKey);
+}
+
+function canonicalLineItemKeys(){
+  const fallback = ['sku','description','quantity','unit_price','amount','line_no'];
+  if(state.canonicalSsotSnapshot?.lineItemKeys?.length){
+    const filtered = state.canonicalSsotSnapshot.lineItemKeys.filter(k => fallback.includes(k));
+    if(filtered.length) return filtered;
+  }
+  return fallback;
+}
+
+function captureDefaultSsotSnapshot(record){
+  if(!record || currentWizardId() !== DEFAULT_WIZARD_ID) return;
+  const lineItemKeys = new Set();
+  (record.lineItems || []).forEach(it => Object.keys(it || {}).forEach(k => lineItemKeys.add(k)));
+  if(!lineItemKeys.size){ canonicalLineItemKeys().forEach(k => lineItemKeys.add(k)); }
+  const snapshot = {
+    record: clonePlain(record),
+    fieldKeys: Object.keys(record.fields || {}),
+    lineItemKeys: Array.from(lineItemKeys),
+    templateKey: record.templateKey || ''
+  };
+  state.canonicalSsotSnapshot = snapshot;
+  console.log('[MasterDB] canonical SSOT shape', { fieldKeys: snapshot.fieldKeys, lineItemKeys: snapshot.lineItemKeys });
+}
+
+function normalizeCustomRecordForMasterDb(record, { hasDynamicColumns = false, amountPicker } = {}){
+  if(!record || currentWizardId() === DEFAULT_WIZARD_ID) return record;
+  const fieldKeys = canonicalFieldKeys();
+  const remap = state.customFieldRemap || {};
+  const displayLabels = state.customDisplayLabels || {};
+  const fields = {};
+
+  fieldKeys.forEach(key => {
+    const altSources = Object.entries(remap)
+      .filter(([, target]) => target === key)
+      .map(([src]) => src);
+    const sourceKey = [key, ...altSources].find(k => record.fields?.[k]);
+    const source = sourceKey ? record.fields?.[sourceKey] : null;
+    const next = source ? { ...source } : { value:'', raw:'', confidence:0, tokens:[] };
+    if(displayLabels[key]) next.label = displayLabels[key];
+    fields[key] = next;
+  });
+
+  const lineKeys = canonicalLineItemKeys();
+  let lineItems = (record.lineItems || []).map((it, idx) => {
+    const normalized = {};
+    lineKeys.forEach(k => {
+      let val = it[k];
+      if(val === undefined && k === 'unit_price') val = it.unitPrice;
+      if(val === undefined && k === 'line_no') val = it.lineNo;
+      normalized[k] = val !== undefined && val !== null ? val : '';
+    });
+    normalized.missing = it.missing || {};
+    normalized.__rowNumber = it.__rowNumber;
+    if(!normalized.line_no) normalized.line_no = String(idx + 1);
+    return normalized;
+  });
+
+  if(!hasDynamicColumns && (!lineItems.length)){
+    const amountVal = typeof amountPicker === 'function' ? amountPicker(fields) : '';
+    const desc = ((fields['store_name']?.value || fields['invoice_number']?.value || 'Invoice') || '').toString().trim() || 'Invoice';
+    lineItems = [{
+      sku: '',
+      description: desc,
+      quantity: '',
+      unit_price: '',
+      amount: amountVal || '',
+      line_no: '1',
+      missing: {}
+    }];
+  }
+
+  return { ...record, fields, lineItems };
+}
+
 function buildMasterDbRowsFromRecord(record){
   try {
     const { rows } = MasterDB.flatten(record);
@@ -607,6 +691,9 @@ function refreshMasterDbRowsStore(db, compiled){
   let rows = hadRows ? (LS.getRows(user, dt, wizardId) || []) : [];
   if(!hadRows && Array.isArray(db)){
     rows = rebuildMasterDbRows(db);
+  }
+  if(compiled && wizardId === DEFAULT_WIZARD_ID){
+    captureDefaultSsotSnapshot(compiled);
   }
   const builtRows = compiled ? buildMasterDbRowsFromRecord(compiled) : [];
   const targetFile = compiled?.fileId;
@@ -2156,6 +2243,16 @@ function ensureProfile(){
   const template = normalizeTemplate(templateRaw);
   const { fields: templateFields, keyMap: remapById } = template ? mapTemplateFieldsToDefaults(template) : { fields: [], keyMap: {} };
   if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
+
+  if(wizardId === DEFAULT_WIZARD_ID){
+    state.customFieldRemap = {};
+    state.customDisplayLabels = {};
+    state.customCanonicalFieldKeys = [];
+  } else {
+    state.customFieldRemap = remapById || {};
+    state.customDisplayLabels = Object.fromEntries((templateFields || []).map(f => [f.fieldKey, f.label || f.name || f.fieldKey]));
+    state.customCanonicalFieldKeys = (templateFields || []).map(f => f.fieldKey);
+  }
 
   state.profile = existing || {
     username: state.username,
@@ -6607,6 +6704,7 @@ function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
   const byKey = {};
   const wizardId = currentWizardId();
+  const isCustomWizard = wizardId !== DEFAULT_WIZARD_ID;
   if(!state.snapshotMode){ state.lastSnapshotManifestId = ''; }
   state.selectedRunId = fileId || state.selectedRunId;
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
@@ -6617,6 +6715,17 @@ function compileDocument(fileId, lineItems){
     if(val === undefined || val === null) return '';
     if(typeof val === 'string') return val.replace(/\s+/g,' ').trim();
     return String(val);
+  };
+  const normalizeMoney = val => {
+    const num = parseFloat(val);
+    return Number.isFinite(num) ? num.toFixed(2) : '';
+  };
+  const pickAmountFromFields = (fieldsMap) => {
+    const total = normalizeMoney(fieldsMap?.invoice_total?.value);
+    if(total) return total;
+    const subtotal = normalizeMoney(fieldsMap?.subtotal_amount?.value);
+    if(subtotal) return subtotal;
+    return '';
   };
   const sub = parseFloat(byKey['subtotal_amount']?.value);
   const tax = parseFloat(byKey['tax_amount']?.value);
@@ -6639,25 +6748,17 @@ function compileDocument(fileId, lineItems){
   const profileFields = state.profile?.fields || [];
   const hasDynamicColumns = profileFields.some(f => (f.type || f.fieldType) === 'column' || (f.fieldType || f.type) === 'dynamic');
   if(!hasDynamicColumns && (!items || !items.length)){
-    const pickAmount = () => {
-      const total = parseFloat(byKey['invoice_total']?.value);
-      if(isFinite(total)) return total.toFixed(2);
-      const subtotal = parseFloat(byKey['subtotal_amount']?.value);
-      if(isFinite(subtotal)) return subtotal.toFixed(2);
-      return '0.00';
-    };
-    const amountVal = pickAmount();
+    const amountVal = pickAmountFromFields(byKey) || (isCustomWizard ? '' : '0.00');
     const desc = cleanScalar(byKey['store_name']?.value) || cleanScalar(byKey['invoice_number']?.value) || 'Invoice';
     items = [{
       sku: '',
       description: desc,
-      quantity: '1',
-      unit_price: amountVal,
+      quantity: isCustomWizard ? '' : '1',
+      unit_price: isCustomWizard ? '' : amountVal,
       amount: amountVal,
       line_no: '1',
-      __synthetic: 'static_only_invoice'
+      __synthetic: isCustomWizard ? undefined : 'static_only_invoice'
     }];
-    // Custom Wizard/static-only path: synthesize a single item so master-db.flatten can export without dynamic columns.
   }
   let existingIdx = findExistingIndex();
   if((!items || !items.length) && existingIdx >= 0){
@@ -6705,19 +6806,22 @@ function compileDocument(fileId, lineItems){
       byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
     }
   }
-  existingIdx = findExistingIndex();
-  const invNum = compiled.invoice.number;
-  const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
-  if(idx>=0) db[idx] = compiled; else db.push(compiled);
   if(state.lastSnapshotManifestId){
     compiled.snapshotManifestId = state.lastSnapshotManifestId;
   }
+  const targetRecord = isCustomWizard
+    ? normalizeCustomRecordForMasterDb(compiled, { hasDynamicColumns, amountPicker: pickAmountFromFields })
+    : compiled;
+  existingIdx = findExistingIndex();
+  const invNum = targetRecord.invoice.number;
+  const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === targetRecord.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
+  if(idx>=0) db[idx] = targetRecord; else db.push(targetRecord);
   LS.setDb(state.username, state.docType, db, wizardId);
-  refreshMasterDbRowsStore(db, compiled);
+  refreshMasterDbRowsStore(db, targetRecord);
   renderResultsTable();
   renderTelemetry();
   renderReports();
-  return compiled;
+  return targetRecord;
 }
 
 function renderResultsTable(){
