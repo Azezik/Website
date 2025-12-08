@@ -449,10 +449,44 @@ function normalizeTemplateFields(fields){
   });
 }
 
+function deriveMasterDbSchema(fields){
+  const sorted = (fields || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  return sorted
+    .filter(f => (f.fieldType || f.type || 'static') === 'static')
+    .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
+}
+
+function normalizeMasterDbConfig(config, fields){
+  const staticFields = deriveMasterDbSchema(fields);
+  const includeLineItems = !!config?.includeLineItems;
+  const isCustomMasterDb = !!config?.isCustomMasterDb;
+  const lineItemFields = Array.isArray(config?.lineItemFields)
+    ? config.lineItemFields.map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }))
+    : [];
+  return { isCustomMasterDb, staticFields, includeLineItems, lineItemFields };
+}
+
 function normalizeTemplate(template){
   if(!template) return template;
   const fields = normalizeTemplateFields(template.fields);
-  return { ...template, fields };
+  const masterDbConfig = normalizeMasterDbConfig(template.masterDbConfig || template, fields);
+  return { ...template, fields, masterDbConfig, isCustomMasterDb: !!masterDbConfig.isCustomMasterDb };
+}
+
+function buildMasterDbConfigFromProfile(profile, templateConfig){
+  const fields = profile?.fields || [];
+  const baseStaticFields = deriveMasterDbSchema(fields);
+  const includeLineItems = templateConfig?.includeLineItems ?? profile?.masterDbConfig?.includeLineItems ?? fields.some(f => (f.type || f.fieldType) === 'column');
+  const isCustomMasterDb = templateConfig?.isCustomMasterDb ?? profile?.masterDbConfig?.isCustomMasterDb ?? false;
+  const lineItemFields = Array.isArray(templateConfig?.lineItemFields)
+    ? templateConfig.lineItemFields
+    : Array.isArray(profile?.masterDbConfig?.lineItemFields) ? profile.masterDbConfig.lineItemFields : [];
+  return {
+    isCustomMasterDb: !!isCustomMasterDb,
+    includeLineItems: !!includeLineItems,
+    staticFields: baseStaticFields,
+    lineItemFields
+  };
 }
 
 function getStoredTemplates(){
@@ -531,8 +565,14 @@ const LS = {
     },
   setDb(u, d, arr, wizardId = DEFAULT_WIZARD_ID){ localStorage.setItem(this.dbKey(u, d, wizardId), JSON.stringify(arr)); },
   hasRows(u, d, wizardId = DEFAULT_WIZARD_ID){ return localStorage.getItem(this.rowsKey(u, d, wizardId)) !== null; },
-  getRows(u, d, wizardId = DEFAULT_WIZARD_ID){ const raw = localStorage.getItem(this.rowsKey(u, d, wizardId)); return raw ? JSON.parse(raw) : []; },
-  setRows(u, d, rows, wizardId = DEFAULT_WIZARD_ID){ localStorage.setItem(this.rowsKey(u, d, wizardId), JSON.stringify(rows)); },
+  getRows(u, d, wizardId = DEFAULT_WIZARD_ID){
+    const raw = localStorage.getItem(this.rowsKey(u, d, wizardId));
+    return normalizeRowsPayload(raw ? JSON.parse(raw) : []);
+  },
+  setRows(u, d, rows, wizardId = DEFAULT_WIZARD_ID){
+    const payload = normalizeRowsPayload(rows);
+    localStorage.setItem(this.rowsKey(u, d, wizardId), JSON.stringify(payload));
+  },
   getProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ const raw = localStorage.getItem(this.profileKey(u,d,wizardId)); return raw ? JSON.parse(raw, jsonReviver) : null; },
   setProfile(u,d,p,wizardId = DEFAULT_WIZARD_ID){ localStorage.setItem(this.profileKey(u,d,wizardId), serializeProfile(p)); },
   removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ localStorage.removeItem(this.profileKey(u,d,wizardId)); }
@@ -549,20 +589,25 @@ function extractFileIdFromRow(row){
 
 function buildMasterDbRowsFromRecord(record){
   try {
-    const { rows } = MasterDB.flatten(record);
-    return rows.slice(1).map(r => ({ fileId: record.fileId || record.fileHash || '', cells: r }));
+    const { header, rows } = MasterDB.flatten(record);
+    return {
+      header: Array.isArray(header) ? header : null,
+      rows: rows.map(r => ({ fileId: record.fileId || record.fileHash || '', cells: r }))
+    };
   } catch(err){
     console.error('Failed to build MasterDB rows from record', record?.fileId || record?.fileHash, err);
-    return [];
+    return { header: null, rows: [] };
   }
 }
 
 function rebuildMasterDbRows(db){
-  const rows = [];
+  const aggregate = { header: null, rows: [] };
   (db || []).forEach(rec => {
-    rows.push(...buildMasterDbRowsFromRecord(rec));
+    const built = buildMasterDbRowsFromRecord(rec);
+    if(!aggregate.header && built.header) aggregate.header = built.header;
+    aggregate.rows.push(...built.rows);
   });
-  return rows;
+  return aggregate;
 }
 
 function refreshMasterDbRowsStore(db, compiled){
@@ -570,42 +615,50 @@ function refreshMasterDbRowsStore(db, compiled){
   const user = state.username;
   const wizardId = currentWizardId();
   const hadRows = LS.hasRows(user, dt, wizardId);
-  let rows = hadRows ? (LS.getRows(user, dt, wizardId) || []) : [];
+  let payload = hadRows ? (LS.getRows(user, dt, wizardId) || { header: null, rows: [] }) : { header: null, rows: [] };
+  let rows = payload.rows || [];
+  let header = payload.header;
   if(!hadRows && Array.isArray(db)){
-    rows = rebuildMasterDbRows(db);
+    const rebuilt = rebuildMasterDbRows(db);
+    rows = rebuilt.rows;
+    header = header || rebuilt.header;
   }
-  const builtRows = compiled ? buildMasterDbRowsFromRecord(compiled) : [];
+  const builtRows = compiled ? buildMasterDbRowsFromRecord(compiled) : { header: null, rows: [] };
   const targetFile = compiled?.fileId;
-  if(targetFile && builtRows.length){
+  if(targetFile && builtRows.rows.length){
     rows = rows.filter(r => extractFileIdFromRow(r) !== targetFile);
   }
   if(compiled){
-    rows = rows.concat(builtRows);
+    rows = rows.concat(builtRows.rows);
+    if(!header && builtRows.header) header = builtRows.header;
   }
-  LS.setRows(user, dt, rows, wizardId);
-  return rows;
+  const normalizedHeader = header || MasterDB.HEADERS;
+  const nextPayload = { header: normalizedHeader, rows };
+  LS.setRows(user, dt, nextPayload, wizardId);
+  return nextPayload;
 }
 
 function getOrHydrateMasterRows(user, docType){
   const wizardId = currentWizardId();
-  let rows = LS.getRows(user, docType, wizardId) || [];
-  if(rows.length) return rows;
+  let payload = LS.getRows(user, docType, wizardId) || { header: null, rows: [] };
+  if((payload.rows || []).length) return payload;
   const db = LS.getDb(user, docType, wizardId);
-  if(!db.length) return rows;
-  rows = rebuildMasterDbRows(db);
-  LS.setRows(user, docType, rows, wizardId);
-  return rows;
+  if(!db.length) return payload;
+  payload = rebuildMasterDbRows(db);
+  if(!payload.header) payload.header = MasterDB.HEADERS;
+  LS.setRows(user, docType, payload, wizardId);
+  return payload;
 }
 
 window.dumpMaster = function(){
   const dt = els.dataDocType?.value || state.docType;
-  const rows = getOrHydrateMasterRows(state.username, dt);
-  console.log('[MasterDB rows]', rows);
-  return rows;
+  const payload = getOrHydrateMasterRows(state.username, dt);
+  console.log('[MasterDB rows]', payload);
+  return payload;
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 7;
+const PROFILE_VERSION = 8;
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -742,6 +795,9 @@ const migrations = {
       const allZero = normalized.every(v => v === 0);
       f.configMask = allZero ? [1,1,1,1] : normalized;
     });
+  },
+  7: p => {
+    p.masterDbConfig = buildMasterDbConfigFromProfile(p, p.masterDbConfig || null);
   }
 };
 
@@ -802,6 +858,17 @@ function jsonReviver(key, value){
 
 function serializeProfile(p){
   return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer, 2);
+}
+
+function normalizeRowsPayload(payload){
+  if(!payload) return { header: null, rows: [] };
+  if(Array.isArray(payload)) return { header: null, rows: payload };
+  if(typeof payload === 'object'){
+    const header = Array.isArray(payload.header) ? payload.header : null;
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    return { header, rows };
+  }
+  return { header: null, rows: [] };
 }
 
 let saveTimer=null;
@@ -2237,6 +2304,8 @@ function ensureProfile(){
   state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
+  const templateConfig = template?.masterDbConfig || null;
+  state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig);
   hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
 }
@@ -2636,7 +2705,15 @@ function saveBuilderTemplate(){
   const template = {
     id: state.builderEditingId || genId('wizard'),
     wizardName: name,
-    fields: normalizedFields
+    fields: normalizedFields,
+    masterDbConfig: {
+      isCustomMasterDb: true,
+      includeLineItems: normalizedFields.some(f => f.fieldType === 'dynamic'),
+      staticFields: deriveMasterDbSchema(normalizedFields),
+      lineItemFields: normalizedFields
+        .filter(f => f.fieldType === 'dynamic')
+        .map(f => ({ fieldKey: f.fieldKey, label: f.name || f.fieldKey }))
+    }
   };
   const saved = persistTemplate(state.username, state.docType, template);
   refreshWizardTemplates();
@@ -6638,6 +6715,7 @@ function compileDocument(fileId, lineItems){
       total: byKey['invoice_total']?.value || '',
       discount: byKey['discounts_amount']?.value || ''
     },
+    masterDbConfig: buildMasterDbConfigFromProfile(state.profile, state.profile?.masterDbConfig),
     lineItems: enriched,
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
     warnings: []
@@ -7341,13 +7419,13 @@ function resolveRecordForDocType(docType, preferred){
 
 function downloadMasterDb(record, docType){
   const dt = docType || els.dataDocType?.value || state.docType;
-  const rows = getOrHydrateMasterRows(state.username, dt);
-  if(!rows.length){
+  const payload = getOrHydrateMasterRows(state.username, dt);
+  if(!payload.rows.length){
     alert('No MasterDB rows available for export.');
     return;
   }
   try {
-    const csv = MasterDB.toCsvRows(rows);
+    const csv = MasterDB.toCsvRows(payload);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
