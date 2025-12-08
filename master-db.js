@@ -45,6 +45,15 @@
   const cleanDescription = cleanText;
   const cleanLineNo = cleanText;
 
+  const DEFAULT_LINE_ITEM_COLUMNS = [
+    { key: 'sku', label: 'Item Code (SKU)', cleaner: cleanSku },
+    { key: 'description', label: 'Item Description', cleaner: cleanDescription },
+    { key: 'quantity', label: 'Quantity', cleaner: cleanNumeric },
+    { key: 'unit_price', label: 'Unit Price', cleaner: cleanNumeric, keys: ['unitPrice'] },
+    { key: 'amount', label: 'Line Total', cleaner: cleanNumeric },
+    { key: 'line_no', label: 'Line No', cleaner: cleanLineNo, keys: ['lineNo'] }
+  ];
+
   const DYNAMIC_ITEM_KEYS = ['sku', 'description', 'quantity', 'unitPrice', 'amount'];
   const CORE_DYNAMIC_KEYS = ['sku', 'description', 'quantity'];
 
@@ -52,6 +61,47 @@
     const field = record?.fields?.[key];
     if(field && typeof field === 'object' && 'value' in field) return field.value;
     return field ?? '';
+  }
+
+  function normalizeMasterConfig(record){
+    const cfg = record?.masterDbConfig || {};
+    const staticFields = Array.isArray(cfg.staticFields) ? cfg.staticFields : [];
+    const includeLineItems = !!cfg.includeLineItems;
+    const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
+    const isCustomMasterDb = !!cfg.isCustomMasterDb;
+    return { isCustomMasterDb, includeLineItems, staticFields, lineItemFields };
+  }
+
+  function resolveLineItemColumns(config){
+    if(!config.includeLineItems) return [];
+    const defaultCleanerByKey = Object.fromEntries(DEFAULT_LINE_ITEM_COLUMNS.map(col => [col.key, col.cleaner]));
+    const configured = (config.lineItemFields || [])
+      .map(f => ({ key: f.fieldKey || f.key, label: f.label || f.fieldKey || f.key }))
+      .filter(f => f.key);
+    const base = configured.length ? configured : DEFAULT_LINE_ITEM_COLUMNS;
+    return base.map(col => ({
+      key: col.key,
+      label: col.label || col.key,
+      cleaner: col.cleaner || defaultCleanerByKey[col.key] || cleanText,
+      keys: Array.isArray(col.keys) ? col.keys : []
+    }));
+  }
+
+  function normalizeLineItemValue(item, column){
+    const candidates = [item?.[column.key], ...column.keys.map(k => item?.[k])];
+    const value = candidates.find(v => v !== undefined && v !== null && String(v).trim() !== '') ?? '';
+    if(column.cleaner === cleanNumeric) return cleanNumeric(value);
+    if(column.cleaner === cleanLineNo) return cleanLineNo(value);
+    if(column.cleaner === cleanDescription) return cleanDescription(value);
+    if(column.cleaner === cleanSku) return cleanSku(value);
+    if(typeof column.cleaner === 'function') return column.cleaner(value);
+    return cleanText(value);
+  }
+
+  function buildStaticValues(record, staticFields){
+    const fields = Array.isArray(staticFields) ? staticFields : [];
+    if(!fields.length) return [];
+    return fields.map(f => cleanText(extractFieldValue(record, f.fieldKey)));
   }
 
   function buildInvoiceCells(record){
@@ -329,8 +379,40 @@
     return Array.from(unique);
   }
 
+  function flattenCustom(records, config){
+    const safeRecords = Array.isArray(records) ? records.filter(Boolean) : [];
+    const staticFields = Array.isArray(config.staticFields) ? config.staticFields : [];
+    const staticHeader = staticFields.map(f => f.label || f.fieldKey);
+    const lineItemColumns = resolveLineItemColumns(config);
+    const header = [...staticHeader, ...lineItemColumns.map(c => c.label), 'File ID'];
+    const rows = [];
+
+    safeRecords.forEach(record => {
+      const baseValues = buildStaticValues(record, staticFields);
+      const fileId = record?.fileId || record?.fileHash || '';
+      if(config.includeLineItems && Array.isArray(record?.lineItems) && record.lineItems.length){
+        record.lineItems.forEach((item, idx) => {
+          const lined = col => (col.key === 'line_no' ? (item?.line_no || item?.lineNo || String(idx + 1)) : null);
+          const enhancedLineValues = lineItemColumns.map(col => {
+            const raw = lined(col);
+            return raw !== null ? cleanLineNo(raw) : normalizeLineItemValue(item, col);
+          });
+          rows.push([...baseValues, ...enhancedLineValues, fileId]);
+        });
+      } else {
+        rows.push([...baseValues, fileId]);
+      }
+    });
+
+    return { header, rows, missingMap: {} };
+  }
+
   function flatten(ssot){
     const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
+    const config = normalizeMasterConfig(records[0]);
+    if(config.isCustomMasterDb){
+      return flattenCustom(records, config);
+    }
     const prepared = records.map(record => ({
       record,
       invoice: buildInvoiceCells(record),
@@ -487,7 +569,7 @@
       console.warn('[MasterDB] count mismatch', { counts, missing: missingSummary, missingMap });
     }
 
-    const rows = [HEADERS];
+    const rows = [];
     selected.forEach(({ invoice, items, record }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
@@ -523,7 +605,7 @@
       });
     });
 
-    return { rows, missingMap };
+    return { header: HEADERS, rows, missingMap };
   }
 
   function normalizeRowInput(row){
@@ -534,13 +616,18 @@
   }
 
   function flattenRows(rows){
-    const dataRows = Array.isArray(rows) ? rows.map(normalizeRowInput).filter(Boolean) : [];
-    return { rows: [HEADERS, ...dataRows] };
+    const payload = Array.isArray(rows) || (rows && rows.header !== undefined)
+      ? (Array.isArray(rows) ? { header: null, rows } : rows)
+      : { header: null, rows: [] };
+    const header = Array.isArray(payload.header) ? payload.header : HEADERS;
+    const dataRows = Array.isArray(payload.rows) ? payload.rows.map(normalizeRowInput).filter(Boolean) : [];
+    return { header, rows: [header, ...dataRows] };
   }
 
   function toCsv(ssot){
-    const { rows } = flatten(ssot);
-    return rows.map(r => r.map(csvEscape).join(',')).join('\n');
+    const { header, rows } = flatten(ssot);
+    const table = [header, ...rows];
+    return table.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
   function toCsvRows(rows){
