@@ -455,6 +455,40 @@ function normalizeTemplate(template){
   return { ...template, fields };
 }
 
+function mapTemplateFieldsToDefaults(template){
+  const normalized = normalizeTemplate(template);
+  const staticDefaults = DEFAULT_FIELDS.filter(f => f.type === 'static');
+  const columnDefaults = DEFAULT_FIELDS.filter(f => f.type === 'column');
+  const keyMap = {};
+  let staticIdx = 0;
+  let columnIdx = 0;
+
+  const mapped = (normalized?.fields || []).map((field, idx) => {
+    const isColumn = (field.fieldType || 'static').toLowerCase() === 'dynamic';
+    const baseList = isColumn ? columnDefaults : staticDefaults;
+    const base = baseList[isColumn ? columnIdx++ : staticIdx++] || null;
+    const fieldKey = base?.fieldKey || field.fieldKey;
+    keyMap[field.fieldKey] = fieldKey;
+    if(field.id){ keyMap[field.id] = fieldKey; }
+
+    return {
+      ...base,
+      fieldId: field.id,
+      fieldKey,
+      name: field.name,
+      label: field.name || base?.label || field.fieldKey,
+      prompt: field.name ? `Please highlight the ${field.name}` : (base?.prompt || `Please highlight the ${field.fieldKey}`),
+      kind: base?.kind || (isColumn ? 'block' : 'value'),
+      mode: base?.mode || (isColumn ? 'column' : 'cell'),
+      type: base?.type || (isColumn ? 'column' : 'static'),
+      fieldType: isColumn ? 'dynamic' : 'static',
+      order: field.order || idx + 1
+    };
+  });
+
+  return { fields: mapped, keyMap };
+}
+
 function getStoredTemplates(){
   try{ return JSON.parse(localStorage.getItem(CUSTOM_WIZARD_KEY) || '[]'); }
   catch{ return []; }
@@ -2120,16 +2154,7 @@ function ensureProfile(){
   const existing = loadProfile(state.username, state.docType, wizardId);
   const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
   const template = normalizeTemplate(templateRaw);
-  const templateFields = template ? (template.fields || []).map(f => ({
-    fieldId: f.id,
-    fieldKey: f.fieldKey,
-    label: f.name || f.fieldKey,
-    type: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'static',
-    kind: (f.fieldType || 'static') === 'dynamic' ? 'block' : 'value',
-    mode: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'cell',
-    order: f.order || 0
-  })) : [];
-  const remapById = template ? Object.fromEntries((template.fields || []).map(f => [f.id, f.fieldKey])) : {};
+  const { fields: templateFields, keyMap: remapById } = template ? mapTemplateFieldsToDefaults(template) : { fields: [], keyMap: {} };
   if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
 
   state.profile = existing || {
@@ -2184,6 +2209,21 @@ function ensureProfile(){
       rowAnchor: null
     }
   };
+
+  if(state.profile && templateFields.length){
+    const byKey = Object.fromEntries((state.profile.fields || []).map(f => [f.fieldKey, f]));
+    templateFields.forEach(tf => {
+      const target = byKey[tf.fieldKey];
+      if(target){
+        target.label = tf.label;
+        target.kind = tf.kind;
+        target.mode = tf.mode;
+        target.type = tf.type;
+      } else {
+        (state.profile.fields = state.profile.fields || []).push(tf);
+      }
+    });
+  }
 
   if(state.profile && !state.profile.wizardId){
     state.profile.wizardId = wizardId;
@@ -2425,21 +2465,14 @@ const DEFAULT_FIELDS = [
 ];
 
 function generateQuestionsFromTemplate(template){
-  const normalized = normalizeTemplate(template);
-  if(!normalized) return [];
-  const sorted = (normalized.fields || []).slice().sort((a,b)=>{
-    const typeA = (a.fieldType || 'static').toLowerCase();
-    const typeB = (b.fieldType || 'static').toLowerCase();
-    if(typeA !== typeB){ return typeA === 'static' ? -1 : 1; }
-    return (a.order || 0) - (b.order || 0);
-  });
-  const total = sorted.length || 0;
-  return sorted.map((f, idx) => ({
-    fieldId: f.id,
+  const { fields } = mapTemplateFieldsToDefaults(template);
+  const total = fields.length || 0;
+  return fields.map((f, idx) => ({
+    fieldId: f.fieldId,
     fieldKey: f.fieldKey,
-    name: f.name || f.fieldKey,
-    fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic' ? 'dynamic' : 'static',
-    prompt: `Please highlight the ${f.name}`,
+    name: f.name || f.label || f.fieldKey,
+    fieldType: f.fieldType === 'dynamic' ? 'dynamic' : 'static',
+    prompt: f.prompt || `Please highlight the ${f.label || f.fieldKey}`,
     order: idx + 1,
     questionIndex: idx + 1,
     totalQuestions: total
@@ -2470,6 +2503,7 @@ function buildStepsFromTemplate(template){
   const questions = generateQuestionsFromTemplate(template);
   return questions.map(q => {
     const type = q.fieldType === 'dynamic' ? 'column' : 'static';
+    // Custom Wizard path: map extracted values into the same SSOT structure used by the default wizard so master-db.flatten works unchanged.
     return {
       ...byKey[q.fieldKey],
       fieldKey: q.fieldKey,
