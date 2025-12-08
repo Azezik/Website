@@ -71,7 +71,10 @@ const csv2 = MasterDB.toCsv(ssot);
 assert.strictEqual(csv1, csv2);
 assert.strictEqual(csv1.split('\n').length, rows.length);
 
-assert.throws(() => MasterDB.toCsv({ fields: {}, lineItems: [] }), /Exporter input empty—SSOT not wired./);
+const emptyFlatten = MasterDB.flatten({ fields: {}, lineItems: [] });
+assert.strictEqual(emptyFlatten.rows.length, 2);
+assert.strictEqual(emptyFlatten.rows[1][8], 'Static-only line item');
+assert.strictEqual(emptyFlatten.rows[1][9], '1.00');
 
 const totalsOnly = {
   fields: {
@@ -165,5 +168,109 @@ assert.deepStrictEqual(
   inflatedRows.slice(1).map(row => row[7]),
   noisyLineItems.slice(0, 8).map(item => item.sku)
 );
+
+const customTemplate = [
+  'Store Custom', 'Department Custom', 'Invoice # Custom', 'Invoice Date Custom', 'Salesperson Custom',
+  'Customer Custom', 'Address Custom', 'SKU Custom', 'Description Custom', 'Quantity Custom',
+  'Unit Price Custom', 'Line Total Custom', 'Subtotal Custom', 'Discount Custom', 'Tax Custom',
+  'Total Custom', 'Payment Method Custom', 'Payment Status Custom', 'Line No Custom', 'File ID Custom'
+];
+
+const templateRow = Array(customTemplate.length).fill(null).map((_, idx) => `v${idx + 1}`);
+const customFlattenRows = MasterDB.flattenRows([templateRow], customTemplate);
+assert.deepStrictEqual(customFlattenRows.rows[0], customTemplate);
+assert.deepStrictEqual(customFlattenRows.rows[1], templateRow);
+
+const staticOnly = {
+  fields: {
+    store_name: { value: 'Fallback Store' },
+    department_division: { value: 'Fallback Dept' },
+    invoice_number: { value: 'INV-STATIC' },
+    invoice_date: { value: '2024-02-10' }
+  },
+  lineItems: []
+};
+
+const { rows: staticRows, missingMap: staticMissing } = MasterDB.flatten(staticOnly);
+assert.strictEqual(staticRows.length, 2);
+assert.deepStrictEqual(staticRows[0], MasterDB.HEADERS);
+assert.strictEqual(staticRows[1][0], 'Fallback Store');
+assert.strictEqual(staticRows[1][1], 'Fallback Dept');
+assert.strictEqual(staticRows[1][2], 'INV-STATIC');
+assert.strictEqual(staticRows[1][3], '2024-02-10');
+assert.strictEqual(staticRows[1][8], 'Static-only line item');
+assert.strictEqual(staticRows[1][9], '1.00');
+assert.strictEqual(staticRows[1][10], '0.00');
+assert.strictEqual(staticRows[1][11], '0.00');
+assert.deepStrictEqual(staticMissing.summary, {
+  sku: [1],
+  quantity: [],
+  unit_price: [],
+  line_no: []
+});
+
+const customTemplateSsot = {
+  dbTemplate: customTemplate,
+  fields: {
+    store_name: { value: 'Template Store' },
+    invoice_number: { value: 'INV-T' },
+    invoice_date: { value: '2024-03-01' }
+  },
+  lineItems: [
+    { description: 'Templated Item', quantity: '2', unit_price: '5', amount: '10' }
+  ]
+};
+
+const { rows: customTemplateRows } = MasterDB.flatten(customTemplateSsot);
+assert.deepStrictEqual(customTemplateRows[0], customTemplate);
+assert.strictEqual(customTemplateRows[1][0], 'Template Store');
+assert.strictEqual(customTemplateRows[1][2], 'INV-T');
+assert.strictEqual(customTemplateRows[1][3], '2024-03-01');
+assert.strictEqual(customTemplateRows[1][8], 'Templated Item');
+assert.strictEqual(customTemplateRows[1][9], '2.00');
+assert.strictEqual(customTemplateRows[1][10], '5.00');
+assert.strictEqual(customTemplateRows[1][11], '10.00');
+assert.strictEqual(customTemplateRows[1][19], '');
+
+const defaultWizardRows = MasterDB.flattenRows([templateRow]).rows;
+assert.deepStrictEqual(defaultWizardRows[0], MasterDB.HEADERS);
+
+const customWizardConfig = {
+  fields: [
+    { fieldKey: 'store_name', name: 'Custom Store Name' },
+    { fieldKey: 'invoice_number', name: 'Custom Invoice #' },
+    { fieldKey: 'product_description', name: 'Custom Description', fieldType: 'dynamic' },
+    { fieldKey: 'tax_amount', name: 'Custom Tax' }
+  ]
+};
+
+const wizardDbTemplate = MasterDB.buildDbTemplateFromCustomWizardConfig(customWizardConfig);
+assert.ok(Array.isArray(wizardDbTemplate));
+assert.strictEqual(wizardDbTemplate[0], 'Custom Store Name');
+assert.strictEqual(wizardDbTemplate[2], 'Custom Invoice #');
+assert.strictEqual(wizardDbTemplate[8], 'Custom Description');
+assert.strictEqual(wizardDbTemplate[14], 'Custom Tax');
+assert.strictEqual(wizardDbTemplate[1], MasterDB.HEADERS[1]);
+
+const customWizardRecord = {
+  dbTemplate: wizardDbTemplate,
+  fields: {
+    store_name: { value: 'CW Store' },
+    invoice_number: { value: 'INV-CW' },
+    invoice_date: { value: '2024-04-15' },
+    tax_amount: { value: '3.75' }
+  },
+  lineItems: [
+    { description: 'CW Item', quantity: '1', unit_price: '3.75', amount: '3.75' }
+  ]
+};
+
+const { rows: customWizardRows } = MasterDB.flatten(customWizardRecord);
+assert.deepStrictEqual(customWizardRows[0], wizardDbTemplate);
+assert.strictEqual(customWizardRows[1][0], 'CW Store');
+assert.strictEqual(customWizardRows[1][2], 'INV-CW');
+assert.strictEqual(customWizardRows[1][3], '2024-04-15');
+assert.strictEqual(customWizardRows[1][8], 'CW Item');
+assert.strictEqual(customWizardRows[1][11], '3.75');
 
 console.log('MasterDB tests passed.');

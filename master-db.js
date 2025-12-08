@@ -25,6 +25,71 @@
     'File ID'
   ];
 
+  const TEMPLATE_FIELD_ALIASES = {
+    order_number: 'invoice_number',
+    sales_date: 'invoice_date',
+    salesperson: 'salesperson_rep',
+    customer: 'customer_name',
+    sold_to_block: 'customer_address',
+    store: 'store_name',
+    subtotal: 'subtotal_amount',
+    hst: 'tax_amount',
+    qst: 'tax_amount',
+    total: 'invoice_total'
+  };
+
+  const TEMPLATE_FIELD_TO_HEADER_INDEX = {
+    store_name: HEADERS.indexOf('Store / Business Name'),
+    department_division: HEADERS.indexOf('Department / Division'),
+    invoice_number: HEADERS.indexOf('Invoice #'),
+    invoice_date: HEADERS.indexOf('Invoice Date'),
+    salesperson_rep: HEADERS.indexOf('Salesperson'),
+    customer_name: HEADERS.indexOf('Customer Name'),
+    customer_address: HEADERS.indexOf('Customer Address'),
+    sku_col: HEADERS.indexOf('Item Code (SKU)'),
+    product_description: HEADERS.indexOf('Item Description'),
+    quantity_col: HEADERS.indexOf('Quantity'),
+    unit_price_col: HEADERS.indexOf('Unit Price'),
+    line_total_col: HEADERS.indexOf('Line Total'),
+    subtotal_amount: HEADERS.indexOf('Subtotal'),
+    discounts_amount: HEADERS.indexOf('Discount'),
+    tax_amount: HEADERS.indexOf('Tax Amount'),
+    invoice_total: HEADERS.indexOf('Invoice Total'),
+    payment_method: HEADERS.indexOf('Payment Method'),
+    payment_status: HEADERS.indexOf('Payment Status'),
+    line_number_col: HEADERS.indexOf('Line No'),
+    file_id: HEADERS.indexOf('File ID')
+  };
+
+  function getHeaderTemplateForRecord(recordOrTemplate){
+    if(Array.isArray(recordOrTemplate)) return recordOrTemplate;
+    if(recordOrTemplate && typeof recordOrTemplate === 'object'){
+      const candidate = recordOrTemplate.dbTemplate || recordOrTemplate.DBTEMPLATE;
+      if(Array.isArray(candidate)) return candidate;
+    }
+    return HEADERS;
+  }
+
+  function buildDbTemplateFromCustomWizardConfig(config){
+    if(!config) return null;
+    const fields = Array.isArray(config.fields) ? config.fields : [];
+    if(!fields.length) return null;
+
+    const resolved = HEADERS.slice();
+
+    fields.forEach(field => {
+      const rawKey = (field?.fieldKey || '').trim();
+      if(!rawKey) return;
+      const canonicalKey = TEMPLATE_FIELD_ALIASES[rawKey] || rawKey;
+      const idx = TEMPLATE_FIELD_TO_HEADER_INDEX[canonicalKey];
+      if(idx === undefined || idx < 0) return;
+      const label = (field?.name || field?.label || '').trim();
+      if(label) resolved[idx] = label;
+    });
+
+    return resolved;
+  }
+
   function cleanText(value){
     if(value === undefined || value === null) return '';
     return String(value).replace(/\s+/g, ' ').trim();
@@ -254,9 +319,9 @@
 
   function selectMajorityRows(items){
     const dynamicCounts = summarizeDynamicCounts(items);
-    const majorityCount = computeMajorityRowCount(dynamicCounts, items.length);
-    if(!majorityCount || majorityCount >= items.length){
-      return { items, majorityCount: majorityCount || items.length, dynamicCounts };
+    const majoritySeed = computeMajorityRowCount(dynamicCounts, items.length);
+    if(!majoritySeed || majoritySeed >= items.length){
+      return { items, majorityCount: majoritySeed || items.length, dynamicCounts, majoritySeed: majoritySeed ?? null };
     }
 
     const annotated = items.map((item, idx) => {
@@ -279,14 +344,14 @@
     const chosenIndices = new Set();
 
     byDensity.forEach(entry => {
-      if(chosenIndices.size >= majorityCount) return;
+      if(chosenIndices.size >= majoritySeed) return;
       if(entry.filledCount === 0) return;
       chosenIndices.add(entry.idx);
     });
 
-    if(chosenIndices.size < majorityCount){
+    if(chosenIndices.size < majoritySeed){
       byRowOrder.forEach(entry => {
-        if(chosenIndices.size >= majorityCount) return;
+        if(chosenIndices.size >= majoritySeed) return;
         chosenIndices.add(entry.idx);
       });
     }
@@ -296,7 +361,7 @@
       .sort((a, b) => a.idx - b.idx)
       .map(entry => entry.item);
 
-    return { items: selected, majorityCount, dynamicCounts };
+    return { items: selected, majorityCount: majoritySeed, dynamicCounts, majoritySeed };
   }
 
   function csvEscape(val){
@@ -331,6 +396,7 @@
 
   function flatten(ssot){
     const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
+    const headerTemplate = getHeaderTemplateForRecord(records[0] || ssot);
     const prepared = records.map(record => ({
       record,
       invoice: buildInvoiceCells(record),
@@ -383,6 +449,34 @@
         allItems.push(syntheticItem);
         singleItemFallback = true;
         console.log('[MasterDB] synthetic single-item row generated from static totals');
+
+        inferLineCalculations(allItems);
+        usableRowCount = computeUsableRows(allItems);
+        syntheticLineNo = synthesizeLineNumbers(allItems);
+      }
+    }
+
+    const majoritySeeds = selected.map(({ selection }) => selection?.majoritySeed ?? null);
+    const dbSeedIsZero = selected.length > 0 && majoritySeeds.every(seed => seed === null);
+
+    if(usableRowCount === 0 && !singleItemFallback && dbSeedIsZero){
+      const target = selected[0];
+      if(target){
+        const syntheticItem = {
+          original: null,
+          sku: '',
+          description: 'Static-only line item',
+          quantity: '1.00',
+          unitPrice: '0.00',
+          amount: '0.00',
+          lineNo: '1',
+          missing: {},
+          rowNumber: 1,
+          _synthetic: 'static_only_fallback'
+        };
+        target.items.push(syntheticItem);
+        allItems.push(syntheticItem);
+        console.log('[MasterDB] synthetic static-only row generated (DBSEED=0)');
 
         inferLineCalculations(allItems);
         usableRowCount = computeUsableRows(allItems);
@@ -487,7 +581,7 @@
       console.warn('[MasterDB] count mismatch', { counts, missing: missingSummary, missingMap });
     }
 
-    const rows = [HEADERS];
+    const rows = [headerTemplate];
     selected.forEach(({ invoice, items, record }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
@@ -533,9 +627,10 @@
     return null;
   }
 
-  function flattenRows(rows){
+  function flattenRows(rows, headerTemplate){
     const dataRows = Array.isArray(rows) ? rows.map(normalizeRowInput).filter(Boolean) : [];
-    return { rows: [HEADERS, ...dataRows] };
+    const resolvedHeaders = getHeaderTemplateForRecord(headerTemplate);
+    return { rows: [resolvedHeaders, ...dataRows] };
   }
 
   function toCsv(ssot){
@@ -543,10 +638,10 @@
     return rows.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
-  function toCsvRows(rows){
-    const table = flattenRows(rows).rows;
+  function toCsvRows(rows, headerTemplate){
+    const table = flattenRows(rows, headerTemplate).rows;
     return table.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
-  return { HEADERS, flatten, flattenRows, toCsv, toCsvRows };
+  return { HEADERS, flatten, flattenRows, toCsv, toCsvRows, buildDbTemplateFromCustomWizardConfig };
 });

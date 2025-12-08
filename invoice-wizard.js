@@ -520,6 +520,26 @@ function refreshWizardTemplates(){
   return state.wizardTemplates;
 }
 
+function getActiveCustomWizardTemplate(wizardId = currentWizardId()){
+  if(!wizardId || wizardId === DEFAULT_WIZARD_ID) return null;
+  const raw = getWizardTemplateById(wizardId);
+  return normalizeTemplate(raw);
+}
+
+function resolveDbTemplateForWizard(wizardId = currentWizardId()){
+  const template = getActiveCustomWizardTemplate(wizardId);
+  if(!template) return null;
+  if(typeof MasterDB?.buildDbTemplateFromCustomWizardConfig === 'function'){
+    return MasterDB.buildDbTemplateFromCustomWizardConfig(template);
+  }
+  return null;
+}
+
+function resolveHeaderTemplateForWizard(wizardId = currentWizardId()){
+  const template = resolveDbTemplateForWizard(wizardId);
+  return template || MasterDB.HEADERS;
+}
+
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
   profileKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `wiz.profile.${u}.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}`,
@@ -539,8 +559,9 @@ const LS = {
 };
 
 const MASTERDB_FILE_ID_HEADER = 'File ID';
-function extractFileIdFromRow(row){
-  const fileIdx = MasterDB?.HEADERS ? MasterDB.HEADERS.indexOf(MASTERDB_FILE_ID_HEADER) : -1;
+function extractFileIdFromRow(row, headerTemplate){
+  const headers = Array.isArray(headerTemplate) ? headerTemplate : MasterDB.HEADERS;
+  const fileIdx = headers.indexOf(MASTERDB_FILE_ID_HEADER);
   if(row && typeof row === 'object' && row.fileId) return row.fileId;
   const cells = Array.isArray(row) ? row : (row && Array.isArray(row.cells) ? row.cells : null);
   if(!cells || fileIdx < 0) return '';
@@ -569,6 +590,7 @@ function refreshMasterDbRowsStore(db, compiled){
   const dt = state.docType;
   const user = state.username;
   const wizardId = currentWizardId();
+  const headerTemplate = resolveHeaderTemplateForWizard(wizardId);
   const hadRows = LS.hasRows(user, dt, wizardId);
   let rows = hadRows ? (LS.getRows(user, dt, wizardId) || []) : [];
   if(!hadRows && Array.isArray(db)){
@@ -577,7 +599,7 @@ function refreshMasterDbRowsStore(db, compiled){
   const builtRows = compiled ? buildMasterDbRowsFromRecord(compiled) : [];
   const targetFile = compiled?.fileId;
   if(targetFile && builtRows.length){
-    rows = rows.filter(r => extractFileIdFromRow(r) !== targetFile);
+    rows = rows.filter(r => extractFileIdFromRow(r, headerTemplate) !== targetFile);
   }
   if(compiled){
     rows = rows.concat(builtRows);
@@ -6642,6 +6664,8 @@ function compileDocument(fileId, lineItems){
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
     warnings: []
   };
+  const dbTemplate = resolveDbTemplateForWizard(wizardId);
+  if(dbTemplate) compiled.dbTemplate = dbTemplate;
   if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
     compiled.warnings.push('line_totals_vs_subtotal');
     if(byKey['subtotal_amount']){
@@ -7342,12 +7366,13 @@ function resolveRecordForDocType(docType, preferred){
 function downloadMasterDb(record, docType){
   const dt = docType || els.dataDocType?.value || state.docType;
   const rows = getOrHydrateMasterRows(state.username, dt);
+  const headerTemplate = resolveHeaderTemplateForWizard();
   if(!rows.length){
     alert('No MasterDB rows available for export.');
     return;
   }
   try {
-    const csv = MasterDB.toCsvRows(rows);
+    const csv = MasterDB.toCsvRows(rows, headerTemplate);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
