@@ -4,6 +4,10 @@ const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
 
+const LEGACY_PDF_SCALE = 1.5;
+const BASE_PDF_SCALE = (window.devicePixelRatio || 1) * LEGACY_PDF_SCALE;
+const PDF_CSS_SCALE = LEGACY_PDF_SCALE / BASE_PDF_SCALE;
+
 let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
@@ -5578,7 +5582,7 @@ async function prepareRunDocument(file){
 
   const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
   state.pdf = await loadingTask.promise;
-  const scale = 1.5;
+  const scale = BASE_PDF_SCALE;
   let totalH = 0;
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
@@ -5630,7 +5634,7 @@ async function renderImage(url){
 async function renderAllPages(){
   if(!state.pdf) return;
   state.overlayPinned = false;
-  const scale = 1.5;
+  const scale = BASE_PDF_SCALE;
   const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -5656,11 +5660,14 @@ async function renderAllPages(){
     totalH += vp.height;
   }
 
+  const cssScale = PDF_CSS_SCALE || 1;
+  const cssW = maxW * cssScale;
+  const cssH = totalH * cssScale;
   els.pdfCanvas.width = maxW;
   els.pdfCanvas.height = totalH;
-  els.pdfCanvas.style.width = maxW + 'px';
-  els.pdfCanvas.style.height = totalH + 'px';
-  sizeOverlayTo(maxW, totalH);
+  els.pdfCanvas.style.width = cssW + 'px';
+  els.pdfCanvas.style.height = cssH + 'px';
+  sizeOverlayTo(cssW, cssH);
 
   let y = 0;
   for(let i=0; i<pageCanvases.length; i++){
@@ -6411,7 +6418,7 @@ async function getSnapshotPageBitmap(pageIdx){
   if(state.pdf){
     try {
       const page = await state.pdf.getPage(pageNumber);
-      const vp = state.pageViewports[pageIdx] || page.getViewport({ scale: 1.5 });
+      const vp = state.pageViewports[pageIdx] || page.getViewport({ scale: BASE_PDF_SCALE });
       const canvas = document.createElement('canvas');
       canvas.width = vp.width;
       canvas.height = vp.height;
