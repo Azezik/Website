@@ -449,7 +449,8 @@ function normalizeTemplateFields(fields){
     const fallback = `field_${idx + 1}`;
     const preferredKey = field?.fieldKey && !looksLikeGeneratedId(field.fieldKey) ? field.fieldKey : '';
     const key = normalizeFieldKey(preferredKey || name, used, fallback);
-    return { ...field, fieldKey: key };
+    const magicDataType = normalizeMagicDataType(field?.magicDataType || field?.magicType);
+    return { ...field, fieldKey: key, magicDataType, magicType: magicDataType };
   });
 }
 
@@ -1520,6 +1521,31 @@ function digitRatio(str){
   return digits / str.length;
 }
 
+const MAGIC_DATA_TYPE = { ANY:'any', TEXT:'text', NUMERIC:'numeric' };
+
+function normalizeMagicDataType(val){
+  if(!val && val !== 0) return MAGIC_DATA_TYPE.ANY;
+  const v = String(val).toLowerCase();
+  if(v.includes('text')) return MAGIC_DATA_TYPE.TEXT;
+  if(v.includes('num')) return MAGIC_DATA_TYPE.NUMERIC;
+  if(v === 'all numbers') return MAGIC_DATA_TYPE.NUMERIC;
+  return MAGIC_DATA_TYPE.ANY;
+}
+
+function inferMagicDataTypeFromFieldKey(fieldKey=''){
+  const key = String(fieldKey || '').toLowerCase();
+  if(/amount|total|tax|balance|subtotal|deposit|price|qty|quantity|unit|number/.test(key)) return MAGIC_DATA_TYPE.NUMERIC;
+  if(/name|address|store|description|salesperson|department|rep/.test(key)) return MAGIC_DATA_TYPE.TEXT;
+  return MAGIC_DATA_TYPE.ANY;
+}
+
+function getMagicDataType(fieldKey){
+  const entry = getProfileFieldEntry(fieldKey) || (state.steps || []).find(s => s.fieldKey === fieldKey);
+  const configured = entry?.magicDataType || entry?.magicType;
+  if(configured) return normalizeMagicDataType(configured);
+  return inferMagicDataTypeFromFieldKey(fieldKey);
+}
+
 function clonePlain(obj){
   if(obj === null || typeof obj !== 'object') return obj;
   if(typeof structuredClone === 'function'){
@@ -1531,78 +1557,280 @@ function clonePlain(obj){
 
 const FieldDataEngine = (() => {
   const patterns = {};
+  const CONFUSION_PAIRS = [
+    { letter:'O', digit:'0' },
+    { letter:'I', digit:'1' },
+    { letter:'l', digit:'1' },
+    { letter:'T', digit:'7' },
+    { letter:'S', digit:'5' },
+    { letter:'B', digit:'8' }
+  ];
+  const FIXED_WORDS = new Set(['EXT', 'GST', 'HST', 'TOTAL']);
+  const POSITION_SLOTS = ['first','second','secondLast','last'];
+  const WRONG_EVENT_THRESHOLD = 3;
 
-  function normalizeOcrDigits(text){
+  function ensurePattern(ftype){
+    const existing = patterns[ftype];
+    if(existing){
+      if(!existing.avoid) existing.avoid = {};
+      if(!existing.posTemplates) existing.posTemplates = {};
+      if(!existing.code) existing.code = {};
+      if(!existing.shape) existing.shape = {};
+      if(!existing.len) existing.len = {};
+      if(!existing.digit) existing.digit = {};
+      return existing;
+    }
+    return patterns[ftype] = { code:{}, shape:{}, len:{}, digit:{}, avoid:{}, posTemplates:{} };
+  }
+
+  function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY }={}){
     if(text === null || text === undefined) return text;
     const str = String(text);
     const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
+    const tokens = str.split(/\s+/g).filter(Boolean);
+    const converted = tokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType, silent:true }).text);
+    const joined = converted.join(' ');
+    let out = '';
     const isDigit = ch => ch >= '0' && ch <= '9';
     const isDecimalPunct = ch => ch === '.' || ch === ',';
-    const prevNonSpace = (idx) => {
+    const prevNonSpace = (idx, s) => {
       for(let i=idx;i>=0;i--){
-        if(str[i] !== ' ') return str[i];
+        if(s[i] !== ' ') return s[i];
       }
       return '';
     };
-    const nextNonSpace = (idx) => {
-      for(let i=idx;i<str.length;i++){
-        if(str[i] !== ' ') return str[i];
+    const nextNonSpace = (idx, s) => {
+      for(let i=idx;i<s.length;i++){
+        if(s[i] !== ' ') return s[i];
       }
       return '';
     };
-
-    let out = '';
-    for(let i=0;i<str.length;i++){
-      const ch = str[i];
-      const prev = i>0 ? str[i-1] : '';
-      const next = i<str.length-1 ? str[i+1] : '';
-      const prevNs = prevNonSpace(i-1);
-      const nextNs = nextNonSpace(i+1);
-
+    for(let i=0;i<joined.length;i++){
+      const ch = joined[i];
+      const prev = i>0 ? joined[i-1] : '';
+      const next = i<joined.length-1 ? joined[i+1] : '';
+      const prevNs = prevNonSpace(i-1, joined);
+      const nextNs = nextNonSpace(i+1, joined);
       const prevCurrencyOrDigit = isDigit(prevNs) || currencySymbols.has(prevNs);
       const nextLooksNumeric = isDigit(nextNs) || isDecimalPunct(nextNs);
-
       if(ch === 'I' || ch === 'l'){
         let shouldConvert = false;
         if(i === 0){
-          const ahead = nextNonSpace(1);
+          const ahead = nextNonSpace(1, joined);
           if(isDigit(ahead) || isDecimalPunct(ahead)) shouldConvert = true;
           else if(currencySymbols.has(ahead)){
-            const afterCurrency = nextNonSpace(str.indexOf(ahead, i+1) + 1);
+            const afterCurrency = nextNonSpace(joined.indexOf(ahead, i+1) + 1, joined);
             if(isDigit(afterCurrency)) shouldConvert = true;
           }
         }
         if(!shouldConvert && prevCurrencyOrDigit && nextLooksNumeric) shouldConvert = true;
         if(!shouldConvert && isDigit(prev) && isDigit(next)) shouldConvert = true;
         if(!shouldConvert && isDigit(prev) && isDecimalPunct(next)) shouldConvert = true;
-        if(!shouldConvert && isDecimalPunct(next) && isDigit(str[i+2]||'')) shouldConvert = true;
+        if(!shouldConvert && isDecimalPunct(next) && isDigit(joined[i+2]||'')) shouldConvert = true;
         out += shouldConvert ? '1' : ch;
         continue;
       }
-
       if(ch === 'O'){
         if((isDigit(prev) && isDigit(next)) || (prevCurrencyOrDigit && isDigit(nextNs))) {
           out += '0';
           continue;
         }
       }
-
       if(ch === 'T'){
         if(prevCurrencyOrDigit && nextLooksNumeric) {
           out += '7';
           continue;
         }
       }
-
       out += ch;
     }
-
     return out;
+  }
+
+  function contextSignature(token='', idx=0){
+    const prev = token[idx-1] || '';
+    const next = token[idx+1] || '';
+    const prevIsDigit = /[0-9]/.test(prev);
+    const nextIsDigit = /[0-9]/.test(next);
+    const prevIsLetter = /[A-Za-z]/.test(prev);
+    const nextIsLetter = /[A-Za-z]/.test(next);
+    const atStart = idx === 0;
+    const atEnd = idx === token.length - 1;
+    const short = token.length <= 3;
+    const long = token.length >= 8;
+    return [prevIsDigit, nextIsDigit, prevIsLetter, nextIsLetter, atStart, atEnd, short, long].map(v => v ? '1' : '0').join('');
+  }
+
+  function tokenShapeSignature(token=''){
+    return token.split('').map(ch => {
+      if(/[A-Za-z]/.test(ch)) return 'L';
+      if(/[0-9]/.test(ch)) return '#';
+      return 'P';
+    }).join('');
+  }
+
+  function shouldAvoidPair(ftype, pairKey, sig){
+    const p = ensurePattern(ftype);
+    const bucket = p.avoid[pairKey] || {};
+    return (bucket[sig] || 0) >= WRONG_EVENT_THRESHOLD;
+  }
+
+  function recordWrongEvent(ftype, pairKey, sig){
+    const p = ensurePattern(ftype);
+    const bucket = p.avoid[pairKey] || (p.avoid[pairKey] = {});
+    bucket[sig] = (bucket[sig] || 0) + 1;
+  }
+
+  function dominantPosShape(ftype, slot){
+    const p = ensurePattern(ftype);
+    const slotData = p.posTemplates?.[slot];
+    if(!slotData) return null;
+    const sorted = Object.entries(slotData).sort((a,b)=>b[1]-a[1]);
+    return sorted[0]?.[0] || null;
+  }
+
+  function learnPosTemplates(ftype, tokens=[]){
+    if(!tokens.length) return;
+    const p = ensurePattern(ftype);
+    POSITION_SLOTS.forEach(slot => { if(!p.posTemplates[slot]) p.posTemplates[slot] = {}; });
+    const shapes = [
+      { slot:'first', token: tokens[0] },
+      { slot:'second', token: tokens[1] },
+      { slot:'secondLast', token: tokens[tokens.length-2] },
+      { slot:'last', token: tokens[tokens.length-1] }
+    ];
+    shapes.forEach(({slot, token}) => {
+      if(!token) return;
+      const sig = tokenShapeSignature(token);
+      const bucket = p.posTemplates[slot];
+      bucket[sig] = (bucket[sig] || 0) + 1;
+    });
+  }
+
+  function formatGuard(original='', candidate=''){
+    const upper = original.toUpperCase();
+    if(FIXED_WORDS.has(upper) && upper !== candidate.toUpperCase()) return true;
+    const money = /^\$?[0-9][0-9,]*([.][0-9]{2})?$/;
+    if(money.test(original) && !money.test(candidate)) return true;
+    const postal = /^[A-Z]\d[A-Z]\s?\d[A-Z]\d$/i;
+    if(postal.test(original) && !postal.test(candidate)) return true;
+    return false;
+  }
+
+  function convertToken(token='', expectation='neutral', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, silent=false }={}){
+    const chars = token.split('');
+    const usedPairs = [];
+    const usedContexts = [];
+    const pairKeyOf = (from, to) => `${from}->${to}`;
+    const shouldFavorDigits = expectation === 'digit';
+    const shouldFavorLetters = expectation === 'letter';
+    const neutral = expectation === 'neutral';
+    CONFUSION_PAIRS.forEach(pair => {
+      chars.forEach((ch, idx) => {
+        if(ch !== pair.letter && ch !== pair.digit) return;
+        const sig = contextSignature(token, idx);
+        let target = ch;
+        if(shouldFavorDigits){
+          target = pair.digit;
+        } else if(shouldFavorLetters){
+          target = pair.letter;
+        } else if(neutral){
+          const digitNeighbors = /[0-9]/.test(token[idx-1]||'') || /[0-9]/.test(token[idx+1]||'');
+          const letterNeighbors = /[A-Za-z]/.test(token[idx-1]||'') || /[A-Za-z]/.test(token[idx+1]||'');
+          if(digitNeighbors && !letterNeighbors) target = pair.digit;
+          else if(letterNeighbors && !digitNeighbors) target = pair.letter;
+        }
+        if(target === ch) return;
+        const key = pairKeyOf(ch, target);
+        if(!silent && shouldAvoidPair(fieldKey, key, sig)) return;
+        chars[idx] = target;
+        usedPairs.push(key);
+        usedContexts.push(sig);
+      });
+    });
+    const text = chars.join('');
+    const hasDigits = /[0-9]/.test(text);
+    const hasLetters = /[A-Za-z]/.test(text);
+    const magicMismatch = (magicType === MAGIC_DATA_TYPE.NUMERIC && hasLetters)
+      || (magicType === MAGIC_DATA_TYPE.TEXT && hasDigits);
+    return { text, usedPairs, usedContexts, magicMismatch };
+  }
+
+  function scoreVariant({ text, expectation, slotShape, magicType, original }){
+    let score = 0;
+    const digitCount = (text.match(/[0-9]/g) || []).length;
+    const letterCount = (text.match(/[A-Za-z]/g) || []).length;
+    const hasDigits = digitCount > 0;
+    const hasLetters = letterCount > 0;
+    if(magicType === MAGIC_DATA_TYPE.NUMERIC){
+      score += hasLetters ? -3 : 4;
+    } else if(magicType === MAGIC_DATA_TYPE.TEXT){
+      score += hasDigits ? -3 : 3;
+    } else {
+      if(hasDigits && hasLetters) score += 1;
+    }
+    if(expectation === 'digit' && hasDigits) score += 1;
+    if(expectation === 'letter' && hasLetters) score += 1;
+    if(slotShape){
+      const candShape = tokenShapeSignature(text);
+      score += candShape === slotShape ? 1 : -1;
+    }
+    if(formatGuard(original, text)) score -= 5;
+    return score;
+  }
+
+  function applyOcrMagic(rawText='', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, spanKey, mode }={}){
+    const tokens = String(rawText || '').split(/\s+/g).filter(Boolean);
+    const positionalShapes = POSITION_SLOTS.reduce((acc, slot) => ({ ...acc, [slot]: dominantPosShape(fieldKey, slot) }), {});
+    const correctedTokens = [];
+    const correctionsApplied = [];
+    const numericTokens = [];
+
+    tokens.forEach((token, idx) => {
+      const expectation = magicType === MAGIC_DATA_TYPE.NUMERIC ? 'digit'
+        : magicType === MAGIC_DATA_TYPE.TEXT ? 'letter'
+        : (()=>{
+            const digits = (token.match(/[0-9]/g) || []).length;
+            const letters = (token.match(/[A-Za-z]/g) || []).length;
+            if(digits > letters) return 'digit';
+            if(letters > digits) return 'letter';
+            return 'neutral';
+          })();
+      const slot = idx === 0 ? 'first' : idx === 1 ? 'second' : (idx === tokens.length - 1 ? 'last' : (idx === tokens.length - 2 ? 'secondLast' : null));
+      const slotShape = slot ? positionalShapes[slot] : null;
+      const variants = [];
+      variants.push({ ...convertToken(token, 'neutral', { fieldKey, magicType }), expectation: 'neutral', original: token, slotShape });
+      variants.push({ ...convertToken(token, expectation, { fieldKey, magicType }), expectation, original: token, slotShape });
+      if(expectation !== 'digit'){
+        variants.push({ ...convertToken(token, 'digit', { fieldKey, magicType }), expectation: 'digit', original: token, slotShape });
+      }
+      if(expectation !== 'letter'){
+        variants.push({ ...convertToken(token, 'letter', { fieldKey, magicType }), expectation: 'letter', original: token, slotShape });
+      }
+      variants.forEach(v => { v.score = scoreVariant({ text: v.text, expectation: v.expectation, slotShape, magicType, original: token }); });
+      const best = variants.reduce((a,b)=> b.score > a.score ? b : a, variants[0]);
+      correctedTokens.push(best.text);
+      numericTokens.push(convertToken(token, 'digit', { fieldKey, magicType, silent:true }).text);
+      if(best.text !== token){
+        best.usedPairs.forEach((pair, i)=> correctionsApplied.push({ pair, context: best.usedContexts[i], from: token, to: best.text, index: idx }));
+      }
+      const bestScore = best.score;
+      variants.forEach(v => {
+        if(v === best) return;
+        if(v.usedPairs?.length && v.magicMismatch && bestScore > v.score){
+          v.usedPairs.forEach((pair, i)=> recordWrongEvent(fieldKey, pair, v.usedContexts[i]));
+        }
+      });
+    });
+    const cleaned = correctedTokens.join(' ').trim();
+    const numericCandidate = numericTokens.join(' ').trim();
+    if(spanKey) traceEvent(spanKey,'ocrmagic',{ magicType, cleaned, tokens: correctedTokens });
+    return { value: cleaned, corrections: correctionsApplied, tokens: correctedTokens, numericCandidate };
   }
 
   function learn(ftype, value){
     if(!value) return;
-    const p = patterns[ftype] || (patterns[ftype] = {code:{}, shape:{}, len:{}, digit:{}});
+    const p = ensurePattern(ftype);
     const c = codeOf(value);
     const s = shapeOf(value);
     const l = value.length;
@@ -1614,8 +1842,7 @@ const FieldDataEngine = (() => {
   }
 
   function dominant(ftype){
-    const p = patterns[ftype];
-    if(!p) return {};
+    const p = ensurePattern(ftype);
     const maxKey = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1])[0]?.[0];
     return { code: maxKey(p.code), shape: maxKey(p.shape), len: +maxKey(p.len), digit: parseFloat(maxKey(p.digit)) };
   }
@@ -1626,12 +1853,18 @@ const FieldDataEngine = (() => {
     const raw = lineStrs.join(' ').trim();
     if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
     let txt = raw.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    const magicType = getMagicDataType(ftype);
+    const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode });
+    txt = magic.value || txt;
+    let correctionsApplied = magic.corrections || [];
+    const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
+    const numericCandidate = magic.numericCandidate || txt;
     let isValid = true;
     let invalidReason = null;
     if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       // Normalize common OCR digit confusions (e.g., $I3999 -> 13999.00) before stripping non-numeric chars.
-      const digitSafe = normalizeOcrDigits(txt);
+      const digitSafe = normalizeOcrDigits(numericCandidate, { fieldKey: ftype, magicType });
       const n=digitSafe.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
     } else if(/sku|product_code/.test(ftype)){
       txt = txt.replace(/\s+/g,'').toUpperCase();
@@ -1662,14 +1895,17 @@ const FieldDataEngine = (() => {
     const before = dominant(ftype);
     const fingerprintMatch = isValid && (!before.code || before.code === code);
     const shouldLearn = isValid && (mode === 'CONFIG' || fingerprintMatch);
-    if(shouldLearn) learn(ftype, txt);
+    if(shouldLearn){
+      learn(ftype, txt);
+      learnPosTemplates(ftype, magicTokens);
+    }
     const dom = shouldLearn ? dominant(ftype) : before;
     let score=0;
     if(isValid && dom.code && dom.code===code) score++;
     if(isValid && dom.shape && dom.shape===shape) score++;
     if(isValid && dom.len && dom.len===txt.length) score++;
     if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
-    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason });
+    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason, magicType });
     if(state.mode === ModeEnum.RUN && staticDebugEnabled() && isStaticFieldDebugTarget(spanKey?.fieldKey || ftype)){
       const expectedCode = getDominantFingerprintCode(ftype, spanKey?.fieldKey || ftype);
       const fingerprintOk = fingerprintMatches(ftype, code, mode, spanKey?.fieldKey, { enabled:false, fieldKey: spanKey?.fieldKey || ftype, cleanedValue: txt });
@@ -1678,7 +1914,7 @@ const FieldDataEngine = (() => {
         { field: spanKey?.fieldKey || ftype, cleaned: txt, code, expected: expectedCode, fingerprintOk }
       );
     }
-    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied:[], digit, fingerprintMatch, isValid, invalidReason };
+    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied, digit, fingerprintMatch, isValid, invalidReason };
   }
 
   function exportPatterns(){ return patterns; }
@@ -1688,6 +1924,7 @@ const FieldDataEngine = (() => {
     for(const [key, data] of Object.entries(p)){
       if(data && typeof data === 'object'){
         patterns[key] = clonePlain(data);
+        ensurePattern(key);
       }
     }
   }
@@ -2512,6 +2749,7 @@ function generateQuestionsFromTemplate(template){
     fieldKey: f.fieldKey,
     name: f.name || f.fieldKey,
     fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic' ? 'dynamic' : 'static',
+    magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
     prompt: `Please highlight the ${f.name}`,
     order: idx + 1,
     questionIndex: idx + 1,
@@ -2551,7 +2789,9 @@ function buildStepsFromTemplate(template){
       label: q.name,
       mode: type === 'column' ? 'column' : 'cell',
       required: true,
-      type
+      type,
+      magicDataType: normalizeMagicDataType(q.magicDataType || q.magicType || byKey[q.fieldKey]?.magicDataType || byKey[q.fieldKey]?.magicType),
+      magicType: normalizeMagicDataType(q.magicDataType || q.magicType || byKey[q.fieldKey]?.magicDataType || byKey[q.fieldKey]?.magicType)
     };
   });
 }
@@ -2610,6 +2850,24 @@ function renderBuilderFields(){
     typeSel.value = (field.fieldType || 'static');
     typeSel.addEventListener('change', e => { field.fieldType = e.target.value; });
 
+    const magicSel = document.createElement('select');
+    magicSel.className = 'field-magic-type';
+    [
+      { value: MAGIC_DATA_TYPE.ANY, label: 'ANY' },
+      { value: MAGIC_DATA_TYPE.TEXT, label: 'TEXT ONLY' },
+      { value: MAGIC_DATA_TYPE.NUMERIC, label: 'NUMERIC ONLY' }
+    ].forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt.value; o.textContent = opt.label;
+      magicSel.appendChild(o);
+    });
+    magicSel.value = normalizeMagicDataType(field.magicType || field.magicDataType);
+    magicSel.addEventListener('change', e => {
+      const v = normalizeMagicDataType(e.target.value);
+      field.magicType = v;
+      field.magicDataType = v;
+    });
+
     const nameInput = document.createElement('input');
     nameInput.className = 'field-name';
     nameInput.placeholder = 'Field name';
@@ -2618,6 +2876,7 @@ function renderBuilderFields(){
 
     row.appendChild(idxBadge);
     row.appendChild(typeSel);
+    row.appendChild(magicSel);
     row.appendChild(nameInput);
     row.appendChild(deleteBtn);
     list.appendChild(row);
@@ -2630,7 +2889,7 @@ function renderBuilderFields(){
 
 function ensureBuilderField(){
   if(state.builderFields && state.builderFields.length) return;
-  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1, fieldKey: '' }];
+  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY }];
 }
 
 function addBuilderField(){
@@ -2640,7 +2899,7 @@ function addBuilderField(){
     return;
   }
   const nextOrder = state.builderFields.length + 1;
-  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder, fieldKey: '' });
+  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY });
   renderBuilderFields();
 }
 
@@ -2658,7 +2917,11 @@ function openBuilder(template=null){
     const normalizedTemplate = normalizeTemplate(template);
     state.builderEditingId = normalizedTemplate.id;
     const sortedFields = (normalizedTemplate.fields || []).slice().sort((a,b)=> (a.order||0) - (b.order||0));
-    state.builderFields = sortedFields.map(f => ({ ...f }));
+    const normalizedFields = sortedFields.map(f => {
+      const mt = normalizeMagicDataType(f.magicDataType || f.magicType);
+      return { ...f, magicType: mt, magicDataType: mt };
+    });
+    state.builderFields = normalizedFields;
     if(els.builderNameInput) els.builderNameInput.value = normalizedTemplate.wizardName || '';
   } else {
     state.builderEditingId = null;
@@ -2686,14 +2949,18 @@ function saveBuilderTemplate(){
     id: f.id || genId('field'),
     name: (f.name || '').trim(),
     fieldType: (f.fieldType || 'static') === 'dynamic' ? 'dynamic' : 'static',
-    order: idx + 1
+    order: idx + 1,
+    magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
+    magicType: normalizeMagicDataType(f.magicDataType || f.magicType)
   }));
   const normalizedFields = normalizeTemplateFields(preparedFields).map(f => ({
     id: f.id || genId('field'),
     name: f.name,
     fieldType: f.fieldType,
     order: f.order,
-    fieldKey: f.fieldKey
+    fieldKey: f.fieldKey,
+    magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
+    magicType: normalizeMagicDataType(f.magicDataType || f.magicType)
   }));
   const hasName = !!name;
   const hasFields = normalizedFields.length > 0;
@@ -6922,7 +7189,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     confidence,
     raw,
     correctionsApplied: corrections,
-    tokens
+    tokens,
+    magicDataType: normalizeMagicDataType(step.magicDataType || step.magicType),
+    magicType: normalizeMagicDataType(step.magicDataType || step.magicType)
   };
   if(extras.lineMetrics){
     entry.lineMetrics = clonePlain(extras.lineMetrics);
