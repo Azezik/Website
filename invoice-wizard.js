@@ -1540,15 +1540,23 @@ function digitRatio(str){
   return digits / str.length;
 }
 
+// ---------------------- OCRMAGIC overview ----------------------
+// Layer-1 base OCRMAGIC (runBaseOcrMagic) now runs immediately on the raw OCR
+// string with type-agnostic confusion-pair cleanup before any MAGIC DATA TYPE
+// logic, learning, or fingerprints. MAGIC_DATA_TYPE.ANY is the mixed-field
+// type (BOTH in the spec) meaning letters + digits + symbols are expected.
 const MAGIC_DATA_TYPE = { ANY:'any', TEXT:'text', NUMERIC:'numeric' };
 
 function normalizeMagicDataType(val){
-  if(!val && val !== 0) return MAGIC_DATA_TYPE.ANY;
-  const v = String(val).toLowerCase();
-  if(v.includes('text')) return MAGIC_DATA_TYPE.TEXT;
-  if(v.includes('num')) return MAGIC_DATA_TYPE.NUMERIC;
-  if(v === 'all numbers') return MAGIC_DATA_TYPE.NUMERIC;
-  return MAGIC_DATA_TYPE.ANY;
+  if(val === null || val === undefined) return null;
+  const v = String(val).trim();
+  if(!v) return null;
+  const lower = v.toLowerCase();
+  if(lower.includes('text')) return MAGIC_DATA_TYPE.TEXT;
+  if(lower.includes('num')) return MAGIC_DATA_TYPE.NUMERIC;
+  if(lower === 'all numbers') return MAGIC_DATA_TYPE.NUMERIC;
+  if(lower === MAGIC_DATA_TYPE.ANY || lower === 'both') return MAGIC_DATA_TYPE.ANY;
+  return null;
 }
 
 function inferMagicDataTypeFromFieldKey(fieldKey=''){
@@ -1556,6 +1564,17 @@ function inferMagicDataTypeFromFieldKey(fieldKey=''){
   if(/amount|total|tax|balance|subtotal|deposit|price|qty|quantity|unit|number/.test(key)) return MAGIC_DATA_TYPE.NUMERIC;
   if(/name|address|store|description|salesperson|department|rep/.test(key)) return MAGIC_DATA_TYPE.TEXT;
   return MAGIC_DATA_TYPE.ANY;
+}
+
+function resolveMagicDataType(fieldKey){
+  const entry = getProfileFieldEntry(fieldKey) || (state.steps || []).find(s => s.fieldKey === fieldKey);
+  const configured = entry?.magicDataType || entry?.magicType;
+  const normalizedConfigured = normalizeMagicDataType(configured);
+  const source = normalizedConfigured ? 'configured' : 'inferred';
+  const magicType = normalizedConfigured || inferMagicDataTypeFromFieldKey(fieldKey);
+  const profileType = getActiveProfileType();
+  logMagicTypeResolution(fieldKey, magicType, { profileType, source });
+  return { magicType, source, isExplicit: Boolean(normalizedConfigured) };
 }
 
 function logMagicTypeResolution(fieldKey, magicType, { profileType = getActiveProfileType(), source='inferred' }={}){
@@ -1567,12 +1586,7 @@ function logMagicTypeResolution(fieldKey, magicType, { profileType = getActivePr
 }
 
 function getMagicDataType(fieldKey){
-  const entry = getProfileFieldEntry(fieldKey) || (state.steps || []).find(s => s.fieldKey === fieldKey);
-  const configured = entry?.magicDataType || entry?.magicType;
-  const resolved = configured ? normalizeMagicDataType(configured) : inferMagicDataTypeFromFieldKey(fieldKey);
-  const profileType = getActiveProfileType();
-  logMagicTypeResolution(fieldKey, resolved, { profileType, source: configured ? 'configured' : 'inferred' });
-  return resolved;
+  return resolveMagicDataType(fieldKey).magicType;
 }
 
 function clonePlain(obj){
@@ -1613,13 +1627,58 @@ const FieldDataEngine = (() => {
     return patterns[ftype] = { code:{}, shape:{}, len:{}, digit:{}, avoid:{}, posTemplates:{} };
   }
 
-  function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMERIC }={}){
-    if(text === null || text === undefined) return text;
-    const str = String(text);
-    const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
-    const tokens = str.split(/\s+/g).filter(Boolean);
-    const converted = tokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType }).text);
-    const joined = converted.join(' ');
+function runBaseOcrMagic(raw=''){
+  const confusionMap = new Map([
+    ['O','0'],['o','0'],['I','1'],['l','1'],['L','1'],['T','7'],['S','5'],['B','8']
+  ]);
+  const collapsePairs = [
+    ['II','11'],['ll','11'],['OO','00'],['TT','77'],['SS','55']
+  ];
+  const isDigit = ch => /[0-9]/.test(ch);
+  const isLetter = ch => /[A-Za-z]/.test(ch);
+  const tokens = String(raw ?? '').split(/(\s+)/);
+  const cleaned = tokens.map(tok => {
+    if(/\s+/.test(tok) || tok === '') return tok;
+    const chars = tok.split('');
+    const digitCount = chars.filter(isDigit).length;
+    const letterCount = chars.filter(isLetter).length;
+    const mostlyNumeric = digitCount >= 2 && (digitCount / Math.max(1, tok.length)) >= 0.6;
+    const mapped = chars.map((ch, idx) => {
+      const left = chars[idx-1];
+      const right = chars[idx+1];
+      const isConfusionLetter = confusionMap.has(ch);
+      if(isConfusionLetter && isDigit(left) && isDigit(right)){
+        return confusionMap.get(ch);
+      }
+      if(isDigit(ch) && isLetter(left) && isLetter(right)){
+        return ch; // assume SKU/mixed token
+      }
+      if(isConfusionLetter && mostlyNumeric && (idx === 0 || idx === chars.length - 1)){
+        const otherDigits = digitCount;
+        const otherLetters = Math.max(0, letterCount - 1);
+        if(otherDigits >= 1 && otherLetters <= 1){
+          return confusionMap.get(ch);
+        }
+      }
+      return ch;
+    }).join('');
+    let collapsed = mapped;
+    collapsePairs.forEach(([from, to]) => {
+      collapsed = collapsed.replace(new RegExp(from, 'g'), to);
+    });
+    return collapsed;
+  }).join('');
+  ocrMagicDebug({ event: 'ocrmagic.base', raw, cleaned });
+  return cleaned;
+}
+
+function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMERIC, learningEnabled=true }={}){
+  if(text === null || text === undefined) return text;
+  const str = String(text);
+  const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
+  const tokens = str.split(/\s+/g).filter(Boolean);
+  const converted = tokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType, learningEnabled }).text);
+  const joined = converted.join(' ');
     let out = '';
     const isDigit = ch => ch >= '0' && ch <= '9';
     const isDecimalPunct = ch => ch === '.' || ch === ',';
@@ -1747,7 +1806,7 @@ const FieldDataEngine = (() => {
     return false;
   }
 
-  function convertToken(token='', expectation='neutral', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, silent=false }={}){
+  function convertToken(token='', expectation='neutral', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, silent=false, learningEnabled=true }={}){
     const chars = token.split('');
     const usedPairs = [];
     const usedContexts = [];
@@ -1772,7 +1831,7 @@ const FieldDataEngine = (() => {
         }
         if(target === ch) return;
         const key = pairKeyOf(ch, target);
-        if(!silent && shouldAvoidPair(fieldKey, key, sig)) return;
+        if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)) return;
         chars[idx] = target;
         usedPairs.push(key);
         usedContexts.push(sig);
@@ -1811,7 +1870,7 @@ const FieldDataEngine = (() => {
             const key = pairKeyOf(origCh, target);
             const sig = contextSignature(token, k);
             if(origCh !== target){
-              if(!silent && shouldAvoidPair(fieldKey, key, sig)){ blocked = true; break; }
+              if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)){ blocked = true; break; }
             }
           }
           if(!blocked){
@@ -1883,7 +1942,7 @@ const FieldDataEngine = (() => {
     return score;
   }
 
-  function applyOcrMagic(rawText='', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, spanKey, mode, profileType, archetype }={}){
+  function applyOcrMagic(rawText='', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, spanKey, mode, profileType, archetype, learningEnabled=true, magicTypeSource='inferred' }={}){
     const tokens = String(rawText || '').split(/\s+/g).filter(Boolean);
     const positionalShapes = POSITION_SLOTS.reduce((acc, slot) => ({ ...acc, [slot]: dominantPosShape(fieldKey, slot) }), {});
     const correctedTokens = [];
@@ -1908,7 +1967,7 @@ const FieldDataEngine = (() => {
       const addVariant = (exp) => {
         if(seen.has(exp)) return;
         seen.add(exp);
-        variants.push({ ...convertToken(token, exp, { fieldKey, magicType }), expectation: exp, original: token, slotShape });
+        variants.push({ ...convertToken(token, exp, { fieldKey, magicType, learningEnabled }), expectation: exp, original: token, slotShape });
       };
       addVariant('neutral');
       if(magicType === MAGIC_DATA_TYPE.NUMERIC){
@@ -1923,7 +1982,7 @@ const FieldDataEngine = (() => {
       variants.forEach(v => { v.score = scoreVariant({ text: v.text, expectation: v.expectation, slotShape, magicType, original: token }); });
       const best = variants.reduce((a,b)=> b.score > a.score ? b : a, variants[0]);
       correctedTokens.push(best.text);
-      numericTokens.push(convertToken(token, 'digit', { fieldKey, magicType, silent:true }).text);
+      numericTokens.push(convertToken(token, 'digit', { fieldKey, magicType, silent:true, learningEnabled }).text);
       if(best.text !== token){
         best.usedPairs.forEach((pair, i)=> correctionsApplied.push({ pair, context: best.usedContexts[i], from: token, to: best.text, index: idx }));
       }
@@ -1936,7 +1995,7 @@ const FieldDataEngine = (() => {
       const bestScore = best.score;
       variants.forEach(v => {
         if(v === best) return;
-        if(v.usedPairs?.length && v.magicMismatch && bestScore > v.score){
+        if(learningEnabled && v.usedPairs?.length && v.magicMismatch && bestScore > v.score){
           v.usedPairs.forEach((pair, i)=> recordWrongEvent(fieldKey, pair, v.usedContexts[i]));
         }
       });
@@ -1948,7 +2007,7 @@ const FieldDataEngine = (() => {
     const rulesApplied = [];
     if(magicType === MAGIC_DATA_TYPE.NUMERIC){
       rulesApplied.push('numeric-only-field');
-      const digitSafe = correctedTokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType }).text);
+      const digitSafe = correctedTokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType, learningEnabled }).text);
       const enforced = enforceNumericIntegrity(digitSafe.join(' '));
       if(enforced !== cleaned){
         rulesApplied.push('numeric-letter-strip');
@@ -1966,6 +2025,7 @@ const FieldDataEngine = (() => {
       profileType: appliedProfileType,
       fieldKey: fieldKey || 'UNKNOWN',
       magicDataType: magicType || 'UNSET',
+      magicTypeSource,
       archetype: appliedArchetype,
       raw: rawText,
       cleaned,
@@ -1998,12 +2058,14 @@ const FieldDataEngine = (() => {
     const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
     const raw = lineStrs.join(' ').trim();
     if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
-    let txt = raw.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
-    const magicType = getMagicDataType(ftype);
+    const baseCleaned = runBaseOcrMagic(raw);
+    let txt = baseCleaned.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    const magicTypeInfo = resolveMagicDataType(ftype);
+    const magicType = magicTypeInfo.magicType;
     const profileEntry = getProfileFieldEntry(ftype);
     const archetype = profileEntry?.archetype || profileEntry?.kind || profileEntry?.type || null;
     const profileType = getActiveProfileType();
-    const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode, profileType, archetype });
+    const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode, profileType, archetype, learningEnabled: magicTypeInfo.isExplicit, magicTypeSource: magicTypeInfo.source });
     txt = magic.value || txt;
     let correctionsApplied = magic.corrections || [];
     const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
@@ -2013,7 +2075,7 @@ const FieldDataEngine = (() => {
     if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       // Normalize common OCR digit confusions (e.g., $I3999 -> 13999.00) before stripping non-numeric chars.
-      const digitSafe = normalizeOcrDigits(numericCandidate, { fieldKey: ftype, magicType });
+      const digitSafe = normalizeOcrDigits(numericCandidate, { fieldKey: ftype, magicType, learningEnabled: magicTypeInfo.isExplicit });
       const n=digitSafe.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
     } else if(/sku|product_code/.test(ftype)){
       txt = txt.replace(/\s+/g,'').toUpperCase();
@@ -2043,7 +2105,7 @@ const FieldDataEngine = (() => {
     const digit = digitRatio(txt);
     const before = dominant(ftype);
     const fingerprintMatch = isValid && (!before.code || before.code === code);
-    const shouldLearn = isValid && (mode === 'CONFIG' || fingerprintMatch);
+    const shouldLearn = isValid && magicTypeInfo.isExplicit && (mode === 'CONFIG' || fingerprintMatch);
     if(shouldLearn){
       learn(ftype, txt);
       learnPosTemplates(ftype, magicTokens);
