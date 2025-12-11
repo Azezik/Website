@@ -12,6 +12,9 @@ let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
+let DEBUG_OCRMAGIC = Boolean(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS);
+window.__DEBUG_OCRMAGIC__ = DEBUG_OCRMAGIC;
+
 const MAX_STATIC_CANDIDATES = 12;
 const MIN_STATIC_ACCEPT_SCORE = 0.7;
 const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
@@ -24,6 +27,14 @@ function logStaticDebug(message, details){
   staticDebugLogs.push(details ? { line, details } : line);
   if(details !== undefined){ console.log(line, details); }
   else { console.log(line); }
+}
+
+function ocrMagicDebug(info){
+  if(!window || !window.__DEBUG_OCRMAGIC__) return;
+  const payload = info || {};
+  const line = `[ocrmagic] ${payload.event || ''}`.trim();
+  staticDebugLogs.push({ line, details: payload });
+  console.log(line, payload);
 }
 function formatBoxForLog(box){
   if(!box) return '<null>';
@@ -177,6 +188,9 @@ const runWizardSubhead = 'Drop a document to extract using the saved wizard.';
 const DEFAULT_WIZARD_ID = 'default';
 const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
+
+const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
+const magicTypeResolutionLog = new Set();
 
 const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
 const ModeEnum = modeHelpers?.WizardMode || { CONFIG:'CONFIG', RUN:'RUN' };
@@ -413,6 +427,11 @@ function bumpDebugBlank(){
 
 function currentWizardId(){
   return state.activeWizardId || DEFAULT_WIZARD_ID;
+}
+
+function getActiveProfileType(){
+  const wizardId = currentWizardId();
+  return wizardId && wizardId !== DEFAULT_WIZARD_ID ? PROFILE_TYPE.CUSTOM_WIZARD : PROFILE_TYPE.STATIC_PROFILE;
 }
 
 function genId(prefix='wiz'){
@@ -1539,11 +1558,21 @@ function inferMagicDataTypeFromFieldKey(fieldKey=''){
   return MAGIC_DATA_TYPE.ANY;
 }
 
+function logMagicTypeResolution(fieldKey, magicType, { profileType = getActiveProfileType(), source='inferred' }={}){
+  if(!fieldKey) return;
+  const key = `${profileType}::${currentWizardId()}::${fieldKey}`;
+  if(magicTypeResolutionLog.has(key)) return;
+  magicTypeResolutionLog.add(key);
+  ocrMagicDebug({ event: 'ocrmagic.magicType.resolve', profileType, fieldKey, magicDataType: magicType || 'UNSET', source });
+}
+
 function getMagicDataType(fieldKey){
   const entry = getProfileFieldEntry(fieldKey) || (state.steps || []).find(s => s.fieldKey === fieldKey);
   const configured = entry?.magicDataType || entry?.magicType;
-  if(configured) return normalizeMagicDataType(configured);
-  return inferMagicDataTypeFromFieldKey(fieldKey);
+  const resolved = configured ? normalizeMagicDataType(configured) : inferMagicDataTypeFromFieldKey(fieldKey);
+  const profileType = getActiveProfileType();
+  logMagicTypeResolution(fieldKey, resolved, { profileType, source: configured ? 'configured' : 'inferred' });
+  return resolved;
 }
 
 function clonePlain(obj){
@@ -1559,6 +1588,7 @@ const FieldDataEngine = (() => {
   const patterns = {};
   const CONFUSION_PAIRS = [
     { letter:'O', digit:'0' },
+    { letter:'o', digit:'0' },
     { letter:'I', digit:'1' },
     { letter:'l', digit:'1' },
     { letter:'T', digit:'7' },
@@ -1583,12 +1613,12 @@ const FieldDataEngine = (() => {
     return patterns[ftype] = { code:{}, shape:{}, len:{}, digit:{}, avoid:{}, posTemplates:{} };
   }
 
-  function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY }={}){
+  function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMERIC }={}){
     if(text === null || text === undefined) return text;
     const str = String(text);
     const currencySymbols = new Set(['$', '€', '£', '¥', '₹']);
     const tokens = str.split(/\s+/g).filter(Boolean);
-    const converted = tokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType, silent:true }).text);
+    const converted = tokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType }).text);
     const joined = converted.join(' ');
     let out = '';
     const isDigit = ch => ch >= '0' && ch <= '9';
@@ -1748,12 +1778,73 @@ const FieldDataEngine = (() => {
         usedContexts.push(sig);
       });
     });
+    const preCollapseText = chars.join('');
+    const favorDigitsByMagic = magicType === MAGIC_DATA_TYPE.NUMERIC;
+    const favorLettersByMagic = magicType === MAGIC_DATA_TYPE.TEXT;
+    const shouldCollapseRepeats = favorDigitsByMagic || favorLettersByMagic;
+    if(shouldCollapseRepeats){
+      const pairByChar = new Map();
+      CONFUSION_PAIRS.forEach(pair => {
+        pairByChar.set(pair.letter, pair);
+        pairByChar.set(pair.digit, pair);
+      });
+      const collapsed = [];
+      let i = 0;
+      while(i < chars.length){
+        const ch = chars[i];
+        const pair = pairByChar.get(ch);
+        if(!pair){
+          collapsed.push(ch);
+          i++;
+          continue;
+        }
+        let j = i + 1;
+        while(j < chars.length && pairByChar.get(chars[j]) === pair){ j++; }
+        const runLength = j - i;
+        const target = favorDigitsByMagic ? pair.digit : (favorLettersByMagic ? pair.letter : null);
+        if(runLength > 1 && target){
+          let blocked = false;
+          for(let k=i;k<j;k++){
+            const origCh = chars[k];
+            const key = pairKeyOf(origCh, target);
+            const sig = contextSignature(token, k);
+            if(origCh !== target){
+              if(!silent && shouldAvoidPair(fieldKey, key, sig)){ blocked = true; break; }
+            }
+          }
+          if(!blocked){
+            for(let k=i;k<j;k++){
+              const origCh = chars[k];
+              const key = pairKeyOf(origCh, target);
+              const sig = contextSignature(token, k);
+              usedPairs.push(key);
+              usedContexts.push(sig);
+            }
+            collapsed.push(target);
+          } else {
+            for(let k=i;k<j;k++) collapsed.push(chars[k]);
+          }
+        } else {
+          collapsed.push(ch);
+        }
+        i = j;
+      }
+      chars.splice(0, chars.length, ...collapsed);
+    }
     const text = chars.join('');
     const hasDigits = /[0-9]/.test(text);
     const hasLetters = /[A-Za-z]/.test(text);
     const magicMismatch = (magicType === MAGIC_DATA_TYPE.NUMERIC && hasLetters)
       || (magicType === MAGIC_DATA_TYPE.TEXT && hasDigits);
-    return { text, usedPairs, usedContexts, magicMismatch };
+    return {
+      text,
+      usedPairs,
+      usedContexts,
+      magicMismatch,
+      collapseChanged: preCollapseText !== text,
+      collapseBefore: preCollapseText,
+      collapseAfter: text
+    };
   }
 
   function scoreVariant({ text, expectation, slotShape, magicType, original }){
@@ -1779,12 +1870,13 @@ const FieldDataEngine = (() => {
     return score;
   }
 
-  function applyOcrMagic(rawText='', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, spanKey, mode }={}){
+  function applyOcrMagic(rawText='', { fieldKey='', magicType=MAGIC_DATA_TYPE.ANY, spanKey, mode, profileType, archetype }={}){
     const tokens = String(rawText || '').split(/\s+/g).filter(Boolean);
     const positionalShapes = POSITION_SLOTS.reduce((acc, slot) => ({ ...acc, [slot]: dominantPosShape(fieldKey, slot) }), {});
     const correctedTokens = [];
     const correctionsApplied = [];
     const numericTokens = [];
+    let repeatCollapsed = false;
 
     tokens.forEach((token, idx) => {
       const expectation = magicType === MAGIC_DATA_TYPE.NUMERIC ? 'digit'
@@ -1814,6 +1906,12 @@ const FieldDataEngine = (() => {
       if(best.text !== token){
         best.usedPairs.forEach((pair, i)=> correctionsApplied.push({ pair, context: best.usedContexts[i], from: token, to: best.text, index: idx }));
       }
+      if(best.collapseChanged){
+        repeatCollapsed = true;
+        if(spanKey){
+          traceEvent(spanKey,'ocrmagic.repeatCollapse',{ from: best.collapseBefore, to: best.collapseAfter, expectation: best.expectation, magicType });
+        }
+      }
       const bestScore = best.score;
       variants.forEach(v => {
         if(v === best) return;
@@ -1824,8 +1922,26 @@ const FieldDataEngine = (() => {
     });
     const cleaned = correctedTokens.join(' ').trim();
     const numericCandidate = numericTokens.join(' ').trim();
+    const appliedProfileType = profileType || getActiveProfileType();
+    const appliedArchetype = archetype || 'UNKNOWN';
+    const rulesApplied = [];
+    if(magicType === MAGIC_DATA_TYPE.NUMERIC) rulesApplied.push('numeric-only-field');
+    else if(magicType === MAGIC_DATA_TYPE.TEXT) rulesApplied.push('text-only-field');
+    if(correctionsApplied.length) rulesApplied.push('token-substitution');
+    if(repeatCollapsed) rulesApplied.push('repeat-collapse');
     if(spanKey) traceEvent(spanKey,'ocrmagic',{ magicType, cleaned, tokens: correctedTokens });
-    return { value: cleaned, corrections: correctionsApplied, tokens: correctedTokens, numericCandidate };
+    ocrMagicDebug({
+      event: 'ocrmagic.apply',
+      mode: mode || state.mode || ModeEnum.RUN,
+      profileType: appliedProfileType,
+      fieldKey: fieldKey || 'UNKNOWN',
+      magicDataType: magicType || 'UNSET',
+      archetype: appliedArchetype,
+      raw: rawText,
+      cleaned,
+      rulesApplied
+    });
+    return { value: cleaned, corrections: correctionsApplied, tokens: correctedTokens, numericCandidate, rulesApplied };
   }
 
   function learn(ftype, value){
@@ -1854,7 +1970,10 @@ const FieldDataEngine = (() => {
     if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
     let txt = raw.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
     const magicType = getMagicDataType(ftype);
-    const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode });
+    const profileEntry = getProfileFieldEntry(ftype);
+    const archetype = profileEntry?.archetype || profileEntry?.kind || profileEntry?.type || null;
+    const profileType = getActiveProfileType();
+    const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode, profileType, archetype });
     txt = magic.value || txt;
     let correctionsApplied = magic.corrections || [];
     const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
