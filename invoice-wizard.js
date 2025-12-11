@@ -4065,11 +4065,21 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
-    const value = text || state.snappedText || cleaned.value || cleaned.raw || '';
+    const cleanedValue = cleaned.value || cleaned.raw || text || state.snappedText || '';
+    const rawOriginal = text || state.snappedText || cleaned.rawOriginal || cleaned.raw || '';
+    if(isConfigStatic && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+      const expectedCode = getDominantFingerprintCode(fieldSpec.fieldKey, spanKey?.fieldKey || fieldSpec.fieldKey);
+      const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, { enabled:false, fieldKey: fieldSpec.fieldKey, cleanedValue });
+      logStaticDebug(
+        `field=${fieldSpec.fieldKey||''} cleaned="${cleanedValue}" code=${cleaned.code || '<none>'} expected=${expectedCode || '<none>'} -> fingerprintOk=${fingerprintOk}`,
+        { field: fieldSpec.fieldKey, cleaned: cleanedValue, code: cleaned.code, expected: expectedCode, fingerprintOk, mode: state.mode }
+      );
+    }
+    const value = cleanedValue;
     const result = {
       value,
-      raw: text || state.snappedText || '',
-      corrected: value,
+      raw: rawOriginal,
+      corrected: cleaned.corrected || value,
       code: cleaned.code,
       shape: cleaned.shape,
       score: cleaned.score,
