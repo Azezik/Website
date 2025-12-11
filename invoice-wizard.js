@@ -1781,7 +1781,7 @@ const FieldDataEngine = (() => {
     const preCollapseText = chars.join('');
     const favorDigitsByMagic = magicType === MAGIC_DATA_TYPE.NUMERIC;
     const favorLettersByMagic = magicType === MAGIC_DATA_TYPE.TEXT;
-    const shouldCollapseRepeats = favorDigitsByMagic || favorLettersByMagic;
+    const shouldCollapseRepeats = magicType === MAGIC_DATA_TYPE.TEXT;
     if(shouldCollapseRepeats){
       const pairByChar = new Map();
       CONFUSION_PAIRS.forEach(pair => {
@@ -1801,8 +1801,10 @@ const FieldDataEngine = (() => {
         let j = i + 1;
         while(j < chars.length && pairByChar.get(chars[j]) === pair){ j++; }
         const runLength = j - i;
+        const runHasLetter = chars.slice(i, j).some(ch => /[A-Za-z]/.test(ch));
+        const runHasDigit = chars.slice(i, j).some(ch => /[0-9]/.test(ch));
         const target = favorDigitsByMagic ? pair.digit : (favorLettersByMagic ? pair.letter : null);
-        if(runLength > 1 && target){
+        if(runLength > 1 && target && runHasLetter && runHasDigit){
           let blocked = false;
           for(let k=i;k<j;k++){
             const origCh = chars[k];
@@ -1847,6 +1849,14 @@ const FieldDataEngine = (() => {
     };
   }
 
+  function enforceNumericIntegrity(text=''){
+    const map = new Map([
+      ['O','0'],['o','0'],['I','1'],['l','1'],['T','7'],['S','5'],['B','8']
+    ]);
+    const mapped = text.split('').map(ch => map.get(ch) || ch).join('');
+    return mapped.replace(/[A-Za-z]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
   function scoreVariant({ text, expectation, slotShape, magicType, original }){
     let score = 0;
     const digitCount = (text.match(/[0-9]/g) || []).length;
@@ -1859,6 +1869,9 @@ const FieldDataEngine = (() => {
       score += hasDigits ? -3 : 3;
     } else {
       if(hasDigits && hasLetters) score += 1;
+      if(hasDigits && !hasLetters && /[A-Za-z]/.test(original) && original.replace(/[^A-Za-z]/g,'').length > (original.match(/[0-9]/g)||[]).length){
+        score -= 1;
+      }
     }
     if(expectation === 'digit' && hasDigits) score += 1;
     if(expectation === 'letter' && hasLetters) score += 1;
@@ -1879,11 +1892,11 @@ const FieldDataEngine = (() => {
     let repeatCollapsed = false;
 
     tokens.forEach((token, idx) => {
+      const digits = (token.match(/[0-9]/g) || []).length;
+      const letters = (token.match(/[A-Za-z]/g) || []).length;
       const expectation = magicType === MAGIC_DATA_TYPE.NUMERIC ? 'digit'
         : magicType === MAGIC_DATA_TYPE.TEXT ? 'letter'
         : (()=>{
-            const digits = (token.match(/[0-9]/g) || []).length;
-            const letters = (token.match(/[A-Za-z]/g) || []).length;
             if(digits > letters) return 'digit';
             if(letters > digits) return 'letter';
             return 'neutral';
@@ -1891,13 +1904,21 @@ const FieldDataEngine = (() => {
       const slot = idx === 0 ? 'first' : idx === 1 ? 'second' : (idx === tokens.length - 1 ? 'last' : (idx === tokens.length - 2 ? 'secondLast' : null));
       const slotShape = slot ? positionalShapes[slot] : null;
       const variants = [];
-      variants.push({ ...convertToken(token, 'neutral', { fieldKey, magicType }), expectation: 'neutral', original: token, slotShape });
-      variants.push({ ...convertToken(token, expectation, { fieldKey, magicType }), expectation, original: token, slotShape });
-      if(expectation !== 'digit'){
-        variants.push({ ...convertToken(token, 'digit', { fieldKey, magicType }), expectation: 'digit', original: token, slotShape });
-      }
-      if(expectation !== 'letter'){
-        variants.push({ ...convertToken(token, 'letter', { fieldKey, magicType }), expectation: 'letter', original: token, slotShape });
+      const seen = new Set();
+      const addVariant = (exp) => {
+        if(seen.has(exp)) return;
+        seen.add(exp);
+        variants.push({ ...convertToken(token, exp, { fieldKey, magicType }), expectation: exp, original: token, slotShape });
+      };
+      addVariant('neutral');
+      if(magicType === MAGIC_DATA_TYPE.NUMERIC){
+        addVariant('digit');
+      } else if(magicType === MAGIC_DATA_TYPE.TEXT){
+        addVariant('letter');
+      } else {
+        addVariant(expectation);
+        if(digits > 0 && digits >= letters) addVariant('digit');
+        if(letters > 0) addVariant('letter');
       }
       variants.forEach(v => { v.score = scoreVariant({ text: v.text, expectation: v.expectation, slotShape, magicType, original: token }); });
       const best = variants.reduce((a,b)=> b.score > a.score ? b : a, variants[0]);
@@ -1920,12 +1941,21 @@ const FieldDataEngine = (() => {
         }
       });
     });
-    const cleaned = correctedTokens.join(' ').trim();
-    const numericCandidate = numericTokens.join(' ').trim();
+    let cleaned = correctedTokens.join(' ').trim();
+    let numericCandidate = numericTokens.join(' ').trim();
     const appliedProfileType = profileType || getActiveProfileType();
     const appliedArchetype = archetype || 'UNKNOWN';
     const rulesApplied = [];
-    if(magicType === MAGIC_DATA_TYPE.NUMERIC) rulesApplied.push('numeric-only-field');
+    if(magicType === MAGIC_DATA_TYPE.NUMERIC){
+      rulesApplied.push('numeric-only-field');
+      const digitSafe = correctedTokens.map(tok => convertToken(tok, 'digit', { fieldKey, magicType }).text);
+      const enforced = enforceNumericIntegrity(digitSafe.join(' '));
+      if(enforced !== cleaned){
+        rulesApplied.push('numeric-letter-strip');
+        cleaned = enforced;
+      }
+      numericCandidate = enforced;
+    }
     else if(magicType === MAGIC_DATA_TYPE.TEXT) rulesApplied.push('text-only-field');
     if(correctionsApplied.length) rulesApplied.push('token-substitution');
     if(repeatCollapsed) rulesApplied.push('repeat-collapse');
