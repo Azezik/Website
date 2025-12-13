@@ -5922,6 +5922,109 @@ function applySelectionFromCss(startCss, endCss, opts={}){
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
+function bufferLikelyHasAcroForm(arrayBuffer){
+  try {
+    const bytes = new Uint8Array(arrayBuffer);
+    const sniffLen = Math.min(bytes.length, 512000);
+    if (sniffLen === 0) return false;
+    const snippet = new TextDecoder('latin1').decode(bytes.subarray(0, sniffLen));
+    return snippet.includes('/AcroForm') && snippet.includes('/Fields');
+  } catch (err) {
+    console.warn('AcroForm sniff failed; skipping flatten', err);
+    return false;
+  }
+}
+
+async function flattenAcroFormAppearances(arrayBuffer){
+  if (!(window.PDFLib && PDFLib.PDFDocument)) return arrayBuffer;
+  if (!bufferLikelyHasAcroForm(arrayBuffer)) return arrayBuffer;
+  try {
+    const pdfDoc = await PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    if (!fields.length) return arrayBuffer;
+
+    let helvetica = null;
+    try {
+      helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+    } catch (err) {
+      console.warn('Helvetica embed failed; attempting flatten without default font', err);
+    }
+
+    try {
+      if (helvetica) {
+        form.updateFieldAppearances(helvetica);
+      } else {
+        form.updateFieldAppearances();
+      }
+    } catch (err) {
+      console.warn('Field appearance update failed; trying per-field fallback', err);
+      if (helvetica) {
+        try {
+          fields.forEach(field => {
+            if (typeof field.updateAppearances === 'function') {
+              try {
+                field.updateAppearances(helvetica);
+              } catch (fieldErr) {
+                console.warn('Per-field appearance refresh failed', fieldErr);
+              }
+            }
+          });
+        } catch (fallbackErr) {
+          console.warn('Per-field appearance loop failed', fallbackErr);
+        }
+      }
+    }
+
+    let stampedWidgets = 0;
+    if (helvetica) {
+      try {
+        fields.forEach(field => {
+          let value = '';
+          try { if (typeof field.getText === 'function') value = field.getText() || ''; } catch (_) { /* noop */ }
+          if (!value) {
+            try { if (typeof field.getSelected === 'function') value = (field.getSelected() || []).join(', '); } catch (_) { /* noop */ }
+          }
+          if (!value) {
+            try { if (typeof field.isChecked === 'function' && field.isChecked()) value = '☑'; } catch (_) { /* noop */ }
+          }
+          if (!value) return;
+
+          const widgets = (field.acroField && typeof field.acroField.getWidgets === 'function') ? field.acroField.getWidgets() : [];
+          widgets.forEach(widget => {
+            if (!widget || typeof widget.getRectangle !== 'function' || typeof widget.getPage !== 'function') return;
+            const rect = widget.getRectangle();
+            const page = widget.getPage();
+            if (!rect || !page) return;
+            const width = (rect.x2 || rect.x) - (rect.x1 || 0);
+            const height = (rect.y2 || rect.y) - (rect.y1 || 0);
+            const size = Math.max(8, Math.min(12, height - 2));
+            const x = (rect.x1 || 0) + 1;
+            const y = (rect.y1 || 0) + Math.max(0, (height - size) / 2);
+            try {
+              page.drawText(String(value), { x, y, size, font: helvetica, color: PDFLib.rgb(0, 0, 0), maxWidth: Math.max(1, width - 2) });
+              stampedWidgets += 1;
+            } catch (drawErr) {
+              console.warn('Widget stamping draw failed', drawErr);
+            }
+          });
+        });
+      } catch (stampErr) {
+        console.warn('Widget stamping failed', stampErr);
+      }
+    }
+
+    form.flatten();
+    const flattened = await pdfDoc.save();
+    const suffix = stampedWidgets ? ` (stamped ${stampedWidgets} widgets)` : '';
+    console.log(`[pdf] flattened ${fields.length} form fields into page content${suffix}`);
+    return flattened;
+  } catch (err) {
+    console.warn('AcroForm flatten failed; using original PDF', err);
+    return arrayBuffer;
+  }
+}
+
 // ===== Open file (image or PDF), robust across browsers =====
 async function openFile(file){
   if (!(file instanceof Blob)) {
@@ -5967,7 +6070,8 @@ async function openFile(file){
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
   try {
-    const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+    const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+    const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
     state.pdf = await loadingTask.promise;
 
     state.pageNum = 1;
@@ -6068,7 +6172,8 @@ async function prepareRunDocument(file){
     }
   }
 
-  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+  const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+  const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
   state.pdf = await loadingTask.promise;
   const scale = BASE_PDF_SCALE;
   let totalH = 0;
