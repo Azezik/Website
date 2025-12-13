@@ -569,7 +569,7 @@
       console.warn('[MasterDB] count mismatch', { counts, missing: missingSummary, missingMap });
     }
 
-    const rows = [];
+    const rows = [HEADERS];
     selected.forEach(({ invoice, items, record }) => {
       items.forEach((item, idx) => {
         let lineTotal = item.amount;
@@ -626,7 +626,7 @@
 
   function toCsv(ssot){
     const { header, rows } = flatten(ssot);
-    const table = [header, ...rows];
+    const table = (rows && rows.length) ? rows : [header || HEADERS];
     return table.map(r => r.map(csvEscape).join(',')).join('\n');
   }
 
