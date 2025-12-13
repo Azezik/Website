@@ -14,6 +14,8 @@ let staticDebugLogs = [];
 
 let DEBUG_OCRMAGIC = Boolean(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS);
 window.__DEBUG_OCRMAGIC__ = DEBUG_OCRMAGIC;
+const DEBUG_FLATTEN_COMPARE = Boolean(window.DEBUG_FLATTEN_COMPARE ?? /flatten-debug/i.test(location.search));
+window.DEBUG_FLATTEN_COMPARE = DEBUG_FLATTEN_COMPARE;
 
 const MAX_STATIC_CANDIDATES = 12;
 const MIN_STATIC_ACCEPT_SCORE = 0.7;
@@ -5959,6 +5961,40 @@ async function flattenAcroFormAppearances(arrayBuffer){
   }
 }
 
+function toPdfData(buffer){
+  if(!buffer) return null;
+  if(buffer instanceof Uint8Array) return buffer;
+  if(buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  return null;
+}
+
+async function debugProbePdfBuffer(label, buffer){
+  if(!DEBUG_FLATTEN_COMPARE || !pdfjsLibRef?.getDocument) return;
+  const data = toPdfData(buffer);
+  if(!data) return;
+  const prefix = `[pdf-debug][${label}]`;
+  try {
+    console.log(`${prefix} loading for probe`);
+    const loadingTask = pdfjsLibRef.getDocument({ data });
+    const doc = await loadingTask.promise;
+    const page = await doc.getPage(1);
+    const content = await page.getTextContent();
+    const sample = content.items.slice(0, 5).map(i => (i?.str || '').slice(0, 80));
+    console.log(`${prefix} page1 text items=${content.items.length}`, sample);
+    await loadingTask.destroy();
+  } catch(err){
+    console.warn(`${prefix} probe failed`, err);
+  }
+}
+
+async function debugCompareFlattenOutputs(originalBuffer, flattenedBuffer){
+  if(!DEBUG_FLATTEN_COMPARE) return;
+  await debugProbePdfBuffer('original', originalBuffer);
+  if(flattenedBuffer && flattenedBuffer !== originalBuffer){
+    await debugProbePdfBuffer('flattened', flattenedBuffer);
+  }
+}
+
 // ===== Open file (image or PDF), robust across browsers =====
 async function openFile(file){
   if (!(file instanceof Blob)) {
@@ -6005,6 +6041,7 @@ async function openFile(file){
   els.pdfCanvas.style.display = 'block';
   try {
     const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+    await debugCompareFlattenOutputs(arrayBuffer, pdfBuffer);
     const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
     state.pdf = await loadingTask.promise;
 
@@ -6223,6 +6260,9 @@ async function readTokensForPage(pageObj, vp){
   const tokens = [];
   try {
     const content = await pageObj.getTextContent();
+    if(DEBUG_FLATTEN_COMPARE){
+      console.log(`[pdf-debug][flattened-run] textContent page ${pageObj.pageNumber} items=${content.items.length}`);
+    }
     for(const item of content.items){
       const tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
       const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
