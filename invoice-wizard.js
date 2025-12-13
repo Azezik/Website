@@ -5943,39 +5943,12 @@ async function flattenAcroFormAppearances(arrayBuffer){
     const form = pdfDoc.getForm();
     const fields = form.getFields();
     if (!fields.length) return arrayBuffer;
-
-    let helvetica = null;
     try {
-      helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      form.updateFieldAppearances(helvetica);
     } catch (err) {
-      console.warn('Helvetica embed failed; attempting flatten without default font', err);
+      console.warn('Field appearance update failed; continuing to flatten', err);
     }
-
-    try {
-      if (helvetica) {
-        form.updateFieldAppearances(helvetica);
-      } else {
-        form.updateFieldAppearances();
-      }
-    } catch (err) {
-      console.warn('Field appearance update failed; trying per-field fallback', err);
-      if (helvetica) {
-        try {
-          fields.forEach(field => {
-            if (typeof field.updateAppearances === 'function') {
-              try {
-                field.updateAppearances(helvetica);
-              } catch (fieldErr) {
-                console.warn('Per-field appearance refresh failed', fieldErr);
-              }
-            }
-          });
-        } catch (fallbackErr) {
-          console.warn('Per-field appearance loop failed', fallbackErr);
-        }
-      }
-    }
-
     form.flatten();
     const flattened = await pdfDoc.save();
     console.log(`[pdf] flattened ${fields.length} form fields into page content`);
