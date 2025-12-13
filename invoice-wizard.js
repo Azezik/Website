@@ -5922,6 +5922,43 @@ function applySelectionFromCss(startCss, endCss, opts={}){
 }
 function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
 
+function bufferLikelyHasAcroForm(arrayBuffer){
+  try {
+    const bytes = new Uint8Array(arrayBuffer);
+    const sniffLen = Math.min(bytes.length, 512000);
+    if (sniffLen === 0) return false;
+    const snippet = new TextDecoder('latin1').decode(bytes.subarray(0, sniffLen));
+    return snippet.includes('/AcroForm') && snippet.includes('/Fields');
+  } catch (err) {
+    console.warn('AcroForm sniff failed; skipping flatten', err);
+    return false;
+  }
+}
+
+async function flattenAcroFormAppearances(arrayBuffer){
+  if (!(window.PDFLib && PDFLib.PDFDocument)) return arrayBuffer;
+  if (!bufferLikelyHasAcroForm(arrayBuffer)) return arrayBuffer;
+  try {
+    const pdfDoc = await PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    if (!fields.length) return arrayBuffer;
+    try {
+      const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      form.updateFieldAppearances(helvetica);
+    } catch (err) {
+      console.warn('Field appearance update failed; continuing to flatten', err);
+    }
+    form.flatten();
+    const flattened = await pdfDoc.save();
+    console.log(`[pdf] flattened ${fields.length} form fields into page content`);
+    return flattened;
+  } catch (err) {
+    console.warn('AcroForm flatten failed; using original PDF', err);
+    return arrayBuffer;
+  }
+}
+
 // ===== Open file (image or PDF), robust across browsers =====
 async function openFile(file){
   if (!(file instanceof Blob)) {
@@ -5967,7 +6004,8 @@ async function openFile(file){
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
   try {
-    const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+    const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+    const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
     state.pdf = await loadingTask.promise;
 
     state.pageNum = 1;
@@ -6068,7 +6106,8 @@ async function prepareRunDocument(file){
     }
   }
 
-  const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+  const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+  const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
   state.pdf = await loadingTask.promise;
   const scale = BASE_PDF_SCALE;
   let totalH = 0;
