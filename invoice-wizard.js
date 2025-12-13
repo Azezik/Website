@@ -5943,81 +5943,15 @@ async function flattenAcroFormAppearances(arrayBuffer){
     const form = pdfDoc.getForm();
     const fields = form.getFields();
     if (!fields.length) return arrayBuffer;
-
-    let helvetica = null;
     try {
-      helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      form.updateFieldAppearances(helvetica);
     } catch (err) {
-      console.warn('Helvetica embed failed; attempting flatten without default font', err);
+      console.warn('Field appearance update failed; continuing to flatten', err);
     }
-
-    try {
-      if (helvetica) {
-        form.updateFieldAppearances(helvetica);
-      } else {
-        form.updateFieldAppearances();
-      }
-    } catch (err) {
-      console.warn('Field appearance update failed; trying per-field fallback', err);
-      if (helvetica) {
-        try {
-          fields.forEach(field => {
-            if (typeof field.updateAppearances === 'function') {
-              try {
-                field.updateAppearances(helvetica);
-              } catch (fieldErr) {
-                console.warn('Per-field appearance refresh failed', fieldErr);
-              }
-            }
-          });
-        } catch (fallbackErr) {
-          console.warn('Per-field appearance loop failed', fallbackErr);
-        }
-      }
-    }
-
-    let stampedWidgets = 0;
-    if (helvetica) {
-      try {
-        fields.forEach(field => {
-          let value = '';
-          try { if (typeof field.getText === 'function') value = field.getText() || ''; } catch (_) { /* noop */ }
-          if (!value) {
-            try { if (typeof field.getSelected === 'function') value = (field.getSelected() || []).join(', '); } catch (_) { /* noop */ }
-          }
-          if (!value) {
-            try { if (typeof field.isChecked === 'function' && field.isChecked()) value = '☑'; } catch (_) { /* noop */ }
-          }
-          if (!value) return;
-
-          const widgets = (field.acroField && typeof field.acroField.getWidgets === 'function') ? field.acroField.getWidgets() : [];
-          widgets.forEach(widget => {
-            if (!widget || typeof widget.getRectangle !== 'function' || typeof widget.getPage !== 'function') return;
-            const rect = widget.getRectangle();
-            const page = widget.getPage();
-            if (!rect || !page) return;
-            const width = (rect.x2 || rect.x) - (rect.x1 || 0);
-            const height = (rect.y2 || rect.y) - (rect.y1 || 0);
-            const size = Math.max(8, Math.min(12, height - 2));
-            const x = (rect.x1 || 0) + 1;
-            const y = (rect.y1 || 0) + Math.max(0, (height - size) / 2);
-            try {
-              page.drawText(String(value), { x, y, size, font: helvetica, color: PDFLib.rgb(0, 0, 0), maxWidth: Math.max(1, width - 2) });
-              stampedWidgets += 1;
-            } catch (drawErr) {
-              console.warn('Widget stamping draw failed', drawErr);
-            }
-          });
-        });
-      } catch (stampErr) {
-        console.warn('Widget stamping failed', stampErr);
-      }
-    }
-
     form.flatten();
     const flattened = await pdfDoc.save();
-    const suffix = stampedWidgets ? ` (stamped ${stampedWidgets} widgets)` : '';
-    console.log(`[pdf] flattened ${fields.length} form fields into page content${suffix}`);
+    console.log(`[pdf] flattened ${fields.length} form fields into page content`);
     return flattened;
   } catch (err) {
     console.warn('AcroForm flatten failed; using original PDF', err);
