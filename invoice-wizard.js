@@ -5944,7 +5944,8 @@ async function flattenAcroFormAppearances(arrayBuffer){
     const fields = form.getFields();
     if (!fields.length) return arrayBuffer;
     try {
-      form.updateFieldAppearances(PDFLib.StandardFonts.Helvetica);
+      const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+      form.updateFieldAppearances(helvetica);
     } catch (err) {
       console.warn('Field appearance update failed; continuing to flatten', err);
     }
