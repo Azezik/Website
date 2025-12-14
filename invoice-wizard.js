@@ -23,6 +23,7 @@ const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
 const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
 function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
+function ocrMagicDebugEnabled(){ return !!(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS); }
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
   const line = `[static-debug] ${message}`;
@@ -32,7 +33,7 @@ function logStaticDebug(message, details){
 }
 
 function ocrMagicDebug(info){
-  if(!window || !window.__DEBUG_OCRMAGIC__) return;
+  if(!window || !ocrMagicDebugEnabled()) return;
   const payload = info || {};
   const line = `[ocrmagic] ${payload.event || ''}`.trim();
   staticDebugLogs.push({ line, details: payload });
@@ -7769,6 +7770,8 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   const enabled = !!els.staticDebugToggle.checked;
   window.DEBUG_STATIC_FIELDS = enabled;
   DEBUG_STATIC_FIELDS = enabled;
+  window.__DEBUG_OCRMAGIC__ = enabled;
+  DEBUG_OCRMAGIC = enabled;
 });
 
 els.docType?.addEventListener('change', ()=>{
