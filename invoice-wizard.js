@@ -23,6 +23,7 @@ const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
 const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
 function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
+function ocrMagicDebugEnabled(){ return !!(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS); }
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
   const line = `[static-debug] ${message}`;
@@ -32,7 +33,7 @@ function logStaticDebug(message, details){
 }
 
 function ocrMagicDebug(info){
-  if(!window || !window.__DEBUG_OCRMAGIC__) return;
+  if(!window || !ocrMagicDebugEnabled()) return;
   const payload = info || {};
   const line = `[ocrmagic] ${payload.event || ''}`.trim();
   staticDebugLogs.push({ line, details: payload });
@@ -1615,6 +1616,20 @@ const FieldDataEngine = (() => {
   const POSITION_SLOTS = ['first','second','secondLast','last'];
   const WRONG_EVENT_THRESHOLD = 3;
 
+  function logAvoidSuppression({ ftype, pairKey, sig, phase }){
+    const p = ensurePattern(ftype);
+    const count = p.avoid?.[pairKey]?.[sig] || 0;
+    ocrMagicDebug({
+      event: 'ocrmagic.suppress',
+      fieldKey: ftype || 'UNKNOWN',
+      pairKey,
+      context: sig,
+      count,
+      threshold: WRONG_EVENT_THRESHOLD,
+      phase
+    });
+  }
+
   function ensurePattern(ftype){
     const existing = patterns[ftype];
     if(existing){
@@ -1770,6 +1785,14 @@ function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMER
     const p = ensurePattern(ftype);
     const bucket = p.avoid[pairKey] || (p.avoid[pairKey] = {});
     bucket[sig] = (bucket[sig] || 0) + 1;
+    ocrMagicDebug({
+      event: 'ocrmagic.wrongEvent',
+      fieldKey: ftype || 'UNKNOWN',
+      pairKey,
+      context: sig,
+      count: bucket[sig],
+      threshold: WRONG_EVENT_THRESHOLD
+    });
   }
 
   function dominantPosShape(ftype, slot){
@@ -1833,7 +1856,10 @@ function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMER
         }
         if(target === ch) return;
         const key = pairKeyOf(ch, target);
-        if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)) return;
+        if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)){
+          logAvoidSuppression({ ftype: fieldKey, pairKey: key, sig, phase: 'token-convert' });
+          return;
+        }
         chars[idx] = target;
         usedPairs.push(key);
         usedContexts.push(sig);
@@ -1872,7 +1898,10 @@ function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMER
             const key = pairKeyOf(origCh, target);
             const sig = contextSignature(token, k);
             if(origCh !== target){
-              if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)){ blocked = true; break; }
+              if(!silent && learningEnabled && shouldAvoidPair(fieldKey, key, sig)){
+                logAvoidSuppression({ ftype: fieldKey, pairKey: key, sig, phase: 'repeat-collapse' });
+                blocked = true; break;
+              }
             }
           }
           if(!blocked){
@@ -1951,6 +1980,15 @@ function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMER
     const correctionsApplied = [];
     const numericTokens = [];
     let repeatCollapsed = false;
+
+    ocrMagicDebug({
+      event: 'ocrmagic.learning.gate',
+      fieldKey: fieldKey || 'UNKNOWN',
+      magicDataType: magicType || 'UNSET',
+      learningEnabled: !!learningEnabled,
+      magicTypeSource,
+      mode: mode || state.mode || ModeEnum.RUN
+    });
 
     tokens.forEach((token, idx) => {
       const digits = (token.match(/[0-9]/g) || []).length;
@@ -2140,6 +2178,8 @@ function normalizeOcrDigits(text, { fieldKey='', magicType=MAGIC_DATA_TYPE.NUMER
         ensurePattern(key);
       }
     }
+    const importedKeys = Object.keys(patterns);
+    ocrMagicDebug({ event: 'ocrmagic.patterns.import', importedKeys, count: importedKeys.length });
   }
 
   return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
@@ -7730,6 +7770,8 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   const enabled = !!els.staticDebugToggle.checked;
   window.DEBUG_STATIC_FIELDS = enabled;
   DEBUG_STATIC_FIELDS = enabled;
+  window.__DEBUG_OCRMAGIC__ = enabled;
+  DEBUG_OCRMAGIC = enabled;
 });
 
 els.docType?.addEventListener('change', ()=>{
