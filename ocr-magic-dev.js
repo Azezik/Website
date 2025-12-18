@@ -15,14 +15,21 @@
     traceSteps: document.getElementById('trace-steps'),
     debugToggle: document.getElementById('debug-toggle'),
     debugLog: document.getElementById('debug-log'),
-    activeFieldLabel: document.getElementById('active-field-label')
+    activeFieldLabel: document.getElementById('active-field-label'),
+    traceSelector: document.getElementById('trace-selector'),
+    tracePassSelect: document.getElementById('trace-pass-select'),
+    traceLineSelect: document.getElementById('trace-line-select'),
+    passResults: document.getElementById('pass-results'),
+    passResultsPanel: document.getElementById('pass-results-panel'),
+    warning: document.getElementById('multiline-warning')
   };
 
   const store = new pipeline.SegmentModelStore('ocrmagic.dev.sandbox');
   const state = {
     fields: [],
     activeFieldId: null,
-    lastDebug: null
+    lastDebug: null,
+    trace: { passIndex: 0, lineIndex: 0 }
   };
 
   const genId = (prefix = 'field') => `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
@@ -33,7 +40,13 @@
       fieldType: 'static',
       name: '',
       magicType: pipeline.MAGIC_DATA_TYPE.ANY,
-      rawInput: ''
+      rawInput: '',
+      multiLineEnabled: false,
+      passHistory: [],
+      pendingLargeRun: false,
+      lastOutput: '',
+      lastDebug: null,
+      passCounter: 0
     };
   }
 
@@ -49,6 +62,15 @@
       row.classList.toggle('active', row.dataset.fieldId === fieldId);
     });
     updateActiveFieldLabel();
+    const field = getActiveField();
+    state.lastDebug = field?.lastDebug || null;
+    state.trace = { passIndex: 0, lineIndex: 0 };
+    updateRunButtonLabel();
+    renderPassResults();
+    updateTraceSelector();
+    renderTraceForCurrentSelection();
+    updateOutputText();
+    updateWarning('');
   }
 
   function updateActiveFieldLabel() {
@@ -92,6 +114,28 @@
       rawWrap.className = 'field-row-raw';
       const label = document.createElement('label');
       label.textContent = 'RAW OCR / Input Text';
+      const toggleWrap = document.createElement('label');
+      toggleWrap.className = 'toggle-inline';
+      toggleWrap.style.marginLeft = '8px';
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.checked = !!field.multiLineEnabled;
+      toggle.addEventListener('change', (e) => {
+        field.multiLineEnabled = !!e.target.checked;
+        if (!field.multiLineEnabled) {
+          field.passHistory = [];
+          field.pendingLargeRun = false;
+          field.passCounter = 0;
+        }
+        state.trace = { passIndex: 0, lineIndex: 0 };
+        renderPassResults();
+        updateOutputText();
+        renderTraceForCurrentSelection();
+        updateRunButtonLabel();
+      });
+      toggleWrap.appendChild(toggle);
+      toggleWrap.appendChild(document.createTextNode('Enable multi-line'));
+      label.appendChild(toggleWrap);
       const textarea = document.createElement('textarea');
       textarea.className = 'sandbox-textarea';
       textarea.placeholder = 'Paste OCR output here...';
@@ -133,6 +177,97 @@
       }
     }
     return { html: html.replace(/ /g, '&nbsp;'), hasChanges: changes > 0 };
+  }
+
+  function parseMultiline(rawText = '') {
+    return String(rawText || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length);
+  }
+
+  function sanitizeLineForPass(rawLine = '') {
+    const asString = String(rawLine ?? '');
+    if (asString.includes('\n')) {
+      console.error('Dev safety: embedded newline found in line before runOcrMagic.', { length: asString.length });
+    }
+    return asString.replace(/\r?\n/g, ' ').trim();
+  }
+
+  function countEdits(debug = {}) {
+    const s1 = (debug.station1?.layer1Edits || []).length;
+    const s2 = (debug.station2?.typeEdits || []).length;
+    const s4 = (debug.station4?.fingerprintEdits || []).length;
+    return s1 + s2 + s4;
+  }
+
+  function runPass(lines = [], fieldCtx = {}) {
+    const linesOut = [];
+    const debugs = [];
+    let changedCount = 0;
+    let editCount = 0;
+    lines.forEach((rawLine) => {
+      const line = sanitizeLineForPass(rawLine);
+      const res = pipeline.runOcrMagic(fieldCtx, line, store);
+      const output = res.finalText || '';
+      linesOut.push(output);
+      debugs.push(res.debug);
+      if (output !== line) changedCount += 1;
+      editCount += countEdits(res.debug);
+      const expectedSegments = Array.isArray(fieldCtx.segmenterConfig?.segments)
+        ? fieldCtx.segmenterConfig.segments.length
+        : 0;
+      const segments = res.debug?.station3?.segments || [];
+      if (expectedSegments > 1 && segments.length === 1 && segments[0]?.segmentId === 'full') {
+        console.warn('Segmenter dev check: expected multiple segments but got single full.', {
+          fieldName: fieldCtx.fieldName,
+          inputLength: line.length,
+          hadNewline: /\n/.test(rawLine || '')
+        });
+      }
+    });
+    return { linesOut, debugs, changedCount, editCount, totalLines: lines.length };
+  }
+
+  function renderPassBlock(passIndex, passResult, isLatest = false, totalPasses = 0) {
+    const block = document.createElement('details');
+    block.className = 'panel minimal';
+    block.open = passIndex === 0 || isLatest;
+
+    const summary = document.createElement('summary');
+    const displayIndex = passResult.passNumber || passIndex + 1;
+    summary.textContent = `Pass ${displayIndex} — Lines: ${passResult.totalLines || passResult.linesOut.length}, Changed: ${passResult.changedCount}, Edits: ${passResult.editCount || 0}`;
+    block.appendChild(summary);
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'log-viewer sandbox-output';
+    textarea.readOnly = true;
+    textarea.value = (passResult.linesOut || []).join('\n');
+    block.appendChild(textarea);
+
+    if (isLatest && totalPasses < 10) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn primary';
+      const currentPassNumber = passResult.passNumber || passIndex + 1;
+      const nextPassNum = currentPassNumber + 1;
+      btn.textContent = currentPassNumber === 1 ? `Run Pass ${nextPassNum} (use Pass 1 output as input)` : `Repeat pass (run Pass ${nextPassNum})`;
+      btn.addEventListener('click', () => runSandbox(true));
+      block.appendChild(btn);
+    }
+
+    return block;
+  }
+
+  function updateRunButtonLabel() {
+    if (!els.runBtn) return;
+    const field = getActiveField();
+    if (field?.multiLineEnabled) {
+      const nextPassNum = (field.passCounter || 0) + 1;
+      els.runBtn.textContent = nextPassNum === 1 ? 'Run Pass 1' : `Repeat pass (run Pass ${nextPassNum})`;
+    } else {
+      els.runBtn.textContent = 'RUN OCR MAGIC';
+    }
   }
 
   function renderSegmentCard(seg) {
@@ -210,26 +345,173 @@
     els.traceSteps.appendChild(buildDiffBlock('FINAL', rawText, station4Text));
   }
 
-  function runSandbox() {
+  function updateWarning(message = '') {
+    if (!els.warning) return;
+    els.warning.textContent = message || '\u00a0';
+  }
+
+  function updateOutputText() {
+    if (!els.output) return;
     const field = getActiveField();
-    if (!field) return;
+    els.output.value = field?.lastOutput || '';
+  }
+
+  function renderPassResults() {
+    if (!els.passResults || !els.passResultsPanel) return;
+    const field = getActiveField();
+    els.passResults.innerHTML = '';
+    if (!field || !field.multiLineEnabled || !(field.passHistory || []).length) {
+      els.passResultsPanel.style.display = 'none';
+      return;
+    }
+    const passes = field.passHistory || [];
+    passes.forEach((pass, idx) => {
+      const block = renderPassBlock(idx, pass, idx === passes.length - 1, passes.length);
+      els.passResults.appendChild(block);
+    });
+    els.passResultsPanel.style.display = 'block';
+  }
+
+  function updateTraceSelector() {
+    const field = getActiveField();
+    if (!els.traceSelector || !els.tracePassSelect || !els.traceLineSelect) return;
+    if (!field || !field.multiLineEnabled || !(field.passHistory || []).length) {
+      els.traceSelector.style.display = 'none';
+      return;
+    }
+
+    const passCount = field.passHistory.length;
+    state.trace.passIndex = Math.min(state.trace.passIndex, passCount - 1);
+    const activePass = field.passHistory[state.trace.passIndex];
+    const lineCount = Math.max(1, (activePass?.linesOut || []).length);
+    state.trace.lineIndex = Math.min(state.trace.lineIndex, lineCount - 1);
+
+    els.tracePassSelect.innerHTML = '';
+    for (let i = 0; i < passCount; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `Pass ${field.passHistory[i]?.passNumber || i + 1}`;
+      if (i === state.trace.passIndex) opt.selected = true;
+      els.tracePassSelect.appendChild(opt);
+    }
+
+    els.traceLineSelect.innerHTML = '';
+    for (let i = 0; i < lineCount; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `Line ${i + 1}`;
+      if (i === state.trace.lineIndex) opt.selected = true;
+      els.traceLineSelect.appendChild(opt);
+    }
+
+    els.traceSelector.style.display = 'flex';
+  }
+
+  function renderTraceForCurrentSelection() {
+    const field = getActiveField();
+    let debug = null;
+    if (field?.multiLineEnabled && (field.passHistory || []).length) {
+      const pass = field.passHistory[state.trace.passIndex];
+      debug = pass?.debugs?.[state.trace.lineIndex] || null;
+    } else {
+      debug = field?.lastDebug || state.lastDebug;
+    }
+    state.lastDebug = debug;
+    renderTrace(debug);
+    if (els.debugLog) {
+      els.debugLog.textContent = debug ? JSON.stringify(debug, null, 2) : '';
+    }
+  }
+
+  function buildFieldContext(field) {
     const idx = state.fields.indexOf(field) + 1;
-    const ctx = {
+    const isAddress = /address/i.test((field.name || `Field ${idx}`).trim());
+    const segmenterConfig = isAddress
+      ? { mode: 'first2_last2', segments: [{ id: 'address:first2', strategy: 'first2' }, { id: 'address:last2', strategy: 'last2' }] }
+      : { mode: 'full', segments: [{ id: 'full', strategy: 'full' }] };
+    return {
       wizardId: 'ocrmagic-dev-sandbox',
       accountId: 'demo-account',
       fieldName: (field.name || `Field ${idx}`).trim() || `Field ${idx}`,
       magicType: field.magicType || pipeline.MAGIC_DATA_TYPE.ANY,
-      segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] }
+      segmenterConfig
     };
+  }
+
+  function runSingleLine() {
+    const field = getActiveField();
+    if (!field) return;
+    const ctx = buildFieldContext(field);
     const rawText = field.rawInput || '';
     const result = pipeline.runOcrMagic(ctx, rawText, store);
     state.lastDebug = result.debug;
-    if (els.output) {
-      els.output.value = result.finalText || '';
+    field.lastDebug = result.debug;
+    field.lastOutput = result.finalText || '';
+    field.passHistory = [];
+    field.pendingLargeRun = false;
+    field.passCounter = 0;
+    updateWarning('');
+    state.trace = { passIndex: 0, lineIndex: 0 };
+    renderPassResults();
+    updateTraceSelector();
+    updateOutputText();
+    renderTraceForCurrentSelection();
+    updateRunButtonLabel();
+  }
+
+  function runMultiLinePass() {
+    const field = getActiveField();
+    if (!field) return;
+    const ctx = buildFieldContext(field);
+    const sourceLines = (field.passHistory.length ? field.passHistory[field.passHistory.length - 1].linesOut : parseMultiline(field.rawInput || ''));
+    if (!sourceLines.length) {
+      field.passHistory = [];
+      field.lastOutput = '';
+      field.pendingLargeRun = false;
+      field.passCounter = 0;
+      updateWarning('');
+      renderPassResults();
+      updateTraceSelector();
+      renderTraceForCurrentSelection();
+      updateOutputText();
+      updateRunButtonLabel();
+      return;
     }
-    renderTrace(result.debug);
-    if (els.debugLog) {
-      els.debugLog.textContent = JSON.stringify(result.debug, null, 2);
+
+    if (sourceLines.length > 300 && !field.pendingLargeRun) {
+      field.pendingLargeRun = true;
+      updateWarning(`Warning: ${sourceLines.length} lines detected. Click run again to proceed in multi-line mode.`);
+      return;
+    }
+
+    field.pendingLargeRun = false;
+    updateWarning('');
+
+    const passResult = runPass(sourceLines, ctx);
+    field.passCounter += 1;
+    passResult.passNumber = field.passCounter;
+    field.passHistory.push(passResult);
+    if (field.passHistory.length > 10) {
+      field.passHistory = field.passHistory.slice(-10);
+    }
+    field.lastOutput = passResult.linesOut.join('\n');
+    field.lastDebug = passResult.debugs?.[0] || null;
+    state.trace = { passIndex: field.passHistory.length - 1, lineIndex: 0 };
+
+    renderPassResults();
+    updateTraceSelector();
+    updateOutputText();
+    renderTraceForCurrentSelection();
+    updateRunButtonLabel();
+  }
+
+  function runSandbox() {
+    const field = getActiveField();
+    if (!field) return;
+    if (field.multiLineEnabled) {
+      runMultiLinePass();
+    } else {
+      runSingleLine();
     }
   }
 
@@ -237,7 +519,19 @@
     const field = getActiveField();
     if (!field) return;
     store.resetField({ wizardId: 'ocrmagic-dev-sandbox', fieldName: (field.name || '').trim() || 'Field' });
-    renderTrace(state.lastDebug);
+    field.passHistory = [];
+    field.lastOutput = '';
+    field.lastDebug = null;
+    field.pendingLargeRun = false;
+    field.passCounter = 0;
+    state.lastDebug = null;
+    state.trace = { passIndex: 0, lineIndex: 0 };
+    updateWarning('');
+    updateOutputText();
+    renderPassResults();
+    updateTraceSelector();
+    renderTraceForCurrentSelection();
+    updateRunButtonLabel();
   }
 
   function bindEvents() {
@@ -250,6 +544,20 @@
     if (els.debugToggle && els.debugLog) {
       els.debugToggle.addEventListener('change', (e) => {
         els.debugLog.style.display = e.target.checked ? 'block' : 'none';
+      });
+    }
+    if (els.tracePassSelect) {
+      els.tracePassSelect.addEventListener('change', (e) => {
+        state.trace.passIndex = parseInt(e.target.value, 10) || 0;
+        state.trace.lineIndex = 0;
+        updateTraceSelector();
+        renderTraceForCurrentSelection();
+      });
+    }
+    if (els.traceLineSelect) {
+      els.traceLineSelect.addEventListener('change', (e) => {
+        state.trace.lineIndex = parseInt(e.target.value, 10) || 0;
+        renderTraceForCurrentSelection();
       });
     }
   }
