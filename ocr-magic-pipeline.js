@@ -139,39 +139,13 @@
     return { typedText: typed.join(''), typeEdits, magicType: normalized };
   }
 
-  function collectTokens(text = '') {
-    const tokens = [];
-    const regex = /\S+/g;
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      tokens.push({ token: match[0], start: match.index, end: match.index + match[0].length });
-    }
-    return tokens;
-  }
+  function extractSegmentsFromText(text = '', fieldCtx = {}) {
+    const source = String(text ?? '').trim();
+    const tokens = source ? source.split(/\s+/g).filter(Boolean) : [];
+    const isAddress = /address/i.test(String(fieldCtx.fieldName || ''));
 
-  function extractSegmentsFromText(text = '', segmenterConfig = null) {
-    const source = String(text ?? '');
-    const tokens = collectTokens(source);
-    const configSegments = Array.isArray(segmenterConfig?.segments) && segmenterConfig.segments.length
-      ? segmenterConfig.segments
-      : [{ id: 'full', strategy: 'full' }];
-    const segments = [];
-
-    configSegments.forEach((seg) => {
-      const strategy = seg.strategy || seg.type || 'full';
-      let selectedTokens = [];
-      if (strategy === 'first_two') selectedTokens = tokens.slice(0, 2);
-      else if (strategy === 'last_two') selectedTokens = tokens.slice(-2);
-      else if (strategy === 'first_and_last') selectedTokens = tokens.length ? [tokens[0], tokens[tokens.length - 1]] : [];
-      else if (strategy === 'full') selectedTokens = tokens.length ? [tokens[0], tokens[tokens.length - 1]] : [];
-
-      let start = 0;
-      let end = source.length;
-      if (selectedTokens.length) {
-        start = selectedTokens[0].start;
-        end = selectedTokens[selectedTokens.length - 1].end;
-      }
-      const rawSegmentText = source.slice(start, end).trim() || source.trim();
+    const buildSegment = (segmentId, tokenSlice) => {
+      const rawSegmentText = Array.isArray(tokenSlice) ? tokenSlice.join(' ') : source;
       const slotString = COMMON_SUBS.stripToAlnum(rawSegmentText);
       const slotMap = [];
       let slotIdx = 0;
@@ -182,17 +156,37 @@
           slotIdx += 1;
         }
       }
-      segments.push({
-        segmentId: seg.id || strategy,
+      const start = rawSegmentText ? source.indexOf(rawSegmentText) : -1;
+      const end = start >= 0 ? start + rawSegmentText.length : -1;
+      return {
+        segmentId,
         rawSegmentText,
         slotString,
         slotLength: slotString.length,
         slotMap,
         start,
-        end: start + rawSegmentText.length
-      });
-    });
-    return segments;
+        end
+      };
+    };
+
+    if (!isAddress) {
+      return [buildSegment('full', source)];
+    }
+
+    const count = tokens.length;
+    if (count === 0) return [];
+    if (count === 1) return [buildSegment('address:first2', [tokens[0]])];
+    if (count === 2) return [buildSegment('address:first2', tokens.slice(0, 2))];
+    if (count === 3) {
+      return [
+        buildSegment('address:first2', tokens.slice(0, 2)),
+        buildSegment('address:last2', tokens.slice(1, 3))
+      ];
+    }
+    return [
+      buildSegment('address:first2', tokens.slice(0, 2)),
+      buildSegment('address:last2', tokens.slice(-2))
+    ];
   }
 
   function deriveLearnedLayout(record, slotLength) {
@@ -243,8 +237,7 @@
   function station3_fingerprintAndScore(typedText = '', fieldCtx = {}, store = defaultSegmentStore) {
     const wizardId = fieldCtx.wizardId || 'sandbox-wizard';
     const fieldName = fieldCtx.fieldName || 'Field';
-    const segmenterConfig = fieldCtx.segmenterConfig || null;
-    const segments = extractSegmentsFromText(typedText, segmenterConfig);
+    const segments = extractSegmentsFromText(typedText, fieldCtx);
     const results = segments.map((seg) => {
       const segmentKey = `${wizardId}::${fieldName}::${seg.segmentId}::${seg.slotLength}`;
       const record = store.updateScores(segmentKey, seg.slotString);

@@ -49,4 +49,29 @@ assert.strictEqual(stage3.segments[0].deliberateViolation, true);
 const stage4 = station4_applyFingerprintFixes('KOA 1XO', stage3, ctx);
 assert.strictEqual(stage4.finalText, 'K0A 1X0');
 
+// Segment extraction - address
+const addrCtx = { wizardId: 'wiz', fieldName: 'shipping_address' };
+const addrStage = station3_fingerprintAndScore('3031 Councillors Way, Ottawa, Ontario, KI7 272', addrCtx, store);
+assert.strictEqual(addrStage.segments.length, 2);
+assert.strictEqual(addrStage.segments[0].segmentId, 'address:first2');
+assert.strictEqual(addrStage.segments[0].rawSegmentText, '3031 Councillors');
+assert.strictEqual(addrStage.segments[1].segmentId, 'address:last2');
+assert.strictEqual(addrStage.segments[1].rawSegmentText, 'KI7 272');
+
+const addrShort = station3_fingerprintAndScore('K2W 1A3', addrCtx, store);
+assert.strictEqual(addrShort.segments.length, 1);
+assert.strictEqual(addrShort.segments[0].rawSegmentText, 'K2W 1A3');
+
+const addrOverlap = station3_fingerprintAndScore('6 Maley Lane, Kanata, Ontario K2W 1A3 Bob MacDonald', addrCtx, store);
+assert.strictEqual(addrOverlap.segments.length, 2);
+assert.strictEqual(addrOverlap.segments[0].rawSegmentText, '6 Maley');
+assert.strictEqual(addrOverlap.segments[1].rawSegmentText, 'Bob MacDonald');
+
+// Segment extraction - non-address defaults to full
+const nonAddrCtx = { wizardId: 'wiz', fieldName: 'invoice_number' };
+const nonAddrStage = station3_fingerprintAndScore('INV-12345', nonAddrCtx, store);
+assert.strictEqual(nonAddrStage.segments.length, 1);
+assert.strictEqual(nonAddrStage.segments[0].segmentId, 'full');
+assert.strictEqual(nonAddrStage.segments[0].rawSegmentText, 'INV-12345');
+
 console.log('OCRMAGIC pipeline tests passed.');
