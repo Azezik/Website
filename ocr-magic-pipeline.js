@@ -140,49 +140,45 @@
   }
 
   function extractSegmentsFromText(text = '', fieldCtx = {}) {
-    const source = String(text ?? '').trim();
-    const tokens = source ? source.split(/\s+/g).filter(Boolean) : [];
+    const source = String(text ?? '');
+    const tokens = source.length ? source.split(/\s+/g).filter(Boolean) : [];
     const isAddress = /address/i.test(String(fieldCtx.fieldName || ''));
 
-    const buildSegment = (segmentId, tokenSlice) => {
-      const rawSegmentText = Array.isArray(tokenSlice) ? tokenSlice.join(' ') : source;
+    const buildSegment = (segmentId, tokenSlice, rawOverride = null) => {
+      const rawSegmentText = rawOverride !== null
+        ? rawOverride
+        : (Array.isArray(tokenSlice) ? tokenSlice.join(' ') : source);
       const slotString = COMMON_SUBS.stripToAlnum(rawSegmentText);
       const slotMap = [];
-      let slotIdx = 0;
-      for (let i = 0; i < rawSegmentText.length; i++) {
+      for (let i = 0, slotIdx = 0; i < rawSegmentText.length; i++) {
         const ch = rawSegmentText[i];
         if (isAlnum(ch)) {
           slotMap.push({ slotIndex: slotIdx, originalIndex: i, char: ch });
           slotIdx += 1;
         }
       }
-      const start = rawSegmentText ? source.indexOf(rawSegmentText) : -1;
-      const end = start >= 0 ? start + rawSegmentText.length : -1;
+      const indexMap = slotMap.map(m => m.originalIndex);
       return {
         segmentId,
         rawSegmentText,
         slotString,
         slotLength: slotString.length,
         slotMap,
-        start,
-        end
+        indexMap,
+        start: -1,
+        end: -1
       };
     };
 
     if (!isAddress) {
-      return [buildSegment('full', source)];
+      return [buildSegment('full', [], source)];
     }
 
     const count = tokens.length;
     if (count === 0) return [];
-    if (count === 1) return [buildSegment('address:first2', [tokens[0]])];
+    if (count === 1) return [buildSegment('address:first1', [tokens[0]])];
     if (count === 2) return [buildSegment('address:first2', tokens.slice(0, 2))];
-    if (count === 3) {
-      return [
-        buildSegment('address:first2', tokens.slice(0, 2)),
-        buildSegment('address:last2', tokens.slice(1, 3))
-      ];
-    }
+    if (count === 3) return [buildSegment('address:first2', tokens.slice(0, 2))];
     return [
       buildSegment('address:first2', tokens.slice(0, 2)),
       buildSegment('address:last2', tokens.slice(-2))
