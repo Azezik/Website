@@ -49,6 +49,50 @@ stage3 = station3_fingerprintAndScore('1 2 1 2 1 2', ctx, store);
 const stage4 = station4_applyFingerprintFixes('1 2 1 2 1 2', stage3, ctx);
 assert.strictEqual(stage4.finalText, 'I 2 I 2 I 2');
 
+// PCS gating - allow close match corrections
+const pcsStore = new SegmentModelStore('test-ocrmagic-pcs', { persist: false });
+const pcsCtx = { wizardId: 'wiz', fieldName: 'pcs_sample' };
+const pcsKey = `${pcsCtx.wizardId}::${pcsCtx.fieldName}::full::4`;
+const pcsRecord = pcsStore.getRecord(pcsKey, 4);
+pcsRecord.letterScore = [30, 0, 0, 0];
+pcsRecord.numberScore = [0, 30, 30, 30];
+pcsRecord.deliberateViolation = true;
+pcsStore.records[pcsKey] = pcsRecord;
+
+let pcsStage3 = station3_fingerprintAndScore('5620', pcsCtx, pcsStore);
+let pcsStage4 = station4_applyFingerprintFixes('5620', pcsStage3, pcsCtx);
+assert.strictEqual(pcsStage4.finalText, 'S620');
+assert.strictEqual(pcsStage4.pcsEvaluations[0].okToCorrect, true);
+
+// PCS gating - block word-like tokens
+const wordKey = `${pcsCtx.wizardId}::${pcsCtx.fieldName}::full::5`;
+const wordRecord = pcsStore.getRecord(wordKey, 5);
+wordRecord.letterScore = [30, 0, 0, 0, 0];
+wordRecord.numberScore = [0, 30, 30, 30, 0];
+wordRecord.deliberateViolation = true;
+pcsStore.records[wordKey] = wordRecord;
+
+pcsStage3 = station3_fingerprintAndScore('Storm', pcsCtx, pcsStore);
+pcsStage4 = station4_applyFingerprintFixes('Storm', pcsStage3, pcsCtx);
+assert.strictEqual(pcsStage4.finalText, 'Storm');
+assert.strictEqual(pcsStage4.fingerprintEdits.length, 0);
+assert.strictEqual(pcsStage4.pcsEvaluations[0].skipReason, 'PCS_SKIP');
+
+// PCS gating - insufficient evidence
+const ambiguousStore = new SegmentModelStore('test-ocrmagic-pcs-ambig', { persist: false });
+const ambiguousCtx = { wizardId: 'wiz', fieldName: 'pcs_ambig' };
+const ambiguousKey = `${ambiguousCtx.wizardId}::${ambiguousCtx.fieldName}::full::4`;
+const ambiguousRecord = ambiguousStore.getRecord(ambiguousKey, 4);
+ambiguousRecord.letterScore = [30, 0, 0, 30];
+ambiguousRecord.numberScore = [0, 30, 30, 0];
+ambiguousRecord.deliberateViolation = true;
+ambiguousStore.records[ambiguousKey] = ambiguousRecord;
+
+const ambiguousStage3 = station3_fingerprintAndScore('1O1O', ambiguousCtx, ambiguousStore);
+const ambiguousStage4 = station4_applyFingerprintFixes('1O1O', ambiguousStage3, ambiguousCtx);
+assert.strictEqual(ambiguousStage4.finalText, '1O1O');
+assert.strictEqual(ambiguousStage4.pcsEvaluations[0].okToCorrect, false);
+
 // Segment extraction - address
 const addrCtx = { wizardId: 'wiz', fieldName: 'shipping_address' };
 const addrStage = station3_fingerprintAndScore('3031 Councillors Way, Ottawa, Ontario, KI7 272', addrCtx, store);
