@@ -192,46 +192,28 @@
   function deriveLearnedLayout(record, slotLength) {
     const layout = [];
     let learnedCount = 0;
+    let hasL = false;
+    let hasN = false;
     for (let i = 0; i < slotLength; i++) {
       const letterScore = record.letterScore?.[i] || 0;
       const numberScore = record.numberScore?.[i] || 0;
       const total = letterScore + numberScore;
       const dominance = Math.abs(letterScore - numberScore);
       if (total >= 20 && dominance >= 15) {
-        if (letterScore > numberScore) layout.push('L');
-        else if (numberScore > letterScore) layout.push('N');
+        if (letterScore > numberScore) {
+          layout.push('L');
+          hasL = true;
+        }
+        else if (numberScore > letterScore) {
+          layout.push('N');
+          hasN = true;
+        }
         learnedCount += 1;
       } else {
         layout.push('?');
       }
     }
-    return { learnedLayout: layout.join(''), learnedCount };
-  }
-
-  function evaluateDvEvidence(segment, learnedLayout) {
-    let dvEligible = 0;
-    let dvContradictions = 0;
-    const layoutArr = (learnedLayout || '').split('');
-    const map = segment.slotMap || [];
-    for (let i = 0; i < map.length; i++) {
-      const current = map[i];
-      if (!COMMON_SUBS.isAmbiguous(current.char)) continue;
-      const prev = map[i - 1];
-      if (!prev) continue;
-      const gap = segment.rawSegmentText.slice(prev.originalIndex + 1, current.originalIndex);
-      if (/\s/.test(gap)) continue;
-      const leftChar = prev.char;
-      const leftIsLetter = /[A-Za-z]/.test(leftChar);
-      const leftIsDigit = /[0-9]/.test(leftChar);
-      if (!leftIsLetter && !leftIsDigit) continue;
-      const adjacencyExpectation = leftIsLetter ? 'L' : 'N';
-      const learned = layoutArr[current.slotIndex] || '?';
-      dvEligible += 1;
-      if (learned !== '?' && learned !== adjacencyExpectation) {
-        dvContradictions += 1;
-      }
-    }
-    return { dvEligible, dvContradictions };
+    return { learnedLayout: layout.join(''), learnedCount, hasL, hasN };
   }
 
   function station3_fingerprintAndScore(typedText = '', fieldCtx = {}, store = defaultSegmentStore) {
@@ -241,32 +223,42 @@
     const results = segments.map((seg) => {
       const segmentKey = `${wizardId}::${fieldName}::${seg.segmentId}::${seg.slotLength}`;
       const record = store.updateScores(segmentKey, seg.slotString);
-      const { learnedLayout, learnedCount } = deriveLearnedLayout(record, seg.slotLength);
+      const { learnedLayout, learnedCount, hasL, hasN } = deriveLearnedLayout(record, seg.slotLength);
       const coverage = seg.slotLength ? learnedCount / seg.slotLength : 0;
-      const dvEvidence = evaluateDvEvidence(seg, learnedLayout);
-      const updated = store.updateDvStats(segmentKey, dvEvidence);
-      const dvRatio = updated.dvEligible ? (updated.dvContradictions / updated.dvEligible) : 0;
-      const deliberateViolation = updated.deliberateViolation || (
-        coverage >= 0.6 &&
-        updated.dvEligible >= 4 &&
-        updated.dvContradictions >= 3 &&
-        dvRatio >= 0.7
-      );
-      updated.deliberateViolation = deliberateViolation;
-      if (store.records) store.records[segmentKey] = updated;
-      store.save();
+      const layoutArr = learnedLayout.split('');
+      let hasMixedAdjacency = false;
+      for (let i = 0; i < layoutArr.length - 1; i++) {
+        const a = layoutArr[i];
+        const b = layoutArr[i + 1];
+        if ((a === 'L' || a === 'N') && (b === 'L' || b === 'N') && a !== b) {
+          hasMixedAdjacency = true;
+          break;
+        }
+      }
+      const hasAnyMixed = hasL && hasN;
+      const dvTrigger = coverage >= 0.6 && hasAnyMixed && hasMixedAdjacency;
+      const deliberateViolation = (store.records?.[segmentKey]?.deliberateViolation) || dvTrigger;
+      if (store.records) {
+        store.records[segmentKey] = {
+          ...(store.records[segmentKey] || {}),
+          letterScore: ensureLength(record.letterScore, seg.slotLength),
+          numberScore: ensureLength(record.numberScore, seg.slotLength),
+          deliberateViolation
+        };
+        store.save();
+      }
       return {
         ...seg,
         segmentKey,
         learnedLayout,
         deliberateViolation,
-        dvEligible: updated.dvEligible,
-        dvContradictions: updated.dvContradictions,
         slotScores: {
           letterScore: ensureLength(record.letterScore, seg.slotLength),
           numberScore: ensureLength(record.numberScore, seg.slotLength)
         },
-        learnedCoverage: coverage
+        learnedCoverage: coverage,
+        hasAnyMixed,
+        hasMixedAdjacency
       };
     });
     return { segments: results };
@@ -297,7 +289,9 @@
         const ch = slotString[i];
         let next = ch;
         const learned = layoutArr[i];
-        if (learned === 'N' && COMMON_SUBS.isAmbiguousLetter(ch)) {
+        if (learned === '?') {
+          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned });
+        } else if (learned === 'N' && COMMON_SUBS.isAmbiguousLetter(ch)) {
           next = COMMON_SUBS.letterToDigit(ch);
         } else if (learned === 'L' && COMMON_SUBS.isAmbiguousDigit(ch)) {
           const left = corrected[i - 1] || '';

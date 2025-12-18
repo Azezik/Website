@@ -32,7 +32,7 @@ assert.strictEqual(s2Text.typedText, 'OLGA');
 const s2Num = station2_magicType('O', MAGIC_DATA_TYPE.NUMERIC);
 assert.strictEqual(s2Num.typedText, '0');
 
-// Station 3 + 4 DV path
+// Station 3 + 4 DV path (structural mixed adjacency)
 const store = new SegmentModelStore('test-ocrmagic', { persist: false });
 const ctx = { wizardId: 'wiz', fieldName: 'sample', magicType: MAGIC_DATA_TYPE.ANY, segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] } };
 
@@ -40,14 +40,14 @@ for (let i = 0; i < 4; i++) {
   station3_fingerprintAndScore('A2B3C4', ctx, store);
 }
 
-let stage3 = station3_fingerprintAndScore('KOA 1XO', ctx, store);
-assert.strictEqual(stage3.segments[0].deliberateViolation, false);
-
-stage3 = station3_fingerprintAndScore('KOA 1XO', ctx, store);
+let stage3 = station3_fingerprintAndScore('A2B3C4', ctx, store);
 assert.strictEqual(stage3.segments[0].deliberateViolation, true);
+assert.ok(stage3.segments[0].hasAnyMixed);
+assert.ok(stage3.segments[0].hasMixedAdjacency);
 
-const stage4 = station4_applyFingerprintFixes('KOA 1XO', stage3, ctx);
-assert.strictEqual(stage4.finalText, 'K0A 1X0');
+stage3 = station3_fingerprintAndScore('1 2 1 2 1 2', ctx, store);
+const stage4 = station4_applyFingerprintFixes('1 2 1 2 1 2', stage3, ctx);
+assert.strictEqual(stage4.finalText, 'I 2 I 2 I 2');
 
 // Segment extraction - address
 const addrCtx = { wizardId: 'wiz', fieldName: 'shipping_address' };
