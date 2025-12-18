@@ -1,59 +1,117 @@
-(function(root, factory){
-  if(typeof module === 'object' && module.exports){
-    module.exports = { runBaseOcrMagic: factory() };
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) {
+    const COMMON_SUBS = require('./common-subs.js');
+    module.exports = factory(COMMON_SUBS);
   } else {
-    root.runBaseOcrMagic = factory();
+    root.OCRMagicLayer1 = factory(root.COMMON_SUBS);
   }
-})(typeof self !== 'undefined' ? self : this, function(){
-  const AMBIGUOUS_DIGITS = new Set(['0','1','5','7']);
-  const AMBIGUOUS_CHARS = new Set(['0','1','5','7','O','I','l','T','S']);
-
-  function digitToLetter(digit, leftLetter){
-    const isLeftLower = /[a-z]/.test(leftLetter);
-    if(digit === '1') return isLeftLower ? 'l' : 'I';
-    if(digit === '0') return isLeftLower ? 'o' : 'O';
-    if(digit === '5') return isLeftLower ? 's' : 'S';
-    if(digit === '7') return isLeftLower ? 't' : 'T';
-    return digit;
+})(typeof self !== 'undefined' ? self : this, function (COMMON_SUBS) {
+  if (!COMMON_SUBS) {
+    throw new Error('COMMON_SUBS module is required for OCRMagic Layer 1.');
   }
 
-  function runBaseOcrMagic(raw=''){
+  const isAlnum = (ch) => /[A-Za-z0-9]/.test(ch);
+
+  function station1_layer1Adjacency(raw = '') {
     const source = String(raw ?? '');
-    const reliable = [];
-    const out = [];
+    const chars = Array.from(source).map((ch) => ({ char: ch, reliable: false }));
+    const layer1Flags = [];
+    const layer1Edits = [];
     let changed = false;
+    let progress = true;
 
-    for(let i=0; i<source.length; i++){
-      const ch = source[i];
-      const isAmbiguous = AMBIGUOUS_CHARS.has(ch);
-      const isAmbiguousDigit = AMBIGUOUS_DIGITS.has(ch);
-      const leftIdx = i - 1;
-      const leftIsSpace = leftIdx >= 0 ? source[leftIdx] === ' ' : false;
-      const leftReliable = leftIdx >= 0 ? reliable[leftIdx] : false;
-      const leftChar = leftIdx >= 0 ? out[leftIdx] : '';
-      let nextChar = ch;
-      let corrected = false;
+    while (progress) {
+      progress = false;
+      for (let i = 0; i < chars.length; i++) {
+        const entry = chars[i];
+        const ch = entry.char;
+        const ambiguous = COMMON_SUBS.isAmbiguous(ch);
 
-      if(AMBIGUOUS_DIGITS.has(ch) && leftReliable && !leftIsSpace && /[A-Za-z]/.test(leftChar)){
-        const replacement = digitToLetter(ch, leftChar);
-        if(replacement !== ch){
-          nextChar = replacement;
-          changed = true;
-          corrected = true;
+        if (!isAlnum(ch)) {
+          entry.reliable = true;
+          continue;
         }
+
+        if (!ambiguous) {
+          entry.reliable = true;
+          continue;
+        }
+
+        if (i === 0) {
+          entry.reliable = true;
+          continue;
+        }
+
+        const left = chars[i - 1];
+        const leftChar = left?.char ?? '';
+        const leftIsSpace = leftChar === ' ';
+        const leftIsAlnum = isAlnum(leftChar);
+
+        if (leftIsSpace) {
+          entry.reliable = true;
+          continue;
+        }
+
+        if (!leftIsAlnum) {
+          entry.reliable = true;
+          continue;
+        }
+
+        const leftAmbiguous = COMMON_SUBS.isAmbiguous(leftChar);
+        const leftReliable = left?.reliable || !leftAmbiguous;
+        if (!leftReliable) {
+          continue;
+        }
+
+        if (/[0-9]/.test(leftChar)) {
+          entry.reliable = true;
+          continue;
+        }
+
+        layer1Flags.push(i);
+
+        if (COMMON_SUBS.isAmbiguousDigit(ch)) {
+          const replacement = COMMON_SUBS.digitToLetter(ch, leftChar);
+          if (replacement !== ch && COMMON_SUBS.isValidOcrMagicSubstitution(ch, replacement)) {
+            entry.char = replacement;
+            layer1Edits.push({ index: i, from: ch, to: replacement });
+            changed = true;
+            progress = true;
+          }
+        }
+
+        entry.reliable = true;
       }
-
-      out.push(nextChar);
-      reliable[i] = corrected ? true : (!isAmbiguousDigit);
     }
 
-    const cleaned = out.join('');
+    const l1Text = chars.map((c) => c.char).join('');
     const rulesApplied = changed ? ['layer1-common-substitution'] : [];
-    if(typeof globalThis !== 'undefined' && typeof globalThis.ocrMagicDebug === 'function'){
-      globalThis.ocrMagicDebug({ event: 'ocrmagic.base', raw: source, cleaned });
+
+    if (typeof globalThis !== 'undefined' && typeof globalThis.ocrMagicDebug === 'function') {
+      globalThis.ocrMagicDebug({ event: 'ocrmagic.base', raw: source, cleaned: l1Text });
     }
-    return { cleaned, rulesApplied };
+
+    return {
+      l1Text,
+      cleaned: l1Text,
+      layer1Flags: Array.from(new Set(layer1Flags)),
+      layer1Edits,
+      rulesApplied
+    };
   }
 
-  return runBaseOcrMagic;
+  function runBaseOcrMagic(raw = '') {
+    const result = station1_layer1Adjacency(raw);
+    return {
+      cleaned: result.cleaned,
+      rulesApplied: result.rulesApplied
+    };
+  }
+
+  const api = { station1_layer1Adjacency, runBaseOcrMagic };
+  if (typeof self !== 'undefined') {
+    self.runBaseOcrMagic = api.runBaseOcrMagic;
+    self.station1_layer1Adjacency = api.station1_layer1Adjacency;
+  }
+  return api;
 });
