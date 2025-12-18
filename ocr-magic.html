@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OCRMAGIC — Dev Sandbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <nav class="tabs">
+      <a href="index.html">Home</a>
+      <a href="portfolio.html">Portfolio Preview</a>
+      <a href="invoice-wizard.html">Invoice Wizard</a>
+      <a class="active" href="ocr-magic.html">OCRMAGIC Sandbox</a>
+    </nav>
+
+    <header class="header">
+      <h1>OCRMAGIC — Dev Sandbox</h1>
+      <p class="sub">Clone of the Build Your Custom Wizard field row with manual RAW OCR input for end-to-end pipeline testing.</p>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Field Configuration</h2>
+        <p class="sub">Use the exact wizard builder field row to configure your test field, then paste RAW OCR / Input Text directly below it.</p>
+        <div id="sandbox-field-list" class="custom-fields"></div>
+        <div class="actions" style="margin-top:10px;">
+          <button id="add-field-btn" class="btn" type="button">Add Field</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="actions" style="justify-content:space-between; gap:12px; align-items:center;">
+          <div class="actions">
+            <button id="run-ocr-btn" class="btn primary" type="button">RUN OCR MAGIC</button>
+            <button id="reset-learning-btn" class="btn" type="button">Reset Learning for this Field</button>
+          </div>
+          <div id="active-field-label" class="sub"></div>
+        </div>
+
+        <div class="field">
+          <label for="corrected-output">Corrected Output</label>
+          <textarea id="corrected-output" class="log-viewer sandbox-output" readonly></textarea>
+        </div>
+
+        <details class="panel minimal" open>
+          <summary>Step-by-step Trace</summary>
+          <div id="trace-steps"></div>
+        </details>
+
+        <div class="actions" style="align-items:center;gap:8px;">
+          <label class="toggle-inline">
+            <input type="checkbox" id="debug-toggle" />
+            Show Raw Debug Log
+          </label>
+        </div>
+        <pre id="debug-log" class="code log-viewer" style="display:none;"></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Standalone sandbox for OCR MAGIC pipeline development.</p>
+    </footer>
+  </div>
+
+  <script src="builder-field-row.js"></script>
+  <script src="common-subs.js"></script>
+  <script src="ocrmagic-layer1.js"></script>
+  <script src="ocr-magic-pipeline.js"></script>
+  <script src="ocr-magic-dev.js"></script>
+</body>
+</html>
