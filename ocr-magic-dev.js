@@ -186,6 +186,14 @@
       .filter((line) => line.length);
   }
 
+  function sanitizeLineForPass(rawLine = '') {
+    const asString = String(rawLine ?? '');
+    if (asString.includes('\n')) {
+      console.error('Dev safety: embedded newline found in line before runOcrMagic.', { length: asString.length });
+    }
+    return asString.replace(/\r?\n/g, ' ').trim();
+  }
+
   function countEdits(debug = {}) {
     const s1 = (debug.station1?.layer1Edits || []).length;
     const s2 = (debug.station2?.typeEdits || []).length;
@@ -198,13 +206,25 @@
     const debugs = [];
     let changedCount = 0;
     let editCount = 0;
-    lines.forEach((line) => {
+    lines.forEach((rawLine) => {
+      const line = sanitizeLineForPass(rawLine);
       const res = pipeline.runOcrMagic(fieldCtx, line, store);
       const output = res.finalText || '';
       linesOut.push(output);
       debugs.push(res.debug);
       if (output !== line) changedCount += 1;
       editCount += countEdits(res.debug);
+      const expectedSegments = Array.isArray(fieldCtx.segmenterConfig?.segments)
+        ? fieldCtx.segmenterConfig.segments.length
+        : 0;
+      const segments = res.debug?.station3?.segments || [];
+      if (expectedSegments > 1 && segments.length === 1 && segments[0]?.segmentId === 'full') {
+        console.warn('Segmenter dev check: expected multiple segments but got single full.', {
+          fieldName: fieldCtx.fieldName,
+          inputLength: line.length,
+          hadNewline: /\n/.test(rawLine || '')
+        });
+      }
     });
     return { linesOut, debugs, changedCount, editCount, totalLines: lines.length };
   }
@@ -405,12 +425,16 @@
 
   function buildFieldContext(field) {
     const idx = state.fields.indexOf(field) + 1;
+    const isAddress = /address/i.test((field.name || `Field ${idx}`).trim());
+    const segmenterConfig = isAddress
+      ? { mode: 'first2_last2', segments: [{ id: 'address:first2', strategy: 'first2' }, { id: 'address:last2', strategy: 'last2' }] }
+      : { mode: 'full', segments: [{ id: 'full', strategy: 'full' }] };
     return {
       wizardId: 'ocrmagic-dev-sandbox',
       accountId: 'demo-account',
       fieldName: (field.name || `Field ${idx}`).trim() || `Field ${idx}`,
       magicType: field.magicType || pipeline.MAGIC_DATA_TYPE.ANY,
-      segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] }
+      segmenterConfig
     };
   }
 
