@@ -121,3 +121,16 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .custom-field-row .field-name{ flex:1; min-width:200px; }
 .custom-field-row .delete-field-btn{ margin-left:auto; background:#231919; border:1px solid #3a2b2b; color:#ffb3b3; border-radius:8px; padding:6px 10px; cursor:pointer; }
 .custom-field-row .delete-field-btn:hover{ background:#301f1f; }
+.custom-field-row.active{ border-color: var(--accent); box-shadow:0 0 0 1px var(--accent), 0 6px 18px rgba(46,230,166,0.2); }
+
+.field-row-raw{ display:flex; flex-direction:column; gap:6px; width:100%; }
+.field-row-raw label{ color:var(--muted); font-size:13px; }
+.sandbox-textarea, .sandbox-output{ width:100%; min-height:140px; background:#0e1516; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px; font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.sandbox-output{ min-height:120px; }
+
+.trace-block{ padding:10px; margin-bottom:10px; border:1px solid var(--border); border-radius:10px; background:#0e1516; }
+.trace-title{ font-weight:600; margin-bottom:6px; }
+.diff-line{ font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:pre-wrap; word-break:break-word; }
+.diff-change{ background:rgba(46,230,166,0.2); color:var(--text); padding:1px 2px; border-radius:4px; }
+.diff-note{ color:var(--muted); font-size:12px; margin-top:4px; }
+.segment-card{ border:1px dashed var(--border); border-radius:8px; padding:8px; margin-top:8px; background:#0b1111; font-size:13px; }
