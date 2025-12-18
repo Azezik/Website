@@ -39,6 +39,54 @@
     return out;
   }
 
+  const PCS_MIN_CONSIDERED = 2;
+  const PCS_MIN_SCORE = 0.8;
+  const PCS_MAX_CONFLICTS = 2;
+
+  const STRONG_DIGITS = new Set(['2', '3', '4', '6', '8', '9']);
+
+  function pcsEvaluate(slotString = '', learnedLayout = '') {
+    let support = 0;
+    let conflicts = 0;
+    let unknowns = 0;
+    const slot = String(slotString ?? '');
+    const layout = String(learnedLayout ?? '');
+    const limit = Math.min(slot.length, layout.length);
+
+    for (let i = 0; i < limit; i++) {
+      const learned = layout[i];
+      if (learned === '?') continue;
+      const ch = slot[i];
+      if (COMMON_SUBS.isAmbiguous(ch)) {
+        unknowns += 1;
+        continue;
+      }
+      if (STRONG_DIGITS.has(ch)) {
+        if (learned === 'N') support += 1;
+        else conflicts += 1;
+        continue;
+      }
+      if (/[A-Za-z]/.test(ch) && !COMMON_SUBS.isAmbiguous(ch)) {
+        if (learned === 'L') support += 1;
+        else conflicts += 1;
+      }
+    }
+
+    const considered = support + conflicts;
+    const score = considered ? support / considered : 0;
+    const hasSufficientEvidence = considered >= PCS_MIN_CONSIDERED;
+    const hasTooManyConflicts = conflicts >= PCS_MAX_CONFLICTS;
+    const meetsScore = score >= PCS_MIN_SCORE;
+    return {
+      okToCorrect: hasSufficientEvidence && !hasTooManyConflicts && meetsScore,
+      support,
+      conflicts,
+      unknowns,
+      score,
+      considered
+    };
+  }
+
   class SegmentModelStore {
     constructor(storageKey = 'ocrmagic.segmentStore', { persist = true } = {}) {
       this.storageKey = storageKey;
@@ -264,12 +312,13 @@
     const source = String(typedText ?? '');
     const segments = stage3Result?.segments || [];
     const dvSegments = segments.filter((s) => s.deliberateViolation);
-    if (!dvSegments.length) return { finalText: source, fingerprintEdits: [] };
+    if (!dvSegments.length) return { finalText: source, fingerprintEdits: [], pcsEvaluations: [] };
 
     const sorted = dvSegments.slice().sort((a, b) => (a.start || 0) - (b.start || 0));
     let cursor = 0;
     const parts = [];
     const fingerprintEdits = [];
+    const pcsEvaluations = [];
 
     sorted.forEach((seg) => {
       const start = typeof seg.start === 'number' && seg.start >= 0
@@ -281,6 +330,26 @@
       const corrected = [];
       const slotString = seg.slotString || '';
       const layoutArr = (seg.learnedLayout || '').split('');
+      const pcs = pcsEvaluate(slotString, seg.learnedLayout || '');
+      pcsEvaluations.push({
+        segmentId: seg.segmentId,
+        segmentKey: seg.segmentKey,
+        okToCorrect: pcs.okToCorrect,
+        support: pcs.support,
+        conflicts: pcs.conflicts,
+        unknowns: pcs.unknowns,
+        score: pcs.score,
+        considered: pcs.considered,
+        learnedLayout: seg.learnedLayout,
+        slotLength: slotString.length,
+        note: pcs.okToCorrect ? 'Stage4: PCS ok' : 'Stage4: skipped (PCS not met)',
+        skipReason: pcs.okToCorrect ? undefined : 'PCS_SKIP'
+      });
+      if (!pcs.okToCorrect) {
+        cursor = start + seg.rawSegmentText.length;
+        parts.push(seg.rawSegmentText);
+        return;
+      }
       for (let i = 0; i < slotString.length; i++) {
         const ch = slotString[i];
         let next = ch;
@@ -304,7 +373,7 @@
       cursor = start + seg.rawSegmentText.length;
     });
     parts.push(source.slice(cursor));
-    return { finalText: parts.join(''), fingerprintEdits };
+    return { finalText: parts.join(''), fingerprintEdits, pcsEvaluations };
   }
 
   function runOcrMagic(fieldCtx = {}, rawText = '', store = defaultSegmentStore) {
@@ -334,7 +403,8 @@
     station4_applyFingerprintFixes,
     runOcrMagic,
     SegmentModelStore,
-    normalizeMagicType
+    normalizeMagicType,
+    pcsEvaluate
   };
 
   if (typeof self !== 'undefined') {
