@@ -44,6 +44,14 @@
   const PCS_MAX_CONFLICTS = 2;
 
   const STRONG_DIGITS = new Set(['2', '3', '4', '6', '8', '9']);
+  const STRONG_LETTERS = new Set(
+    'ABCDEFGHJKLMNPQRSTUVWXYZ'.split('').concat('abcdefghijklmnopqrstuvwxyz'.split(''))
+  );
+
+  function toChunkSignature(lengths = []) {
+    if (!Array.isArray(lengths) || !lengths.length) return '0';
+    return lengths.join(',');
+  }
 
   function pcsEvaluate(slotString = '', learnedLayout = '') {
     let support = 0;
@@ -92,6 +100,7 @@
       this.storageKey = storageKey;
       this.persist = persist && typeof localStorage !== 'undefined';
       this.records = this.persist ? this.loadFromStorage() : {};
+      this.chunkRecords = this.persist ? this.loadChunksFromStorage() : {};
     }
 
     loadFromStorage() {
@@ -104,10 +113,21 @@
       }
     }
 
+    loadChunksFromStorage() {
+      try {
+        const raw = localStorage.getItem(`${this.storageKey}.chunks`);
+        if (!raw) return {};
+        return JSON.parse(raw) || {};
+      } catch (err) {
+        return {};
+      }
+    }
+
     save() {
       if (!this.persist || typeof localStorage === 'undefined') return;
       try {
         localStorage.setItem(this.storageKey, JSON.stringify(this.records));
+        localStorage.setItem(`${this.storageKey}.chunks`, JSON.stringify(this.chunkRecords || {}));
       } catch (err) {
         /* ignore persistence errors in sandbox */
       }
@@ -141,6 +161,29 @@
       return rec;
     }
 
+    getChunkRecord(chunkKey, chunkCount = 0) {
+      const rec = this.chunkRecords[chunkKey] || { chunkScores: [] };
+      while (rec.chunkScores.length < chunkCount) {
+        rec.chunkScores.push({ Lscore: 0, Nscore: 0 });
+      }
+      this.chunkRecords[chunkKey] = rec;
+      return rec;
+    }
+
+    updateChunkScores(chunkKey, chunkUpdates = []) {
+      const rec = this.getChunkRecord(chunkKey, chunkUpdates.length);
+      chunkUpdates.forEach((score, idx) => {
+        const existing = rec.chunkScores[idx] || { Lscore: 0, Nscore: 0 };
+        rec.chunkScores[idx] = {
+          Lscore: (existing.Lscore || 0) + (score.Lscore || 0),
+          Nscore: (existing.Nscore || 0) + (score.Nscore || 0)
+        };
+      });
+      this.chunkRecords[chunkKey] = rec;
+      this.save();
+      return rec;
+    }
+
     updateDvStats(segmentKey, { dvEligible = 0, dvContradictions = 0 } = {}) {
       const rec = this.getRecord(segmentKey);
       rec.dvEligible += dvEligible;
@@ -156,6 +199,12 @@
       Object.keys(this.records).forEach((key) => {
         if (prefix.trim() && key.startsWith(prefix)) {
           delete this.records[key];
+          removed = true;
+        }
+      });
+      Object.keys(this.chunkRecords || {}).forEach((key) => {
+        if (prefix.trim() && key.startsWith(prefix)) {
+          delete this.chunkRecords[key];
           removed = true;
         }
       });
@@ -190,12 +239,9 @@
   function extractSegmentsFromText(text = '', fieldCtx = {}) {
     const source = String(text ?? '');
     const tokens = source.length ? source.split(/\s+/g).filter(Boolean) : [];
-    const isAddress = /address/i.test(String(fieldCtx.fieldName || ''));
+    const segmenterConfig = fieldCtx.segmenterConfig || { segments: [{ id: 'full', strategy: 'full' }] };
 
-    const buildSegment = (segmentId, tokenSlice, rawOverride = null) => {
-      const rawSegmentText = rawOverride !== null
-        ? rawOverride
-        : (Array.isArray(tokenSlice) ? tokenSlice.join(' ') : source);
+    const buildSegment = (segmentId, rawSegmentText) => {
       const slotString = COMMON_SUBS.stripToAlnum(rawSegmentText);
       const slotMap = [];
       for (let i = 0, slotIdx = 0; i < rawSegmentText.length; i++) {
@@ -218,19 +264,18 @@
       };
     };
 
-    if (!isAddress) {
-      return [buildSegment('full', [], source)];
-    }
+    const segmentsCfg = Array.isArray(segmenterConfig?.segments) && segmenterConfig.segments.length
+      ? segmenterConfig.segments
+      : [{ id: 'full', strategy: 'full' }];
 
-    const count = tokens.length;
-    if (count === 0) return [];
-    if (count === 1) return [buildSegment('address:first1', [tokens[0]])];
-    if (count === 2) return [buildSegment('address:first2', tokens.slice(0, 2))];
-    if (count === 3) return [buildSegment('address:first2', tokens.slice(0, 2))];
-    return [
-      buildSegment('address:first2', tokens.slice(0, 2)),
-      buildSegment('address:last2', tokens.slice(-2))
-    ];
+    return segmentsCfg.map((segDef) => {
+      const strategy = segDef.strategy || 'full';
+      let rawSegmentText = source;
+      if (strategy === 'first2') rawSegmentText = tokens.slice(0, 2).join(' ');
+      else if (strategy === 'last2') rawSegmentText = tokens.slice(-2).join(' ');
+      else if (strategy === 'first1') rawSegmentText = tokens.slice(0, 1).join(' ');
+      return buildSegment(segDef.id || 'full', rawSegmentText || source);
+    });
   }
 
   function deriveLearnedLayout(record, slotLength) {
@@ -291,6 +336,31 @@
         };
         store.save();
       }
+
+      const rawChunks = (seg.rawSegmentText || '').trim().length
+        ? (seg.rawSegmentText || '').trim().split(/\s+/)
+        : [];
+      const chunkAlnums = rawChunks.map((c) => COMMON_SUBS.stripToAlnum(c));
+      const chunkScores = chunkAlnums.map((chunk) => {
+        let Lscore = 0;
+        let Nscore = 0;
+        for (const ch of chunk) {
+          if (STRONG_DIGITS.has(ch)) Nscore += 5;
+          else if (STRONG_LETTERS.has(ch) && !COMMON_SUBS.isAmbiguous(ch)) Lscore += 5;
+        }
+        return { Lscore, Nscore };
+      });
+      const chunkKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunks::${chunkScores.length}::${toChunkSignature(chunkAlnums.map(c => c.length))}`;
+      const chunkRecord = store.updateChunkScores(chunkKey, chunkScores);
+      const learnedChunkTypes = (chunkRecord.chunkScores || []).map((score) => {
+        const total = (score.Lscore || 0) + (score.Nscore || 0);
+        const dominance = Math.abs((score.Lscore || 0) - (score.Nscore || 0));
+        if (total >= 20 && dominance >= 15) {
+          if ((score.Lscore || 0) > (score.Nscore || 0)) return 'L';
+          if ((score.Nscore || 0) > (score.Lscore || 0)) return 'N';
+        }
+        return '?';
+      }).join('');
       return {
         ...seg,
         segmentKey,
@@ -302,7 +372,16 @@
         },
         learnedCoverage: coverage,
         hasAnyMixed,
-        hasMixedAdjacency
+        hasMixedAdjacency,
+        chunks: rawChunks.map((rawChunk, idx) => ({
+          index: idx,
+          rawChunk,
+          chunkAlnum: chunkAlnums[idx] || '',
+          chunkType: learnedChunkTypes[idx] || '?',
+          Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
+          Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0
+        })),
+        learnedChunkTypes
       };
     });
     return { segments: results };
@@ -329,6 +408,15 @@
       parts.push(before);
       const corrected = [];
       const slotString = seg.slotString || '';
+      const posToChunkIndex = [];
+      const chunkAlnumLengths = (seg.chunks || []).map((c) => (c.chunkAlnum || '').length);
+      let chunkCursor = 0;
+      chunkAlnumLengths.forEach((len, idx) => {
+        for (let i = 0; i < len; i++) {
+          posToChunkIndex[chunkCursor + i] = idx;
+        }
+        chunkCursor += len;
+      });
       const layoutArr = (seg.learnedLayout || '').split('');
       const pcs = pcsEvaluate(slotString, seg.learnedLayout || '');
       pcsEvaluations.push({
@@ -354,16 +442,27 @@
         const ch = slotString[i];
         let next = ch;
         const learned = layoutArr[i];
+        const chunkIndex = posToChunkIndex[i] ?? null;
+        const learnedChunkType = (seg.learnedChunkTypes || '')[chunkIndex] || '?';
+        const expectedType = learned;
         if (learned === '?') {
-          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned });
+          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned, chunkIndex, learnedChunkType });
         } else if (learned === 'N' && COMMON_SUBS.isAmbiguousLetter(ch)) {
-          next = COMMON_SUBS.letterToDigit(ch);
+          if (learnedChunkType === 'L' || (learnedChunkType === 'N' && !COMMON_SUBS.isAmbiguousLetter(ch))) {
+            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, learnedChunkType, blocked: true, reason: `blocked by chunkType=${learnedChunkType}` });
+          } else {
+            next = COMMON_SUBS.letterToDigit(ch);
+          }
         } else if (learned === 'L' && COMMON_SUBS.isAmbiguousDigit(ch)) {
-          const left = corrected[i - 1] || '';
-          next = COMMON_SUBS.digitToLetter(ch, left);
+          if (learnedChunkType === 'N') {
+            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, learnedChunkType, blocked: true, reason: `blocked by chunkType=${learnedChunkType}` });
+          } else {
+            const left = corrected[i - 1] || '';
+            next = COMMON_SUBS.digitToLetter(ch, left);
+          }
         }
         if (next !== ch) {
-          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: next, learned });
+          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: next, learned, chunkIndex, learnedChunkType, expectedType });
         }
         corrected.push(next);
       }

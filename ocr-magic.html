@@ -41,15 +41,28 @@
           </div>
           <div id="active-field-label" class="sub"></div>
         </div>
+        <div id="multiline-warning" class="sub" style="color:#f6b">&nbsp;</div>
 
         <div class="field">
           <label for="corrected-output">Corrected Output</label>
           <textarea id="corrected-output" class="log-viewer sandbox-output" readonly></textarea>
         </div>
 
+        <div class="actions" id="trace-selector" style="align-items:center; gap:8px; display:none;">
+          <label for="trace-pass-select">Pass:</label>
+          <select id="trace-pass-select"></select>
+          <label for="trace-line-select">Trace line:</label>
+          <select id="trace-line-select"></select>
+        </div>
+
         <details class="panel minimal" open>
           <summary>Step-by-step Trace</summary>
           <div id="trace-steps"></div>
+        </details>
+
+        <details class="panel minimal" id="pass-results-panel" open style="display:none;">
+          <summary>Pass Results</summary>
+          <div id="pass-results"></div>
         </details>
 
         <div class="actions" style="align-items:center;gap:8px;">
