@@ -3038,59 +3038,71 @@ function renderBuilderFields(){
   const fields = state.builderFields || [];
   fields.forEach((field, idx) => {
     field.order = idx + 1;
-    const row = document.createElement('div');
-    row.className = 'custom-field-row';
+    let row = null;
+    if(typeof BuilderFieldRow !== 'undefined' && typeof BuilderFieldRow.createFieldRow === 'function'){
+      row = BuilderFieldRow.createFieldRow({
+        field,
+        index: idx,
+        magicTypeOptions: MAGIC_DATA_TYPE,
+        onDelete: () => removeBuilderField(idx),
+        onChange: () => {}
+      });
+    }
+    if(!row){
+      row = document.createElement('div');
+      row.className = 'custom-field-row';
 
-    const idxBadge = document.createElement('span');
-    idxBadge.className = 'field-index';
-    idxBadge.textContent = `Field ${idx + 1}`;
+      const idxBadge = document.createElement('span');
+      idxBadge.className = 'field-index';
+      idxBadge.textContent = `Field ${idx + 1}`;
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'delete-field-btn';
-    deleteBtn.title = 'Delete field';
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.addEventListener('click', ()=> removeBuilderField(idx));
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'delete-field-btn';
+      deleteBtn.title = 'Delete field';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', ()=> removeBuilderField(idx));
 
-    const typeSel = document.createElement('select');
-    typeSel.className = 'field-type';
-    ['static','dynamic'].forEach(opt => {
-      const o = document.createElement('option');
-      o.value = opt; o.textContent = opt === 'static' ? 'Static' : 'Dynamic';
-      typeSel.appendChild(o);
-    });
-    typeSel.value = (field.fieldType || 'static');
-    typeSel.addEventListener('change', e => { field.fieldType = e.target.value; });
+      const typeSel = document.createElement('select');
+      typeSel.className = 'field-type';
+      ['static','dynamic'].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt; o.textContent = opt === 'static' ? 'Static' : 'Dynamic';
+        typeSel.appendChild(o);
+      });
+      typeSel.value = (field.fieldType || 'static');
+      typeSel.addEventListener('change', e => { field.fieldType = e.target.value; });
 
-    const magicSel = document.createElement('select');
-    magicSel.className = 'field-magic-type';
-    [
-      { value: MAGIC_DATA_TYPE.ANY, label: 'ANY' },
-      { value: MAGIC_DATA_TYPE.TEXT, label: 'TEXT ONLY' },
-      { value: MAGIC_DATA_TYPE.NUMERIC, label: 'NUMERIC ONLY' }
-    ].forEach(opt => {
-      const o = document.createElement('option');
-      o.value = opt.value; o.textContent = opt.label;
-      magicSel.appendChild(o);
-    });
-    magicSel.value = normalizeMagicDataType(field.magicType || field.magicDataType);
-    magicSel.addEventListener('change', e => {
-      const v = normalizeMagicDataType(e.target.value);
-      field.magicType = v;
-      field.magicDataType = v;
-    });
+      const magicSel = document.createElement('select');
+      magicSel.className = 'field-magic-type';
+      [
+        { value: MAGIC_DATA_TYPE.ANY, label: 'ANY' },
+        { value: MAGIC_DATA_TYPE.TEXT, label: 'TEXT ONLY' },
+        { value: MAGIC_DATA_TYPE.NUMERIC, label: 'NUMERIC ONLY' }
+      ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.textContent = opt.label;
+        magicSel.appendChild(o);
+      });
+      magicSel.value = normalizeMagicDataType(field.magicType || field.magicDataType);
+      magicSel.addEventListener('change', e => {
+        const v = normalizeMagicDataType(e.target.value);
+        field.magicType = v;
+        field.magicDataType = v;
+      });
 
-    const nameInput = document.createElement('input');
-    nameInput.className = 'field-name';
-    nameInput.placeholder = 'Field name';
-    nameInput.value = field.name || '';
-    nameInput.addEventListener('input', e => { field.name = e.target.value; });
+      const nameInput = document.createElement('input');
+      nameInput.className = 'field-name';
+      nameInput.placeholder = 'Field name';
+      nameInput.value = field.name || '';
+      nameInput.addEventListener('input', e => { field.name = e.target.value; });
 
-    row.appendChild(idxBadge);
-    row.appendChild(typeSel);
-    row.appendChild(magicSel);
-    row.appendChild(nameInput);
-    row.appendChild(deleteBtn);
+      row.appendChild(idxBadge);
+      row.appendChild(typeSel);
+      row.appendChild(magicSel);
+      row.appendChild(nameInput);
+      row.appendChild(deleteBtn);
+    }
     list.appendChild(row);
   });
   if(els.builderFieldCount) els.builderFieldCount.textContent = String(fields.length);
