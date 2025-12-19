@@ -162,12 +162,9 @@
     }
 
     getChunkRecord(chunkKey, chunkCount = 0) {
-      const rec = this.chunkRecords[chunkKey] || { chunkScores: [], chunkLayouts: [] };
+      const rec = this.chunkRecords[chunkKey] || { chunkScores: [] };
       while (rec.chunkScores.length < chunkCount) {
         rec.chunkScores.push({ Lscore: 0, Nscore: 0 });
-      }
-      while (rec.chunkLayouts.length < chunkCount) {
-        rec.chunkLayouts.push({ letterScore: [], numberScore: [] });
       }
       this.chunkRecords[chunkKey] = rec;
       return rec;
@@ -181,27 +178,6 @@
           Lscore: (existing.Lscore || 0) + (score.Lscore || 0),
           Nscore: (existing.Nscore || 0) + (score.Nscore || 0)
         };
-      });
-      this.chunkRecords[chunkKey] = rec;
-      this.save();
-      return rec;
-    }
-
-    updateChunkLayoutScores(chunkKey, chunkSlotStrings = []) {
-      const rec = this.getChunkRecord(chunkKey, chunkSlotStrings.length);
-      chunkSlotStrings.forEach((slotString, idx) => {
-        const chunkLayout = rec.chunkLayouts[idx] || { letterScore: [], numberScore: [] };
-        const slot = String(slotString || '');
-        const letterScore = ensureLength(chunkLayout.letterScore, slot.length);
-        const numberScore = ensureLength(chunkLayout.numberScore, slot.length);
-        for (let i = 0; i < slot.length; i++) {
-          const ch = slot[i];
-          if (!COMMON_SUBS.isAmbiguous(ch)) {
-            if (/[0-9]/.test(ch)) numberScore[i] = (numberScore[i] || 0) + 5;
-            else if (/[A-Za-z]/.test(ch)) letterScore[i] = (letterScore[i] || 0) + 5;
-          }
-        }
-        rec.chunkLayouts[idx] = { letterScore, numberScore };
       });
       this.chunkRecords[chunkKey] = rec;
       this.save();
@@ -337,60 +313,8 @@
       const segmentKey = `${wizardId}::${fieldName}::${seg.segmentId}::${seg.slotLength}`;
       const record = store.updateScores(segmentKey, seg.slotString);
       const { learnedLayout, learnedCount, hasL, hasN } = deriveLearnedLayout(record, seg.slotLength);
-      const rawChunks = (seg.rawSegmentText || '').trim().length
-        ? (seg.rawSegmentText || '').trim().split(/\s+/)
-        : [];
-      const chunkAlnums = rawChunks.map((c) => COMMON_SUBS.stripToAlnum(c));
-      const chunkScores = chunkAlnums.map((chunk) => {
-        let Lscore = 0;
-        let Nscore = 0;
-        for (const ch of chunk) {
-          if (STRONG_DIGITS.has(ch)) Nscore += 5;
-          else if (STRONG_LETTERS.has(ch) && !COMMON_SUBS.isAmbiguous(ch)) Lscore += 5;
-        }
-        return { Lscore, Nscore };
-      });
-      const chunkKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunks::${chunkScores.length}::${toChunkSignature(chunkAlnums.map(c => c.length))}`;
-      const chunkRecord = store.updateChunkScores(chunkKey, chunkScores);
-      const chunkLayoutRecord = store.updateChunkLayoutScores(chunkKey, chunkAlnums);
-      const learnedChunkTypes = (chunkRecord.chunkScores || []).map((score) => {
-        const total = (score.Lscore || 0) + (score.Nscore || 0);
-        const dominance = Math.abs((score.Lscore || 0) - (score.Nscore || 0));
-        if (total >= 20 && dominance >= 15) {
-          if ((score.Lscore || 0) > (score.Nscore || 0)) return 'L';
-          if ((score.Nscore || 0) > (score.Lscore || 0)) return 'N';
-        }
-        return '?';
-      }).join('');
-      const chunkLayouts = (chunkLayoutRecord.chunkLayouts || []).map((layoutScores, idx) => {
-        const chunkLen = (chunkAlnums[idx] || '').length;
-        const derived = deriveLearnedLayout({
-          letterScore: ensureLength(layoutScores.letterScore, chunkLen),
-          numberScore: ensureLength(layoutScores.numberScore, chunkLen)
-        }, chunkLen);
-        return {
-          learnedLayout: derived.learnedLayout,
-          learnedCount: derived.learnedCount,
-          hasL: derived.hasL,
-          hasN: derived.hasN,
-          slotLength: chunkLen,
-          slotScores: {
-            letterScore: ensureLength(layoutScores.letterScore, chunkLen),
-            numberScore: ensureLength(layoutScores.numberScore, chunkLen)
-          }
-        };
-      });
-      const chunkLayoutString = chunkLayouts.map((c, idx) => c.learnedLayout || ''.padStart((chunkAlnums[idx] || '').length, '?')).join('');
-      const baseLayoutArr = (learnedLayout || ''.padStart(seg.slotLength, '?')).split('');
-      const mergedLayoutArr = (chunkLayoutString || '').split('');
-      while (mergedLayoutArr.length < seg.slotLength) mergedLayoutArr.push('?');
-      const layoutArr = mergedLayoutArr.map((ch, idx) => (ch && ch !== '?') ? ch : (baseLayoutArr[idx] || '?'));
-      const layoutString = layoutArr.join('');
-      const learnedCountCombined = (layoutArr.filter((c) => c === 'L' || c === 'N').length);
-      const hasLCombined = layoutArr.includes('L');
-      const hasNCombined = layoutArr.includes('N');
-      const hasAnyMixedCombined = hasLCombined && hasNCombined;
-      const coverage = seg.slotLength ? learnedCountCombined / seg.slotLength : 0;
+      const coverage = seg.slotLength ? learnedCount / seg.slotLength : 0;
+      const layoutArr = learnedLayout.split('');
       let hasMixedAdjacency = false;
       for (let i = 0; i < layoutArr.length - 1; i++) {
         const a = layoutArr[i];
@@ -400,7 +324,7 @@
           break;
         }
       }
-      const hasAnyMixed = hasAnyMixedCombined || (hasL && hasN);
+      const hasAnyMixed = hasL && hasN;
       const dvTrigger = coverage >= 0.6 && hasAnyMixed && hasMixedAdjacency;
       const deliberateViolation = (store.records?.[segmentKey]?.deliberateViolation) || dvTrigger;
       if (store.records) {
@@ -440,30 +364,27 @@
       return {
         ...seg,
         segmentKey,
-        learnedLayout: layoutString,
+        learnedLayout,
         deliberateViolation,
-          slotScores: {
-            letterScore: ensureLength(record.letterScore, seg.slotLength),
-            numberScore: ensureLength(record.numberScore, seg.slotLength)
-          },
-          chunkLayoutString,
-          learnedCoverage: coverage,
-          hasAnyMixed,
-          hasMixedAdjacency,
-          chunks: rawChunks.map((rawChunk, idx) => ({
-            index: idx,
-            rawChunk,
-            chunkAlnum: chunkAlnums[idx] || '',
-            chunkType: learnedChunkTypes[idx] || '?',
-            Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
-            Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0,
-            learnedLayout: (chunkLayouts[idx] || {}).learnedLayout || ''.padStart((chunkAlnums[idx] || '').length, '?'),
-            slotScores: (chunkLayouts[idx] || {}).slotScores || { letterScore: [], numberScore: [] }
-          })),
-          learnedChunkTypes
-        };
-      });
-      return { segments: results };
+        slotScores: {
+          letterScore: ensureLength(record.letterScore, seg.slotLength),
+          numberScore: ensureLength(record.numberScore, seg.slotLength)
+        },
+        learnedCoverage: coverage,
+        hasAnyMixed,
+        hasMixedAdjacency,
+        chunks: rawChunks.map((rawChunk, idx) => ({
+          index: idx,
+          rawChunk,
+          chunkAlnum: chunkAlnums[idx] || '',
+          chunkType: learnedChunkTypes[idx] || '?',
+          Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
+          Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0
+        })),
+        learnedChunkTypes
+      };
+    });
+    return { segments: results };
   }
 
   function station4_applyFingerprintFixes(typedText = '', stage3Result = {}, fieldCtx = {}) {
@@ -488,13 +409,11 @@
       const corrected = [];
       const slotString = seg.slotString || '';
       const posToChunkIndex = [];
-      const posToChunkOffset = [];
       const chunkAlnumLengths = (seg.chunks || []).map((c) => (c.chunkAlnum || '').length);
       let chunkCursor = 0;
       chunkAlnumLengths.forEach((len, idx) => {
         for (let i = 0; i < len; i++) {
           posToChunkIndex[chunkCursor + i] = idx;
-          posToChunkOffset[chunkCursor + i] = i;
         }
         chunkCursor += len;
       });
@@ -522,11 +441,8 @@
       for (let i = 0; i < slotString.length; i++) {
         const ch = slotString[i];
         let next = ch;
+        const learned = layoutArr[i];
         const chunkIndex = posToChunkIndex[i] ?? null;
-        const chunkOffset = posToChunkOffset[i] ?? 0;
-        const chunkLayout = ((seg.chunks || [])[chunkIndex] || {}).learnedLayout || '';
-        const chunkLearned = chunkLayout[chunkOffset];
-        const learned = (chunkLearned && chunkLearned !== '?') ? chunkLearned : layoutArr[i];
         const learnedChunkType = (seg.learnedChunkTypes || '')[chunkIndex] || '?';
         const expectedType = learned;
         if (learned === '?') {
