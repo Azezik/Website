@@ -279,7 +279,6 @@
         `[#${c.index}] ${escapeHtml(c.rawChunk || '')}`,
         `alnum:${escapeHtml(c.chunkAlnum || '')}`,
         `type:${escapeHtml(c.chunkType || '?')}`,
-        `layout:${escapeHtml(c.learnedLayout || '')}`,
         `L:${c.Lscore || 0} N:${c.Nscore || 0}`
       ];
       return parts.join(' | ');
