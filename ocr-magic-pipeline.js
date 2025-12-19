@@ -412,6 +412,31 @@
         };
         store.save();
       }
+
+      const rawChunks = (seg.rawSegmentText || '').trim().length
+        ? (seg.rawSegmentText || '').trim().split(/\s+/)
+        : [];
+      const chunkAlnums = rawChunks.map((c) => COMMON_SUBS.stripToAlnum(c));
+      const chunkScores = chunkAlnums.map((chunk) => {
+        let Lscore = 0;
+        let Nscore = 0;
+        for (const ch of chunk) {
+          if (STRONG_DIGITS.has(ch)) Nscore += 5;
+          else if (STRONG_LETTERS.has(ch) && !COMMON_SUBS.isAmbiguous(ch)) Lscore += 5;
+        }
+        return { Lscore, Nscore };
+      });
+      const chunkKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunks::${chunkScores.length}::${toChunkSignature(chunkAlnums.map(c => c.length))}`;
+      const chunkRecord = store.updateChunkScores(chunkKey, chunkScores);
+      const learnedChunkTypes = (chunkRecord.chunkScores || []).map((score) => {
+        const total = (score.Lscore || 0) + (score.Nscore || 0);
+        const dominance = Math.abs((score.Lscore || 0) - (score.Nscore || 0));
+        if (total >= 20 && dominance >= 15) {
+          if ((score.Lscore || 0) > (score.Nscore || 0)) return 'L';
+          if ((score.Nscore || 0) > (score.Lscore || 0)) return 'N';
+        }
+        return '?';
+      }).join('');
       return {
         ...seg,
         segmentKey,
