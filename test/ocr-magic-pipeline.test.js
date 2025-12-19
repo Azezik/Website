@@ -153,4 +153,18 @@ const ambStage3 = station3_fingerprintAndScore('86I', ambCtx, ambStore);
 const ambStage4 = station4_applyFingerprintFixes('86I', ambStage3, ambCtx);
 assert.strictEqual(ambStage4.finalText, '861');
 
+// Chunk layout persistence should be per-chunk, not merged across different shapes
+const chunkLayoutStore = new SegmentModelStore('chunk-layout', { persist: false });
+const chunkLayoutCtx = { wizardId: 'wiz', fieldName: 'chunky3', segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] } };
+for (let i = 0; i < 4; i++) {
+  station3_fingerprintAndScore('38 Fortune', chunkLayoutCtx, chunkLayoutStore);
+}
+let chunkLayoutStage = station3_fingerprintAndScore('38 Fortune', chunkLayoutCtx, chunkLayoutStore);
+assert.strictEqual(chunkLayoutStage.segments[0].chunks[0].learnedLayout, 'NN');
+assert.strictEqual(chunkLayoutStage.segments[0].chunks[1].learnedLayout, 'LLLLLLL');
+assert.strictEqual(chunkLayoutStage.segments[0].learnedLayout, 'NNLLLLLLL');
+chunkLayoutStage = station3_fingerprintAndScore('5 Elm', chunkLayoutCtx, chunkLayoutStore);
+assert.strictEqual(chunkLayoutStage.segments[0].chunks[0].learnedLayout, '?');
+assert.strictEqual(chunkLayoutStage.segments[0].chunks[1].learnedLayout, '???');
+
 console.log('OCRMAGIC pipeline tests passed.');
