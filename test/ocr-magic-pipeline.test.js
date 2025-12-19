@@ -93,8 +93,12 @@ const ambiguousStage4 = station4_applyFingerprintFixes('1O1O', ambiguousStage3, 
 assert.strictEqual(ambiguousStage4.finalText, '1O1O');
 assert.strictEqual(ambiguousStage4.pcsEvaluations[0].okToCorrect, false);
 
-// Segment extraction - address
-const addrCtx = { wizardId: 'wiz', fieldName: 'shipping_address' };
+// Segment extraction - address (using explicit segmenter config)
+const addrCtx = {
+  wizardId: 'wiz',
+  fieldName: 'shipping_address',
+  segmenterConfig: { segments: [{ id: 'address:first2', strategy: 'first2' }, { id: 'address:last2', strategy: 'last2' }] }
+};
 const addrStage = station3_fingerprintAndScore('3031 Councillors Way, Ottawa, Ontario, KI7 272', addrCtx, store);
 assert.strictEqual(addrStage.segments.length, 2);
 assert.strictEqual(addrStage.segments[0].segmentId, 'address:first2');
@@ -103,8 +107,9 @@ assert.strictEqual(addrStage.segments[1].segmentId, 'address:last2');
 assert.strictEqual(addrStage.segments[1].rawSegmentText, 'KI7 272');
 
 const addrShort = station3_fingerprintAndScore('K2W 1A3', addrCtx, store);
-assert.strictEqual(addrShort.segments.length, 1);
+assert.strictEqual(addrShort.segments.length, 2);
 assert.strictEqual(addrShort.segments[0].rawSegmentText, 'K2W 1A3');
+assert.strictEqual(addrShort.segments[1].rawSegmentText, 'K2W 1A3');
 
 const addrOverlap = station3_fingerprintAndScore('6 Maley Lane, Kanata, Ontario K2W 1A3 Bob MacDonald', addrCtx, store);
 assert.strictEqual(addrOverlap.segments.length, 2);
@@ -117,5 +122,35 @@ const nonAddrStage = station3_fingerprintAndScore('INV-12345', nonAddrCtx, store
 assert.strictEqual(nonAddrStage.segments.length, 1);
 assert.strictEqual(nonAddrStage.segments[0].segmentId, 'full');
 assert.strictEqual(nonAddrStage.segments[0].rawSegmentText, 'INV-12345');
+
+// Chunk gating: numeric chunk should not become letters
+const chunkStore = new SegmentModelStore('chunk-guard', { persist: false });
+const chunkCtx = { wizardId: 'wiz', fieldName: 'chunky', segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] } };
+const chunkSegKey = `${chunkCtx.wizardId}::${chunkCtx.fieldName}::full::6`;
+const chunkRec = chunkStore.getRecord(chunkSegKey, 6);
+chunkRec.letterScore = [30, 30, 30, 0, 0, 0];
+chunkRec.numberScore = [0, 0, 0, 30, 30, 30];
+chunkRec.deliberateViolation = true;
+chunkStore.records[chunkSegKey] = chunkRec;
+const chunkKey = `${chunkCtx.wizardId}::${chunkCtx.fieldName}::full::chunks::2::3,3`;
+chunkStore.updateChunkScores(chunkKey, [{ Lscore: 0, Nscore: 40 }, { Lscore: 40, Nscore: 0 }]);
+const numericStage3 = station3_fingerprintAndScore('300 Bay', chunkCtx, chunkStore);
+const numericStage4 = station4_applyFingerprintFixes('300 Bay', numericStage3, chunkCtx);
+assert.strictEqual(numericStage4.finalText, '300 Bay');
+
+// Chunk gating: ambiguous fix allowed in numeric chunk
+const ambStore = new SegmentModelStore('chunk-amb', { persist: false });
+const ambCtx = { wizardId: 'wiz', fieldName: 'chunky2', segmenterConfig: { segments: [{ id: 'full', strategy: 'full' }] } };
+const ambSegKey = `${ambCtx.wizardId}::${ambCtx.fieldName}::full::3`;
+const ambRec = ambStore.getRecord(ambSegKey, 3);
+ambRec.numberScore = [40, 40, 40];
+ambRec.letterScore = [0, 0, 0];
+ambRec.deliberateViolation = true;
+ambStore.records[ambSegKey] = ambRec;
+const ambChunkKey = `${ambCtx.wizardId}::${ambCtx.fieldName}::full::chunks::1::3`;
+ambStore.updateChunkScores(ambChunkKey, [{ Lscore: 0, Nscore: 40 }]);
+const ambStage3 = station3_fingerprintAndScore('86I', ambCtx, ambStore);
+const ambStage4 = station4_applyFingerprintFixes('86I', ambStage3, ambCtx);
+assert.strictEqual(ambStage4.finalText, '861');
 
 console.log('OCRMAGIC pipeline tests passed.');

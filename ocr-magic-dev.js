@@ -274,12 +274,24 @@
     const card = document.createElement('div');
     card.className = 'segment-card';
     const layout = seg.learnedLayout || ''.padStart(seg.slotLength, '?');
+    const chunkLines = (seg.chunks || []).map((c) => {
+      const parts = [
+        `[#${c.index}] ${escapeHtml(c.rawChunk || '')}`,
+        `alnum:${escapeHtml(c.chunkAlnum || '')}`,
+        `type:${escapeHtml(c.chunkType || '?')}`,
+        `L:${c.Lscore || 0} N:${c.Nscore || 0}`
+      ];
+      return parts.join(' | ');
+    });
     card.innerHTML = `
       <div><strong>Segment:</strong> ${escapeHtml(seg.segmentId || 'segment')}</div>
+      <div><strong>Raw Segment Text:</strong> ${escapeHtml(seg.rawSegmentText || '')}</div>
       <div><strong>Slot String:</strong> ${escapeHtml(seg.slotString || '')}</div>
       <div><strong>Learned Layout:</strong> ${escapeHtml(layout)}</div>
       <div><strong>DV:</strong> ${seg.deliberateViolation ? 'TRUE' : 'false'} (eligible ${seg.dvEligible || 0}, contradictions ${seg.dvContradictions || 0})</div>
       <div><strong>Scores:</strong> L[${(seg.slotScores?.letterScore || []).join(', ')}] N[${(seg.slotScores?.numberScore || []).join(', ')}]</div>
+      <div><strong>Learned Chunk Types:</strong> ${escapeHtml(seg.learnedChunkTypes || '')}</div>
+      <div><strong>Chunks:</strong><br>${chunkLines.join('<br>') || 'None'}</div>
     `;
     return card;
   }
@@ -341,7 +353,12 @@
     }
     els.traceSteps.appendChild(station3Block);
 
-    els.traceSteps.appendChild(buildDiffBlock('Station 4 (Layout Corrections)', station2Text, station4Text, (debug.station4?.fingerprintEdits || []).map((e) => `${e.from}->${e.to} @${e.slotIndex} (${e.learned})`)));
+    els.traceSteps.appendChild(buildDiffBlock('Station 4 (Layout Corrections)', station2Text, station4Text, (debug.station4?.fingerprintEdits || []).map((e) => {
+      if (e.blocked) {
+        return `${e.reason || 'blocked'} @${e.slotIndex} [chunk ${e.chunkIndex ?? '-'} ${e.learnedChunkType || '?'}]`;
+      }
+      return `${e.from}->${e.to} @${e.slotIndex} (${e.learned}) [chunk ${e.chunkIndex ?? '-'} ${e.learnedChunkType || '?'}]`;
+    })));
     els.traceSteps.appendChild(buildDiffBlock('FINAL', rawText, station4Text));
   }
 
