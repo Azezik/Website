@@ -435,7 +435,6 @@ function bumpDebugBlank(){
 }
 
 function currentWizardId(){
-  if(isSkinV2) return state.activeWizardId || '';
   return state.activeWizardId || DEFAULT_WIZARD_ID;
 }
 
@@ -7716,10 +7715,6 @@ if(isSkinV2){
   completeLogin({ username: 'demo' });
 }
 els.logoutBtn?.addEventListener('click', ()=>{
-  if(isSkinV2){
-    window.location.href = '/';
-    return;
-  }
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
@@ -7748,11 +7743,7 @@ function openBuilderFromSelection(){
   openBuilder(template);
 }
 
-els.configureBtn?.addEventListener('click', ()=>{
-  if(isSkinV2){
-    openBuilderFromSelection();
-    return;
-  }
+function configureSelectedWizard(){
   const selection = modelSelect?.value || DEFAULT_WIZARD_ID;
   if(selection === DEFAULT_WIZARD_ID){
     state.activeWizardId = DEFAULT_WIZARD_ID;
@@ -7767,7 +7758,9 @@ els.configureBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
   renderSavedFieldsTable();
-});
+}
+
+els.configureBtn?.addEventListener('click', configureSelectedWizard);
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 els.staticDebugBtn?.addEventListener('click', showStaticDebugModal);
 els.staticDebugClose?.addEventListener('click', hideStaticDebugModal);
