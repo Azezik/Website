@@ -263,6 +263,28 @@ body.skin-v2.doc-dashboard {
   color: var(--muted);
 }
 
+.dash-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.arrow-line {
+  flex: 1;
+  height: 2px;
+  border-top: 2px dashed var(--text);
+  position: relative;
+}
+
+.arrow-line::after {
+  content: '>';
+  position: absolute;
+  right: -8px;
+  top: -10px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 .grid {
   display: grid;
   gap: 14px;
