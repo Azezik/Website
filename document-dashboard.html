@@ -54,16 +54,13 @@
     <section id="app" class="grid" style="display:none">
       <nav class="subtabs" id="dashTabs">
         <button class="tablink active" data-target="document-dashboard">Doc Dashboard</button>
-        <button class="tablink" data-target="builder-section">Wizard Manager</button>
+        <button class="tablink" data-target="wizard-manager">Wizard Manager</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
         <button class="tablink" data-target="reports">Reports</button>
       </nav>
 
       <section id="document-dashboard" class="panel">
-        <div class="dash-row">
-          <button id="configure-btn" class="btn primary" type="button">Configure New Wizard</button>
-          <div class="arrow-line" aria-hidden="true"></div>
-        </div>
+        <button id="configure-btn" class="btn primary" type="button">Configure New Wizard</button>
 
         <div class="field inline">
           <label for="model-select">Saved Wizard Models:</label>
@@ -74,6 +71,10 @@
 
         <div id="dropzone" class="dropzone">Drag and Drop</div>
         <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+      </section>
+
+      <section id="wizard-manager" class="panel" style="display:none;">
+        <p class="sub" style="margin:0;color:var(--muted);">Wizard manager coming soon.</p>
       </section>
 
       <section id="extracted-data" class="panel" style="display:none">
