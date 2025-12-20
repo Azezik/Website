@@ -3,9 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <title>Trace Viewer</title>
-  <link rel="stylesheet" href="styles.css">
-  <script src="trace.js"></script>
-  <script src="trace-viewer.js" defer></script>
+  <link rel="stylesheet" href="../styles.css">
+  <script src="../legacy-gate.js"></script>
+  <script>
+    if (window.wrokitLegacyGate) {
+      window.wrokitLegacyGate.requireLegacyFlag();
+    }
+  </script>
+  <script src="../trace.js"></script>
+  <script src="../trace-viewer.js" defer></script>
 </head>
 <body>
   <h2>Trace Viewer</h2>
