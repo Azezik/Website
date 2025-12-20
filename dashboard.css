@@ -189,6 +189,21 @@ body.skin-v2.doc-dashboard {
   gap: 6px;
 }
 
+.field.inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field.inline label {
+  margin: 0;
+  min-width: 180px;
+}
+
+.field.inline select {
+  max-width: 360px;
+}
+
 .field label {
   font-weight: 700;
   display: flex;

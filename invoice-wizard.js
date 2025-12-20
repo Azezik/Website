@@ -81,6 +81,7 @@ const els = {
   app:             document.getElementById('app'),
   tabs:            document.querySelectorAll('#dashTabs button'),
   docDashboard:    document.getElementById('document-dashboard'),
+  wizardManager:   document.getElementById('wizard-manager'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   docType:         document.getElementById('doc-type'),
@@ -187,6 +188,7 @@ const defaultWizardTitle = els.wizardTitle?.textContent || 'Wizard Configuration
 const defaultWizardSubhead = els.wizardSubhead?.textContent || '';
 const runWizardTitle = 'Wizard Run Mode';
 const runWizardSubhead = 'Drop a document to extract using the saved wizard.';
+const isSkinV2 = document.body.classList.contains('skin-v2');
 
 const DEFAULT_WIZARD_ID = 'default';
 const MAX_CUSTOM_FIELDS = 30;
@@ -241,7 +243,11 @@ const BOTTOM_ANCHOR_FIELD_KEYS = new Set([
 ]);
 
 function showTab(id){
-  [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
+  const sections = [els.docDashboard, els.extractedData, els.reports];
+  if(isSkinV2 && els.wizardManager){
+    sections.push(els.wizardManager);
+  }
+  sections.forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
   });
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
@@ -429,6 +435,7 @@ function bumpDebugBlank(){
 }
 
 function currentWizardId(){
+  if(isSkinV2) return state.activeWizardId || '';
   return state.activeWizardId || DEFAULT_WIZARD_ID;
 }
 
@@ -945,12 +952,19 @@ function populateModelSelect(forceValue){
   if(!sel) return;
   const models = getModels().filter(m => m.username === state.username && m.docType === state.docType);
   const current = forceValue || sel.value;
-  const templateOptions = (state.wizardTemplates || []).map(t => `<option value="custom:${t.id}">${t.wizardName}</option>`);
-  const modelOptions = models.map(m => `<option value="model:${m.id}">${new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString()}</option>`);
-  const defaultOption = `<option value="${DEFAULT_WIZARD_ID}">Default Wizard</option>`;
-  sel.innerHTML = [defaultOption, ...templateOptions, ...modelOptions].join('');
-  const desired = current || (state.activeWizardId === DEFAULT_WIZARD_ID ? DEFAULT_WIZARD_ID : `custom:${state.activeWizardId}`);
-  sel.value = desired;
+  const options = [];
+  if(isSkinV2){
+    options.push({ value: '', label: '— Select a custom wizard —' });
+  } else {
+    options.push({ value: DEFAULT_WIZARD_ID, label: 'Default Wizard' });
+  }
+  options.push(...(state.wizardTemplates || []).map(t => ({ value: `custom:${t.id}`, label: t.wizardName })));
+  options.push(...models.map(m => ({ value: `model:${m.id}`, label: new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString() })));
+
+  sel.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+  const desired = current || (state.activeWizardId ? `custom:${state.activeWizardId}` : (isSkinV2 ? '' : DEFAULT_WIZARD_ID));
+  const hasDesired = options.some(o => o.value === desired);
+  sel.value = hasDesired ? desired : (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
 }
 
 function loadModelById(id){
@@ -7678,22 +7692,34 @@ function renderConfirmedTables(rec){
 
 /* --------------------------- Events ------------------------------ */
 // Auth
-els.loginForm?.addEventListener('submit', (e)=>{
-  e.preventDefault();
-  state.username = (els.username?.value || 'demo').trim();
-  state.docType = els.docType?.value || 'invoice';
-  state.activeWizardId = DEFAULT_WIZARD_ID;
+function completeLogin(opts = {}){
+  const nameInput = opts.username ?? els.username?.value ?? 'demo';
+  state.username = String(nameInput || 'demo').trim() || 'demo';
+  state.docType = opts.docType || els.docType?.value || 'invoice';
+  state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   refreshWizardTemplates();
   const existing = loadProfile(state.username, state.docType, currentWizardId());
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
-  els.loginSection.style.display = 'none';
-  els.app.style.display = 'block';
+  if(els.loginSection){ els.loginSection.style.display = 'none'; }
+  if(els.app){ els.app.style.display = 'block'; }
   showTab('document-dashboard');
   populateModelSelect();
   renderResultsTable();
+}
+els.loginForm?.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  completeLogin({});
 });
+
+if(isSkinV2){
+  completeLogin({ username: 'demo' });
+}
 els.logoutBtn?.addEventListener('click', ()=>{
+  if(isSkinV2){
+    window.location.href = '/';
+    return;
+  }
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
@@ -7717,6 +7743,10 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   alert('Model and records reset.');
 });
 els.configureBtn?.addEventListener('click', ()=>{
+  if(isSkinV2){
+    openBuilder();
+    return;
+  }
   const selection = modelSelect?.value || DEFAULT_WIZARD_ID;
   if(selection === DEFAULT_WIZARD_ID){
     state.activeWizardId = DEFAULT_WIZARD_ID;
