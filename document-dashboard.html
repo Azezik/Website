@@ -60,29 +60,7 @@
       </nav>
 
       <section id="document-dashboard" class="panel">
-        <div class="grid" style="align-items:flex-end;">
-          <div class="field">
-            <label for="doc-type">Document Type</label>
-            <select id="doc-type">
-              <option value="invoice" selected>Invoice</option>
-              <option value="product_inventory_sheet">Product Inventory Sheet</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Quick Actions</label>
-            <div class="actions" style="flex-wrap:wrap;gap:10px;">
-              <button id="configure-btn" class="btn primary" type="button">Configure Wizard</button>
-              <button id="configure-custom-btn" class="btn" type="button">Configure Custom Wizard</button>
-              <button id="demo-btn" class="btn" type="button">Demo Wizard</button>
-              <label class="toggle-inline" style="display:flex;align-items:center;gap:6px;">
-                <input type="checkbox" id="snapshot-mode-toggle" />
-                Snapshot mode
-              </label>
-              <button id="static-debug-btn" class="btn" type="button">Static Debug Logs</button>
-              <button id="reset-model-btn" class="btn" type="button">Reset Model</button>
-            </div>
-          </div>
-        </div>
+        <button id="configure-btn" class="btn primary" type="button">Configure New Wizard</button>
 
         <div class="field inline">
           <label for="model-select">Saved Wizard Models:</label>
