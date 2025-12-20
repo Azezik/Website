@@ -9,19 +9,25 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="../styles.css">
+  <script src="../legacy-gate.js"></script>
+  <script>
+    if (window.wrokitLegacyGate) {
+      window.wrokitLegacyGate.requireLegacyFlag();
+    }
+  </script>
 
   <!-- pdf.js (same-origin, single version) -->
-  <script src="vendor/pdfjs/3.10.111/pdf.min.js"></script>
+  <script src="../vendor/pdfjs/3.10.111/pdf.min.js"></script>
   <script>
     // Match the worker to the SAME version & same origin
     if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/3.10.111/pdf.worker.min.js';
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = '../vendor/pdfjs/3.10.111/pdf.worker.min.js';
     }
   </script>
 
   <!-- pdf-lib (used to flatten AcroForm appearances before extraction) -->
-  <script src="vendor/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+  <script src="../vendor/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 
 
 
@@ -316,18 +322,18 @@
     </footer>
   </div>
 
-  <script src="trace.js"></script>
-  <script src="tools/static-field-mode.js"></script>
-  <script src="tools/wizard-mode.js"></script>
-  <script src="tools/run-landmark-once.js"></script>
-  <script src="tools/keyword-weighting.js"></script>
-  <script src="master-db.js"></script>
-  <script src="orchestrator.js"></script>
-  <script src="field-map.js"></script>
-  <script src="snapshot-store.js"></script>
-  <script src="builder-field-row.js"></script>
-  <script src="common-subs.js"></script>
-  <script src="ocrmagic-layer1.js"></script>
-  <script src="invoice-wizard.js"></script>
+  <script src="../trace.js"></script>
+  <script src="../tools/static-field-mode.js"></script>
+  <script src="../tools/wizard-mode.js"></script>
+  <script src="../tools/run-landmark-once.js"></script>
+  <script src="../tools/keyword-weighting.js"></script>
+  <script src="../master-db.js"></script>
+  <script src="../orchestrator.js"></script>
+  <script src="../field-map.js"></script>
+  <script src="../snapshot-store.js"></script>
+  <script src="../builder-field-row.js"></script>
+  <script src="../common-subs.js"></script>
+  <script src="../ocrmagic-layer1.js"></script>
+  <script src="../invoice-wizard.js"></script>
 </body>
 </html>

@@ -1,0 +1,168 @@
+:root {
+  --bg: #f3e9d7;
+  --bg-soft: #efe2cc;
+  --text: #21170f;
+  --accent: #b68b4c;
+  --accent-strong: #a07536;
+  --input-bg: #f8f1e4;
+  --border: #d1bfa7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body.skin-v2 {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', 'Courier New', monospace;
+}
+
+.landing {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.landing-card {
+  width: min(540px, 100%);
+  display: grid;
+  gap: 24px;
+  padding: 32px 32px 40px;
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(33, 23, 15, 0.12);
+}
+
+.brand {
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.brand h1 {
+  margin: 0 0 6px;
+  font-size: 48px;
+  letter-spacing: 1px;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 18px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--accent-strong);
+}
+
+.auth {
+  display: grid;
+  gap: 12px;
+}
+
+.auth label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.auth input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 2px solid var(--border);
+  background: var(--input-bg);
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--text);
+}
+
+.auth input:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.3px;
+  border-radius: 10px;
+  border: 2px solid var(--text);
+  background: var(--bg-soft);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(33, 23, 15, 0.14);
+}
+
+.btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fffaf2;
+}
+
+.btn.ghost {
+  background: var(--input-bg);
+}
+
+.copy {
+  display: grid;
+  gap: 12px;
+  line-height: 1.5;
+  font-size: 16px;
+}
+
+.copy .lede {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.copy .note {
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.legacy {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.legacy-btn {
+  width: 100%;
+  background: transparent;
+}
+
+@media (max-width: 600px) {
+  .landing-card {
+    padding: 28px 22px 32px;
+  }
+
+  .brand h1 {
+    font-size: 42px;
+  }
+}
