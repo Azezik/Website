@@ -7,7 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="../styles.css">
+  <script src="../legacy-gate.js"></script>
+  <script>
+    if (window.wrokitLegacyGate) {
+      window.wrokitLegacyGate.requireLegacyFlag();
+    }
+  </script>
 </head>
 <body>
   <div class="page">
@@ -80,10 +86,10 @@
     </footer>
   </div>
 
-  <script src="builder-field-row.js"></script>
-  <script src="common-subs.js"></script>
-  <script src="ocrmagic-layer1.js"></script>
-  <script src="ocr-magic-pipeline.js"></script>
-  <script src="ocr-magic-dev.js"></script>
+  <script src="../builder-field-row.js"></script>
+  <script src="../common-subs.js"></script>
+  <script src="../ocrmagic-layer1.js"></script>
+  <script src="../ocr-magic-pipeline.js"></script>
+  <script src="../ocr-magic-dev.js"></script>
 </body>
 </html>

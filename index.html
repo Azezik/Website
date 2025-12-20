@@ -7,32 +7,41 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="home.css" />
 </head>
-<body>
-  <div class="page">
-    <nav class="tabs">
-      <a class="active" href="index.html">Home</a>
-      <a href="portfolio.html">Portfolio Preview</a>
-      <a href="invoice-wizard.html">Invoice Wizard</a>
-      <a href="ocr-magic.html">OCRMAGIC Sandbox</a>
-    </nav>
+<body class="skin-v2">
+  <main class="landing">
+    <section class="landing-card">
+      <header class="brand">
+        <h1>WROKIT</h1>
+        <p class="subtitle">Data Mining</p>
+      </header>
 
-    <header class="header">
-      <h1><span class="hash">#</span> WROKIT</h1>
-      <p class="sub">Personal site + product experiments.</p>
-    </header>
+      <form class="auth" aria-label="Log in">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" />
 
-    <main>
-      <section class="panel">
-        <h2>Welcome</h2>
-        <p>Use the tabs above. “Invoice Wizard” is a client-side demo that lets you map invoice fields by highlighting them.</p>
-      </section>
-    </main>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" />
 
-    <footer class="footer">
-      <p>© WROKIT</p>
-    </footer>
-  </div>
+        <div class="actions">
+          <a class="btn ghost" href="#">Sign Up</a>
+          <a class="btn primary" href="/document-dashboard.html">Log In</a>
+        </div>
+      </form>
+
+      <div class="copy">
+        <p class="lede">Structured data from the documents you already use.</p>
+        <p>Wrokit turns the documents you already receive into usable, structured data – without forcing you to change how you work.</p>
+        <p>Upload pay stubs, invoices, statements, or legacy system reports, highlight what matters, and see everything clearly in one place.</p>
+        <p class="note">No integrations. No logins. No replacements.</p>
+        <p>Wrokit is an exoskeleton for your existing workflows — it doesn’t replace what works, it makes it stronger.</p>
+      </div>
+
+      <div class="legacy">
+        <a class="btn legacy-btn" href="/legacy/">Legacy Mode</a>
+      </div>
+    </section>
+  </main>
 </body>
 </html>
