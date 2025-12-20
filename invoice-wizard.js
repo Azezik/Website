@@ -5863,8 +5863,8 @@ function syncOverlay(){
   const isConfig = isConfigMode();
   const rect = src.getBoundingClientRect();
   const parentRect = els.viewer.getBoundingClientRect();
-  const left = rect.left - parentRect.left + els.viewer.scrollLeft;
-  const top = rect.top - parentRect.top + els.viewer.scrollTop;
+  const left = rect.left - parentRect.left + els.viewer.scrollLeft - (els.viewer.clientLeft || 0);
+  const top = rect.top - parentRect.top + els.viewer.scrollTop - (els.viewer.clientTop || 0);
   els.overlayCanvas.style.left = left + 'px';
   els.overlayCanvas.style.top = top + 'px';
   sizeOverlayTo(rect.width, rect.height);
