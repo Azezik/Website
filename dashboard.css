@@ -189,6 +189,21 @@ body.skin-v2.doc-dashboard {
   gap: 6px;
 }
 
+.field.inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field.inline label {
+  margin: 0;
+  min-width: 180px;
+}
+
+.field.inline select {
+  max-width: 360px;
+}
+
 .field label {
   font-weight: 700;
   display: flex;
@@ -246,6 +261,28 @@ body.skin-v2.doc-dashboard {
   font-weight: 700;
   font-size: 18px;
   color: var(--muted);
+}
+
+.dash-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.arrow-line {
+  flex: 1;
+  height: 2px;
+  border-top: 2px dashed var(--text);
+  position: relative;
+}
+
+.arrow-line::after {
+  content: '>';
+  position: absolute;
+  right: -8px;
+  top: -10px;
+  font-weight: 700;
+  color: var(--text);
 }
 
 .grid {
