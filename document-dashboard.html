@@ -29,7 +29,7 @@
       <button id="logout-btn" class="btn ghost" type="button">Logout</button>
     </div>
 
-    <section id="login-section" class="panel login-card">
+    <section id="login-section" class="panel login-card" style="display:none;">
       <h2>Login</h2>
       <form id="login-form">
         <div class="field">
@@ -54,47 +54,25 @@
     <section id="app" class="grid" style="display:none">
       <nav class="subtabs" id="dashTabs">
         <button class="tablink active" data-target="document-dashboard">Doc Dashboard</button>
+        <button class="tablink" data-target="builder-section">Wizard Manager</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
         <button class="tablink" data-target="reports">Reports</button>
       </nav>
 
       <section id="document-dashboard" class="panel">
-        <div class="grid">
-          <div class="field">
-            <label for="doc-type">Document Type</label>
-            <select id="doc-type">
-              <option value="invoice" selected>Invoice</option>
-              <option value="product_inventory_sheet">Product Inventory Sheet</option>
-            </select>
-          </div>
-
-          <div class="field">
-            <label>Quick Actions</label>
-            <div class="actions">
-              <button id="configure-btn" class="btn" type="button">Configure Wizard</button>
-              <button id="configure-custom-btn" class="btn" type="button">Configure Custom Wizard</button>
-              <button id="new-wizard-btn" class="btn" type="button" style="display:none">New Wizard</button>
-              <button id="demo-btn" class="btn" type="button">Demo Wizard</button>
-              <button id="static-debug-btn" class="btn" type="button">Static Debug Logs</button>
-              <label class="toggle-inline" style="display:flex;gap:8px;align-items:center;">
-                <input type="checkbox" id="snapshot-mode-toggle" />
-                Snapshot mode
-              </label>
-              <button id="upload-btn" class="btn" type="button" style="display:none">Upload Documents</button>
-              <button id="reset-model-btn" class="btn" type="button">Reset Model</button>
-            </div>
-          </div>
-
-          <div class="field">
-            <label for="model-select">Saved Wizard Models</label>
-            <select id="model-select">
-              <option value="">— Select a saved model —</option>
-            </select>
-            <p class="sub" style="margin:0;color:var(--muted);">Pick a model and then drop files below to auto-extract.</p>
-          </div>
+        <div class="dash-row">
+          <button id="configure-btn" class="btn primary" type="button">Configure New Wizard</button>
+          <div class="arrow-line" aria-hidden="true"></div>
         </div>
 
-        <div id="dropzone" class="dropzone">Drag &amp; Drop Files Here</div>
+        <div class="field inline">
+          <label for="model-select">Saved Wizard Models:</label>
+          <select id="model-select">
+            <option value="">— Select a saved model —</option>
+          </select>
+        </div>
+
+        <div id="dropzone" class="dropzone">Drag and Drop</div>
         <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
       </section>
 

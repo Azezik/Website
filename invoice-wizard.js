@@ -241,7 +241,11 @@ const BOTTOM_ANCHOR_FIELD_KEYS = new Set([
 ]);
 
 function showTab(id){
-  [els.docDashboard, els.extractedData, els.reports].forEach(sec => {
+  const sections = [els.docDashboard, els.extractedData, els.reports];
+  if(document.body.classList.contains('skin-v2') && els.builderSection){
+    sections.push(els.builderSection);
+  }
+  sections.forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
   });
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
@@ -7678,22 +7682,34 @@ function renderConfirmedTables(rec){
 
 /* --------------------------- Events ------------------------------ */
 // Auth
-els.loginForm?.addEventListener('submit', (e)=>{
-  e.preventDefault();
-  state.username = (els.username?.value || 'demo').trim();
-  state.docType = els.docType?.value || 'invoice';
+function completeLogin(opts = {}){
+  const nameInput = opts.username ?? els.username?.value ?? 'demo';
+  state.username = String(nameInput || 'demo').trim() || 'demo';
+  state.docType = opts.docType || els.docType?.value || 'invoice';
   state.activeWizardId = DEFAULT_WIZARD_ID;
   refreshWizardTemplates();
   const existing = loadProfile(state.username, state.docType, currentWizardId());
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
-  els.loginSection.style.display = 'none';
-  els.app.style.display = 'block';
+  if(els.loginSection){ els.loginSection.style.display = 'none'; }
+  if(els.app){ els.app.style.display = 'block'; }
   showTab('document-dashboard');
   populateModelSelect();
   renderResultsTable();
+}
+els.loginForm?.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  completeLogin({});
 });
+
+if(document.body.classList.contains('skin-v2')){
+  completeLogin({ username: 'demo' });
+}
 els.logoutBtn?.addEventListener('click', ()=>{
+  if(document.body.classList.contains('skin-v2')){
+    window.location.href = '/';
+    return;
+  }
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
