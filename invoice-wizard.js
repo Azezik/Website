@@ -7760,7 +7760,13 @@ function configureSelectedWizard(){
   renderSavedFieldsTable();
 }
 
-els.configureBtn?.addEventListener('click', configureSelectedWizard);
+if (els.configureBtn) {
+  if (isSkinV2) {
+    els.configureBtn.addEventListener('click', () => openBuilderFromSelection());
+  } else {
+    els.configureBtn.addEventListener('click', configureSelectedWizard);
+  }
+}
 els.demoBtn?.addEventListener('click', ()=> els.wizardFile.click());
 els.staticDebugBtn?.addEventListener('click', showStaticDebugModal);
 els.staticDebugClose?.addEventListener('click', hideStaticDebugModal);
