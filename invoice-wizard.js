@@ -7742,9 +7742,15 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   renderResultsTable();
   alert('Model and records reset.');
 });
+function openBuilderFromSelection(){
+  const val = modelSelect?.value || '';
+  const template = val.startsWith('custom:') ? getWizardTemplateById(val.replace('custom:','')) : null;
+  openBuilder(template);
+}
+
 els.configureBtn?.addEventListener('click', ()=>{
   if(isSkinV2){
-    openBuilder();
+    openBuilderFromSelection();
     return;
   }
   const selection = modelSelect?.value || DEFAULT_WIZARD_ID;
@@ -7786,11 +7792,7 @@ els.docType?.addEventListener('change', ()=>{
   populateModelSelect();
 });
 
-els.configureCustomBtn?.addEventListener('click', ()=>{
-  const val = modelSelect?.value || '';
-  const template = val.startsWith('custom:') ? getWizardTemplateById(val.replace('custom:','')) : null;
-  openBuilder(template);
-});
+els.configureCustomBtn?.addEventListener('click', openBuilderFromSelection);
 els.builderAddFieldBtn?.addEventListener('click', addBuilderField);
 els.builderSaveBtn?.addEventListener('click', saveBuilderTemplate);
 els.builderCancelBtn?.addEventListener('click', ()=>{ resetBuilderErrors(); closeBuilder(); });
