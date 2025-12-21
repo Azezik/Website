@@ -516,14 +516,26 @@ function deriveMasterDbSchema(fields){
     .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
 }
 
+function deriveGlobalFields(fields){
+  const sorted = (fields || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  return sorted
+    .filter(f => (f.fieldType || f.type || 'static') === 'static')
+    .filter(f => !f.isArea && !f.isSubordinate && !!f.isGlobal)
+    .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
+}
+
 function normalizeMasterDbConfig(config, fields){
   const staticFields = deriveMasterDbSchema(fields);
+  const derivedGlobalFields = deriveGlobalFields(fields);
   const includeLineItems = !!config?.includeLineItems;
   const isCustomMasterDb = !!config?.isCustomMasterDb;
   const lineItemFields = Array.isArray(config?.lineItemFields)
     ? config.lineItemFields.map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }))
     : [];
-  return { isCustomMasterDb, staticFields, includeLineItems, lineItemFields };
+  const globalFields = Array.isArray(config?.globalFields)
+    ? config.globalFields.map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }))
+    : derivedGlobalFields;
+  return { isCustomMasterDb, staticFields, includeLineItems, lineItemFields, globalFields };
 }
 
 function normalizeTemplate(template){
@@ -536,6 +548,7 @@ function normalizeTemplate(template){
 function buildMasterDbConfigFromProfile(profile, templateConfig){
   const fields = profile?.fields || [];
   const baseStaticFields = deriveMasterDbSchema(fields);
+  const globalFields = deriveGlobalFields(fields);
   const includeLineItems = templateConfig?.includeLineItems ?? profile?.masterDbConfig?.includeLineItems ?? fields.some(f => (f.type || f.fieldType) === 'column');
   const isCustomMasterDb = templateConfig?.isCustomMasterDb ?? profile?.masterDbConfig?.isCustomMasterDb ?? false;
   const lineItemFields = Array.isArray(templateConfig?.lineItemFields)
@@ -545,7 +558,8 @@ function buildMasterDbConfigFromProfile(profile, templateConfig){
     isCustomMasterDb: !!isCustomMasterDb,
     includeLineItems: !!includeLineItems,
     staticFields: baseStaticFields,
-    lineItemFields
+    lineItemFields,
+    globalFields
   };
 }
 
