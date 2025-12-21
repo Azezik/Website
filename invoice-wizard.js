@@ -477,8 +477,24 @@ function normalizeTemplateFields(fields){
     const fallback = `field_${idx + 1}`;
     const preferredKey = field?.fieldKey && !looksLikeGeneratedId(field.fieldKey) ? field.fieldKey : '';
     const key = normalizeFieldKey(preferredKey || name, used, fallback);
+    const rawType = (field?.fieldType || field?.type || 'static').toLowerCase();
+    const normalizedType = rawType === 'dynamic' ? 'dynamic' : (rawType === 'areabox' ? 'areabox' : 'static');
     const magicDataType = normalizeMagicDataType(field?.magicDataType || field?.magicType);
-    return { ...field, fieldKey: key, magicDataType, magicType: magicDataType };
+    const areaId = normalizedType === 'areabox'
+      ? (field.areaId || field.id || field.fieldKey || key)
+      : (field.areaId || null);
+    const isArea = normalizedType === 'areabox';
+    const isSubordinate = !!areaId && !isArea;
+    return {
+      ...field,
+      fieldType: normalizedType,
+      areaId: areaId || undefined,
+      isArea,
+      isSubordinate,
+      fieldKey: key,
+      magicDataType,
+      magicType: magicDataType
+    };
   });
 }
 
@@ -2962,18 +2978,18 @@ const DEFAULT_FIELDS = [
 function generateQuestionsFromTemplate(template){
   const normalized = normalizeTemplate(template);
   if(!normalized) return [];
-  const sorted = (normalized.fields || []).slice().sort((a,b)=>{
-    const typeA = (a.fieldType || 'static').toLowerCase();
-    const typeB = (b.fieldType || 'static').toLowerCase();
-    if(typeA !== typeB){ return typeA === 'static' ? -1 : 1; }
-    return (a.order || 0) - (b.order || 0);
-  });
+  const sorted = (normalized.fields || []).slice().sort((a,b)=> (a.order || 0) - (b.order || 0));
   const total = sorted.length || 0;
   return sorted.map((f, idx) => ({
     fieldId: f.id,
     fieldKey: f.fieldKey,
     name: f.name || f.fieldKey,
-    fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic' ? 'dynamic' : 'static',
+    fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic'
+      ? 'dynamic'
+      : ((f.fieldType || 'static').toLowerCase() === 'areabox' ? 'areabox' : 'static'),
+    areaId: f.areaId,
+    isArea: (f.fieldType || 'static') === 'areabox',
+    isSubordinate: !!f.areaId && (f.fieldType || 'static') !== 'areabox',
     magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
     prompt: `Please highlight the ${f.name}`,
     order: idx + 1,
@@ -3006,6 +3022,7 @@ function buildStepsFromTemplate(template){
   const questions = generateQuestionsFromTemplate(template);
   return questions.map(q => {
     const type = q.fieldType === 'dynamic' ? 'column' : 'static';
+    const isArea = q.fieldType === 'areabox';
     return {
       ...byKey[q.fieldKey],
       fieldKey: q.fieldKey,
@@ -3015,6 +3032,10 @@ function buildStepsFromTemplate(template){
       mode: type === 'column' ? 'column' : 'cell',
       required: true,
       type,
+      fieldType: q.fieldType,
+      areaId: q.areaId,
+      isArea,
+      isSubordinate: !!q.isSubordinate,
       magicDataType: normalizeMagicDataType(q.magicDataType || q.magicType || byKey[q.fieldKey]?.magicDataType || byKey[q.fieldKey]?.magicType),
       magicType: normalizeMagicDataType(q.magicDataType || q.magicType || byKey[q.fieldKey]?.magicDataType || byKey[q.fieldKey]?.magicType)
     };
@@ -3044,21 +3065,117 @@ function resetBuilderErrors(){
   if(els.builderFieldNameError) els.builderFieldNameError.style.display = 'none';
 }
 
+function normalizeAreaLink(field){
+  if(!field) return null;
+  if(!field.id) field.id = genId('field');
+  if(field.fieldType === 'areabox'){
+    field.isArea = true;
+    field.areaId = field.areaId || field.id;
+    field.isSubordinate = false;
+    return field.areaId;
+  }
+  if(field.areaId){
+    field.isSubordinate = true;
+    field.isArea = false;
+    return field.areaId;
+  }
+  field.isArea = false;
+  field.isSubordinate = false;
+  return null;
+}
+
+function resequenceBuilderFields(){
+  if(!Array.isArray(state.builderFields)) state.builderFields = [];
+  state.builderFields.forEach((f, i) => { f.order = i + 1; });
+}
+
+function removeSubordinateFields(areaId){
+  if(!areaId || !Array.isArray(state.builderFields)) return;
+  state.builderFields = state.builderFields.filter(f => f.fieldType === 'areabox' || f.areaId !== areaId);
+  resequenceBuilderFields();
+}
+
+function addSubordinateField(areaField){
+  if(!areaField || !Array.isArray(state.builderFields)) return;
+  if(state.builderFields.length >= MAX_CUSTOM_FIELDS){
+    if(els.builderFieldLimitMsg) els.builderFieldLimitMsg.style.display = 'inline';
+    return;
+  }
+  const areaId = normalizeAreaLink(areaField) || areaField.id;
+  const fields = state.builderFields;
+  const areaIdx = fields.findIndex(f => f.id === areaField.id);
+  if(areaIdx < 0) return;
+  const newField = {
+    id: genId('field'),
+    fieldType: 'static',
+    name: '',
+    order: 0,
+    fieldKey: '',
+    areaId,
+    isSubordinate: true,
+    magicType: MAGIC_DATA_TYPE.ANY,
+    magicDataType: MAGIC_DATA_TYPE.ANY
+  };
+  let insertAt = areaIdx;
+  for(let i = areaIdx + 1; i < fields.length; i++){
+    if(fields[i].areaId === areaId) insertAt = i;
+    else if(fields[i].fieldType === 'areabox'){ break; }
+    else if(!fields[i].areaId){ break; }
+  }
+  fields.splice(insertAt + 1, 0, newField);
+  resequenceBuilderFields();
+  renderBuilderFields();
+}
+
 function renderBuilderFields(){
   const list = els.builderFieldsList;
   if(!list) return;
   list.innerHTML = '';
-  const fields = state.builderFields || [];
-  fields.forEach((field, idx) => {
-    field.order = idx + 1;
+  const fields = Array.isArray(state.builderFields) ? state.builderFields : [];
+  fields.forEach(normalizeAreaLink);
+  fields.sort((a,b)=> (a.order || 0) - (b.order || 0));
+  resequenceBuilderFields();
+
+  const byArea = new Map();
+  fields.forEach(f => {
+    if(f.fieldType === 'areabox') return;
+    if(f.areaId){
+      if(!byArea.has(f.areaId)) byArea.set(f.areaId, []);
+      byArea.get(f.areaId).push(f);
+    }
+  });
+
+  const rootFields = fields.filter(f => !f.areaId || f.fieldType === 'areabox');
+  rootFields.forEach((field, idx) => {
+    const fieldIndex = fields.indexOf(field);
+    const displayIndex = field.order || (fieldIndex + 1);
+    const handleChange = (changedField, changeIdx, key, meta={}) => {
+      if(key === 'fieldType'){
+        if(changedField.fieldType === 'areabox'){
+          normalizeAreaLink(changedField);
+        } else if(meta.previousType === 'areabox'){
+          const oldAreaId = changedField.areaId || changedField.id;
+          changedField.areaId = null;
+          changedField.isArea = false;
+          removeSubordinateFields(oldAreaId);
+        }
+        resequenceBuilderFields();
+        renderBuilderFields();
+        return;
+      }
+      if(key === 'name' && changedField.fieldType === 'areabox'){
+        changedField.prompt = `Please highlight the ${changedField.name}`;
+      }
+    };
+
     let row = null;
     if(typeof BuilderFieldRow !== 'undefined' && typeof BuilderFieldRow.createFieldRow === 'function'){
       row = BuilderFieldRow.createFieldRow({
         field,
-        index: idx,
+        index: displayIndex - 1,
         magicTypeOptions: MAGIC_DATA_TYPE,
-        onDelete: () => removeBuilderField(idx),
-        onChange: () => {}
+        onDelete: () => removeBuilderField(fieldIndex),
+        onChange: handleChange
       });
     }
     if(!row){
@@ -3067,7 +3184,7 @@ function renderBuilderFields(){
 
       const idxBadge = document.createElement('span');
       idxBadge.className = 'field-index';
-      idxBadge.textContent = `Field ${idx + 1}`;
+      idxBadge.textContent = `Field ${displayIndex}`;
 
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
@@ -3078,13 +3195,18 @@ function renderBuilderFields(){
 
       const typeSel = document.createElement('select');
       typeSel.className = 'field-type';
-      ['static','dynamic'].forEach(opt => {
+      ['areabox','static','dynamic'].forEach(opt => {
         const o = document.createElement('option');
-        o.value = opt; o.textContent = opt === 'static' ? 'Static' : 'Dynamic';
+        o.value = opt;
+        o.textContent = opt === 'areabox' ? 'Areabox' : (opt === 'static' ? 'Static' : 'Dynamic');
         typeSel.appendChild(o);
       });
       typeSel.value = (field.fieldType || 'static');
-      typeSel.addEventListener('change', e => { field.fieldType = e.target.value; });
+      typeSel.addEventListener('change', e => {
+        const prev = field.fieldType;
+        field.fieldType = e.target.value;
+        handleChange(field, fieldIndex, 'fieldType', { previousType: prev });
+      });
 
       const magicSel = document.createElement('select');
       magicSel.className = 'field-magic-type';
@@ -3106,9 +3228,9 @@ function renderBuilderFields(){
 
       const nameInput = document.createElement('input');
       nameInput.className = 'field-name';
-      nameInput.placeholder = 'Field name';
+      nameInput.placeholder = field.fieldType === 'areabox' ? 'Area name' : 'Field name';
       nameInput.value = field.name || '';
-      nameInput.addEventListener('input', e => { field.name = e.target.value; });
+      nameInput.addEventListener('input', e => { field.name = e.target.value; handleChange(field, fieldIndex, 'name'); });
 
       row.appendChild(idxBadge);
       row.appendChild(typeSel);
@@ -3117,6 +3239,32 @@ function renderBuilderFields(){
       row.appendChild(deleteBtn);
     }
     list.appendChild(row);
+
+    if(field.fieldType === 'areabox'){
+      const subContainer = document.createElement('div');
+      subContainer.className = 'sub-field-container';
+      const areaId = field.areaId || field.id;
+      const subFields = (byArea.get(areaId) || []).sort((a,b)=> (a.order || 0) - (b.order || 0));
+      subFields.forEach((subField, subIdx) => {
+        const subRow = BuilderFieldRow.createFieldRow({
+          field: subField,
+          index: (subField.order || subIdx + 1) - 1,
+          magicTypeOptions: MAGIC_DATA_TYPE,
+          onDelete: () => removeBuilderField(fields.indexOf(subField)),
+          onChange: handleChange,
+          isSubordinate: true,
+          allowAreaType: false
+        });
+        subContainer.appendChild(subRow);
+      });
+      const addSubBtn = document.createElement('button');
+      addSubBtn.type = 'button';
+      addSubBtn.className = 'btn add-sub-field-btn';
+      addSubBtn.textContent = 'Add field to area';
+      addSubBtn.addEventListener('click', () => addSubordinateField(field));
+      subContainer.appendChild(addSubBtn);
+      list.appendChild(subContainer);
+    }
   });
   if(els.builderFieldCount) els.builderFieldCount.textContent = String(fields.length);
   if(els.builderFieldLimitMsg){
@@ -3143,8 +3291,13 @@ function addBuilderField(){
 function removeBuilderField(idx){
   if(!Array.isArray(state.builderFields)) state.builderFields = [];
   if(idx < 0 || idx >= state.builderFields.length) return;
+  const removed = state.builderFields[idx];
+  const removedAreaId = removed?.fieldType === 'areabox' ? (removed.areaId || removed.id) : null;
   state.builderFields.splice(idx, 1);
-  state.builderFields.forEach((f, i) => { f.order = i + 1; });
+  if(removedAreaId){
+    state.builderFields = state.builderFields.filter(f => f.areaId !== removedAreaId);
+  }
+  resequenceBuilderFields();
   renderBuilderFields();
 }
 
@@ -3181,21 +3334,36 @@ function closeBuilder(){
 function saveBuilderTemplate(){
   resetBuilderErrors();
   const name = (els.builderNameInput?.value || '').trim();
-  const preparedFields = (state.builderFields || []).map((f, idx) => ({
-    ...f,
-    id: f.id || genId('field'),
-    name: (f.name || '').trim(),
-    fieldType: (f.fieldType || 'static') === 'dynamic' ? 'dynamic' : 'static',
-    order: idx + 1,
-    magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
-    magicType: normalizeMagicDataType(f.magicDataType || f.magicType)
-  }));
+  const seededFields = (state.builderFields || []).map((f, idx) => ({ ...f, id: f.id || genId('field'), order: idx + 1 }));
+  seededFields.forEach(normalizeAreaLink);
+  const preparedFields = seededFields.map(f => {
+    const mt = normalizeMagicDataType(f.magicDataType || f.magicType);
+    const normalizedType = (f.fieldType || 'static') === 'dynamic'
+      ? 'dynamic'
+      : ((f.fieldType || 'static') === 'areabox' ? 'areabox' : 'static');
+    const normalizedAreaId = normalizedType === 'areabox' ? (f.areaId || f.id) : (f.areaId || null);
+    return {
+      ...f,
+      id: f.id || genId('field'),
+      name: (f.name || '').trim(),
+      fieldType: normalizedType,
+      areaId: normalizedAreaId || undefined,
+      isArea: normalizedType === 'areabox',
+      isSubordinate: !!normalizedAreaId && normalizedType !== 'areabox',
+      order: f.order,
+      magicDataType: mt,
+      magicType: mt
+    };
+  });
   const normalizedFields = normalizeTemplateFields(preparedFields).map(f => ({
     id: f.id || genId('field'),
     name: f.name,
     fieldType: f.fieldType,
     order: f.order,
     fieldKey: f.fieldKey,
+    areaId: f.areaId,
+    isArea: f.isArea,
+    isSubordinate: f.isSubordinate,
     magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
     magicType: normalizeMagicDataType(f.magicDataType || f.magicType)
   }));
@@ -3210,6 +3378,7 @@ function saveBuilderTemplate(){
   if((!hasFields || missingFieldNames) && els.builderFieldNameError) els.builderFieldNameError.style.display = 'block';
   if(!hasName || !hasFields || missingFieldNames) return null;
 
+  // Subordinate fields store areaId linking back to their parent Areabox so later configuration/run steps can scope boxes to the owning area without changing coordinate systems.
   const template = {
     id: state.builderEditingId || genId('wizard'),
     wizardName: name,

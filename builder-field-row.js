@@ -23,11 +23,15 @@
     index = 0,
     magicTypeOptions = {},
     onDelete,
-    onChange
+    onChange,
+    isSubordinate = false,
+    allowAreaType = true
   } = {}) {
     const normalizedMagic = magicTypeOptions || {};
     const row = document.createElement('div');
     row.className = 'custom-field-row';
+    if ((field?.fieldType || '').toLowerCase() === 'areabox') row.classList.add('area-row');
+    if (isSubordinate) row.classList.add('sub-field-row');
 
     const idxBadge = document.createElement('span');
     idxBadge.className = 'field-index';
@@ -42,17 +46,20 @@
       deleteBtn.addEventListener('click', () => onDelete(field, index));
     }
 
+    const typeOptions = [
+      { value: 'static', label: 'Static' },
+      { value: 'dynamic', label: 'Dynamic' }
+    ];
+    if (allowAreaType) typeOptions.unshift({ value: 'areabox', label: 'Areabox' });
     const typeSel = createSelect(
-      [
-        { value: 'static', label: 'Static' },
-        { value: 'dynamic', label: 'Dynamic' }
-      ],
+      typeOptions,
       field.fieldType || 'static',
       'field-type'
     );
     typeSel.addEventListener('change', (e) => {
+      const previousType = field.fieldType;
       field.fieldType = e.target.value;
-      if (typeof onChange === 'function') onChange(field, index, 'fieldType');
+      if (typeof onChange === 'function') onChange(field, index, 'fieldType', { previousType });
     });
 
     const magicOpts = [
@@ -73,7 +80,7 @@
 
     const nameInput = document.createElement('input');
     nameInput.className = 'field-name';
-    nameInput.placeholder = 'Field name';
+    nameInput.placeholder = field.fieldType === 'areabox' ? 'Area name' : 'Field name';
     nameInput.value = field.name || '';
     nameInput.addEventListener('input', (e) => {
       field.name = e.target.value;

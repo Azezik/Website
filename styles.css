@@ -121,6 +121,11 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .custom-field-row .field-name{ flex:1; min-width:200px; }
 .custom-field-row .delete-field-btn{ margin-left:auto; background:#231919; border:1px solid #3a2b2b; color:#ffb3b3; border-radius:8px; padding:6px 10px; cursor:pointer; }
 .custom-field-row .delete-field-btn:hover{ background:#301f1f; }
+.custom-field-row.area-row{ border-color: var(--accent); box-shadow:0 0 0 1px var(--accent), 0 6px 18px rgba(46,230,166,0.15); }
+.custom-field-row.sub-field-row{ background:#0f1116; border-color:#1c2533; box-shadow:none; padding:10px; }
+.sub-field-container{ margin:4px 0 12px 34px; padding-left:12px; border-left:2px dashed #273040; display:flex; flex-direction:column; gap:10px; }
+.add-sub-field-btn{ background:#1c2533; border-color:#273040; color:#dfe8ff; padding:8px 12px; }
+.add-sub-field-btn:hover{ background:#223146; }
 .custom-field-row.active{ border-color: var(--accent); box-shadow:0 0 0 1px var(--accent), 0 6px 18px rgba(46,230,166,0.2); }
 
 .field-row-raw{ display:flex; flex-direction:column; gap:6px; width:100%; }
