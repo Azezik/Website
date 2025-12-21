@@ -277,6 +277,7 @@ let state = {
   keywordIndexByPage: {},   // per-page keyword bbox cache
   areaMatchesByPage: {},    // per-page detected area occurrences
   areaOccurrencesById: {},  // area occurrences keyed by areaId
+  areaExtractions: {},      // resolved subordinate values keyed by areaId
   selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
   selectionPx: null,         // current user-drawn selection (px, page-relative)
   snappedCss: null,          // snapped line box (CSS units, page-relative)
@@ -313,6 +314,7 @@ let state = {
   debugLineAnchors: [],
   builderFields: [],
   builderEditingId: null,
+  currentAreaRows: [],
 };
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
@@ -380,6 +382,7 @@ function clearTransientStateLocal(){
   state.lastOcrCropPx = null; state.lastOcrCropCss = null;
   state.cropAudits = []; state.cropHashes = {};
   state.tokensByPage = {}; state.currentLineItems = [];
+  state.areaMatchesByPage = {}; state.areaOccurrencesById = {}; state.areaExtractions = {}; state.currentAreaRows = [];
   state.currentFileId = ''; state.currentFileName = '';
   state.lineLayout = null;
   state.lastSnapshotManifestId = '';
@@ -1237,6 +1240,63 @@ function setAreaSelection(areaId, payload){
 function getAreaSelection(areaId){
   if(!areaId || !state.areaSelections) return null;
   return state.areaSelections[areaId] || null;
+}
+
+function resolveAreaBoxPx(occurrence){
+  if(!occurrence) return null;
+  if(occurrence.bboxPx && Number.isFinite(occurrence.bboxPx.x) && Number.isFinite(occurrence.bboxPx.y)){
+    const page = occurrence.bboxPx.page || occurrence.page || 1;
+    return { ...occurrence.bboxPx, page };
+  }
+  const norm = occurrence.bboxNorm || occurrence.bboxPct || null;
+  if(!norm) return null;
+  const page = occurrence.page || norm.page || 1;
+  const vp = state.pageViewports[(page||1)-1] || state.viewport || {};
+  const box = toPx({ w: vp.width ?? vp.w ?? 1, h: vp.height ?? vp.h ?? 1 }, { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1, page });
+  return { x: box.x, y: box.y, w: box.w, h: box.h, page };
+}
+
+function absoluteBoxFromRelative(relativeBox, areaBoxPx){
+  if(!relativeBox || !areaBoxPx || !Number.isFinite(areaBoxPx.w) || !Number.isFinite(areaBoxPx.h)) return null;
+  const x0 = areaBoxPx.x + (relativeBox.x0 || 0) * areaBoxPx.w;
+  const y0 = areaBoxPx.y + (relativeBox.y0 || 0) * areaBoxPx.h;
+  const x1 = areaBoxPx.x + (relativeBox.x1 || 0) * areaBoxPx.w;
+  const y1 = areaBoxPx.y + (relativeBox.y1 || 0) * areaBoxPx.h;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, page: areaBoxPx.page };
+}
+
+function tokensWithinArea(tokens, areaBoxPx){
+  if(!Array.isArray(tokens) || !areaBoxPx) return [];
+  return tokensInBox(tokens, areaBoxPx, { minOverlap: 0 });
+}
+
+function groupFieldsByArea(fields = []){
+  const map = new Map();
+  fields.forEach(f => {
+    const isArea = f && (f.isArea || f.fieldType === 'areabox');
+    const areaId = isArea ? (f.areaId || f.id || f.fieldKey) : (f.areaId || null);
+    if(isArea){
+      if(!map.has(areaId)) map.set(areaId, { area: f, subs: [] });
+      else map.get(areaId).area = map.get(areaId).area || f;
+    }
+  });
+  fields.forEach(f => {
+    if(!f || f.isArea || f.fieldType === 'areabox') return;
+    if(!f.areaId) return;
+    if(!map.has(f.areaId)) map.set(f.areaId, { area: null, subs: [] });
+    map.get(f.areaId).subs.push(f);
+  });
+  return map;
+}
+
+function persistAreaRows(rows = []){
+  state.areaExtractions = {};
+  state.currentAreaRows = rows;
+  rows.forEach(row => {
+    if(!row || !row.areaId) return;
+    if(!state.areaExtractions[row.areaId]) state.areaExtractions[row.areaId] = [];
+    state.areaExtractions[row.areaId].push(row);
+  });
 }
 
 const normalizeBox = (boxPx, canvasW, canvasH) => ({
@@ -6492,7 +6552,9 @@ async function prepareRunDocument(file){
   state.telemetry = [];
   state.areaMatchesByPage = {};
   state.areaOccurrencesById = {};
+  state.areaExtractions = {};
   state.currentLineItems = [];
+  state.currentAreaRows = [];
   state.lineLayout = null;
   state.pageSnapshots = {};
   state.pageNum = 1;
@@ -6836,6 +6898,71 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
     }
   }
   return matches;
+}
+
+async function extractAreaRows(profile){
+  const fields = profile?.fields || [];
+  const groups = groupFieldsByArea(fields);
+  const pagesToIndex = new Set();
+  groups.forEach(entry => {
+    const page = entry.area?.areaFingerprint?.page || entry.area?.page || null;
+    if(page) pagesToIndex.add(page);
+  });
+  for(const page of pagesToIndex){
+    await buildKeywordIndexForPage(page);
+  }
+
+  const rows = [];
+  for(const [areaId, entry] of groups.entries()){
+    const subs = entry.subs || [];
+    const occurrences = (state.areaOccurrencesById?.[areaId] || []).slice();
+    if(!subs.length || !occurrences.length) continue;
+    for(let i=0; i<occurrences.length; i++){
+      const occ = occurrences[i];
+      const areaBoxPx = resolveAreaBoxPx(occ);
+      if(!areaBoxPx) continue;
+      const page = areaBoxPx.page || occ.page || 1;
+      const vp = state.pageViewports[(page||1)-1] || state.viewport || { width:1, height:1, w:1, h:1 };
+      const pageTokens = state.tokensByPage[page] || await ensureTokensForPage(page);
+      const scopedTokens = tokensWithinArea(pageTokens, areaBoxPx);
+      const pageW = (vp.width ?? vp.w) || 1;
+      const pageH = (vp.height ?? vp.h) || 1;
+      const normArea = normalizeBox(areaBoxPx, pageW, pageH);
+      const bboxNorm = { x0: normArea.x0n, y0: normArea.y0n, x1: normArea.x0n + normArea.wN, y1: normArea.y0n + normArea.hN };
+      const rowFields = {};
+      for(const sub of subs){
+        const scoped = clonePlain(sub);
+        scoped.page = page;
+        const absBox = sub.areaRelativeBox ? absoluteBoxFromRelative(sub.areaRelativeBox, areaBoxPx) : null;
+        if(absBox){
+          const nb = normalizeBox(absBox, pageW, pageH);
+          scoped.bbox = [nb.x0n, nb.y0n, nb.x0n + nb.wN, nb.y0n + nb.hN];
+          scoped.configBox = { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN };
+        }
+        const res = await extractFieldValue(scoped, scopedTokens, vp);
+        const normBox = res.boxPx ? normalizeBox(res.boxPx, pageW, pageH) : null;
+        rowFields[sub.fieldKey] = {
+          value: res.value || '',
+          raw: res.raw || '',
+          confidence: res.confidence || 0,
+          bbox: normBox ? { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN } : null,
+          page,
+          tokens: res.tokens || []
+        };
+      }
+      rows.push({
+        areaId,
+        occurrenceIndex: i,
+        page,
+        bboxPx: areaBoxPx,
+        bboxNorm,
+        confidence: occ.confidence || 0,
+        fields: rowFields
+      });
+    }
+  }
+  persistAreaRows(rows);
+  return rows;
 }
 
 function computeKeywordRelationsForConfig(fieldKey, boxPx, normBox, page, pageW, pageH){
@@ -7708,6 +7835,7 @@ function compileDocument(fileId, lineItems){
     },
     masterDbConfig: buildMasterDbConfigFromProfile(state.profile, state.profile?.masterDbConfig),
     lineItems: enriched,
+    areaRows: (state.currentAreaRows || []).map(r => clonePlain(r)),
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
     warnings: []
   };
@@ -8536,7 +8664,12 @@ async function runModeExtractFileWithProfile(file, profile){
     if(!prepared){ return; }
     if(isRunMode()) console.log(`[run-mode] tokens cached for ${state.numPages} page(s)`);
 
+    await extractAreaRows(activeProfile);
+
     for(const spec of (activeProfile.fields || [])){
+      const isAreaField = spec.isArea || spec.fieldType === 'areabox';
+      const isSubordinateField = !!spec.areaId && !isAreaField;
+      if(isAreaField || isSubordinateField){ continue; }
       const placement = spec.type === 'static'
         ? resolveStaticPlacement(spec, state.pageViewports, state.numPages)
         : null;
