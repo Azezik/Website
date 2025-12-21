@@ -407,8 +407,9 @@
     return { header, rows, missingMap: {} };
   }
 
-  function flatten(ssot){
-    const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
+  const ROOT_SHEET_NAME = 'MasterDB';
+
+  function flattenRoot(records){
     const config = normalizeMasterConfig(records[0]);
     if(config.isCustomMasterDb){
       return flattenCustom(records, config);
@@ -606,6 +607,96 @@
     });
 
     return { header: HEADERS, rows, missingMap };
+  }
+
+  function normalizeAreaFieldValue(cell){
+    if(cell && typeof cell === 'object' && 'value' in cell) return cleanText(cell.value);
+    if(cell && typeof cell === 'object' && 'raw' in cell) return cleanText(cell.raw);
+    return cleanText(cell);
+  }
+
+  function ensureFileIdLast(header){
+    const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
+    const withoutFileId = header.filter(h => h !== fileHeader);
+    return [...withoutFileId, fileHeader];
+  }
+
+  function upsertHeaderColumns(existing, incoming){
+    const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
+    const next = existing.slice();
+    incoming.forEach(col => {
+      if(col === fileHeader) return;
+      if(!next.includes(col)){
+        const insertAt = Math.max(0, next.indexOf(fileHeader));
+        if(insertAt >= 0 && insertAt < next.length){
+          next.splice(insertAt, 0, col);
+        } else {
+          next.push(col);
+        }
+      }
+    });
+    return ensureFileIdLast(next);
+  }
+
+  function normalizeAreaSheetRow(header, fields, fileId){
+    const normalizedFields = fields || {};
+    const values = header
+      .filter(col => col !== (HEADERS[HEADERS.length - 1] || 'File ID'))
+      .map(col => normalizeAreaFieldValue(normalizedFields[col]));
+    values.push(fileId);
+    return values;
+  }
+
+  function buildAreaSheets(records){
+    const sheets = new Map();
+    const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
+
+    const addRowToSheet = (areaId, areaName, rowFields, fileId) => {
+      const key = areaId || areaName || 'Area';
+      const label = areaName || areaId || 'Area';
+      const incomingCols = Object.keys(rowFields || {});
+      const existing = sheets.get(key) || {
+        name: label,
+        areaId: areaId || label,
+        header: ensureFileIdLast(incomingCols.concat(fileHeader)),
+        rows: []
+      };
+      existing.header = upsertHeaderColumns(existing.header, incomingCols);
+      existing.rows.push(normalizeAreaSheetRow(existing.header, rowFields, fileId));
+      sheets.set(key, existing);
+    };
+
+    records.forEach(record => {
+      const fileId = record?.fileId || record?.fileHash || '';
+      const areaRows = Array.isArray(record?.areaRows) ? record.areaRows : [];
+      areaRows.forEach(row => {
+        const areaId = row?.areaId || row?.id || row?.name;
+        const areaName = row?.areaName || row?.name || areaId;
+        const nestedRows = Array.isArray(row?.rows) && row.rows.length ? row.rows : [row];
+        nestedRows.forEach(nested => {
+          const rowFields = nested?.fields || row?.fields || {};
+          addRowToSheet(areaId, areaName, rowFields, fileId);
+        });
+      });
+    });
+
+    return Array.from(sheets.values()).map(sheet => ({
+      name: sheet.name,
+      areaId: sheet.areaId,
+      header: sheet.header,
+      rows: [sheet.header, ...sheet.rows]
+    }));
+  }
+
+  function flatten(ssot){
+    const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
+    const root = flattenRoot(records);
+    const areaSheets = buildAreaSheets(records);
+    const sheets = [
+      { name: ROOT_SHEET_NAME, header: root.header, rows: root.rows },
+      ...areaSheets
+    ];
+    return { header: root.header, rows: root.rows, missingMap: root.missingMap, sheets };
   }
 
   function normalizeRowInput(row){
