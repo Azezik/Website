@@ -3,6 +3,7 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
+const AreaFinder = window.AreaFinder || null;
 
 const LEGACY_PDF_SCALE = 1.5;
 const BASE_PDF_SCALE = (window.devicePixelRatio || 1) * LEGACY_PDF_SCALE;
@@ -274,6 +275,8 @@ let state = {
   pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: {},          // {page:number: Token[] in px}
   keywordIndexByPage: {},   // per-page keyword bbox cache
+  areaMatchesByPage: {},    // per-page detected area occurrences
+  areaOccurrencesById: {},  // area occurrences keyed by areaId
   selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
   selectionPx: null,         // current user-drawn selection (px, page-relative)
   snappedCss: null,          // snapped line box (CSS units, page-relative)
@@ -6487,6 +6490,8 @@ async function prepareRunDocument(file){
   state.grayCanvases = {};
   state.matchPoints = [];
   state.telemetry = [];
+  state.areaMatchesByPage = {};
+  state.areaOccurrencesById = {};
   state.currentLineItems = [];
   state.lineLayout = null;
   state.pageSnapshots = {};
@@ -6715,6 +6720,26 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   return tokens;
 }
 
+function areaConfigsForPage(pageNum){
+  if(!state.profile || !Array.isArray(state.profile.fields)) return [];
+  return state.profile.fields
+    .filter(f => f && (f.isArea || f.fieldType === 'areabox') && f.areaFingerprint)
+    .filter(f => (f.areaFingerprint.page || f.page || 1) === pageNum);
+}
+
+function cacheAreaOccurrencesForPage(pageNum, matches = []){
+  if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
+  Object.keys(state.areaOccurrencesById).forEach(key => {
+    state.areaOccurrencesById[key] = (state.areaOccurrencesById[key] || []).filter(m => m.page !== pageNum);
+  });
+  matches.forEach(m => {
+    const key = m.areaId || m.fieldKey;
+    if(!key) return;
+    if(!state.areaOccurrencesById[key]) state.areaOccurrencesById[key] = [];
+    state.areaOccurrencesById[key].push(m);
+  });
+}
+
 async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
   if(state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
   const catalogue = getKeywordCatalogue();
@@ -6799,6 +6824,17 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
 
   state.keywordIndexByPage[pageNum] = matches;
   logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
+
+  const areaFields = areaConfigsForPage(pageNum);
+  if(AreaFinder && areaFields.length){
+    try {
+      const areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH }) || [];
+      state.areaMatchesByPage[pageNum] = areaMatches;
+      cacheAreaOccurrencesForPage(pageNum, areaMatches);
+    } catch(err){
+      console.warn('AREAFINDER failed', err);
+    }
+  }
   return matches;
 }
 
