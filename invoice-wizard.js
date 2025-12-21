@@ -1132,6 +1132,99 @@ function computeAreaRelativeBox(areaPct, fieldPct){
   };
 }
 
+function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
+  if(!areaBox) return null;
+  const bboxPct = areaBox.bboxPct || (areaBox.normBox ? {
+    x0: areaBox.normBox.x0n,
+    y0: areaBox.normBox.y0n,
+    x1: areaBox.normBox.x0n + areaBox.normBox.wN,
+    y1: areaBox.normBox.y0n + areaBox.normBox.hN
+  } : null);
+  const areaPx = areaBox.rawBox || (bboxPct ? {
+    x: (bboxPct.x0 || 0) * pageW,
+    y: (bboxPct.y0 || 0) * pageH,
+    w: Math.max(0, ((bboxPct.x1 || 0) - (bboxPct.x0 || 0)) * pageW),
+    h: Math.max(0, ((bboxPct.y1 || 0) - (bboxPct.y0 || 0)) * pageH)
+  } : null);
+
+  if(!bboxPct || !areaPx || !Number.isFinite(areaPx.w) || !Number.isFinite(areaPx.h) || areaPx.w <= 0 || areaPx.h <= 0){
+    return null;
+  }
+
+  const areaPage = areaBox.page || areaBox.pageNumber || (Array.isArray(tokens) ? tokens[0]?.page : null);
+  const insideArea = (tokens || []).filter(t => {
+    if(!t || (t.page && areaPage && t.page !== areaPage)) return false;
+    const cx = (t.x || 0) + (t.w || 0) / 2;
+    const cy = (t.y || 0) + (t.h || 0) / 2;
+    return cx >= areaPx.x && cx <= areaPx.x + areaPx.w && cy >= areaPx.y && cy <= areaPx.y + areaPx.h;
+  });
+
+  const keywords = insideArea.map((t, idx) => {
+    const norm = normalizeBBoxForPage({ x: t.x, y: t.y, w: t.w, h: t.h, page: t.page }, pageW, pageH) || { x:0, y:0, w:0, h:0 };
+    const text = t.text || t.raw || '';
+    const normText = normalizeKeywordText(text);
+    const centerRel = {
+      cx: ((t.x || 0) + (t.w || 0) / 2 - areaPx.x) / areaPx.w,
+      cy: ((t.y || 0) + (t.h || 0) / 2 - areaPx.y) / areaPx.h
+    };
+    const edgeOffsets = {
+      left: ((t.x || 0) - areaPx.x) / areaPx.w,
+      top: ((t.y || 0) - areaPx.y) / areaPx.h,
+      right: ((areaPx.x + areaPx.w) - ((t.x || 0) + (t.w || 0))) / areaPx.w,
+      bottom: ((areaPx.y + areaPx.h) - ((t.y || 0) + (t.h || 0))) / areaPx.h
+    };
+    return { id: idx, text, normText, bboxNorm: norm, centerRel, edgeOffsets };
+  }).filter(k => k.normText);
+
+  const neighborFor = (kw) => {
+    const scored = keywords
+      .filter(other => other !== kw)
+      .map(other => {
+        const dx = other.centerRel.cx - kw.centerRel.cx;
+        const dy = other.centerRel.cy - kw.centerRel.cy;
+        const dist = Math.hypot(dx, dy);
+        return { id: other.id, text: other.text, dx, dy, dist };
+      })
+      .sort((a,b)=>a.dist - b.dist)
+      .slice(0, 3);
+    return scored;
+  };
+
+  keywords.forEach(k => { k.neighbors = neighborFor(k); });
+
+  const pickCornerKeyword = (targetCx, targetCy) => {
+    if(!keywords.length) return null;
+    let best = keywords[0];
+    let bestDist = Math.hypot(best.centerRel.cx - targetCx, best.centerRel.cy - targetCy);
+    for(let i=1;i<keywords.length;i++){
+      const kw = keywords[i];
+      const dist = Math.hypot(kw.centerRel.cx - targetCx, kw.centerRel.cy - targetCy);
+      if(dist < bestDist){ best = kw; bestDist = dist; }
+    }
+    return {
+      keywordId: best.id,
+      text: best.text,
+      normText: best.normText,
+      bboxNorm: best.bboxNorm,
+      centerRel: best.centerRel,
+      edgeOffsets: best.edgeOffsets,
+      distanceToCorner: bestDist
+    };
+  };
+
+  return {
+    // This fingerprint captures the shape of the AREABOX plus normalized keyword layout
+    // so RUN mode can validate orientation/size without re-OCR or new coordinate systems.
+    page: areaPage,
+    bboxPct,
+    keywords,
+    orientation: {
+      topRight: pickCornerKeyword(1, 0),
+      bottomLeft: pickCornerKeyword(0, 1)
+    }
+  };
+}
+
 function setAreaSelection(areaId, payload){
   if(!areaId || !payload) return;
   state.areaSelections = state.areaSelections || {};
@@ -7804,6 +7897,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(extras.landmark) entry.landmark = extras.landmark;
   if(extras.areaBox){ entry.areaBox = clonePlain(extras.areaBox); }
   if(extras.areaRelativeBox){ entry.areaRelativeBox = clonePlain(extras.areaRelativeBox); }
+  if(extras.areaFingerprint){ entry.areaFingerprint = clonePlain(extras.areaFingerprint); }
   if(step.isArea || (step.fieldType === 'areabox')){
     entry.isArea = true;
   } else if(areaId){
@@ -8288,6 +8382,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     extras.areaBox = areaBoxForStep;
     const relativeBox = computeAreaRelativeBox(areaBoxForStep.bboxPct, pct);
     if(relativeBox){ extras.areaRelativeBox = relativeBox; }
+  }
+  if(isAreaStep && areaBoxForStep){
+    const areaFingerprint = buildAreaFingerprint(areaBoxForStep, tokens, canvasW, canvasH);
+    if(areaFingerprint){ extras.areaFingerprint = areaFingerprint; }
   }
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
