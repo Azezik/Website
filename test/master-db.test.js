@@ -169,6 +169,11 @@ assert.deepStrictEqual(
 const areaRecord = {
   ...ssot,
   fileId: 'file-area-1',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ]
+  },
   areaRows: [
     { areaId: 'StoreFloor', fields: { aisle: { value: 'A1' }, shelf: { value: 'S1' } } },
     { areaId: 'StoreFloor', fields: { aisle: { value: 'A2' } } },
@@ -192,16 +197,18 @@ assert.deepStrictEqual(storeFloorSheet.header.slice(-1)[0], 'File ID');
 assert.strictEqual(storeFloorSheet.rows.length, 1 + 2);
 assert.deepStrictEqual(
   storeFloorSheet.rows[0],
-  ['aisle', 'shelf', 'File ID']
+  ['Invoice #', 'aisle', 'shelf', 'File ID']
 );
-assert.strictEqual(storeFloorSheet.rows[1][0], 'A1');
-assert.strictEqual(storeFloorSheet.rows[1][2], 'file-area-1');
+assert.strictEqual(storeFloorSheet.rows[1][0], 'INV-001');
+assert.strictEqual(storeFloorSheet.rows[1][1], 'A1');
+assert.strictEqual(storeFloorSheet.rows[1][3], 'file-area-1');
+assert.strictEqual(storeFloorSheet.rows[2][0], 'INV-001');
 
 const backroomSheet = sheets.find(s => s.areaId === 'Backroom');
 assert.ok(backroomSheet, 'Backroom sheet present');
 assert.strictEqual(backroomSheet.rows.length, 1 + 2);
-assert.deepStrictEqual(backroomSheet.header, ['bin', 'status', 'File ID']);
-assert.strictEqual(backroomSheet.rows[2][1], '');
-assert.strictEqual(backroomSheet.rows[2][2], 'file-area-1');
+assert.deepStrictEqual(backroomSheet.header, ['Invoice #', 'bin', 'status', 'File ID']);
+assert.strictEqual(backroomSheet.rows[2][2], '');
+assert.strictEqual(backroomSheet.rows[2][3], 'file-area-1');
 
 console.log('MasterDB tests passed.');

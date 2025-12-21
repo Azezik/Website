@@ -69,7 +69,8 @@
     const includeLineItems = !!cfg.includeLineItems;
     const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
     const isCustomMasterDb = !!cfg.isCustomMasterDb;
-    return { isCustomMasterDb, includeLineItems, staticFields, lineItemFields };
+    const globalFields = Array.isArray(cfg.globalFields) ? cfg.globalFields : [];
+    return { isCustomMasterDb, includeLineItems, staticFields, lineItemFields, globalFields };
   }
 
   function resolveLineItemColumns(config){
@@ -102,6 +103,18 @@
     const fields = Array.isArray(staticFields) ? staticFields : [];
     if(!fields.length) return [];
     return fields.map(f => cleanText(extractFieldValue(record, f.fieldKey)));
+  }
+
+  function buildNamedValues(record, fields){
+    const fieldList = Array.isArray(fields) ? fields : [];
+    if(!fieldList.length) return {};
+    const labels = fieldList.map(f => f.label || f.fieldKey);
+    const values = buildStaticValues(record, fieldList);
+    const map = {};
+    labels.forEach((label, idx) => {
+      map[label] = values[idx];
+    });
+    return map;
   }
 
   function buildInvoiceCells(record){
@@ -650,11 +663,14 @@
   function buildAreaSheets(records){
     const sheets = new Map();
     const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
+    const { globalFields = [] } = normalizeMasterConfig(records[0] || {});
+    const globalColumns = Array.isArray(globalFields) ? globalFields.map(f => f.label || f.fieldKey) : [];
 
-    const addRowToSheet = (areaId, areaName, rowFields, fileId) => {
+    const addRowToSheet = (areaId, areaName, rowFields, fileId, globalFieldMap) => {
       const key = areaId || areaName || 'Area';
       const label = areaName || areaId || 'Area';
-      const incomingCols = Object.keys(rowFields || {});
+      const combinedFields = { ...(globalFieldMap || {}), ...(rowFields || {}) };
+      const incomingCols = Object.keys(combinedFields);
       const existing = sheets.get(key) || {
         name: label,
         areaId: areaId || label,
@@ -662,20 +678,21 @@
         rows: []
       };
       existing.header = upsertHeaderColumns(existing.header, incomingCols);
-      existing.rows.push(normalizeAreaSheetRow(existing.header, rowFields, fileId));
+      existing.rows.push(normalizeAreaSheetRow(existing.header, combinedFields, fileId));
       sheets.set(key, existing);
     };
 
     records.forEach(record => {
       const fileId = record?.fileId || record?.fileHash || '';
       const areaRows = Array.isArray(record?.areaRows) ? record.areaRows : [];
+      const globalFieldMap = globalColumns.length ? buildNamedValues(record, globalFields) : {};
       areaRows.forEach(row => {
         const areaId = row?.areaId || row?.id || row?.name;
         const areaName = row?.areaName || row?.name || areaId;
         const nestedRows = Array.isArray(row?.rows) && row.rows.length ? row.rows : [row];
         nestedRows.forEach(nested => {
           const rowFields = nested?.fields || row?.fields || {};
-          addRowToSheet(areaId, areaName, rowFields, fileId);
+          addRowToSheet(areaId, areaName, rowFields, fileId, globalFieldMap);
         });
       });
     });
