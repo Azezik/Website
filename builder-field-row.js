@@ -87,10 +87,29 @@
       if (typeof onChange === 'function') onChange(field, index, 'name');
     });
 
+    const allowGlobal = !isSubordinate && (field.fieldType || '').toLowerCase() !== 'areabox';
+    let globalToggle = null;
+    if (allowGlobal) {
+      globalToggle = document.createElement('label');
+      globalToggle.className = 'field-global-toggle';
+      const globalCheckbox = document.createElement('input');
+      globalCheckbox.type = 'checkbox';
+      globalCheckbox.checked = !!field.isGlobal;
+      globalCheckbox.addEventListener('change', (e) => {
+        field.isGlobal = !!e.target.checked;
+        if (typeof onChange === 'function') onChange(field, index, 'isGlobal');
+      });
+      const globalText = document.createElement('span');
+      globalText.textContent = 'Global Field';
+      globalToggle.appendChild(globalCheckbox);
+      globalToggle.appendChild(globalText);
+    }
+
     row.appendChild(idxBadge);
     row.appendChild(typeSel);
     row.appendChild(magicSel);
     row.appendChild(nameInput);
+    if (globalToggle) row.appendChild(globalToggle);
     row.appendChild(deleteBtn);
     return row;
   }
