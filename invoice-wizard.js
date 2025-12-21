@@ -279,6 +279,7 @@ let state = {
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
   snappedText: '',           // snapped line text
+  areaSelections: {},        // cached AREABOX selections keyed by areaId
   pageTransform: { scale:1, rotation:0 }, // calibration transform per page
   telemetry: [],            // extraction telemetry
   grayCanvases: {},         // cached grayscale canvases by page
@@ -362,6 +363,7 @@ function clearTransientStateLocal(){
   state.stepIdx = 0; state.steps = [];
   state.selectionCss = null; state.selectionPx = null;
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
+  state.areaSelections = {};
   state.pendingSelection = null; state.matchPoints = [];
   state.snappedLineMetrics = null;
   state.overlayMetrics = null; state.overlayPinned = false;
@@ -1116,6 +1118,30 @@ const toPct = (vp, pxBox) => {
     page: pxBox.page
   };
 };
+
+function computeAreaRelativeBox(areaPct, fieldPct){
+  if(!areaPct || !fieldPct) return null;
+  const areaW = (areaPct.x1 - areaPct.x0);
+  const areaH = (areaPct.y1 - areaPct.y0);
+  if(areaW <= 0 || areaH <= 0) return null;
+  return {
+    x0: (fieldPct.x0 - areaPct.x0) / areaW,
+    y0: (fieldPct.y0 - areaPct.y0) / areaH,
+    x1: (fieldPct.x1 - areaPct.x0) / areaW,
+    y1: (fieldPct.y1 - areaPct.y0) / areaH
+  };
+}
+
+function setAreaSelection(areaId, payload){
+  if(!areaId || !payload) return;
+  state.areaSelections = state.areaSelections || {};
+  state.areaSelections[areaId] = clonePlain(payload);
+}
+
+function getAreaSelection(areaId){
+  if(!areaId || !state.areaSelections) return null;
+  return state.areaSelections[areaId] || null;
+}
 
 const normalizeBox = (boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -2982,23 +3008,66 @@ function generateQuestionsFromTemplate(template){
   const normalized = normalizeTemplate(template);
   if(!normalized) return [];
   const sorted = (normalized.fields || []).slice().sort((a,b)=> (a.order || 0) - (b.order || 0));
-  const total = sorted.length || 0;
-  return sorted.map((f, idx) => ({
-    fieldId: f.id,
-    fieldKey: f.fieldKey,
-    name: f.name || f.fieldKey,
-    fieldType: (f.fieldType || 'static').toLowerCase() === 'dynamic'
-      ? 'dynamic'
-      : ((f.fieldType || 'static').toLowerCase() === 'areabox' ? 'areabox' : 'static'),
-    areaId: f.areaId,
-    isArea: (f.fieldType || 'static') === 'areabox',
-    isSubordinate: !!f.areaId && (f.fieldType || 'static') !== 'areabox',
-    magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
-    prompt: `Please highlight the ${f.name}`,
-    order: idx + 1,
-    questionIndex: idx + 1,
-    totalQuestions: total
-  }));
+  const byArea = new Map();
+  sorted.forEach(f => {
+    const normalizedType = (f.fieldType || 'static').toLowerCase();
+    const isArea = normalizedType === 'areabox';
+    const areaId = isArea ? (f.areaId || f.id || f.fieldKey) : (f.areaId || null);
+    if(isArea){
+      byArea.set(areaId, byArea.get(areaId) || { area: f, subs: [] });
+      byArea.get(areaId).area = f;
+    } else if(areaId){
+      byArea.set(areaId, byArea.get(areaId) || { area: null, subs: [] });
+      byArea.get(areaId).subs.push(f);
+    }
+  });
+
+  const ordered = [];
+  const seen = new Set();
+  const pushField = (f) => {
+    const key = f.id || f.fieldKey;
+    if(!key || seen.has(key)) return false;
+    ordered.push(f);
+    seen.add(key);
+    return true;
+  };
+
+  sorted.forEach(f => {
+    const normalizedType = (f.fieldType || 'static').toLowerCase();
+    const isArea = normalizedType === 'areabox';
+    if(!isArea) return;
+    if(!pushField(f)) return;
+    const areaId = f.areaId || f.id || f.fieldKey;
+    const subs = (byArea.get(areaId)?.subs || []).slice().sort((a,b)=> (a.order || 0) - (b.order || 0));
+    subs.forEach(sf => pushField(sf));
+  });
+
+  sorted.forEach(f => {
+    if(!pushField(f) && f.areaId && !byArea.get(f.areaId)?.area){
+      pushField(f);
+    }
+  });
+
+  const total = ordered.length || 0;
+  return ordered.map((f, idx) => {
+    const normalizedType = (f.fieldType || 'static').toLowerCase();
+    const isArea = normalizedType === 'areabox';
+    const isDynamic = normalizedType === 'dynamic';
+    return {
+      fieldId: f.id,
+      fieldKey: f.fieldKey,
+      name: f.name || f.fieldKey,
+      fieldType: isDynamic ? 'dynamic' : (isArea ? 'areabox' : 'static'),
+      areaId: f.areaId,
+      isArea,
+      isSubordinate: !!f.areaId && !isArea,
+      magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
+      prompt: isArea ? `Please highlight one ${f.name} area.` : `Please highlight the ${f.name}`,
+      order: idx + 1,
+      questionIndex: idx + 1,
+      totalQuestions: total
+    };
+  });
 }
 
 function initStepsFromProfile(){
@@ -7647,6 +7716,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   ensureProfile();
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const areaId = step.areaId || (step.isArea ? (step.fieldKey || step.fieldId) : null) || step.fieldKey;
   const parsePctBox = box => {
     if(!box) return null;
     const x0 = Number.isFinite(box.x0) ? box.x0 : (Array.isArray(box) ? box[0] : null);
@@ -7697,6 +7767,8 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   const entry = {
     fieldKey: step.fieldKey,
     type: step.type,
+    fieldType: step.fieldType || step.type,
+    areaId: areaId || undefined,
     page,
     selectorType:'bbox',
     bbox:[pctBox.x0, pctBox.y0, pctBox.x1, pctBox.y1],
@@ -7730,6 +7802,13 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     entry.keywordRelations = extras.keywordRelations ? clonePlain(extras.keywordRelations) : null;
   }
   if(extras.landmark) entry.landmark = extras.landmark;
+  if(extras.areaBox){ entry.areaBox = clonePlain(extras.areaBox); }
+  if(extras.areaRelativeBox){ entry.areaRelativeBox = clonePlain(extras.areaRelativeBox); }
+  if(step.isArea || (step.fieldType === 'areabox')){
+    entry.isArea = true;
+  } else if(areaId){
+    entry.isSubordinate = true;
+  }
   if(step.type === 'column' && extras.column){
     const columnExtras = clonePlain(extras.column);
     const columnFera = columnExtras.fera || anchorMetrics || null;
@@ -8132,13 +8211,16 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
 
+  const isAreaStep = !!step.isArea;
+  const areaKey = step.areaId || (isAreaStep ? (step.fieldKey || step.fieldId) : null) || step.fieldKey;
+
   let value = '', boxPx = state.snappedPx;
   let confidence = 0, raw = '', corrections=[];
   let fieldTokens = [];
   if(step.kind === 'landmark'){
     value = (state.snappedText || '').trim();
     raw = value;
-  } else if (step.type === 'static'){
+  } else if (step.type === 'static' && !isAreaStep){
     const res = await extractFieldValue(step, tokens, state.viewport);
     value = res.value;
     if(!value && state.snappedText){
@@ -8150,10 +8232,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     raw = res.raw || (state.snappedText || '').trim();
     corrections = res.correctionsApplied || res.corrections || [];
     fieldTokens = res.tokens || [];
-  } else if (step.kind === 'block'){
+  } else if (step.kind === 'block' && !isAreaStep){
     value = (state.snappedText || '').trim();
     raw = value;
-  } else {
+  } else if(!isAreaStep){
     const res = await extractFieldValue(step, tokens, state.viewport);
     value = res.value;
     if(!value && state.snappedText){
@@ -8170,7 +8252,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const storedBoxPx = (isConfigMode() && step.type === 'static' && state.selectionPx)
     ? (state.selectionPx || boxPx)
     : boxPx;
-  if(els.ocrToggle?.checked){
+  if(!isAreaStep && els.ocrToggle?.checked){
     try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', storedBoxPx || boxPx); }
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
@@ -8185,6 +8267,9 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     ? computeKeywordRelationsForConfig(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH)
     : null;
   const extras = {};
+  const areaBoxForStep = isAreaStep
+    ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }
+    : getAreaSelection(areaKey);
   if(step.type === 'static'){
     const lm = captureRingLandmark(storedBoxPx);
     lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
@@ -8196,12 +8281,20 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
+  if(isAreaStep && areaBoxForStep){
+    extras.areaBox = areaBoxForStep;
+    setAreaSelection(areaKey, areaBoxForStep);
+  } else if(step.areaId && areaBoxForStep){
+    extras.areaBox = areaBoxForStep;
+    const relativeBox = computeAreaRelativeBox(areaBoxForStep.bboxPct, pct);
+    if(relativeBox){ extras.areaRelativeBox = relativeBox; }
+  }
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
 
   const fid = state.currentFileId;
-  if(fid){
+  if(fid && !isAreaStep){
     const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
     rawStore.upsert(fid, rec);
     compileDocument(fid, state.currentLineItems);
