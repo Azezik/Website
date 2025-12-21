@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node test/conflict-markers.test.js && node test/field-map.test.js && node test/master-db.test.js && node test/orchestrator.test.js && node test/static-mode.test.js && node test/wizard-mode.test.js && node test/run-mode-guards.test.js && node test/run-landmark-once.test.js && node test/snapshot-store.test.js && node test/keyword-weighting.test.js && node test/ocrmagic-layer1.test.js && node test/ocr-magic-pipeline.test.js"
+    "test": "node test/conflict-markers.test.js && node test/field-map.test.js && node test/master-db.test.js && node test/orchestrator.test.js && node test/static-mode.test.js && node test/wizard-mode.test.js && node test/run-mode-guards.test.js && node test/run-landmark-once.test.js && node test/snapshot-store.test.js && node test/keyword-weighting.test.js && node test/ocrmagic-layer1.test.js && node test/ocr-magic-pipeline.test.js && node test/areafinder.test.js"
   }
 }
