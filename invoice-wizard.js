@@ -485,12 +485,15 @@ function normalizeTemplateFields(fields){
       : (field.areaId || null);
     const isArea = normalizedType === 'areabox';
     const isSubordinate = !!areaId && !isArea;
+    const allowGlobal = !isSubordinate && !isArea;
+    const isGlobal = allowGlobal && !!field?.isGlobal;
     return {
       ...field,
       fieldType: normalizedType,
       areaId: areaId || undefined,
       isArea,
       isSubordinate,
+      isGlobal,
       fieldKey: key,
       magicDataType,
       magicType: magicDataType
@@ -3072,15 +3075,18 @@ function normalizeAreaLink(field){
     field.isArea = true;
     field.areaId = field.areaId || field.id;
     field.isSubordinate = false;
+    field.isGlobal = false;
     return field.areaId;
   }
   if(field.areaId){
     field.isSubordinate = true;
     field.isArea = false;
+    field.isGlobal = false;
     return field.areaId;
   }
   field.isArea = false;
   field.isSubordinate = false;
+  field.isGlobal = !!field.isGlobal;
   return null;
 }
 
@@ -3114,7 +3120,8 @@ function addSubordinateField(areaField){
     areaId,
     isSubordinate: true,
     magicType: MAGIC_DATA_TYPE.ANY,
-    magicDataType: MAGIC_DATA_TYPE.ANY
+    magicDataType: MAGIC_DATA_TYPE.ANY,
+    isGlobal: false
   };
   let insertAt = areaIdx;
   for(let i = areaIdx + 1; i < fields.length; i++){
@@ -3232,10 +3239,26 @@ function renderBuilderFields(){
       nameInput.value = field.name || '';
       nameInput.addEventListener('input', e => { field.name = e.target.value; handleChange(field, fieldIndex, 'name'); });
 
+      const allowGlobal = (field.fieldType || '').toLowerCase() !== 'areabox';
+      let globalToggle = null;
+      if(allowGlobal){
+        globalToggle = document.createElement('label');
+        globalToggle.className = 'field-global-toggle';
+        const globalCheckbox = document.createElement('input');
+        globalCheckbox.type = 'checkbox';
+        globalCheckbox.checked = !!field.isGlobal;
+        globalCheckbox.addEventListener('change', (e)=> { field.isGlobal = !!e.target.checked; handleChange(field, fieldIndex, 'isGlobal'); });
+        const globalText = document.createElement('span');
+        globalText.textContent = 'Global Field';
+        globalToggle.appendChild(globalCheckbox);
+        globalToggle.appendChild(globalText);
+      }
+
       row.appendChild(idxBadge);
       row.appendChild(typeSel);
       row.appendChild(magicSel);
       row.appendChild(nameInput);
+      if(allowGlobal && globalToggle) row.appendChild(globalToggle);
       row.appendChild(deleteBtn);
     }
     list.appendChild(row);
@@ -3274,7 +3297,7 @@ function renderBuilderFields(){
 
 function ensureBuilderField(){
   if(state.builderFields && state.builderFields.length) return;
-  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY }];
+  state.builderFields = [{ id: genId('field'), fieldType: 'static', name: '', order: 1, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY, isGlobal: false }];
 }
 
 function addBuilderField(){
@@ -3284,7 +3307,7 @@ function addBuilderField(){
     return;
   }
   const nextOrder = state.builderFields.length + 1;
-  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY });
+  state.builderFields.push({ id: genId('field'), fieldType: 'static', name: '', order: nextOrder, fieldKey: '', magicType: MAGIC_DATA_TYPE.ANY, magicDataType: MAGIC_DATA_TYPE.ANY, isGlobal: false });
   renderBuilderFields();
 }
 
@@ -3342,6 +3365,7 @@ function saveBuilderTemplate(){
       ? 'dynamic'
       : ((f.fieldType || 'static') === 'areabox' ? 'areabox' : 'static');
     const normalizedAreaId = normalizedType === 'areabox' ? (f.areaId || f.id) : (f.areaId || null);
+    const allowGlobal = !normalizedAreaId && normalizedType !== 'areabox';
     return {
       ...f,
       id: f.id || genId('field'),
@@ -3350,6 +3374,7 @@ function saveBuilderTemplate(){
       areaId: normalizedAreaId || undefined,
       isArea: normalizedType === 'areabox',
       isSubordinate: !!normalizedAreaId && normalizedType !== 'areabox',
+      isGlobal: allowGlobal ? !!f.isGlobal : false,
       order: f.order,
       magicDataType: mt,
       magicType: mt
@@ -3364,6 +3389,7 @@ function saveBuilderTemplate(){
     areaId: f.areaId,
     isArea: f.isArea,
     isSubordinate: f.isSubordinate,
+    isGlobal: f.isGlobal,
     magicDataType: normalizeMagicDataType(f.magicDataType || f.magicType),
     magicType: normalizeMagicDataType(f.magicDataType || f.magicType)
   }));

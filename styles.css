@@ -119,6 +119,8 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .custom-field-row .field-index{ display:inline-flex; align-items:center; justify-content:center; background:#20242c; border-radius:999px; padding:6px 10px; font-size:13px; font-weight:600; letter-spacing:0.3px; color:#dfe8ff; }
 .custom-field-row .field-type{ max-width:160px; }
 .custom-field-row .field-name{ flex:1; min-width:200px; }
+.custom-field-row .field-global-toggle{ display:inline-flex; align-items:center; gap:6px; color:#cdd0d5; font-size:13px; }
+.custom-field-row .field-global-toggle input[type="checkbox"]{ accent-color: var(--accent, #2ee6a6); width:16px; height:16px; }
 .custom-field-row .delete-field-btn{ margin-left:auto; background:#231919; border:1px solid #3a2b2b; color:#ffb3b3; border-radius:8px; padding:6px 10px; cursor:pointer; }
 .custom-field-row .delete-field-btn:hover{ background:#301f1f; }
 .custom-field-row.area-row{ border-color: var(--accent); box-shadow:0 0 0 1px var(--accent), 0 6px 18px rgba(46,230,166,0.15); }
