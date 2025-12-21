@@ -99,6 +99,24 @@
     return cleanText(value);
   }
 
+  function emptyMissingMap(){
+    return {
+      summary: {
+        sku: [],
+        quantity: [],
+        unit_price: [],
+        line_no: []
+      },
+      columns: {
+        sku: { rows: [], details: {} },
+        quantity: { rows: [], details: {} },
+        unit_price: { rows: [], details: {} },
+        line_no: { rows: [], details: {} }
+      },
+      rows: {}
+    };
+  }
+
   function buildStaticValues(record, staticFields){
     const fields = Array.isArray(staticFields) ? staticFields : [];
     if(!fields.length) return [];
@@ -707,12 +725,22 @@
 
   function flatten(ssot){
     const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
-    const root = flattenRoot(records);
+    const areaRowsPresent = records.some(r => Array.isArray(r?.areaRows) && r.areaRows.length);
+    let root;
+    try {
+      root = flattenRoot(records);
+    } catch(err){
+      const emptyRootOk = areaRowsPresent && /Exporter input empty/.test(err?.message || '');
+      if(!emptyRootOk) throw err;
+      root = { header: HEADERS, rows: [HEADERS], missingMap: emptyMissingMap() };
+    }
     const areaSheets = buildAreaSheets(records);
-    const sheets = [
-      { name: ROOT_SHEET_NAME, header: root.header, rows: root.rows },
-      ...areaSheets
-    ];
+    const rootHasRows = root.rows && root.rows.length > 1;
+    const sheets = [];
+    if(rootHasRows || !areaSheets.length){
+      sheets.push({ name: ROOT_SHEET_NAME, header: root.header, rows: root.rows });
+    }
+    sheets.push(...areaSheets);
     return { header: root.header, rows: root.rows, missingMap: root.missingMap, sheets };
   }
 
