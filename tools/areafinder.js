@@ -63,10 +63,11 @@
       }
     }
 
-    const matchRatio = matched / Math.max(1, keywords.length);
-    const avgPosErr = matched ? totalPosErr / matched : 1;
-    const avgEdgeErr = matched ? totalEdgeErr / matched : 1;
-    const positionPenalty = Math.min(1, (avgPosErr * 0.6) + (avgEdgeErr * 0.4));
+    const denom = Math.max(1, keywords.length);
+    const matchRatio = keywords.length ? matched / denom : 1;
+    const avgPosErr = matched ? totalPosErr / Math.max(1, matched) : 0;
+    const avgEdgeErr = matched ? totalEdgeErr / Math.max(1, matched) : 0;
+    const positionPenalty = matched ? Math.min(1, (avgPosErr * 0.6) + (avgEdgeErr * 0.4)) : 0;
     return { matchRatio, positionPenalty, matched };
   }
 
