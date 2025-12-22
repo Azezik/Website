@@ -6930,6 +6930,34 @@ async function extractAreaRows(profile){
   for(const [areaId, entry] of groups.entries()){
     const subs = entry.subs || [];
     const occurrences = (state.areaOccurrencesById?.[areaId] || []).slice();
+    if(!occurrences.length && entry.area?.areaBox){
+      const norm = entry.area.areaBox.bboxPct || (entry.area.areaBox.normBox ? {
+        x0: entry.area.areaBox.normBox.x0n,
+        y0: entry.area.areaBox.normBox.y0n,
+        x1: entry.area.areaBox.normBox.x0n + entry.area.areaBox.normBox.wN,
+        y1: entry.area.areaBox.normBox.y0n + entry.area.areaBox.normBox.hN
+      } : null);
+      if(norm){
+        const page = entry.area.areaBox.page || entry.area.page || 1;
+        const fallback = {
+          areaId,
+          page,
+          bboxPct: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+          bboxNorm: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+          bboxPx: entry.area.areaBox.rawBox ? {
+            x: entry.area.areaBox.rawBox.x,
+            y: entry.area.areaBox.rawBox.y,
+            w: entry.area.areaBox.rawBox.w,
+            h: entry.area.areaBox.rawBox.h,
+            page
+          } : null,
+          confidence: 0.01
+        };
+        occurrences.push(fallback);
+        if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
+        state.areaOccurrencesById[areaId] = occurrences.slice();
+      }
+    }
     if(!subs.length || !occurrences.length) continue;
     for(let i=0; i<occurrences.length; i++){
       const occ = occurrences[i];
@@ -8008,7 +8036,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   const getConfigPctBox = field => parsePctBox(field?.configBox) || pctFromRawBox(field?.rawBox) || null;
   const boxesOverlap = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0;
   let overlapDetails = null;
-  if(step.type === 'static'){
+  const isAreaField = step.isArea || step.fieldType === 'areabox';
+  const isSubordinateField = !!step.areaId && !isAreaField;
+  if(step.type === 'static' && !isAreaField && !isSubordinateField){
     const clash = (state.profile.fields||[]).find(f=>{
       if(f.fieldKey===step.fieldKey || f.type!=='static' || f.page!==page) return false;
       const mine = configPctBox || pctBox;
