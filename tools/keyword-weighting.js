@@ -115,7 +115,7 @@
   }
 
   function triangulateBox(relations, keywordIndex, pageW, pageH, referenceBox, opts={}){
-    if(!relations) return null;
+    const extraSeeds = Array.isArray(opts.extraSeeds) ? opts.extraSeeds : [];
     const configWeight = Number.isFinite(opts.configWeight) ? opts.configWeight : 0.6;
     const seeds = [];
     const seed = (pred, source, weight=1, entry=null)=>{
@@ -123,16 +123,24 @@
       seeds.push({ box: pred, source, weight, entry });
     };
 
-    const motherPred = chooseKeywordMatch(relations.mother, keywordIndex, referenceBox, pageW, pageH);
-    if(motherPred?.predictedBox){ seed(motherPred.predictedBox, 'mother', 1.1, motherPred.entry || relations.mother); }
-
+    let motherPred = null;
     const secondaryMatches = [];
-    for(const rel of (relations.secondaries || [])){
-      const pred = chooseKeywordMatch(rel, keywordIndex, referenceBox, pageW, pageH);
-      if(pred?.predictedBox){
-        secondaryMatches.push(pred);
-        seed(pred.predictedBox, 'secondary', 0.9, pred.entry || rel);
+
+    if(relations){
+      motherPred = chooseKeywordMatch(relations.mother, keywordIndex, referenceBox, pageW, pageH);
+      if(motherPred?.predictedBox){ seed(motherPred.predictedBox, 'mother', 1.1, motherPred.entry || relations.mother); }
+
+      for(const rel of (relations.secondaries || [])){
+        const pred = chooseKeywordMatch(rel, keywordIndex, referenceBox, pageW, pageH);
+        if(pred?.predictedBox){
+          secondaryMatches.push(pred);
+          seed(pred.predictedBox, 'secondary', 0.9, pred.entry || rel);
+        }
       }
+    }
+
+    for(const extra of extraSeeds){
+      if(extra?.box){ seed(extra.box, extra.source || 'extra', extra.weight || 1, extra.entry || null); }
     }
 
     if(referenceBox){

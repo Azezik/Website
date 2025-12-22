@@ -3,6 +3,7 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
+const KeywordConstellation = window.KeywordConstellation || null;
 const AreaFinder = window.AreaFinder || null;
 
 const LEGACY_PDF_SCALE = 1.5;
@@ -5022,10 +5023,13 @@ function labelValueHeuristic(fieldSpec, tokens){
   let keywordMatch = null;
   let keywordWeight = 1;
   let triangulatedBox = null;
+  let constellationContext = null;
+  let constellationBox = null;
   let keywordIndex = null;
   let keywordContext = null;
   let selectionRaw = '';
   let firstAttempt = null;
+  const keywordConstellation = staticRun ? (fieldSpec.keywordConstellation || null) : null;
   const recordHintCandidate = cand => {
     if(!cand || !cand.boxPx) return;
     const dist = cand.hintDistance ?? distanceToHint(cand.boxPx);
@@ -5066,18 +5070,46 @@ function labelValueHeuristic(fieldSpec, tokens){
         { anchorBox, stage: 'stage-2' }
       );
     }
+    if(staticRun && keywordConstellation && KeywordConstellation?.matchConstellation){
+      const page = basePx.page || fieldSpec.page || state.pageNum || 1;
+      const { pageW, pageH } = getPageSize(page);
+      let pageTokens = (page === (fieldSpec.page || state.pageNum || page)) ? tokens : (state.tokensByPage?.[page] || []);
+      if((pageTokens?.length || 0) === 0 && ensureTokensForPage){
+        pageTokens = await ensureTokensForPage(page);
+      }
+      constellationContext = KeywordConstellation.matchConstellation(keywordConstellation, pageTokens || [], {
+        page,
+        pageW,
+        pageH,
+        maxResults: 3
+      });
+      if(constellationContext?.best?.predictedBoxPx){
+        constellationBox = constellationContext.best.predictedBoxPx;
+      }
+    }
     if(staticRun && keywordRelations){
       await ensureKeywordIndexForPage(basePx.page);
       keywordIndex = state.keywordIndexByPage?.[basePx.page] || [];
       const { pageW, pageH } = getPageSize(basePx.page);
+      const extraSeeds = [];
+      if(constellationBox){
+        extraSeeds.push({ box: constellationBox, source: 'constellation', weight: 1.05, entry: constellationContext?.best || null });
+      }
       keywordContext = KeywordWeighting?.triangulateBox
-        ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx, { configWeight: 1.2 })
+        ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx, { configWeight: 1.2, extraSeeds })
         : null;
       triangulatedBox = keywordContext?.box || keywordContext || triangulatedBox;
       if(!keywordPrediction && keywordContext?.motherPred?.predictedBox){
         keywordPrediction = keywordContext.motherPred.predictedBox;
         keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
       }
+    }
+    if(staticRun && !keywordRelations && constellationBox && KeywordWeighting?.triangulateBox){
+      const { pageW, pageH } = getPageSize(basePx.page);
+      const extraSeeds = [{ box: constellationBox, source: 'constellation', weight: 1.05, entry: constellationContext?.best || null }];
+      const blended = KeywordWeighting.triangulateBox(null, [], pageW, pageH, basePx, { configWeight: 1.2, extraSeeds });
+      triangulatedBox = blended?.box || triangulatedBox || constellationBox;
+      keywordContext = keywordContext || blended;
     }
 
     traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
@@ -5306,7 +5338,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
   }
   let triangulationAudit = null;
-  if(staticRun && keywordRelations && triangulatedBox && !hintLocked){
+  if(staticRun && triangulatedBox && !hintLocked && (keywordRelations || constellationBox)){
     const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     const scored = scoreTriangulatedCandidates({
@@ -8608,6 +8640,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const keywordRelations = (step.type === 'static')
     ? computeKeywordRelationsForConfig(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH)
     : null;
+  const pageTokens = state.tokensByPage[state.pageNum] || tokens || [];
+  const keywordConstellation = (step.type === 'static' && KeywordConstellation?.captureConstellation)
+    ? KeywordConstellation.captureConstellation(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH, pageTokens, {})
+    : null;
   const extras = {};
   const areaBoxForStep = isAreaStep
     ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }
@@ -8620,6 +8656,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       extras.lineMetrics = clonePlain(state.snappedLineMetrics);
     }
     extras.keywordRelations = keywordRelations || null;
+    extras.keywordConstellation = keywordConstellation || null;
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
