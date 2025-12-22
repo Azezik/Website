@@ -6851,6 +6851,28 @@ function cacheAreaOccurrencesForPage(pageNum, matches = []){
   });
 }
 
+function buildSavedAreaOccurrence(areaField){
+  const areaBox = areaField?.areaBox;
+  if(!areaBox) return null;
+  const norm = areaBox.bboxPct || (areaBox.normBox ? {
+    x0: areaBox.normBox.x0n,
+    y0: areaBox.normBox.y0n,
+    x1: areaBox.normBox.x0n + areaBox.normBox.wN,
+    y1: areaBox.normBox.y0n + areaBox.normBox.hN
+  } : null);
+  if(!norm) return null;
+  const page = areaBox.page || areaField.page || areaField.areaFingerprint?.page || 1;
+  return {
+    areaId: areaField.areaId || areaField.id || areaField.fieldKey,
+    page,
+    bboxPct: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+    bboxNorm: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+    bboxPx: areaBox.rawBox ? { x: areaBox.rawBox.x, y: areaBox.rawBox.y, w: areaBox.rawBox.w, h: areaBox.rawBox.h, page } : null,
+    confidence: 0.01,
+    source: 'config'
+  };
+}
+
 async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
   if(state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
   const catalogue = getKeywordCatalogue();
@@ -6940,8 +6962,23 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
   if(AreaFinder && areaFields.length){
     try {
       const areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH }) || [];
-      state.areaMatchesByPage[pageNum] = areaMatches;
-      cacheAreaOccurrencesForPage(pageNum, areaMatches);
+      const matchesByArea = new Map();
+      areaMatches.forEach(m => {
+        const key = m.areaId || m.fieldKey;
+        if(!key) return;
+        if(!matchesByArea.has(key)) matchesByArea.set(key, []);
+        matchesByArea.get(key).push(m);
+      });
+      const enrichedMatches = areaMatches.slice();
+      for(const areaField of areaFields){
+        const key = areaField.areaId || areaField.id || areaField.fieldKey;
+        const hasMatch = key && matchesByArea.has(key) && matchesByArea.get(key).length;
+        if(hasMatch) continue;
+        const fallback = buildSavedAreaOccurrence(areaField);
+        if(fallback) enrichedMatches.push(fallback);
+      }
+      state.areaMatchesByPage[pageNum] = enrichedMatches;
+      cacheAreaOccurrencesForPage(pageNum, enrichedMatches);
     } catch(err){
       console.warn('AREAFINDER failed', err);
     }
@@ -6966,6 +7003,34 @@ async function extractAreaRows(profile){
   for(const [areaId, entry] of groups.entries()){
     const subs = entry.subs || [];
     const occurrences = (state.areaOccurrencesById?.[areaId] || []).slice();
+    if(!occurrences.length && entry.area?.areaBox){
+      const norm = entry.area.areaBox.bboxPct || (entry.area.areaBox.normBox ? {
+        x0: entry.area.areaBox.normBox.x0n,
+        y0: entry.area.areaBox.normBox.y0n,
+        x1: entry.area.areaBox.normBox.x0n + entry.area.areaBox.normBox.wN,
+        y1: entry.area.areaBox.normBox.y0n + entry.area.areaBox.normBox.hN
+      } : null);
+      if(norm){
+        const page = entry.area.areaBox.page || entry.area.page || 1;
+        const fallback = {
+          areaId,
+          page,
+          bboxPct: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+          bboxNorm: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
+          bboxPx: entry.area.areaBox.rawBox ? {
+            x: entry.area.areaBox.rawBox.x,
+            y: entry.area.areaBox.rawBox.y,
+            w: entry.area.areaBox.rawBox.w,
+            h: entry.area.areaBox.rawBox.h,
+            page
+          } : null,
+          confidence: 0.01
+        };
+        occurrences.push(fallback);
+        if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
+        state.areaOccurrencesById[areaId] = occurrences.slice();
+      }
+    }
     if(!subs.length || !occurrences.length) continue;
     for(let i=0; i<occurrences.length; i++){
       const occ = occurrences[i];
