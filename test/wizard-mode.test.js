@@ -120,6 +120,7 @@ assert.strictEqual(controller.getMode(), WizardMode.CONFIG);
 controller.setMode(WizardMode.RUN);
 assert.strictEqual(controller.isRun(), true);
 assert.strictEqual(controller.guardInteractive('overlay'), true, 'overlay guard should block in RUN');
+assert.strictEqual(controller.guardInteractive('overlay', { allowInRun: true }), false, 'overlay guard should allow when flagged');
 let calls = 0;
 controller.trackRun('dup', ()=>{ calls += 1; });
 controller.trackRun('dup', ()=>{ calls += 1; });

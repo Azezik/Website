@@ -130,8 +130,9 @@
       setMode(next){ mode = next === WizardMode.RUN ? WizardMode.RUN : WizardMode.CONFIG; },
       getMode(){ return mode; },
       isRun(){ return mode === WizardMode.RUN; },
-      guardInteractive(label){
-        if(mode !== WizardMode.RUN) return false;
+      guardInteractive(label, opts={}){
+        const allowInRun = !!opts.allowInRun;
+        if(mode !== WizardMode.RUN || allowInRun) return false;
         if(logger && typeof logger.warn === 'function'){
           logger.warn(`[run-mode] ${label} invoked while in RUN mode; skipping.`);
         }

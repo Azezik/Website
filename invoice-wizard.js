@@ -218,10 +218,10 @@ const runLoopGuard = modeHelpers?.createRunLoopGuard ? modeHelpers.createRunLoop
 function isConfigMode(){ return state.mode === ModeEnum.CONFIG; }
 function isRunMode(){ return state.mode === ModeEnum.RUN; }
 
-function guardInteractive(label){
-  const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
+function guardInteractive(label, opts={}){
+  const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label, opts) : false;
   if(blocked) return true;
-  if(isRunMode()){
+  if(isRunMode() && !opts.allowInRun){
     console.warn(`[run-mode] ${label} called during RUN mode; skipping.`);
     return true;
   }
@@ -1212,14 +1212,22 @@ function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
 
   keywords.forEach(k => { k.neighbors = neighborFor(k); });
 
-  const pickCornerKeyword = (targetCx, targetCy) => {
+  const preferKeywordCandidates = keywords.filter(k => /[a-z]/i.test(k.normText));
+
+  const pickCornerKeyword = (targetCx, targetCy, role) => {
     if(!keywords.length) return null;
-    let best = keywords[0];
-    let bestDist = Math.hypot(best.centerRel.cx - targetCx, best.centerRel.cy - targetCy);
-    for(let i=1;i<keywords.length;i++){
-      const kw = keywords[i];
+    const pool = preferKeywordCandidates.length ? preferKeywordCandidates : keywords;
+    let best = pool[0];
+    let bestScore = Infinity;
+    for(let i=0;i<pool.length;i++){
+      const kw = pool[i];
       const dist = Math.hypot(kw.centerRel.cx - targetCx, kw.centerRel.cy - targetCy);
-      if(dist < bestDist){ best = kw; bestDist = dist; }
+      const edgeProximity = Math.min(
+        kw.edgeOffsets.left + kw.edgeOffsets.top,
+        kw.edgeOffsets.right + kw.edgeOffsets.bottom
+      );
+      const score = dist * 0.8 + edgeProximity * 0.3;
+      if(score < bestScore){ best = kw; bestScore = score; }
     }
     return {
       keywordId: best.id,
@@ -1228,7 +1236,8 @@ function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
       bboxNorm: best.bboxNorm,
       centerRel: best.centerRel,
       edgeOffsets: best.edgeOffsets,
-      distanceToCorner: bestDist
+      distanceToCorner: Math.hypot(best.centerRel.cx - targetCx, best.centerRel.cy - targetCy),
+      role
     };
   };
 
@@ -1239,8 +1248,8 @@ function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
     bboxPct,
     keywords,
     orientation: {
-      topRight: pickCornerKeyword(1, 0),
-      bottomLeft: pickCornerKeyword(0, 1)
+      topRight: pickCornerKeyword(1, 0, 'topRight'),
+      bottomLeft: pickCornerKeyword(0, 1, 'bottomLeft')
     }
   };
 }
@@ -6314,7 +6323,7 @@ const overlayCtx = els.overlayCanvas.getContext('2d');
 const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/100 : 'err';
 
 function sizeOverlayTo(cssW, cssH){
-  if(guardInteractive('overlay.size')) return;
+  if(guardInteractive('overlay.size', { allowInRun: true })) return;
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   const pxW = src?.width || Math.round(cssW * (window.devicePixelRatio || 1));
   const pxH = src?.height || Math.round(cssH * (window.devicePixelRatio || 1));
@@ -6326,7 +6335,7 @@ function sizeOverlayTo(cssW, cssH){
 }
 
 function syncOverlay(){
-  if(guardInteractive('overlay.sync')) return;
+  if(guardInteractive('overlay.sync', { allowInRun: true })) return;
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!src) return;
   const isConfig = isConfigMode();
@@ -6744,7 +6753,7 @@ async function renderAllPages(){
 }
 
 window.addEventListener('resize', () => {
-  if(guardInteractive('overlay.resize')) return;
+  if(guardInteractive('overlay.resize', { allowInRun: true })) return;
   state.overlayPinned = false;
   const base = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!base) return;
@@ -6831,11 +6840,9 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   return tokens;
 }
 
-function areaConfigsForPage(pageNum){
+function areaConfigsForPage(){
   if(!state.profile || !Array.isArray(state.profile.fields)) return [];
-  return state.profile.fields
-    .filter(f => f && (f.isArea || f.fieldType === 'areabox') && f.areaFingerprint)
-    .filter(f => (f.areaFingerprint.page || f.page || 1) === pageNum);
+  return state.profile.fields.filter(f => f && (f.isArea || f.fieldType === 'areabox') && f.areaFingerprint);
 }
 
 function cacheAreaOccurrencesForPage(pageNum, matches = []){
@@ -6958,10 +6965,10 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
   state.keywordIndexByPage[pageNum] = matches;
   logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
 
-  const areaFields = areaConfigsForPage(pageNum);
+  const areaFields = areaConfigsForPage();
   if(AreaFinder && areaFields.length){
     try {
-      const areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH }) || [];
+      const areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH, page: pageNum }) || [];
       const matchesByArea = new Map();
       areaMatches.forEach(m => {
         const key = m.areaId || m.fieldKey;
@@ -6969,16 +6976,8 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
         if(!matchesByArea.has(key)) matchesByArea.set(key, []);
         matchesByArea.get(key).push(m);
       });
-      const enrichedMatches = areaMatches.slice();
-      for(const areaField of areaFields){
-        const key = areaField.areaId || areaField.id || areaField.fieldKey;
-        const hasMatch = key && matchesByArea.has(key) && matchesByArea.get(key).length;
-        if(hasMatch) continue;
-        const fallback = buildSavedAreaOccurrence(areaField);
-        if(fallback) enrichedMatches.push(fallback);
-      }
-      state.areaMatchesByPage[pageNum] = enrichedMatches;
-      cacheAreaOccurrencesForPage(pageNum, enrichedMatches);
+      state.areaMatchesByPage[pageNum] = areaMatches;
+      cacheAreaOccurrencesForPage(pageNum, areaMatches);
     } catch(err){
       console.warn('AREAFINDER failed', err);
     }
@@ -6990,12 +6989,8 @@ async function extractAreaRows(profile){
   const fields = profile?.fields || [];
   const groups = groupFieldsByArea(fields);
   seedAreaOccurrencesFromConfig(groups);
-  const pagesToIndex = new Set();
-  groups.forEach(entry => {
-    const page = entry.area?.areaFingerprint?.page || entry.area?.page || null;
-    if(page) pagesToIndex.add(page);
-  });
-  for(const page of pagesToIndex){
+  const totalPages = Math.max(1, state.numPages || state.pageViewports?.length || state.pdf?.numPages || 1);
+  for(let page=1; page<=totalPages; page++){
     await buildKeywordIndexForPage(page);
   }
 
@@ -7003,34 +6998,6 @@ async function extractAreaRows(profile){
   for(const [areaId, entry] of groups.entries()){
     const subs = entry.subs || [];
     const occurrences = (state.areaOccurrencesById?.[areaId] || []).slice();
-    if(!occurrences.length && entry.area?.areaBox){
-      const norm = entry.area.areaBox.bboxPct || (entry.area.areaBox.normBox ? {
-        x0: entry.area.areaBox.normBox.x0n,
-        y0: entry.area.areaBox.normBox.y0n,
-        x1: entry.area.areaBox.normBox.x0n + entry.area.areaBox.normBox.wN,
-        y1: entry.area.areaBox.normBox.y0n + entry.area.areaBox.normBox.hN
-      } : null);
-      if(norm){
-        const page = entry.area.areaBox.page || entry.area.page || 1;
-        const fallback = {
-          areaId,
-          page,
-          bboxPct: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
-          bboxNorm: { x0: norm.x0, y0: norm.y0, x1: norm.x1, y1: norm.y1 },
-          bboxPx: entry.area.areaBox.rawBox ? {
-            x: entry.area.areaBox.rawBox.x,
-            y: entry.area.areaBox.rawBox.y,
-            w: entry.area.areaBox.rawBox.w,
-            h: entry.area.areaBox.rawBox.h,
-            page
-          } : null,
-          confidence: 0.01
-        };
-        occurrences.push(fallback);
-        if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
-        state.areaOccurrencesById[areaId] = occurrences.slice();
-      }
-    }
     if(!subs.length || !occurrences.length) continue;
     for(let i=0; i<occurrences.length; i++){
       const occ = occurrences[i];
@@ -7463,7 +7430,7 @@ els.overlayCanvas.addEventListener('pointerup', e=>finalizeSelection(e), { passi
 els.overlayCanvas.addEventListener('pointercancel', e=>finalizeSelection(e), { passive: false });
 
 els.viewer.addEventListener('scroll', ()=>{
-  if(guardInteractive('viewer.scroll')) return;
+  if(guardInteractive('viewer.scroll', { allowInRun: true })) return;
   syncOverlay();
   const y = els.viewer.scrollTop;
   let p = 1;
@@ -7477,7 +7444,7 @@ els.viewer.addEventListener('scroll', ()=>{
   }
 });
 function drawOverlay(){
-  if(guardInteractive('overlay.draw')) return;
+  if(guardInteractive('overlay.draw', { allowInRun: true })) return;
   syncOverlay();
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
   paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });

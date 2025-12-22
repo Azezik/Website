@@ -12,9 +12,18 @@ async function main(){
     overlayExecuted = true;
   }
 
+  let overlayAllowedExecuted = false;
+  function overlayAllowedFn(){
+    if(controller.guardInteractive('overlay.draw', { allowInRun: true })) return;
+    overlayAllowedExecuted = true;
+  }
+
   overlayFn();
   assert.strictEqual(overlayExecuted, false, 'overlay should be blocked in RUN mode');
   assert.ok(warnings.some(w => w.includes('overlay.draw')), 'warning should be emitted for overlay in RUN');
+
+  overlayAllowedFn();
+  assert.strictEqual(overlayAllowedExecuted, true, 'allowInRun should bypass guard');
 
   let runs = 0;
   let release;
