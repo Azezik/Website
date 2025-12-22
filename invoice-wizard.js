@@ -1303,6 +1303,41 @@ function groupFieldsByArea(fields = []){
   return map;
 }
 
+function seedAreaOccurrencesFromConfig(groups){
+  if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
+  for(const [areaId, entry] of groups.entries()){
+    if(!areaId || !entry?.area) continue;
+    const existing = state.areaOccurrencesById[areaId] || [];
+    if(existing.length) continue;
+
+    const area = entry.area;
+    const areaBox = area.areaBox || null;
+    const pctBox = areaBox?.bboxPct
+      || (Array.isArray(area.bbox) ? { x0: area.bbox[0], y0: area.bbox[1], x1: area.bbox[2], y1: area.bbox[3] } : null)
+      || area.bboxPct
+      || null;
+    const normFromBox = (!pctBox && area.normBox)
+      ? { x0: area.normBox.x0n, y0: area.normBox.y0n, x1: area.normBox.x0n + area.normBox.wN, y1: area.normBox.y0n + area.normBox.hN }
+      : null;
+    const page = areaBox?.page || area.areaFingerprint?.page || area.page || area.pageNumber || 1;
+    const bboxNorm = pctBox || normFromBox;
+    const rawBox = areaBox?.rawBox || null;
+    const hasPxBox = rawBox && [rawBox.x, rawBox.y, rawBox.w, rawBox.h].every(v => Number.isFinite(v));
+
+    if(!bboxNorm && !hasPxBox) continue;
+
+    const occurrence = { areaId, page };
+    if(bboxNorm){
+      occurrence.bboxNorm = { x0: bboxNorm.x0, y0: bboxNorm.y0, x1: bboxNorm.x1, y1: bboxNorm.y1, page };
+    }
+    if(hasPxBox){
+      occurrence.bboxPx = { x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h, page };
+    }
+
+    state.areaOccurrencesById[areaId] = [occurrence];
+  }
+}
+
 function persistAreaRows(rows = []){
   state.areaExtractions = {};
   state.currentAreaRows = rows;
@@ -6917,6 +6952,7 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
 async function extractAreaRows(profile){
   const fields = profile?.fields || [];
   const groups = groupFieldsByArea(fields);
+  seedAreaOccurrencesFromConfig(groups);
   const pagesToIndex = new Set();
   groups.forEach(entry => {
     const page = entry.area?.areaFingerprint?.page || entry.area?.page || null;
