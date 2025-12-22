@@ -8008,7 +8008,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   const getConfigPctBox = field => parsePctBox(field?.configBox) || pctFromRawBox(field?.rawBox) || null;
   const boxesOverlap = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0;
   let overlapDetails = null;
-  if(step.type === 'static'){
+  const isAreaField = step.isArea || step.fieldType === 'areabox';
+  const isSubordinateField = !!step.areaId && !isAreaField;
+  if(step.type === 'static' && !isAreaField && !isSubordinateField){
     const clash = (state.profile.fields||[]).find(f=>{
       if(f.fieldKey===step.fieldKey || f.type!=='static' || f.page!==page) return false;
       const mine = configPctBox || pctBox;
