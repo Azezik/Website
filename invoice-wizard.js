@@ -27,9 +27,12 @@ function persistStaticDebugPref(enabled){
 const storedStaticDebug = loadStoredStaticDebugPref();
 let DEBUG_STATIC_FIELDS = Boolean(
   window.DEBUG_STATIC_FIELDS ??
-  (storedStaticDebug !== null ? storedStaticDebug : undefined) ??
+  (storedStaticDebug !== null ? storedStaticDebug : true) ??
   /static-debug/i.test(location.search)
 );
+if(storedStaticDebug === null){
+  persistStaticDebugPref(true);
+}
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
