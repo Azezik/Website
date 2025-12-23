@@ -24,20 +24,21 @@ function persistStaticDebugPref(enabled){
   catch(err){ /* ignore storage failures */ }
 }
 
+const STATIC_DEBUG_FORCED = true;
 const storedStaticDebug = loadStoredStaticDebugPref();
-let DEBUG_STATIC_FIELDS = Boolean(
+let DEBUG_STATIC_FIELDS = STATIC_DEBUG_FORCED ? true : Boolean(
   window.DEBUG_STATIC_FIELDS ??
   (storedStaticDebug !== null ? storedStaticDebug : true) ??
   /static-debug/i.test(location.search)
 );
-if(storedStaticDebug === null){
+if(storedStaticDebug === null || STATIC_DEBUG_FORCED){
   persistStaticDebugPref(true);
 }
-window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
+window.DEBUG_STATIC_FIELDS = true;
 let staticDebugLogs = [];
 
-let DEBUG_OCRMAGIC = Boolean(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS);
-window.__DEBUG_OCRMAGIC__ = DEBUG_OCRMAGIC;
+let DEBUG_OCRMAGIC = STATIC_DEBUG_FORCED ? true : Boolean(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS);
+window.__DEBUG_OCRMAGIC__ = true;
 const DEBUG_FLATTEN_COMPARE = Boolean(window.DEBUG_FLATTEN_COMPARE ?? /flatten-debug/i.test(location.search));
 window.DEBUG_FLATTEN_COMPARE = DEBUG_FLATTEN_COMPARE;
 
@@ -46,8 +47,8 @@ const MIN_STATIC_ACCEPT_SCORE = 0.7;
 const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
 const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
-function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
-function ocrMagicDebugEnabled(){ return !!(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS); }
+function staticDebugEnabled(){ return true; }
+function ocrMagicDebugEnabled(){ return true; }
 function mirrorDebugLog(line, details=null, level='log'){
   const logger = console[level] ? console[level].bind(console) : console.log.bind(console);
   if(staticDebugEnabled()){
