@@ -224,6 +224,13 @@ body.skin-v2.doc-dashboard {
   color: var(--text);
 }
 
+.field input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 .field select {
   appearance: none;
   background-image: linear-gradient(45deg, transparent 50%, var(--text) 50%),
@@ -238,6 +245,58 @@ body.skin-v2.doc-dashboard {
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+}
+
+.options-dropdown {
+  border: 2px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  padding: 0;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.options-dropdown summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.options-dropdown summary::-webkit-details-marker {
+  display: none;
+}
+
+.options-dropdown summary span[aria-hidden="true"] {
+  transition: transform 120ms ease;
+}
+
+.options-dropdown[open] summary span[aria-hidden="true"] {
+  transform: rotate(180deg);
+}
+
+.options-dropdown .toggle-grid {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: #fffaf1;
+}
+
+.toggle-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.toggle-option input[type="checkbox"] {
+  flex-shrink: 0;
+  accent-color: var(--accent);
 }
 
 .toggle-inline {

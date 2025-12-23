@@ -90,42 +90,6 @@
           </select>
         </div>
         <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="show-boxes-toggle" />
-            Show saved boxes
-          </label>
-        </div>
-        <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="show-rings-toggle" class="show-ring-toggle" />
-            Show ring landmarks
-          </label>
-        </div>
-        <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="show-match-toggle" class="show-match-toggle" />
-            Show match points
-          </label>
-        </div>
-        <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="show-ocr-boxes-toggle" checked />
-            Show OCR Boxes
-          </label>
-        </div>
-        <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="raw-data-toggle" />
-            Raw data mode
-          </label>
-        </div>
-        <div class="field">
-          <label style="flex-direction:row;align-items:center;gap:6px;">
-            <input type="checkbox" id="show-raw-toggle" />
-            Show raw values
-          </label>
-        </div>
-        <div class="field">
           <div class="actions">
             <button id="export-master-db-data-btn" class="btn" type="button">Export Master DB</button>
             <button id="view-snapshot-btn" class="btn" type="button">View Snapshot</button>
@@ -158,6 +122,38 @@
             <button id="traceExportBtn" class="btn">Export trace</button>
           </div>
         </div>
+        <details class="options-dropdown">
+          <summary>
+            <span>Display options</span>
+            <span aria-hidden="true">▾</span>
+          </summary>
+          <div class="toggle-grid">
+            <label class="toggle-option">
+              <input type="checkbox" id="show-boxes-toggle" />
+              <span>Show saved boxes</span>
+            </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="show-rings-toggle" class="show-ring-toggle" />
+              <span>Show ring landmarks</span>
+            </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="show-match-toggle" class="show-match-toggle" />
+              <span>Show match points</span>
+            </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="show-ocr-boxes-toggle" checked />
+              <span>Show OCR boxes</span>
+            </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="raw-data-toggle" />
+              <span>Raw data mode</span>
+            </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="show-raw-toggle" />
+              <span>Show raw values</span>
+            </label>
+          </div>
+        </details>
       </section>
 
       <section id="reports" class="panel" style="display:none">
