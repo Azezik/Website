@@ -1055,7 +1055,6 @@ function loadModelById(id){
   state.activeWizardId = m.wizardId || DEFAULT_WIZARD_ID;
   state.profile = migrateProfile(m.profile);
   hydrateFingerprintsFromProfile(state.profile);
-  saveProfile(state.username, state.docType, state.profile, state.activeWizardId);
   return m;
 }
 
@@ -3024,7 +3023,10 @@ const ANCHOR_HINTS = {
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   const wizardId = currentWizardId();
-  if(state.profile && state.profile.wizardId === wizardId) return;
+  if(state.profile && state.profile.wizardId === wizardId){
+    hydrateFingerprintsFromProfile(state.profile);
+    return;
+  }
 
   const existing = loadProfile(state.username, state.docType, wizardId);
   const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
@@ -6829,10 +6831,14 @@ async function prepareRunDocument(file){
       state.viewport = { w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageViewports[0] = { width: imgMeta.width, height: imgMeta.height, w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageOffsets[0] = 0;
-      state.pageRenderReady[0] = true;
-      state.pageRenderPromises[0] = Promise.resolve();
-      state.tokensByPage[1] = [];
-      state.numPages = 1;
+      const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
+      await renderImage(blobUrl);
+      state.pageNum = 1; state.numPages = 1;
+      if(els.pageControls) els.pageControls.style.display = 'none';
+      const tokens = await ensureTokensForPage(1, null, state.pageViewports[0], els.imgCanvas);
+      await buildKeywordIndexForPage(1, tokens, state.pageViewports[0]);
+      if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
+      else await calibrateIfNeeded();
       return { type:'image' };
     } catch(err){
       console.error('Image load failed in run mode', err);
