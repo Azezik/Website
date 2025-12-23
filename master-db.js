@@ -77,8 +77,8 @@
       .filter(Boolean);
   }
 
-  function normalizeAreaRowType(area){
-    const raw = cleanText(area?.rowType || area?.type || '');
+  function normalizeAreaRowMode(area){
+    const raw = cleanText(area?.rowMode || area?.rowBehavior || area?.rowType || area?.type || '');
     const normalized = raw.toLowerCase();
     if(['table', 'table-like', 'table_rows', 'rows'].includes(normalized)) return 'table';
     if(['block', 'repeating-block', 'block_row', 'block_rows'].includes(normalized)) return 'block';
@@ -115,7 +115,8 @@
               ? area.aliases.map(alias => cleanText(alias)).filter(Boolean)
               : [],
             columns: normalizeAreaColumns(area),
-            rowType: normalizeAreaRowType(area)
+            rowMode: normalizeAreaRowMode(area),
+            rowType: normalizeAreaRowMode(area)
           }))
           .filter(area => area.id || area.name)
       : [];
@@ -748,12 +749,13 @@
       if(!canonicalKey) return;
       const columns = Array.isArray(area.columns) ? area.columns : [];
       const rowType = area.rowType || '';
+      const rowMode = area.rowMode || rowType || '';
       const variants = [area.id, area.name, canonicalLabel, ...(Array.isArray(area.aliases) ? area.aliases : [])];
       variants.forEach(variant => {
         const normalized = normalizeAreaKey(variant);
         if(!normalized) return;
         if(!registry.has(normalized)){
-          registry.set(normalized, { key: canonicalKey, label: canonicalLabel, areaId: canonicalId || canonicalKey, columns, rowType });
+          registry.set(normalized, { key: canonicalKey, label: canonicalLabel, areaId: canonicalId || canonicalKey, columns, rowType, rowMode });
         }
       });
     });
@@ -771,7 +773,8 @@
       label: fromRegistry?.label || fallbackLabel,
       areaId: fromRegistry?.areaId || areaId || fallbackKey,
       columns: fromRegistry?.columns || [],
-      rowType: fromRegistry?.rowType || ''
+      rowType: fromRegistry?.rowType || '',
+      rowMode: fromRegistry?.rowMode || fromRegistry?.rowType || ''
     };
   }
 
@@ -831,8 +834,7 @@
       return normalized;
     };
 
-    const addRowToSheet = (areaId, areaName, rowFields, fileId, globalFieldMap) => {
-      const resolved = resolveAreaIdentity(areaId, areaName, areaRegistry);
+    const addRowToSheet = (resolved, rowFields, fileId, globalFieldMap) => {
       const key = resolved.key;
       const label = resolved.label;
       const combinedFields = { ...(globalFieldMap || {}), ...(rowFields || {}) };
@@ -853,7 +855,8 @@
         areaId: resolved.areaId,
         header,
         rows: [],
-        rowType: resolved.rowType || ''
+        rowType: resolved.rowType || '',
+        rowMode: resolved.rowMode || resolved.rowType || ''
       };
       const previousHeader = existing.header;
       if(hasSchema){
@@ -879,11 +882,20 @@
       areaRows.forEach(row => {
         const areaId = row?.areaId || row?.id || row?.name;
         const areaName = row?.areaName || row?.name || areaId;
-        const nestedRows = Array.isArray(row?.rows) && row.rows.length ? row.rows : [row];
-        nestedRows.forEach(nested => {
-          const rowFields = nested?.fields || row?.fields || {};
-          addRowToSheet(areaId, areaName, rowFields, fileId, globalFieldMap);
-        });
+        const resolved = resolveAreaIdentity(areaId, areaName, areaRegistry);
+        const rowMode = resolved.rowMode || resolved.rowType || '';
+        const isTableLike = rowMode === 'block' ? false : true;
+        const nestedRows = isTableLike && Array.isArray(row?.rows) && row.rows.length ? row.rows : [row];
+        if(isTableLike){
+          nestedRows.forEach(nested => {
+            const rowFields = nested?.fields || row?.fields || {};
+            addRowToSheet(resolved, rowFields, fileId, globalFieldMap);
+          });
+        } else {
+          const fallbackNested = Array.isArray(row?.rows) && row.rows.length ? row.rows[0] : null;
+          const rowFields = row?.fields || fallbackNested?.fields || {};
+          addRowToSheet(resolved, rowFields, fileId, globalFieldMap);
+        }
       });
     });
 
