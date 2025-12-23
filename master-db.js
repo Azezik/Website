@@ -788,9 +788,28 @@
     const normalizedConfig = config || normalizeMasterConfig(records[0] || {});
     const sheets = new Map();
     const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
-    const { globalFields = [] } = normalizedConfig;
     const areaRegistry = buildAreaRegistry(normalizedConfig);
-    const globalColumns = Array.isArray(globalFields) ? globalFields.map(f => f.label || f.fieldKey) : [];
+    const globalColumnSet = new Set();
+    const globalColumns = [];
+
+    const collectGlobalColumns = cols => {
+      cols.forEach(col => {
+        if(!col || globalColumnSet.has(col)) return;
+        globalColumnSet.add(col);
+        globalColumns.push(col);
+      });
+    };
+
+    const alignExistingRows = (rows, previousHeader, nextHeader) => {
+      if(!previousHeader || previousHeader.length === nextHeader.length && previousHeader.every((col, idx) => col === nextHeader[idx])){
+        return rows;
+      }
+      const indexMap = new Map(previousHeader.map((col, idx) => [col, idx]));
+      return rows.map(row => nextHeader.map(col => {
+        const oldIdx = indexMap.get(col);
+        return oldIdx === undefined ? '' : row[oldIdx] ?? '';
+      }));
+    };
 
     const buildSchemaHeader = (resolved, incomingCols) => {
       const areaColumns = Array.isArray(resolved.columns) ? resolved.columns.map(col => col.label) : [];
@@ -836,12 +855,14 @@
         rows: [],
         rowType: resolved.rowType || ''
       };
+      const previousHeader = existing.header;
       if(hasSchema){
         existing.header = header;
       } else {
         existing.header = upsertHeaderColumns(existing.header, incomingCols);
         header = existing.header;
       }
+      existing.rows = alignExistingRows(existing.rows, previousHeader, existing.header);
       const normalizedFields = hasSchema ? normalizeFieldsToSchema(existing.header, combinedFields) : combinedFields;
       existing.rows.push(normalizeAreaSheetRow(existing.header, normalizedFields, fileId));
       sheets.set(key, existing);
@@ -850,7 +871,11 @@
     records.forEach(record => {
       const fileId = record?.fileId || record?.fileHash || '';
       const areaRows = Array.isArray(record?.areaRows) ? record.areaRows : [];
-      const globalFieldMap = globalColumns.length ? buildNamedValues(record, globalFields) : {};
+      const recordConfig = normalizeMasterConfig(record);
+      const recordGlobalFields = Array.isArray(recordConfig?.globalFields) ? recordConfig.globalFields : [];
+      const recordGlobalColumns = recordGlobalFields.map(f => f.label || f.fieldKey);
+      collectGlobalColumns(recordGlobalColumns);
+      const globalFieldMap = recordGlobalFields.length ? buildNamedValues(record, recordGlobalFields) : {};
       areaRows.forEach(row => {
         const areaId = row?.areaId || row?.id || row?.name;
         const areaName = row?.areaName || row?.name || areaId;
