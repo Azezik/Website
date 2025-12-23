@@ -258,6 +258,52 @@ const areaAliasRecord = {
 const { sheets: aliasSheets } = MasterDB.flatten(areaAliasRecord);
 const coldStorageSheets = aliasSheets.filter(s => s.areaId === 'ColdStorage');
 assert.strictEqual(coldStorageSheets.length, 1, 'Cold Storage sheet deduped');
+
+const multiAreaRecords = [
+  {
+    fields: {
+      invoice_number: { value: 'INV-A ' },
+      store_name: { value: 'North Shop' }
+    },
+    fileId: 'file-multi-1',
+    masterDbConfig: {
+      globalFields: [
+        { fieldKey: 'invoice_number', label: 'Invoice #' },
+        { fieldKey: 'store_name', label: 'Store' }
+      ]
+    },
+    areaRows: [
+      { areaId: 'Zone', fields: { aisle: { value: 'Z1' } } },
+      { areaId: 'Zone', fields: { aisle: { value: 'Z2' } } }
+    ]
+  },
+  {
+    fields: {
+      invoice_date: { value: '2024-02-10' },
+      invoice_number: { value: 'INV-B' }
+    },
+    fileId: 'file-multi-2',
+    masterDbConfig: {
+      globalFields: [
+        { fieldKey: 'invoice_date', label: 'Invoice Date' }
+      ]
+    },
+    areaRows: [
+      { areaId: 'Zone', fields: { aisle: { value: 'Z3' } } },
+      { areaId: 'Zone', fields: { aisle: { value: 'Z4' } } }
+    ]
+  }
+];
+
+const { sheets: multiAreaSheets } = MasterDB.flatten(multiAreaRecords);
+const zoneSheet = multiAreaSheets.find(s => s.areaId === 'Zone');
+assert.ok(zoneSheet, 'Zone sheet present for multi-doc records');
+assert.deepStrictEqual(zoneSheet.header, ['Invoice #', 'Store', 'aisle', 'Invoice Date', 'File ID']);
+assert.strictEqual(zoneSheet.rows.length, 1 + 4);
+assert.deepStrictEqual(zoneSheet.rows[1], ['INV-A', 'North Shop', 'Z1', '', 'file-multi-1']);
+assert.deepStrictEqual(zoneSheet.rows[2], ['INV-A', 'North Shop', 'Z2', '', 'file-multi-1']);
+assert.deepStrictEqual(zoneSheet.rows[3], ['', '', 'Z3', '2024-02-10', 'file-multi-2']);
+assert.deepStrictEqual(zoneSheet.rows[4], ['', '', 'Z4', '2024-02-10', 'file-multi-2']);
 const coldStorageSheet = coldStorageSheets[0];
 assert.strictEqual(coldStorageSheet.rows.length, 1 + 3);
 assert.deepStrictEqual(
