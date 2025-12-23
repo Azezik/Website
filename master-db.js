@@ -84,6 +84,17 @@
     const documentFieldKeys = documentFieldKeysOverride || staticFields
       .filter(f => !areaFieldKeys.includes(f.fieldKey))
       .map(f => f.fieldKey);
+    const areas = Array.isArray(cfg.areas)
+      ? cfg.areas
+          .map(area => ({
+            id: cleanText(area?.id || area?.areaId || area?.key || area?.name),
+            name: cleanText(area?.name || area?.label || area?.id || area?.areaId),
+            aliases: Array.isArray(area?.aliases)
+              ? area.aliases.map(alias => cleanText(alias)).filter(Boolean)
+              : []
+          }))
+          .filter(area => area.id || area.name)
+      : [];
     const includeLineItems = !!cfg.includeLineItems;
     const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
     const isCustomMasterDb = !!cfg.isCustomMasterDb;
@@ -95,6 +106,7 @@
       staticFields,
       lineItemFields,
       globalFields,
+      areas,
       areaFieldKeys,
       documentFieldKeys,
       hasNonAreaFields
@@ -697,6 +709,44 @@
     return ensureFileIdLast(next);
   }
 
+  function normalizeAreaKey(value){
+    const cleaned = cleanText(value || '');
+    return cleaned ? cleaned.toLowerCase() : '';
+  }
+
+  function buildAreaRegistry(config){
+    const registry = new Map();
+    const areas = Array.isArray(config?.areas) ? config.areas : [];
+    areas.forEach(area => {
+      const canonicalId = area.id || area.name;
+      const canonicalLabel = area.name || area.id || 'Area';
+      const canonicalKey = canonicalId || canonicalLabel;
+      if(!canonicalKey) return;
+      const variants = [area.id, area.name, canonicalLabel, ...(Array.isArray(area.aliases) ? area.aliases : [])];
+      variants.forEach(variant => {
+        const normalized = normalizeAreaKey(variant);
+        if(!normalized) return;
+        if(!registry.has(normalized)){
+          registry.set(normalized, { key: canonicalKey, label: canonicalLabel, areaId: canonicalId || canonicalKey });
+        }
+      });
+    });
+    return registry;
+  }
+
+  function resolveAreaIdentity(areaId, areaName, registry){
+    const byId = normalizeAreaKey(areaId);
+    const byName = normalizeAreaKey(areaName);
+    const fromRegistry = registry.get(byId) || registry.get(byName) || null;
+    const fallbackKey = areaId || areaName || 'Area';
+    const fallbackLabel = areaName || areaId || 'Area';
+    return {
+      key: fromRegistry?.key || fallbackKey,
+      label: fromRegistry?.label || fallbackLabel,
+      areaId: fromRegistry?.areaId || areaId || fallbackKey
+    };
+  }
+
   function normalizeAreaSheetRow(header, fields, fileId){
     const normalizedFields = fields || {};
     const values = header
@@ -707,19 +757,22 @@
   }
 
   function buildAreaSheets(records, config){
+    const normalizedConfig = config || normalizeMasterConfig(records[0] || {});
     const sheets = new Map();
     const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
-    const { globalFields = [] } = config || normalizeMasterConfig(records[0] || {});
+    const { globalFields = [] } = normalizedConfig;
+    const areaRegistry = buildAreaRegistry(normalizedConfig);
     const globalColumns = Array.isArray(globalFields) ? globalFields.map(f => f.label || f.fieldKey) : [];
 
     const addRowToSheet = (areaId, areaName, rowFields, fileId, globalFieldMap) => {
-      const key = areaId || areaName || 'Area';
-      const label = areaName || areaId || 'Area';
+      const resolved = resolveAreaIdentity(areaId, areaName, areaRegistry);
+      const key = resolved.key;
+      const label = resolved.label;
       const combinedFields = { ...(globalFieldMap || {}), ...(rowFields || {}) };
       const incomingCols = Object.keys(combinedFields);
       const existing = sheets.get(key) || {
         name: label,
-        areaId: areaId || label,
+        areaId: resolved.areaId,
         header: ensureFileIdLast(incomingCols.concat(fileHeader)),
         rows: []
       };

@@ -236,4 +236,37 @@ assert.strictEqual(floorSheet.rows.length, 1 + 1);
 assert.strictEqual(floorSheet.rows[1][0], 'INV-001');
 assert.strictEqual(floorSheet.rows[1][1], 'C3');
 
+const areaAliasRecord = {
+  ...ssot,
+  fileId: 'area-alias',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      { id: 'ColdStorage', name: 'Cold Storage', aliases: ['Freezer'] }
+    ]
+  },
+  lineItems: [],
+  areaRows: [
+    { areaId: 'coldstorage', areaName: 'Cold Storage', fields: { bin: { value: 'CS1' } } },
+    { areaId: 'COLD STORAGE', areaName: 'cold storage', fields: { bin: { value: 'CS2' } } },
+    { areaId: 'freezer', areaName: 'FREEZER', fields: { bin: { value: 'CS3' } } }
+  ]
+};
+
+const { sheets: aliasSheets } = MasterDB.flatten(areaAliasRecord);
+const coldStorageSheets = aliasSheets.filter(s => s.areaId === 'ColdStorage');
+assert.strictEqual(coldStorageSheets.length, 1, 'Cold Storage sheet deduped');
+const coldStorageSheet = coldStorageSheets[0];
+assert.strictEqual(coldStorageSheet.rows.length, 1 + 3);
+assert.deepStrictEqual(
+  coldStorageSheet.rows.slice(1).map(r => r[0]),
+  ['INV-001', 'INV-001', 'INV-001']
+);
+assert.deepStrictEqual(
+  coldStorageSheet.rows.slice(1).map(r => r[1]),
+  ['CS1', 'CS2', 'CS3']
+);
+
 console.log('MasterDB tests passed.');
