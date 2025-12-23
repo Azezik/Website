@@ -45,6 +45,13 @@ const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
 function staticDebugEnabled(){ return !!window.DEBUG_STATIC_FIELDS; }
 function ocrMagicDebugEnabled(){ return !!(window.__DEBUG_OCRMAGIC__ ?? window.DEBUG_STATIC_FIELDS); }
+function mirrorDebugLog(line, details=null, level='log'){
+  const logger = console[level] ? console[level].bind(console) : console.log.bind(console);
+  if(staticDebugEnabled()){
+    staticDebugLogs.push(details !== null ? { line, details } : line);
+  }
+  logger(line, details);
+}
 function logStaticDebug(message, details){
   if(!staticDebugEnabled()) return;
   const line = `[static-debug] ${message}`;
@@ -60,6 +67,14 @@ function ocrMagicDebug(info){
   staticDebugLogs.push({ line, details: payload });
   console.log(line, payload);
 }
+(function sanityLog(){
+  mirrorDebugLog(
+    '[pdf.js] version: ' + (pdfjsLibRef?.version || '<unknown>') + ' workerSrc: ' + (pdfjsLibRef?.GlobalWorkerOptions?.workerSrc || '<unset>'),
+    null,
+    'log'
+  );
+})();
+
 function formatBoxForLog(box){
   if(!box) return '<null>';
   const { x=0, y=0, w=0, h=0, page } = box;
@@ -68,11 +83,6 @@ function formatBoxForLog(box){
 function formatArrayBox(boxArr){
   return Array.isArray(boxArr) ? `[${boxArr.map(v=>Math.round(v??0)).join(',')}]` : '<none>';
 }
-
-(function sanityLog(){
-  console.log('[pdf.js] version:', pdfjsLibRef?.version,
-              'workerSrc:', pdfjsLibRef?.GlobalWorkerOptions?.workerSrc);
-})();
 
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
@@ -242,7 +252,7 @@ function guardInteractive(label){
   const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
   if(blocked) return true;
   if(isRunMode()){
-    console.warn(`[run-mode] ${label} called during RUN mode; skipping.`);
+    mirrorDebugLog(`[run-mode] ${label} called during RUN mode; skipping.`, null, 'warn');
     return true;
   }
   return false;
@@ -6800,7 +6810,7 @@ async function prepareRunDocument(file){
     // pdf.js text items may be non-extensible in some browsers; clone before annotating
     const tokens = rawTokens.map(t => ({ ...t, page: i }));
     state.tokensByPage[i] = tokens;
-    if(isRunMode()) console.log(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
     totalH += vp.height;
   }
   state.pageRenderReady = state.pageViewports.map(()=>true);
@@ -8389,7 +8399,7 @@ function renderSavedFieldsTable(){
 let confirmedRenderPending = false;
 function renderConfirmedTables(rec){
   if(isRunMode()){
-    console.warn('[run-mode] renderConfirmedTables invoked during RUN; skipping RAF update');
+    mirrorDebugLog('[run-mode] renderConfirmedTables invoked during RUN; skipping RAF update', null, 'warn');
     return;
   }
   if(confirmedRenderPending) return;
@@ -8884,13 +8894,13 @@ async function runModeExtractFileWithProfile(file, profile){
   }
   try {
     activateRunMode({ clearDoc: true });
-    if(isRunMode()) console.log(`[run-mode] starting extraction for ${file?.name || 'file'}`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
     hydrateFingerprintsFromProfile(state.profile);
     const activeProfile = state.profile || profile || { fields: [] };
     const prepared = await prepareRunDocument(file);
     if(!prepared){ return; }
-    if(isRunMode()) console.log(`[run-mode] tokens cached for ${state.numPages} page(s)`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] tokens cached for ${state.numPages} page(s)`);
 
     await extractAreaRows(activeProfile);
 
@@ -8952,15 +8962,15 @@ async function runModeExtractFileWithProfile(file, profile){
         );
       }
     }
-    if(isRunMode()) console.log(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
     const lineItems = await extractLineItems(activeProfile);
-    if(isRunMode()) console.log(`[run-mode] dynamic line items extracted (${lineItems.length})`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
     const compiled = compileDocument(state.currentFileId, lineItems);
     if(state.snapshotMode){
       const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
       if(manifest){ compiled.snapshotManifestId = manifest.id; }
     }
-    if(isRunMode()) console.log(`[run-mode] MasterDB written for ${compiled.fileId}`);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
   } finally {
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
