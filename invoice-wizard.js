@@ -1702,19 +1702,78 @@ const KNOWN_LEXICON = [
 ];
 
 const KEYWORD_CATALOGUE = {
-  store_name: { en: ['store', 'vendor', 'seller', 'company'] },
-  department_division: { en: ['department', 'division'] },
-  invoice_number: { en: ['invoice number', 'invoice no', 'invoice #', 'inv #', 'inv no'] },
-  invoice_date: { en: ['invoice date', 'date of issue', 'issued date'] },
-  salesperson_rep: { en: ['salesperson', 'sales rep', 'representative'] },
-  customer_name: { en: ['customer', 'client', 'bill to', 'sold to'] },
-  customer_address: { en: ['address', 'billing address', 'bill to address', 'customer address'] },
-  subtotal_amount: { en: ['subtotal', 'sub total'] },
-  discounts_amount: { en: ['discount', 'discounts'] },
-  tax_amount: { en: ['tax', 'hst', 'gst', 'qst', 'vat'] },
-  invoice_total: { en: ['total', 'grand total', 'amount due', 'balance due'] },
-  payment_method: { en: ['payment method', 'paid with'] },
-  payment_status: { en: ['payment status', 'status'] }
+  store_name: {
+    en: [
+      'store', 'vendor', 'seller', 'company', 'business', 'organization', 'institution', 'entity',
+      'provider', 'supplier', 'market', 'branch', 'office'
+    ]
+  },
+  department_division: {
+    en: ['department', 'division', 'branch', 'section', 'sections', 'chapter', 'chapters', 'part', 'parts']
+  },
+  invoice_number: {
+    en: [
+      'invoice number', 'invoice no', 'invoice #', 'inv #', 'inv no', 'invoice', 'account', 'accounts',
+      'application', 'certificate', 'code', 'contract', 'coverage', 'form', 'format', 'formats', 'id',
+      'identification', 'label', 'labels', 'ledger', 'number', 'numbers', 'numbered', 'order', 'orders',
+      'page', 'pages', 'policy', 'reference', 'references', 'report', 'request', 'review', 'transaction',
+      'transactions', 'entry', 'document', 'documents', 'table', 'tables', 'figure', 'figures', 'trade'
+    ]
+  },
+  invoice_date: {
+    en: [
+      'invoice date', 'date of issue', 'issued date', 'date', 'dates', 'issued', 'delivery', 'effective',
+      'expiry', 'period', 'periods', 'time', 'times', 'term', 'terms', 'year', 'years', 'hours'
+    ]
+  },
+  salesperson_rep: {
+    en: [
+      'salesperson', 'sales rep', 'representative', 'agent', 'broker', 'brokerage', 'contact', 'author',
+      'authors', 'employee', 'sales', 'support'
+    ]
+  },
+  customer_name: {
+    en: [
+      'customer', 'client', 'bill to', 'sold to', 'customers', 'clients', 'buyer', 'member', 'owner',
+      'holder', 'user', 'users', 'person', 'people', 'reader', 'readers', 'employer', 'name', 'names',
+      'title', 'titles'
+    ]
+  },
+  customer_address: {
+    en: [
+      'address', 'billing address', 'bill to address', 'customer address', 'city', 'postal', 'province',
+      'region', 'zip', 'location', 'phone', 'telephone', 'email', 'contact', 'office', 'branch', 'insurance'
+    ]
+  },
+  subtotal_amount: {
+    en: [
+      'subtotal', 'sub total', 'average', 'net', 'description', 'describe', 'describes', 'details', 'information',
+      'content', 'contents', 'note', 'notes', 'text', 'texts', 'example', 'examples', 'item', 'items',
+      'quantity', 'price', 'product', 'service', 'services', 'sales', 'definition', 'definitions', 'include',
+      'includes', 'including', 'guidelines', 'instructions', 'disclosure'
+    ]
+  },
+  discounts_amount: { en: ['discount', 'discounts', 'credit', 'refund'] },
+  tax_amount: {
+    en: ['tax', 'hst', 'gst', 'qst', 'vat', 'taxes', 'rate', 'rates', 'fee', 'fees', 'charge', 'charges', 'commission', 'commissions']
+  },
+  invoice_total: {
+    en: [
+      'total', 'grand total', 'amount due', 'balance due', 'amount', 'amounts', 'balance', 'balances',
+      'outstanding', 'principal', 'value', 'values', 'price', 'available', 'limit', 'assets', 'liability',
+      'income', 'financial', 'investment', 'portfolio', 'interest', 'process', 'purpose', 'risk'
+    ]
+  },
+  payment_method: {
+    en: [
+      'payment method', 'paid with', 'payment', 'payments', 'bank', 'banking', 'cash', 'certificate', 'credit',
+      'currency', 'debit', 'deposit', 'deposits', 'exchange', 'fund', 'funds', 'payroll', 'transfer', 'refund',
+      'settlement', 'wages', 'method'
+    ]
+  },
+  payment_status: {
+    en: ['payment status', 'status', 'confirmation', 'authorization', 'verification', 'notice', 'statement', 'security', 'signature']
+  }
 };
 
 const KEYWORD_RELATION_SCOPE = new Set([
