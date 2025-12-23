@@ -400,4 +400,80 @@ assert.deepStrictEqual(
   ]
 );
 
+const blockWithNestedRows = {
+  fields: {
+    invoice_number: { value: 'BLOCK-NESTED' }
+  },
+  fileId: 'block-nested',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      {
+        id: 'Notice',
+        name: 'Notice',
+        rowMode: 'block',
+        columns: [
+          { fieldKey: 'message', label: 'Message' },
+          { fieldKey: 'status', label: 'Status' }
+        ]
+      }
+    ]
+  },
+  areaRows: [
+    {
+      areaId: 'Notice',
+      fields: { Message: { value: 'Top Level' }, Status: { value: 'Active' } },
+      rows: [
+        { fields: { Message: { value: 'Nested One' }, Status: { value: 'Inactive' } } },
+        { fields: { Message: { value: 'Nested Two' }, Status: { value: 'Paused' } } }
+      ]
+    }
+  ]
+};
+
+const { sheets: blockNestedSheets } = MasterDB.flatten(blockWithNestedRows);
+const noticeSheet = blockNestedSheets.find(s => s.areaId === 'Notice');
+assert.ok(noticeSheet, 'notice sheet present for block rowMode');
+assert.strictEqual(noticeSheet.rows.length, 2);
+assert.deepStrictEqual(noticeSheet.rows[1], ['BLOCK-NESTED', 'Top Level', 'Active', 'block-nested']);
+
+const blockWithNestedOnly = {
+  fields: {
+    invoice_number: { value: 'BLOCK-ROWS' }
+  },
+  fileId: 'block-rows',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      {
+        id: 'Placard',
+        name: 'Placard',
+        rowType: 'block',
+        columns: [
+          { fieldKey: 'message', label: 'Message' },
+          { fieldKey: 'status', label: 'Status' }
+        ]
+      }
+    ]
+  },
+  areaRows: [
+    {
+      areaId: 'Placard',
+      rows: [
+        { fields: { Message: { value: 'Nested Field' } } }
+      ]
+    }
+  ]
+};
+
+const { sheets: blockNestedOnlySheets } = MasterDB.flatten(blockWithNestedOnly);
+const nestedOnlyPlacard = blockNestedOnlySheets.find(s => s.areaId === 'Placard');
+assert.ok(nestedOnlyPlacard, 'placard sheet present for nested-only block');
+assert.strictEqual(nestedOnlyPlacard.rows.length, 2);
+assert.deepStrictEqual(nestedOnlyPlacard.rows[1], ['BLOCK-ROWS', 'Nested Field', '', 'block-rows']);
+
 console.log('MasterDB tests passed.');
