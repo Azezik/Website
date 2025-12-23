@@ -63,6 +63,28 @@
     return field ?? '';
   }
 
+  function normalizeAreaColumns(area){
+    if(!area) return [];
+    const rawColumns = Array.isArray(area.columns) ? area.columns : [];
+    return rawColumns
+      .map(col => {
+        const key = col?.fieldKey || col?.key || col?.name || col?.label || col;
+        const label = col?.label || col?.name || col?.fieldKey || col?.key || key;
+        const normalizedKey = cleanText(key);
+        const normalizedLabel = cleanText(label);
+        return normalizedKey && normalizedLabel ? { key: normalizedKey, label: normalizedLabel } : null;
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeAreaRowType(area){
+    const raw = cleanText(area?.rowType || area?.type || '');
+    const normalized = raw.toLowerCase();
+    if(['table', 'table-like', 'table_rows', 'rows'].includes(normalized)) return 'table';
+    if(['block', 'repeating-block', 'block_row', 'block_rows'].includes(normalized)) return 'block';
+    return '';
+  }
+
   function normalizeMasterConfig(record){
     const cfg = record?.masterDbConfig || {};
     const staticFieldsRaw = Array.isArray(cfg.staticFields) ? cfg.staticFields : [];
@@ -91,7 +113,9 @@
             name: cleanText(area?.name || area?.label || area?.id || area?.areaId),
             aliases: Array.isArray(area?.aliases)
               ? area.aliases.map(alias => cleanText(alias)).filter(Boolean)
-              : []
+              : [],
+            columns: normalizeAreaColumns(area),
+            rowType: normalizeAreaRowType(area)
           }))
           .filter(area => area.id || area.name)
       : [];
@@ -722,12 +746,14 @@
       const canonicalLabel = area.name || area.id || 'Area';
       const canonicalKey = canonicalId || canonicalLabel;
       if(!canonicalKey) return;
+      const columns = Array.isArray(area.columns) ? area.columns : [];
+      const rowType = area.rowType || '';
       const variants = [area.id, area.name, canonicalLabel, ...(Array.isArray(area.aliases) ? area.aliases : [])];
       variants.forEach(variant => {
         const normalized = normalizeAreaKey(variant);
         if(!normalized) return;
         if(!registry.has(normalized)){
-          registry.set(normalized, { key: canonicalKey, label: canonicalLabel, areaId: canonicalId || canonicalKey });
+          registry.set(normalized, { key: canonicalKey, label: canonicalLabel, areaId: canonicalId || canonicalKey, columns, rowType });
         }
       });
     });
@@ -743,7 +769,9 @@
     return {
       key: fromRegistry?.key || fallbackKey,
       label: fromRegistry?.label || fallbackLabel,
-      areaId: fromRegistry?.areaId || areaId || fallbackKey
+      areaId: fromRegistry?.areaId || areaId || fallbackKey,
+      columns: fromRegistry?.columns || [],
+      rowType: fromRegistry?.rowType || ''
     };
   }
 
@@ -764,20 +792,58 @@
     const areaRegistry = buildAreaRegistry(normalizedConfig);
     const globalColumns = Array.isArray(globalFields) ? globalFields.map(f => f.label || f.fieldKey) : [];
 
+    const buildSchemaHeader = (resolved, incomingCols) => {
+      const areaColumns = Array.isArray(resolved.columns) ? resolved.columns.map(col => col.label) : [];
+      const hasSchema = areaColumns.length > 0;
+      if(!hasSchema){
+        const cols = incomingCols.concat(fileHeader);
+        return ensureFileIdLast(cols);
+      }
+      const ordered = ensureFileIdLast([...globalColumns, ...areaColumns, fileHeader]);
+      return ordered;
+    };
+
+    const normalizeFieldsToSchema = (header, fields) => {
+      const normalized = { ...(fields || {}) };
+      header.forEach(col => {
+        if(col === fileHeader) return;
+        if(!(col in normalized)) normalized[col] = '';
+      });
+      return normalized;
+    };
+
     const addRowToSheet = (areaId, areaName, rowFields, fileId, globalFieldMap) => {
       const resolved = resolveAreaIdentity(areaId, areaName, areaRegistry);
       const key = resolved.key;
       const label = resolved.label;
       const combinedFields = { ...(globalFieldMap || {}), ...(rowFields || {}) };
       const incomingCols = Object.keys(combinedFields);
+      let header = buildSchemaHeader(resolved, incomingCols);
+      const hasSchema = Array.isArray(resolved.columns) && resolved.columns.length > 0;
+      if(hasSchema){
+        const allowedCols = new Set(header);
+        const unexpected = incomingCols.filter(col => !allowedCols.has(col));
+        if(unexpected.length){
+          const err = new Error(`Unexpected columns for area ${label}: ${unexpected.join(', ')}`);
+          err.unexpectedColumns = unexpected;
+          throw err;
+        }
+      }
       const existing = sheets.get(key) || {
         name: label,
         areaId: resolved.areaId,
-        header: ensureFileIdLast(incomingCols.concat(fileHeader)),
-        rows: []
+        header,
+        rows: [],
+        rowType: resolved.rowType || ''
       };
-      existing.header = upsertHeaderColumns(existing.header, incomingCols);
-      existing.rows.push(normalizeAreaSheetRow(existing.header, combinedFields, fileId));
+      if(hasSchema){
+        existing.header = header;
+      } else {
+        existing.header = upsertHeaderColumns(existing.header, incomingCols);
+        header = existing.header;
+      }
+      const normalizedFields = hasSchema ? normalizeFieldsToSchema(existing.header, combinedFields) : combinedFields;
+      existing.rows.push(normalizeAreaSheetRow(existing.header, normalizedFields, fileId));
       sheets.set(key, existing);
     };
 

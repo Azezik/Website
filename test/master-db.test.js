@@ -269,4 +269,89 @@ assert.deepStrictEqual(
   ['CS1', 'CS2', 'CS3']
 );
 
+const schemaRecord = {
+  fields: {
+    invoice_number: { value: 'SCHEMA-100' }
+  },
+  fileId: 'schema-table',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      {
+        id: 'Warehouse',
+        name: 'Warehouse',
+        rowType: 'table',
+        columns: [
+          { fieldKey: 'aisle', label: 'Aisle' },
+          { fieldKey: 'shelf', label: 'Shelf' },
+          { fieldKey: 'bin', label: 'Bin' }
+        ]
+      }
+    ]
+  },
+  areaRows: [
+    { areaId: 'Warehouse', rows: [
+      { fields: { Aisle: { value: 'A' }, Shelf: { value: 'S1' } } },
+      { fields: { Aisle: { value: 'B' }, Bin: { value: 'B2' } } }
+    ] }
+  ]
+};
+
+const { sheets: schemaSheets } = MasterDB.flatten(schemaRecord);
+const warehouseSheet = schemaSheets.find(s => s.areaId === 'Warehouse');
+assert.ok(warehouseSheet, 'warehouse sheet present');
+assert.deepStrictEqual(warehouseSheet.header, ['Invoice #', 'Aisle', 'Shelf', 'Bin', 'File ID']);
+assert.deepStrictEqual(warehouseSheet.rows[1], ['SCHEMA-100', 'A', 'S1', '', 'schema-table']);
+assert.deepStrictEqual(warehouseSheet.rows[2], ['SCHEMA-100', 'B', '', 'B2', 'schema-table']);
+assert.strictEqual(warehouseSheet.rows.length, 3);
+
+assert.throws(() => MasterDB.flatten({
+  ...schemaRecord,
+  areaRows: [
+    { areaId: 'Warehouse', fields: { Aisle: { value: 'C' }, Extra: { value: '??' } } }
+  ]
+}), /Unexpected columns/);
+
+const blockSchemaRecord = {
+  fields: {
+    invoice_number: { value: 'BLOCK-1' }
+  },
+  fileId: 'schema-block',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      {
+        id: 'Placard',
+        name: 'Placard',
+        rowType: 'block',
+        columns: [
+          { fieldKey: 'message', label: 'Message' },
+          { fieldKey: 'status', label: 'Status' }
+        ]
+      }
+    ]
+  },
+  areaRows: [
+    { areaId: 'Placard', fields: { Message: { value: 'Hello' } } },
+    { areaId: 'Placard', fields: { Status: { value: 'Green' } } }
+  ]
+};
+
+const { sheets: blockSheets } = MasterDB.flatten(blockSchemaRecord);
+const placardSheet = blockSheets.find(s => s.areaId === 'Placard');
+assert.ok(placardSheet, 'placard sheet present');
+assert.deepStrictEqual(placardSheet.header, ['Invoice #', 'Message', 'Status', 'File ID']);
+assert.strictEqual(placardSheet.rows.length, 1 + 2);
+assert.deepStrictEqual(
+  placardSheet.rows.slice(1),
+  [
+    ['BLOCK-1', 'Hello', '', 'schema-block'],
+    ['BLOCK-1', '', 'Green', 'schema-block']
+  ]
+);
+
 console.log('MasterDB tests passed.');
