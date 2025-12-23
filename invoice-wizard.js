@@ -6,11 +6,30 @@ const KeywordWeighting = window.KeywordWeighting || null;
 const KeywordConstellation = window.KeywordConstellation || null;
 const AreaFinder = window.AreaFinder || null;
 
+const STATIC_DEBUG_STORAGE_KEY = 'wiz.staticDebug';
 const LEGACY_PDF_SCALE = 1.5;
 const BASE_PDF_SCALE = (window.devicePixelRatio || 1) * LEGACY_PDF_SCALE;
 const PDF_CSS_SCALE = LEGACY_PDF_SCALE / BASE_PDF_SCALE;
 
-let DEBUG_STATIC_FIELDS = Boolean(window.DEBUG_STATIC_FIELDS ?? /static-debug/i.test(location.search));
+function loadStoredStaticDebugPref(){
+  try {
+    const stored = localStorage.getItem(STATIC_DEBUG_STORAGE_KEY);
+    if(stored === '1') return true;
+    if(stored === '0') return false;
+  } catch(err){ /* ignore storage failures */ }
+  return null;
+}
+function persistStaticDebugPref(enabled){
+  try { localStorage.setItem(STATIC_DEBUG_STORAGE_KEY, enabled ? '1' : '0'); }
+  catch(err){ /* ignore storage failures */ }
+}
+
+const storedStaticDebug = loadStoredStaticDebugPref();
+let DEBUG_STATIC_FIELDS = Boolean(
+  window.DEBUG_STATIC_FIELDS ??
+  (storedStaticDebug !== null ? storedStaticDebug : undefined) ??
+  /static-debug/i.test(location.search)
+);
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
@@ -8511,7 +8530,9 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   DEBUG_STATIC_FIELDS = enabled;
   window.__DEBUG_OCRMAGIC__ = enabled;
   DEBUG_OCRMAGIC = enabled;
+  persistStaticDebugPref(enabled);
 });
+syncStaticDebugToggleUI();
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
