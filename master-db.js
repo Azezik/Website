@@ -65,12 +65,40 @@
 
   function normalizeMasterConfig(record){
     const cfg = record?.masterDbConfig || {};
-    const staticFields = Array.isArray(cfg.staticFields) ? cfg.staticFields : [];
+    const staticFieldsRaw = Array.isArray(cfg.staticFields) ? cfg.staticFields : [];
+    const staticFields = staticFieldsRaw
+      .map(f => ({
+        ...f,
+        fieldKey: f?.fieldKey || f?.key || f?.name,
+        label: f?.label || f?.fieldKey || f?.key || f?.name,
+        isArea: !!f?.isArea,
+        isSubordinate: !!f?.isSubordinate
+      }))
+      .filter(f => !!f.fieldKey);
+    const areaFieldKeysFromConfig = Array.isArray(cfg.areaFieldKeys) ? cfg.areaFieldKeys : [];
+    const areaFieldKeysFromStatic = staticFields
+      .filter(f => f.isArea || f.isSubordinate)
+      .map(f => f.fieldKey);
+    const areaFieldKeys = Array.from(new Set([...areaFieldKeysFromConfig, ...areaFieldKeysFromStatic])).filter(Boolean);
+    const documentFieldKeysOverride = Array.isArray(cfg.documentFieldKeys) ? cfg.documentFieldKeys.filter(Boolean) : null;
+    const documentFieldKeys = documentFieldKeysOverride || staticFields
+      .filter(f => !areaFieldKeys.includes(f.fieldKey))
+      .map(f => f.fieldKey);
     const includeLineItems = !!cfg.includeLineItems;
     const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
     const isCustomMasterDb = !!cfg.isCustomMasterDb;
     const globalFields = Array.isArray(cfg.globalFields) ? cfg.globalFields : [];
-    return { isCustomMasterDb, includeLineItems, staticFields, lineItemFields, globalFields };
+    const hasNonAreaFields = documentFieldKeys.length > 0 || (!areaFieldKeys.length && documentFieldKeysOverride === null);
+    return {
+      isCustomMasterDb,
+      includeLineItems,
+      staticFields,
+      lineItemFields,
+      globalFields,
+      areaFieldKeys,
+      documentFieldKeys,
+      hasNonAreaFields
+    };
   }
 
   function resolveLineItemColumns(config){
@@ -440,10 +468,10 @@
 
   const ROOT_SHEET_NAME = 'MasterDB';
 
-  function flattenRoot(records){
-    const config = normalizeMasterConfig(records[0]);
-    if(config.isCustomMasterDb){
-      return flattenCustom(records, config);
+  function flattenRoot(records, config){
+    const configRef = config || normalizeMasterConfig(records[0]);
+    if(configRef.isCustomMasterDb){
+      return flattenCustom(records, configRef);
     }
     const prepared = records.map(record => ({
       record,
@@ -637,7 +665,7 @@
       });
     });
 
-    return { header: HEADERS, rows, missingMap };
+    return { header: HEADERS, rows, missingMap, hasNonAreaFields: configRef.hasNonAreaFields };
   }
 
   function normalizeAreaFieldValue(cell){
@@ -678,10 +706,10 @@
     return values;
   }
 
-  function buildAreaSheets(records){
+  function buildAreaSheets(records, config){
     const sheets = new Map();
     const fileHeader = HEADERS[HEADERS.length - 1] || 'File ID';
-    const { globalFields = [] } = normalizeMasterConfig(records[0] || {});
+    const { globalFields = [] } = config || normalizeMasterConfig(records[0] || {});
     const globalColumns = Array.isArray(globalFields) ? globalFields.map(f => f.label || f.fieldKey) : [];
 
     const addRowToSheet = (areaId, areaName, rowFields, fileId, globalFieldMap) => {
@@ -725,19 +753,26 @@
 
   function flatten(ssot){
     const records = Array.isArray(ssot) ? ssot.filter(Boolean) : ssot ? [ssot] : [];
+    const normalizedConfig = normalizeMasterConfig(records[0]);
     const areaRowsPresent = records.some(r => Array.isArray(r?.areaRows) && r.areaRows.length);
     let root;
     try {
-      root = flattenRoot(records);
+      root = flattenRoot(records, normalizedConfig);
     } catch(err){
       const emptyRootOk = areaRowsPresent && /Exporter input empty/.test(err?.message || '');
       if(!emptyRootOk) throw err;
-      root = { header: HEADERS, rows: [HEADERS], missingMap: emptyMissingMap() };
+      root = {
+        header: HEADERS,
+        rows: [HEADERS],
+        missingMap: emptyMissingMap(),
+        hasNonAreaFields: normalizedConfig.hasNonAreaFields
+      };
     }
-    const areaSheets = buildAreaSheets(records);
+    const areaSheets = buildAreaSheets(records, normalizedConfig);
     const rootHasRows = root.rows && root.rows.length > 1;
+    const hasNonAreaFields = root.hasNonAreaFields ?? normalizedConfig.hasNonAreaFields;
     const sheets = [];
-    if(rootHasRows || !areaSheets.length){
+    if((hasNonAreaFields && rootHasRows) || (!areaSheets.length && hasNonAreaFields)){
       sheets.push({ name: ROOT_SHEET_NAME, header: root.header, rows: root.rows });
     }
     sheets.push(...areaSheets);
