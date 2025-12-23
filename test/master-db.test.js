@@ -211,4 +211,29 @@ assert.deepStrictEqual(backroomSheet.header, ['Invoice #', 'bin', 'status', 'Fil
 assert.strictEqual(backroomSheet.rows[2][2], '');
 assert.strictEqual(backroomSheet.rows[2][3], 'file-area-1');
 
+const areaOnlyRecord = {
+  ...ssot,
+  fileId: 'area-only',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areaFieldKeys: ['invoice_number'],
+    documentFieldKeys: []
+  },
+  lineItems: [],
+  areaRows: [
+    { areaId: 'Floor', fields: { aisle: { value: 'C3' } } }
+  ]
+};
+
+const { sheets: areaOnlySheets } = MasterDB.flatten(areaOnlyRecord);
+const rootAreaOnlySheet = areaOnlySheets.find(s => s.name === 'MasterDB');
+assert.ok(!rootAreaOnlySheet, 'root sheet omitted when fields are area-only');
+const floorSheet = areaOnlySheets.find(s => s.areaId === 'Floor');
+assert.ok(floorSheet, 'Floor sheet present');
+assert.strictEqual(floorSheet.rows.length, 1 + 1);
+assert.strictEqual(floorSheet.rows[1][0], 'INV-001');
+assert.strictEqual(floorSheet.rows[1][1], 'C3');
+
 console.log('MasterDB tests passed.');
