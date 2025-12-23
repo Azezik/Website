@@ -27,9 +27,12 @@ function persistStaticDebugPref(enabled){
 const storedStaticDebug = loadStoredStaticDebugPref();
 let DEBUG_STATIC_FIELDS = Boolean(
   window.DEBUG_STATIC_FIELDS ??
-  (storedStaticDebug !== null ? storedStaticDebug : undefined) ??
+  (storedStaticDebug !== null ? storedStaticDebug : true) ??
   /static-debug/i.test(location.search)
 );
+if(storedStaticDebug === null){
+  persistStaticDebugPref(true);
+}
 window.DEBUG_STATIC_FIELDS = DEBUG_STATIC_FIELDS;
 let staticDebugLogs = [];
 
@@ -1553,7 +1556,9 @@ function projectColumnFera(fera, pageWidth, pageHeight){
 }
 
 function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
-  if(!saved || !candidate) return { ok: true, matches: 0, textMatch: false, tolerance: 0 };
+  if(!saved || !candidate){
+    return { ok: true, softOk: true, status: 'skip', matches: 0, textMatch: false, tolerance: 0, nearMisses: 0 };
+  }
   const targetHeight = candidate.pageHeightPx || 0;
   const targetWidth = candidate.pageWidthPx || 0;
   const expectedTop = projectAnchorDistance(saved.topPct, saved.topPx, saved.pageHeightPx, targetHeight);
@@ -1568,56 +1573,70 @@ function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
     { expected: expectedRight, actual: candidate.rightPx, label:'right' }
   ];
   const available = distances.filter(d => Number.isFinite(d.expected) && Number.isFinite(d.actual));
+  const minDim = Math.min(targetHeight || 0, targetWidth || 0);
   let toleranceBase = Number.isFinite(expectedText) ? expectedText : candidate.textHeightPx;
   if(!Number.isFinite(toleranceBase) || toleranceBase <= 0){
-    toleranceBase = Math.min(targetHeight || 0, targetWidth || 0) * 0.02;
+    toleranceBase = minDim * 0.02;
   }
+  const pctFloor = Number.isFinite(minDim) && minDim > 0 ? minDim * 0.025 : 0;
   if(!Number.isFinite(toleranceBase) || toleranceBase <= 0){ toleranceBase = 4; }
-  const tolerance = Math.max(4, toleranceBase * 1.35);
-  const matches = available.filter(d => Math.abs(d.actual - d.expected) <= tolerance).length;
+  const tolerance = Math.max(4, Math.max(toleranceBase * 1.35, pctFloor));
+  const softTolerance = tolerance * 2.25;
+  const edgeStats = available.map(d => ({
+    label: d.label,
+    delta: Math.abs(d.actual - d.expected),
+    within: Math.abs(d.actual - d.expected) <= tolerance,
+    soft: Math.abs(d.actual - d.expected) <= softTolerance
+  }));
+  const matches = edgeStats.filter(e => e.within).length;
+  const nearMisses = edgeStats.filter(e => !e.within && e.soft).length;
   const textMatch = Number.isFinite(expectedText) && Number.isFinite(candidate.textHeightPx)
-    ? Math.abs(candidate.textHeightPx - expectedText) <= tolerance
+    ? Math.abs(candidate.textHeightPx - expectedText) <= softTolerance
     : false;
   if(!available.length){
     const ok = !Number.isFinite(expectedText) || textMatch;
-    return { ok, matches: 0, textMatch, tolerance };
+    const softOk = !ok; // allow degrade when nothing to compare
+    return { ok, softOk, status: ok ? 'ok' : 'soft', matches: 0, textMatch, tolerance, nearMisses };
   }
   const required = Math.min(2, available.length);
-  let ok = matches >= required;
-  if(!ok){
-    if(required === 1){
-      ok = matches === 1 || (matches === 0 && textMatch);
-    } else if(matches === required - 1 && textMatch){
-      ok = true;
-    }
+  let ok = matches >= required || (matches >= 1 && required === 1);
+  if(!ok && matches === required - 1 && textMatch){
+    ok = true;
   }
+  const softOk = !ok && (matches + nearMisses >= required || textMatch);
+  const status = ok ? 'ok' : (softOk ? 'soft' : 'fail');
   if(staticDebugEnabled() && debugCtx?.enabled){
     const annotated = distances.map(d => {
       const ready = Number.isFinite(d.expected) && Number.isFinite(d.actual);
       const delta = ready ? Math.round(d.actual - d.expected) : null;
       const edgeOk = ready ? Math.abs(d.actual - d.expected) <= tolerance : null;
-      return `${d.label}=${ready ? (edgeOk ? 'OK' : 'FAIL') + ` (${delta >= 0 ? '+' : ''}${delta}px)` : 'n/a'}`;
+      const edgeSoft = ready ? Math.abs(d.actual - d.expected) <= softTolerance : null;
+      return `${d.label}=${ready ? (edgeOk ? 'OK' : edgeSoft ? 'SOFT' : 'FAIL') + ` (${delta >= 0 ? '+' : ''}${delta}px)` : 'n/a'}`;
     }).join(', ');
     const heightStatus = Number.isFinite(expectedText) && Number.isFinite(candidate.textHeightPx)
-      ? `${Math.abs(candidate.textHeightPx - expectedText) <= tolerance ? 'OK' : 'FAIL'} (${Math.round(candidate.textHeightPx - expectedText)}px)`
+      ? `${Math.abs(candidate.textHeightPx - expectedText) <= softTolerance ? 'OK' : 'FAIL'} (${Math.round(candidate.textHeightPx - expectedText)}px)`
       : 'n/a';
     logStaticDebug(
-      `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} viewport=${Math.round(targetWidth)}x${Math.round(targetHeight)} -> match=${ok}`
+      `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} soft=${Math.round(softTolerance)} viewport=${Math.round(targetWidth)}x${Math.round(targetHeight)} -> status=${status}`
     );
   }
-  return { ok, matches, textMatch, tolerance };
+  return { ok, softOk, status, matches, textMatch, tolerance, nearMisses };
 }
 
 function anchorMatchForBox(savedMetrics, box, tokens, viewportW, viewportH, debugCtx=null){
-  if(!savedMetrics) return true;
+  if(!savedMetrics) return { ok: true, softOk: true, status: 'skip', matches: 0, textMatch: false, tolerance: 0, nearMisses: 0, score: 1 };
   if(!box || !Number.isFinite(viewportW) || !Number.isFinite(viewportH) || viewportW <= 0 || viewportH <= 0){
-    return false;
+    return { ok:false, softOk:false, status:'fail', matches:0, textMatch:false, tolerance:0, nearMisses:0, score:0 };
   }
   const heights = (tokens || []).map(t => Number.isFinite(t?.h) ? t.h : null).filter(v => Number.isFinite(v) && v > 0);
   const fallbackHeight = heights.length ? median(heights) : (Number.isFinite(box.h) ? box.h : 0);
   const metrics = anchorMetricsFromBox(box, viewportW, viewportH, heights, fallbackHeight);
-  if(!metrics) return false;
-  return anchorMetricsSatisfied(savedMetrics, metrics, debugCtx).ok;
+  if(!metrics){
+    return { ok:false, softOk:true, status:'soft', matches:0, textMatch:false, tolerance:0, nearMisses:0, score:0.75 };
+  }
+  const res = anchorMetricsSatisfied(savedMetrics, metrics, debugCtx);
+  const score = res.ok ? 1 : res.softOk ? 0.82 : 0;
+  return { ...res, score };
 }
 
 function validateNormBox(nb){
@@ -4635,8 +4654,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
   const enforceAnchors = isRunMode() && !!fieldSpec.anchorMetrics;
   const anchorMatchesCandidate = cand => {
-    if(!enforceAnchors) return true;
-    if(!cand || !cand.boxPx) return false;
+    if(!enforceAnchors) return { ok:true, softOk:true, status:'skip', score:1 };
+    if(!cand || !cand.boxPx) return { ok:false, softOk:false, status:'fail', score:0 };
     const debugCtx = (runMode && ftype==='static' && isStaticFieldDebugTarget(fieldSpec.fieldKey))
       ? { enabled:true, fieldKey: fieldSpec.fieldKey, page: cand.boxPx.page }
       : null;
@@ -4795,7 +4814,11 @@ function labelValueHeuristic(fieldSpec, tokens){
     const hits = assembled?.hits || tokensInBox(tokens, searchBox, { minOverlap: staticMinOverlap });
     const lines = assembled?.lines || groupIntoLines(hits);
     const observedLineCount = assembled?.lineCount ?? (assembled?.lines?.length ?? lines.length ?? 0);
-    const anchorOk = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+    const anchorRes = anchorMatchesCandidate({ boxPx: searchBox, tokens: hits });
+    const anchorOk = anchorRes.ok || anchorRes.softOk;
+    const anchorFactor = anchorRes.ok ? 1 : anchorRes.softOk ? 0.85 : 0.7;
+    const anchorStatus = anchorRes.status || (anchorOk ? 'ok' : 'fail');
+    const anchorScore = anchorRes.score ?? anchorFactor;
     const adjustConfidenceForLines = (confidence, observed=observedLineCount)=>{
       const expected = fieldSpec?.lineMetrics?.lineCount ?? fieldSpec?.lineCount ?? observed;
       if(!expected || !observed) return { confidence, expected, factor: 1 };
@@ -4823,7 +4846,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
         logStaticDebug(
           `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=0 anchorsOk=${anchorOk} fingerprintOk=false finalText=<empty> conf=0`,
-          { anchorsOk: anchorOk, fingerprintOk:false, text:'', confidence:0, box: searchBox }
+          { anchorsOk: anchorRes.status || (anchorOk ? 'ok' : 'fail'), fingerprintOk:false, text:'', confidence:0, box: searchBox }
         );
       }
       return null;
@@ -4885,11 +4908,13 @@ function labelValueHeuristic(fieldSpec, tokens){
         correctionsApplied: baseClean.correctionsApplied,
         corrections: baseClean.correctionsApplied,
         boxPx: searchBox,
-        confidence,
+        confidence: clamp(confidence * anchorFactor, 0, 1),
         tokens: hits,
         cleanedOk,
         fingerprintOk,
         anchorOk,
+        anchorStatus,
+        anchorScore,
         hintDistance,
         withinHint: withinHintBand,
         lineCount: lineCountForEval,
@@ -4904,8 +4929,8 @@ function labelValueHeuristic(fieldSpec, tokens){
           );
         }
         logStaticDebug(
-          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
-          { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+          `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchors=${anchorRes.status||'n/a'} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+          { anchorsOk: anchorRes, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
         );
       }
       return attemptResult;
@@ -4926,6 +4951,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       lineAdj = adjustConfidenceForLines(confidence);
       confidence = lineAdj.confidence;
     }
+    confidence = clamp(confidence * anchorFactor, 0, 1);
     const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
     const attemptResult = {
       value: sel.value,
@@ -4942,6 +4968,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       cleanedOk,
       fingerprintOk,
       anchorOk,
+      anchorStatus,
+      anchorScore,
       hintDistance,
       withinHint: withinHintBand,
       lineCount: observedLineCount,
@@ -4956,8 +4984,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         );
       }
       logStaticDebug(
-        `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchorsOk=${anchorOk} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
-        { anchorsOk: anchorOk, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
+        `attempt field=${fieldSpec.fieldKey||''} page=${searchBox.page||''} hits=${hits.length} anchors=${anchorStatus} fingerprintOk=${fingerprintOk} finalText="${(attemptResult.value||'').replace(/\s+/g,' ')}" conf=${attemptResult.confidence}`,
+        { anchorsOk: anchorStatus, fingerprintOk, text: attemptResult.value, confidence: attemptResult.confidence, box: searchBox }
       );
     }
     return attemptResult;
@@ -5037,11 +5065,12 @@ function labelValueHeuristic(fieldSpec, tokens){
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
       const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
-      const anchorOk = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
+      const anchorRes = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
+      const anchorOk = anchorRes.ok || anchorRes.softOk;
       const keywordScore = keywordPrediction && KeywordWeighting?.computeKeywordWeight
         ? KeywordWeighting.computeKeywordWeight(box, keywordPrediction, { pageW, pageH, strongAnchor: anchorOk || fingerprintOk })
         : 1;
-      const anchorScore = anchorOk ? 1 : 0.82;
+      const anchorScore = anchorRes.score ?? (anchorOk ? 1 : 0.82);
       const fpScore = staticRun
         ? (fingerprintOk ? STATIC_FP_SCORES.ok : STATIC_FP_SCORES.fail)
         : (fingerprintOk ? 1.1 : 0.65);
@@ -5050,7 +5079,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
       const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
-      const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorOk ? 1 : 0.85) * (0.55 + distanceScore * 0.45), 0, 1);
+      const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorRes.ok ? 1 : anchorRes.softOk ? 0.85 : 0.75) * (0.55 + distanceScore * 0.45), 0, 1);
       if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey) && anchorRef){
         const anchorDeltas = {
           top: Math.round(box.y - anchorRef.y),
@@ -5250,7 +5279,9 @@ function labelValueHeuristic(fieldSpec, tokens){
           : null;
         const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, fpDebugCtx);
         const cleanedOk = !!(cleaned.value || cleaned.raw);
-        const anchorOk = anchorMatchesCandidate({ boxPx: box, tokens: ordered });
+        const anchorResBox = anchorMatchesCandidate({ boxPx: box, tokens: ordered });
+        const anchorOk = anchorResBox.ok || anchorResBox.softOk;
+        const anchorFactorBox = anchorResBox.ok ? 1 : anchorResBox.softOk ? 0.85 : 0.7;
         const baseConf = cleaned.conf || (cleanedOk ? 1 : 0.1);
         let confidence = fingerprintOk ? baseConf : Math.max(0.2, Math.min(baseConf * 0.6, 0.5));
         const lineInfo = computeLineDiff(lines.length);
@@ -5270,11 +5301,13 @@ function labelValueHeuristic(fieldSpec, tokens){
           correctionsApplied: cleaned.correctionsApplied,
           corrections: cleaned.correctionsApplied,
           boxPx: box,
-          confidence,
+          confidence: clamp(confidence * anchorFactorBox, 0, 1),
           tokens: ordered,
           cleanedOk,
           fingerprintOk,
           anchorOk,
+          anchorStatus: anchorResBox.status || (anchorOk ? 'ok' : 'fail'),
+          anchorScore: anchorResBox.score ?? anchorFactorBox,
           hintDistance,
           withinHint: withinHintBand,
           lineCount: lines.length,
@@ -5287,7 +5320,7 @@ function labelValueHeuristic(fieldSpec, tokens){
         if(runMode && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
           logStaticDebug(
             `box-locked field=${fieldSpec.fieldKey||''} page=${box.page||basePx.page||''} hits=${ordered.length} box=${formatBoxForLog(box)} raw="${rawText.replace(/\s+/g,' ').trim()}"`,
-            { hits: ordered.length, tokenPreview: ordered.slice(0,3).map(t=>({ text:t.text, box:{ x:t.x, y:t.y, w:t.w, h:t.h } })), box, lineAdj }
+            { hits: ordered.length, tokenPreview: ordered.slice(0,3).map(t=>({ text:t.text, box:{ x:t.x, y:t.y, w:t.w, h:t.h } })), box, lineAdj, anchor: anchorResBox }
           );
         }
       }
@@ -5312,7 +5345,10 @@ function labelValueHeuristic(fieldSpec, tokens){
           const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
           const r = await attempt(search);
           if(r){ recordHintCandidate(r); }
-          if(r && !anchorMatchesCandidate(r)){ continue; }
+          if(r){
+            const anchorRes = anchorMatchesCandidate(r);
+            if(!(anchorRes.ok || anchorRes.softOk)){ continue; }
+          }
           if(r && r.fingerprintOk && r.cleanedOk){
             result = r; method='bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; } hintLocked = true; break;
           }
@@ -5349,13 +5385,15 @@ function labelValueHeuristic(fieldSpec, tokens){
       if(m){
         const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
         const r = await attempt(box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
+        const anchorRes = r ? anchorMatchesCandidate(r) : null;
+        if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
       }
       if(!result){
         const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
         if(a){
           const r = await attempt(a.box);
-          if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+          const anchorRes = r ? anchorMatchesCandidate(r) : null;
+          if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
         }
       }
       if(!result){
@@ -5366,7 +5404,8 @@ function labelValueHeuristic(fieldSpec, tokens){
             const r = await attempt(box);
             const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
             const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
-            if(r && anchorMatchesCandidate(r) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
+            const anchorRes = r ? anchorMatchesCandidate(r) : null;
+            if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value && geomOk && gramOk){ result=r; method=`partial-${half}`; score=m.score; comp=m.comparator; break; }
           }
         }
       }
@@ -5374,7 +5413,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       const a = anchorAssist(fieldSpec.landmark.anchorHints, tokens, basePx);
       if(a){
         const r = await attempt(a.box);
-        if(r && anchorMatchesCandidate(r) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
+        const anchorRes = r ? anchorMatchesCandidate(r) : null;
+        if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){ result=r; method='anchor'; comp='text_anchor'; score:null; }
       }
     }
   }
@@ -5393,7 +5433,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       for(const pad of [0,3]){
         const probe = { x: triangulatedBox.x - pad, y: triangulatedBox.y - pad, w: triangulatedBox.w + pad*2, h: triangulatedBox.h + pad*2, page: triangulatedBox.page };
         const r = await attempt(probe);
-        if(r && anchorMatchesCandidate(r) && r.value){
+        const anchorRes = r ? anchorMatchesCandidate(r) : null;
+        if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){
           r.confidence = Math.min(r.confidence || 0.45, 0.45);
           result = r; method='keyword-triangulation'; comp='keyword'; score = score || null; break;
         }
@@ -5406,12 +5447,13 @@ function labelValueHeuristic(fieldSpec, tokens){
 
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
-    if(lv.value){
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
-      let candidateTokens = [];
-      if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
-      const boxOk = !enforceAnchors || (lv.usedBox && anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height));
-      if(boxOk){
+      if(lv.value){
+        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
+        let candidateTokens = [];
+        if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
+        const anchorRes = lv.usedBox ? anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height) : null;
+        const boxOk = !enforceAnchors || (anchorRes && (anchorRes.ok || anchorRes.softOk));
+        if(boxOk){
         result = { value: cleaned.value || cleaned.raw, raw: cleaned.raw, corrected: cleaned.corrected, code: cleaned.code, shape: cleaned.shape, score: cleaned.score, correctionsApplied: cleaned.correctionsApplied, corrections: cleaned.correctionsApplied, boxPx: lv.usedBox, confidence: lv.confidence, method: method||'anchor', score:null, comparator: 'text_anchor', tokens: candidateTokens };
       }
     }
@@ -5997,7 +6039,10 @@ async function extractLineItems(profile){
       if(desc.sourcePage && desc.sourcePage !== pageNum) return { tokens: tokList, bandTokens: tokList };
       const saved = desc.anchorSampleMetrics || (tableHints.rowAnchor?.fieldKey === desc.fieldKey ? tableHints.rowAnchor.metrics : null);
       if(!saved) return { tokens: tokList, bandTokens: tokList };
-      const filtered = (tokList || []).filter(tok => anchorMatchForBox(saved, { x: tok.x, y: tok.y, w: tok.w, h: tok.h }, [tok], pageWidth, pageHeight));
+      const filtered = (tokList || []).filter(tok => {
+        const anchorRes = anchorMatchForBox(saved, { x: tok.x, y: tok.y, w: tok.w, h: tok.h }, [tok], pageWidth, pageHeight);
+        return anchorRes.ok || anchorRes.softOk;
+      });
       if(filtered.length) return { tokens: tokList, bandTokens: filtered };
       return { tokens: [], bandTokens: [] };
     };
