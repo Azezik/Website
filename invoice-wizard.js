@@ -483,11 +483,17 @@ function normalizeFieldKey(name='', usedKeys=new Set(), fallbackPrefix='field'){
 
 function normalizeTemplateFields(fields){
   const used = new Set();
+  const sanitizeKey = (name='', fallback='field') => (name || '').toLowerCase()
+    .replace(/[^a-z0-9]+/gi, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/^_+|_+$/g, '') || fallback;
   return (fields || []).map((field, idx) => {
     const name = (field?.name || '').trim();
     const fallback = `field_${idx + 1}`;
     const preferredKey = field?.fieldKey && !looksLikeGeneratedId(field.fieldKey) ? field.fieldKey : '';
-    const key = normalizeFieldKey(preferredKey || name, used, fallback);
+    const sanitizedKey = sanitizeKey(preferredKey || name, fallback);
+    const aliasedKey = FIELD_ALIASES[sanitizedKey] || sanitizedKey;
+    const key = normalizeFieldKey(aliasedKey, used, aliasedKey || fallback);
     const rawType = (field?.fieldType || field?.type || 'static').toLowerCase();
     const normalizedType = rawType === 'dynamic' ? 'dynamic' : (rawType === 'areabox' ? 'areabox' : 'static');
     const magicDataType = normalizeMagicDataType(field?.magicDataType || field?.magicType);
