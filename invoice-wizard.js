@@ -316,6 +316,7 @@ let state = {
   builderFields: [],
   builderEditingId: null,
   currentAreaRows: [],
+  wizardComplete: false,
 };
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
@@ -369,6 +370,7 @@ function clearTransientStateLocal(){
   state.stepIdx = 0; state.steps = [];
   state.selectionCss = null; state.selectionPx = null;
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
+  state.wizardComplete = false;
   state.areaSelections = {};
   state.pendingSelection = null; state.matchPoints = [];
   state.snappedLineMetrics = null;
@@ -3716,6 +3718,13 @@ function saveBuilderTemplate(){
   if(els.app) els.app.style.display = 'none';
   return saved;
 }
+
+function setWizardCompletionMode(isComplete){
+  state.wizardComplete = !!isComplete;
+  if(!els.confirmBtn) return;
+  els.confirmBtn.textContent = isComplete ? 'Save Wizard' : 'Confirm';
+}
+
 function updatePrompt(){
   const step = state.steps[state.stepIdx];
   els.stepLabel.textContent = `Step ${state.stepIdx+1}/${state.steps.length}`;
@@ -3725,6 +3734,7 @@ function updatePrompt(){
 function goToStep(idx){
   const max = state.steps.length - 1;
   state.stepIdx = Math.max(0, Math.min(idx, max));
+  setWizardCompletionMode(false);
   els.confirmBtn.disabled = false;
   els.skipBtn.disabled = false;
   updatePrompt();
@@ -3732,12 +3742,22 @@ function goToStep(idx){
 }
 
 function finishWizard(){
-  els.confirmBtn.disabled = true;
+  setWizardCompletionMode(true);
+  els.confirmBtn.disabled = false;
   els.skipBtn.disabled = true;
   els.backBtn.disabled = false;
-  document.getElementById('promptBar').innerHTML =
-    `<span id="stepLabel">Wizard complete</span>
-     <strong id="questionText">Click “Save & Return” or export JSON.</strong>`;
+  els.stepLabel.textContent = 'Wizard complete';
+  els.questionText.textContent = 'Click “Save & Return” or export JSON.';
+}
+
+function saveWizardAndReturn(){
+  saveCurrentProfileAsModel();
+  compileDocument(state.currentFileId);
+  activateRunMode({ clearDoc: true });
+  els.wizardSection.style.display = 'none';
+  els.app.style.display = 'block';
+  showTab('extracted-data');
+  populateModelSelect();
 }
 
 function afterConfirmAdvance(){
@@ -8571,7 +8591,10 @@ els.clearSelectionBtn?.addEventListener('click', ()=>{
 });
 
 els.backBtn?.addEventListener('click', ()=>{
-  if(state.stepIdx > 0) goToStep(state.stepIdx - 1);
+  const prevIdx = Math.max(0, state.stepIdx - 1);
+  if(state.wizardComplete || state.stepIdx !== prevIdx){
+    goToStep(prevIdx);
+  }
 });
 
 els.skipBtn?.addEventListener('click', ()=>{
@@ -8581,6 +8604,10 @@ els.skipBtn?.addEventListener('click', ()=>{
 
 // Confirm → extract + save + insert record, advance step
 els.confirmBtn?.addEventListener('click', async ()=>{
+  if(state.wizardComplete){
+    saveWizardAndReturn();
+    return;
+  }
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
@@ -8755,13 +8782,7 @@ els.exportMasterDbBtn?.addEventListener('click', ()=> downloadMasterDb(state.sav
 els.exportMasterDbDataBtn?.addEventListener('click', ()=> downloadMasterDb());
 els.exportMissingBtn?.addEventListener('click', ()=> downloadMissingCells(state.savedFieldsRecord));
 els.finishWizardBtn?.addEventListener('click', ()=>{
-  saveCurrentProfileAsModel();
-  compileDocument(state.currentFileId);
-  activateRunMode({ clearDoc: true });
-  els.wizardSection.style.display = 'none';
-  els.app.style.display = 'block';
-  showTab('extracted-data');
-  populateModelSelect();
+  saveWizardAndReturn();
 });
 
 /* ---------------------------- Batch ------------------------------- */
