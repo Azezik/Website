@@ -479,7 +479,15 @@ function bumpDebugBlank(){
 }
 
 function currentWizardId(){
-  return state.activeWizardId || DEFAULT_WIZARD_ID;
+  return state.activeWizardId || state.profile?.wizardId || DEFAULT_WIZARD_ID;
+}
+
+function syncActiveWizardId(profile){
+  const incoming = profile?.wizardId;
+  if(!incoming) return;
+  if(state.activeWizardId !== incoming){
+    state.activeWizardId = incoming;
+  }
 }
 
 function getActiveProfileType(){
@@ -8948,6 +8956,7 @@ async function runModeExtractFileWithProfile(file, profile){
     activateRunMode({ clearDoc: true });
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
+    syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
     const activeProfile = state.profile || profile || { fields: [] };
     const prepared = await prepareRunDocument(file);
@@ -9038,10 +9047,11 @@ async function processBatch(files){
   activateRunMode({ clearDoc: true });
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
-  ensureProfile(); renderSavedFieldsTable();
   const modelId = document.getElementById('model-select')?.value || '';
   const model = modelId ? getModels().find(m => m.id === modelId) : null;
   const profile = model ? model.profile : state.profile;
+  syncActiveWizardId(profile);
+  ensureProfile(); renderSavedFieldsTable();
 
   try {
     for(const f of files){
