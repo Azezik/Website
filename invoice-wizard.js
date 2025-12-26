@@ -600,7 +600,20 @@ function deriveMasterDbSchema(fields){
   const sorted = (fields || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   return sorted
     .filter(f => (f.fieldType || f.type || 'static') === 'static')
-    .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
+    .map(f => {
+      const normalizedType = (f.fieldType || f.type || 'static').toLowerCase();
+      const isArea = !!f.isArea || normalizedType === 'areabox';
+      const areaId = f.areaId || (isArea ? (f.id || f.fieldId || f.fieldKey) : null);
+      const isSubordinate = !!f.isSubordinate || (!!areaId && !isArea);
+      return {
+        fieldKey: f.fieldKey,
+        label: f.label || f.name || f.fieldKey,
+        isArea,
+        isSubordinate,
+        areaId: areaId || undefined,
+        isGlobal: !!f.isGlobal
+      };
+    });
 }
 
 function deriveGlobalFields(fields){
@@ -608,21 +621,61 @@ function deriveGlobalFields(fields){
   return sorted
     .filter(f => (f.fieldType || f.type || 'static') === 'static')
     .filter(f => !f.isArea && !f.isSubordinate && !!f.isGlobal)
-    .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
+    .map(f => ({
+      fieldKey: f.fieldKey,
+      label: f.label || f.name || f.fieldKey,
+      isGlobal: true
+    }));
 }
 
 function normalizeMasterDbConfig(config, fields){
   const staticFields = deriveMasterDbSchema(fields);
   const derivedGlobalFields = deriveGlobalFields(fields);
   const includeLineItems = !!config?.includeLineItems;
-  const isCustomMasterDb = !!config?.isCustomMasterDb;
+  const isCustomMasterDb = isSkinV2 ? true : !!config?.isCustomMasterDb;
+  const templateAreas = Array.isArray(config?.areas) ? config.areas : [];
+  const normalizedTemplateAreas = templateAreas
+    .map(a => ({
+      ...a,
+      id: a?.id || a?.areaId || a?.name || a?.key,
+      name: a?.name || a?.label || a?.id || a?.areaId || a?.key
+    }))
+    .filter(a => a.id || a.name);
   const lineItemFields = Array.isArray(config?.lineItemFields)
     ? config.lineItemFields.map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }))
     : [];
   const globalFields = Array.isArray(config?.globalFields)
     ? config.globalFields.map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }))
     : derivedGlobalFields;
-  return { isCustomMasterDb, staticFields, includeLineItems, lineItemFields, globalFields };
+  const areaFieldKeysFromConfig = Array.isArray(config?.areaFieldKeys) ? config.areaFieldKeys : [];
+  const areaFieldKeysFromFields = (fields || [])
+    .filter(f => f && (f.isArea || f.isSubordinate))
+    .map(f => f.fieldKey)
+    .filter(Boolean);
+  const areaFieldKeys = Array.from(new Set([...areaFieldKeysFromConfig, ...areaFieldKeysFromFields]));
+  const documentFieldKeys = Array.isArray(config?.documentFieldKeys)
+    ? config.documentFieldKeys.filter(Boolean)
+    : staticFields.filter(f => !areaFieldKeys.includes(f.fieldKey)).map(f => f.fieldKey);
+  const derivedAreas = Array.isArray(fields)
+    ? fields.filter(f => f && (f.isArea || (f.fieldType || f.type) === 'areabox')).map(f => ({
+      id: f.areaId || f.fieldKey,
+      name: f.label || f.name || f.fieldKey
+    }))
+    : [];
+  const areaMap = new Map();
+  normalizedTemplateAreas.forEach(area => {
+    const id = area.id || area.name;
+    if(!id) return;
+    areaMap.set(id, area);
+  });
+  derivedAreas.forEach(area => {
+    if(!area?.id) return;
+    if(!areaMap.has(area.id)){
+      areaMap.set(area.id, { ...area, aliases: [] });
+    }
+  });
+  const areas = Array.from(areaMap.values());
+  return { isCustomMasterDb, staticFields, includeLineItems, lineItemFields, globalFields, areaFieldKeys, documentFieldKeys, areas };
 }
 
 function normalizeTemplate(template){
@@ -632,22 +685,107 @@ function normalizeTemplate(template){
   return { ...template, fields, masterDbConfig, isCustomMasterDb: !!masterDbConfig.isCustomMasterDb };
 }
 
-function buildMasterDbConfigFromProfile(profile, templateConfig){
-  const fields = profile?.fields || [];
-  const baseStaticFields = deriveMasterDbSchema(fields);
-  const globalFields = deriveGlobalFields(fields);
-  const includeLineItems = templateConfig?.includeLineItems ?? profile?.masterDbConfig?.includeLineItems ?? fields.some(f => (f.type || f.fieldType) === 'column');
-  const isCustomMasterDb = templateConfig?.isCustomMasterDb ?? profile?.masterDbConfig?.isCustomMasterDb ?? false;
+function buildMasterDbConfigFromProfile(profile, templateConfig, template){
+  const profileFields = Array.isArray(profile?.fields) ? profile.fields : [];
+  const templateFields = Array.isArray(template?.fields) ? template.fields : [];
+  const templateByKey = new Map(templateFields.map(f => [f.fieldKey, f]));
+  const templateById = new Map();
+  templateFields.forEach(f => {
+    const key = f.id || f.fieldId;
+    if(key) templateById.set(key, f);
+  });
+
+  const normalizeField = (field, templateField) => {
+    const source = templateField || field || {};
+    const fieldKey = source.fieldKey || field?.fieldKey;
+    const rawType = (field?.fieldType || field?.type || source.fieldType || source.type || 'static').toLowerCase();
+    const normalizedType = rawType === 'dynamic' ? 'dynamic' : (rawType === 'areabox' ? 'areabox' : 'static');
+    const inferredAreaId = source.areaId || field?.areaId || (normalizedType === 'areabox' ? (source.id || source.fieldId || fieldKey) : null);
+    const isArea = !!(field?.isArea || source.isArea || normalizedType === 'areabox');
+    const isSubordinate = !!(field?.isSubordinate || source.isSubordinate || (!!inferredAreaId && !isArea));
+    const isGlobal = !isArea && !isSubordinate && !!(field?.isGlobal ?? source.isGlobal);
+    const label = field?.label || field?.name || source.label || source.name || fieldKey;
+    return {
+      ...source,
+      ...field,
+      fieldKey,
+      fieldId: field?.fieldId || field?.id || source.id || source.fieldId,
+      fieldType: normalizedType,
+      type: normalizedType === 'dynamic' ? 'column' : 'static',
+      areaId: inferredAreaId || undefined,
+      isArea,
+      isSubordinate,
+      isGlobal,
+      label,
+      name: field?.name || source.name || label
+    };
+  };
+
+  const mergedMap = new Map();
+  profileFields.forEach(f => {
+    const tpl = templateByKey.get(f.fieldKey) || templateById.get(f.fieldId || f.id);
+    const merged = normalizeField(f, tpl);
+    if(merged?.fieldKey) mergedMap.set(merged.fieldKey, merged);
+  });
+  templateFields.forEach(tf => {
+    if(mergedMap.has(tf.fieldKey)) return;
+    const merged = normalizeField(tf, tf);
+    if(merged?.fieldKey) mergedMap.set(merged.fieldKey, merged);
+  });
+  const mergedFields = Array.from(mergedMap.values());
+
+  const includeLineItems = templateConfig?.includeLineItems
+    ?? profile?.masterDbConfig?.includeLineItems
+    ?? mergedFields.some(f => (f.type || f.fieldType) === 'column' || (f.fieldType || f.type) === 'dynamic');
+
+  const templateLineItems = mergedFields
+    .filter(f => (f.fieldType || f.type) === 'dynamic')
+    .map(f => ({ fieldKey: f.fieldKey, label: f.label || f.name || f.fieldKey }));
   const lineItemFields = Array.isArray(templateConfig?.lineItemFields)
     ? templateConfig.lineItemFields
-    : Array.isArray(profile?.masterDbConfig?.lineItemFields) ? profile.masterDbConfig.lineItemFields : [];
-  return {
-    isCustomMasterDb: !!isCustomMasterDb,
-    includeLineItems: !!includeLineItems,
-    staticFields: baseStaticFields,
+    : Array.isArray(profile?.masterDbConfig?.lineItemFields) && profile.masterDbConfig.lineItemFields.length
+      ? profile.masterDbConfig.lineItemFields
+      : templateLineItems;
+
+  const isCustomMasterDb = isSkinV2 ? true : (templateConfig?.isCustomMasterDb ?? profile?.masterDbConfig?.isCustomMasterDb ?? false);
+  const globalFields = Array.isArray(templateConfig?.globalFields) && templateConfig.globalFields.length
+    ? templateConfig.globalFields
+    : deriveGlobalFields(mergedFields);
+  const areaFieldKeysFromTemplate = mergedFields.filter(f => f.isArea || f.isSubordinate).map(f => f.fieldKey).filter(Boolean);
+  const areaFieldKeysFromConfig = Array.isArray(templateConfig?.areaFieldKeys) ? templateConfig.areaFieldKeys : [];
+  const areaFieldKeys = Array.from(new Set([...areaFieldKeysFromConfig, ...areaFieldKeysFromTemplate]));
+  const documentFieldKeys = Array.isArray(templateConfig?.documentFieldKeys)
+    ? templateConfig.documentFieldKeys.filter(Boolean)
+    : mergedFields
+        .filter(f => (f.fieldType || f.type || 'static') === 'static' && !areaFieldKeys.includes(f.fieldKey))
+        .map(f => f.fieldKey);
+  const areasFromConfig = Array.isArray(templateConfig?.areas) ? templateConfig.areas : [];
+  const areasFromTemplate = mergedFields
+    .filter(f => f.isArea)
+    .map(f => ({ id: f.areaId || f.fieldKey, name: f.label || f.name || f.fieldKey }));
+  const areaMap = new Map();
+  areasFromConfig.forEach(area => {
+    const id = area?.id || area?.areaId || area?.name;
+    if(!id) return;
+    areaMap.set(id, area);
+  });
+  areasFromTemplate.forEach(area => {
+    if(!area?.id || areaMap.has(area.id)) return;
+    areaMap.set(area.id, area);
+  });
+  const areas = Array.from(areaMap.values());
+
+  const configInput = {
+    ...templateConfig,
+    isCustomMasterDb,
+    includeLineItems,
     lineItemFields,
-    globalFields
+    globalFields,
+    areaFieldKeys,
+    documentFieldKeys,
+    areas
   };
+  return normalizeMasterDbConfig(configInput, mergedFields);
 }
 
 function getStoredTemplates(){
@@ -3078,15 +3216,31 @@ function ensureProfile(){
   const existing = loadProfile(state.username, state.docType, wizardId);
   const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
   const template = normalizeTemplate(templateRaw);
-  const templateFields = template ? (template.fields || []).map(f => ({
-    fieldId: f.id,
-    fieldKey: f.fieldKey,
-    label: f.name || f.fieldKey,
-    type: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'static',
-    kind: (f.fieldType || 'static') === 'dynamic' ? 'block' : 'value',
-    mode: (f.fieldType || 'static') === 'dynamic' ? 'column' : 'cell',
-    order: f.order || 0
-  })) : [];
+  const templateFields = template ? (template.fields || []).map(f => {
+    const normalizedType = (f.fieldType || 'static').toLowerCase();
+    const isArea = normalizedType === 'areabox';
+    const areaId = isArea ? (f.areaId || f.id || f.fieldKey) : (f.areaId || null);
+    const isSubordinate = !!areaId && !isArea;
+    const allowGlobal = !isArea && !isSubordinate;
+    const resolvedType = normalizedType === 'dynamic' ? 'dynamic' : (isArea ? 'areabox' : 'static');
+    const magicDataType = normalizeMagicDataType(f.magicDataType || f.magicType);
+    return {
+      fieldId: f.id,
+      fieldKey: f.fieldKey,
+      label: f.name || f.fieldKey,
+      type: resolvedType === 'dynamic' ? 'column' : 'static',
+      fieldType: resolvedType,
+      kind: resolvedType === 'dynamic' ? 'block' : 'value',
+      mode: resolvedType === 'dynamic' ? 'column' : 'cell',
+      order: f.order || 0,
+      areaId,
+      isArea,
+      isSubordinate,
+      isGlobal: allowGlobal ? !!f.isGlobal : false,
+      magicDataType,
+      magicType: magicDataType
+    };
+  }) : [];
   const remapById = template ? Object.fromEntries((template.fields || []).map(f => [f.id, f.fieldKey])) : {};
   if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
 
@@ -3196,7 +3350,7 @@ function ensureProfile(){
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
   const templateConfig = template?.masterDbConfig || null;
-  state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig);
+  state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
   hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
 }
@@ -8099,6 +8253,7 @@ function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
   const byKey = {};
   const wizardId = currentWizardId();
+  const activeTemplate = wizardId === DEFAULT_WIZARD_ID ? null : normalizeTemplate(getWizardTemplateById(wizardId));
   if(!state.snapshotMode){ state.lastSnapshotManifestId = ''; }
   state.selectedRunId = fileId || state.selectedRunId;
   raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
@@ -8164,7 +8319,7 @@ function compileDocument(fileId, lineItems){
       total: byKey['invoice_total']?.value || '',
       discount: byKey['discounts_amount']?.value || ''
     },
-    masterDbConfig: buildMasterDbConfigFromProfile(state.profile, state.profile?.masterDbConfig),
+    masterDbConfig: buildMasterDbConfigFromProfile(state.profile, state.profile?.masterDbConfig, activeTemplate),
     lineItems: enriched,
     areaRows: (state.currentAreaRows || []).map(r => clonePlain(r)),
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
