@@ -293,7 +293,7 @@ if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(locat
 let state = {
   username: null,
   docType: 'invoice',
-  activeWizardId: DEFAULT_WIZARD_ID,
+  activeWizardId: isSkinV2 ? '' : DEFAULT_WIZARD_ID,
   wizardTemplates: [],
   mode: ModeEnum.CONFIG,
   modes: { rawData: false },
@@ -478,8 +478,45 @@ function bumpDebugBlank(){
   window.__debugBlankAvoided = (window.__debugBlankAvoided || 0) + 1;
 }
 
+function firstCustomWizardId(){
+  const template = (state.wizardTemplates || []).find(t => t?.id);
+  return template?.id || '';
+}
+
+function resolveWizardId(opts = {}){
+  const preferCustom = !!opts.preferCustom;
+  const allowTemplateFallback = opts.allowTemplateFallback !== false;
+  const candidates = [];
+  const activeId = state.activeWizardId;
+  const profileId = state.profile?.wizardId;
+  if(preferCustom){
+    if(activeId && activeId !== DEFAULT_WIZARD_ID) candidates.push(activeId);
+    if(profileId && profileId !== DEFAULT_WIZARD_ID) candidates.push(profileId);
+    if(allowTemplateFallback){
+      const tplId = firstCustomWizardId();
+      if(tplId) candidates.push(tplId);
+    }
+  } else {
+    if(activeId) candidates.push(activeId);
+    if(profileId) candidates.push(profileId);
+  }
+  const resolved = candidates.find(Boolean);
+  if(resolved && resolved !== state.activeWizardId){
+    state.activeWizardId = resolved;
+  }
+  return resolved || (preferCustom ? '' : DEFAULT_WIZARD_ID);
+}
+
+function requireCustomWizard(opts = {}){
+  const wizardId = resolveWizardId({ preferCustom: true, allowTemplateFallback: opts.allowTemplateFallback });
+  if(!wizardId && opts.promptBuilder){
+    openBuilder();
+  }
+  return wizardId;
+}
+
 function currentWizardId(){
-  return state.activeWizardId || state.profile?.wizardId || DEFAULT_WIZARD_ID;
+  return resolveWizardId({ preferCustom: isSkinV2 });
 }
 
 function syncActiveWizardId(profile){
@@ -1052,15 +1089,17 @@ function populateModelSelect(forceValue){
   options.push(...models.map(m => ({ value: `model:${m.id}`, label: new Date(parseInt(m.id.split(':').pop(),10)).toLocaleString() })));
 
   sel.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
-  const desired = current || (state.activeWizardId ? `custom:${state.activeWizardId}` : (isSkinV2 ? '' : DEFAULT_WIZARD_ID));
+  const activeCustom = state.activeWizardId && state.activeWizardId !== DEFAULT_WIZARD_ID ? `custom:${state.activeWizardId}` : '';
+  const desired = current || (isSkinV2 ? activeCustom : (state.activeWizardId ? activeCustom || state.activeWizardId : DEFAULT_WIZARD_ID));
   const hasDesired = options.some(o => o.value === desired);
-  sel.value = hasDesired ? desired : (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
+  sel.value = hasDesired ? desired : (isSkinV2 ? activeCustom || '' : DEFAULT_WIZARD_ID);
 }
 
 function loadModelById(id){
   const m = getModels().find(x => x.id === id);
   if(!m) return null;
-  state.activeWizardId = m.wizardId || DEFAULT_WIZARD_ID;
+  const wizardId = m.wizardId || (isSkinV2 ? state.activeWizardId || firstCustomWizardId() : DEFAULT_WIZARD_ID);
+  state.activeWizardId = wizardId;
   state.profile = migrateProfile(m.profile);
   hydrateFingerprintsFromProfile(state.profile);
   return m;
@@ -3456,14 +3495,18 @@ function buildStepsFromTemplate(template){
 }
 
 function initStepsFromActiveWizard(){
-  const wizardId = currentWizardId();
+  let wizardId = currentWizardId();
+  if(isSkinV2 && wizardId === DEFAULT_WIZARD_ID){
+    wizardId = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true });
+    state.activeWizardId = wizardId || state.activeWizardId || firstCustomWizardId();
+  }
   if(wizardId === DEFAULT_WIZARD_ID){
     initStepsFromProfile();
     return;
   }
   const template = normalizeTemplate(getWizardTemplateById(wizardId));
   if(!template){
-    state.activeWizardId = DEFAULT_WIZARD_ID;
+    state.activeWizardId = isSkinV2 ? (wizardId || firstCustomWizardId()) : DEFAULT_WIZARD_ID;
     initStepsFromProfile();
     return;
   }
@@ -8517,15 +8560,20 @@ function completeLogin(opts = {}){
   const nameInput = opts.username ?? els.username?.value ?? 'demo';
   state.username = String(nameInput || 'demo').trim() || 'demo';
   state.docType = opts.docType || els.docType?.value || 'invoice';
-  state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   refreshWizardTemplates();
-  const existing = loadProfile(state.username, state.docType, currentWizardId());
+  const wizardId = isSkinV2
+    ? requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true })
+    : resolveWizardId();
+  state.activeWizardId = wizardId || (isSkinV2 ? firstCustomWizardId() : DEFAULT_WIZARD_ID);
+  const targetWizardId = state.activeWizardId || (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
+  const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId) : null;
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
+  const hasWizard = !!state.activeWizardId;
   if(els.loginSection){ els.loginSection.style.display = 'none'; }
-  if(els.app){ els.app.style.display = 'block'; }
-  showTab('document-dashboard');
-  populateModelSelect();
+  if(els.app){ els.app.style.display = hasWizard ? 'block' : 'none'; }
+  if(hasWizard){ showTab('document-dashboard'); }
+  populateModelSelect(isSkinV2 && state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
   renderResultsTable();
 }
 els.loginForm?.addEventListener('submit', (e)=>{
@@ -8540,7 +8588,7 @@ els.logoutBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'none';
   els.loginSection.style.display = 'block';
-  state.activeWizardId = DEFAULT_WIZARD_ID;
+  state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
@@ -8561,7 +8609,9 @@ els.resetModelBtn?.addEventListener('click', ()=>{
 });
 function openBuilderFromSelection(){
   const val = modelSelect?.value || '';
-  const template = val.startsWith('custom:') ? getWizardTemplateById(val.replace('custom:','')) : null;
+  const templateId = val.startsWith('custom:') ? val.replace('custom:','') : (isSkinV2 ? state.activeWizardId : '');
+  if(templateId){ state.activeWizardId = templateId; }
+  const template = templateId ? getWizardTemplateById(templateId) : null;
   openBuilder(template);
 }
 
@@ -8606,13 +8656,21 @@ syncStaticDebugToggleUI();
 
 els.docType?.addEventListener('change', ()=>{
   state.docType = els.docType.value || 'invoice';
-  state.activeWizardId = DEFAULT_WIZARD_ID;
   refreshWizardTemplates();
-  const existing = loadProfile(state.username, state.docType, currentWizardId());
+  if(isSkinV2){
+    state.activeWizardId = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true }) || firstCustomWizardId();
+  } else {
+    state.activeWizardId = DEFAULT_WIZARD_ID;
+  }
+  const wizardId = state.activeWizardId || (isSkinV2 ? '' : currentWizardId());
+  const existing = wizardId ? loadProfile(state.username, state.docType, wizardId) : null;
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
   renderSavedFieldsTable();
-  populateModelSelect();
+  if(isSkinV2 && els.app){
+    els.app.style.display = state.activeWizardId ? 'block' : 'none';
+  }
+  populateModelSelect(isSkinV2 && state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
 });
 
 els.configureCustomBtn?.addEventListener('click', openBuilderFromSelection);
@@ -8636,8 +8694,27 @@ const modelSelect = document.getElementById('model-select');
 if(modelSelect){
   modelSelect.addEventListener('change', ()=>{
     const val = modelSelect.value;
-    if(!val) return;
+    if(!val){
+      if(isSkinV2){
+        const ensured = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true });
+        if(ensured){
+          state.activeWizardId = ensured;
+          populateModelSelect(`custom:${ensured}`);
+        }
+      }
+      return;
+    }
     if(val === DEFAULT_WIZARD_ID){
+      if(isSkinV2){
+        const ensured = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true });
+        if(ensured){
+          state.activeWizardId = ensured;
+          populateModelSelect(`custom:${ensured}`);
+        } else {
+          alert('Please create or choose a custom wizard.');
+        }
+        return;
+      }
       state.activeWizardId = DEFAULT_WIZARD_ID;
       state.profile = loadProfile(state.username, state.docType, currentWizardId());
       hydrateFingerprintsFromProfile(state.profile);
@@ -8648,12 +8725,20 @@ if(modelSelect){
       state.activeWizardId = val.replace('custom:','');
       state.profile = loadProfile(state.username, state.docType, currentWizardId());
       hydrateFingerprintsFromProfile(state.profile);
+      if(isSkinV2){
+        populateModelSelect(`custom:${state.activeWizardId}`);
+      }
       alert('Custom wizard selected. Click Configure Wizard to edit.');
       return;
     }
     if(val.startsWith('model:')){
       const loaded = loadModelById(val.replace('model:',''));
-      if(loaded?.wizardId) state.activeWizardId = loaded.wizardId;
+      if(loaded?.wizardId){
+        state.activeWizardId = loaded.wizardId;
+      } else if(isSkinV2){
+        state.activeWizardId = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true }) || state.activeWizardId || firstCustomWizardId();
+        populateModelSelect(state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
+      }
       activateRunMode({ clearDoc: true });
       renderSavedFieldsTable();
       renderConfirmedTables();
