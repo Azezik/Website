@@ -9645,7 +9645,13 @@ async function runModeExtractFileWithProfile(file, profile){
   }
   try {
     activateRunMode({ clearDoc: true });
+    const runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
+    traceEvent(runSpanKey,'bbox:read',{
+      stageLabel:'Run start',
+      input:{ fileName: file?.name || null },
+      notes:'Run mode extraction started'
+    });
     state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
     syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
@@ -9653,8 +9659,18 @@ async function runModeExtractFileWithProfile(file, profile){
     const prepared = await prepareRunDocument(file);
     if(!prepared){ return; }
     if(isRunMode()) mirrorDebugLog(`[run-mode] tokens cached for ${state.numPages} page(s)`);
+    traceEvent(runSpanKey,'tokens:rank',{
+      stageLabel:'Tokens ready',
+      counts:{ tokens: state.tokensByPage?.reduce?.((n,p)=>n+(p?.length||0),0) || 0, pages: state.numPages||0 },
+      notes:'Tokens cached for run mode'
+    });
 
     await extractAreaRows(activeProfile);
+    traceEvent(runSpanKey,'columns:merge',{
+      stageLabel:'Area rows scanned',
+      counts:{ areas: (activeProfile.fields||[]).filter(f=>f.isArea || f.fieldType==='areabox').length },
+      notes:'Area rows extraction complete'
+    });
 
     for(const spec of (activeProfile.fields || [])){
       const isAreaField = spec.isArea || spec.fieldType === 'areabox';
@@ -9692,6 +9708,17 @@ async function runModeExtractFileWithProfile(file, profile){
           `resolve ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(placement?.boxPx)}`,
           { tokens: hitTokens.length, preview: summarizeTokens(hitTokens) }
         );
+        traceEvent(
+          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          'bbox:read',
+          {
+            stageLabel:'BBox read (run)',
+            bbox:{ pixel: placement?.boxPx || null, normalized: placement?.bbox || null },
+            counts:{ tokens: tokens.length },
+            input:{ boxPx: placement?.boxPx || null, normBox: placement?.bbox || null, configMask },
+            notes:`targetPage=${targetPage}`
+          }
+        );
       }
       state.snappedPx = null; state.snappedText = '';
       const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
@@ -9712,17 +9739,38 @@ async function runModeExtractFileWithProfile(file, profile){
           `resolved ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(boxPx || placement?.boxPx)}`,
           { tokens: postTokens.length, preview: summarizeTokens(postTokens) }
         );
+        traceEvent(
+          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          'finalize',
+          {
+            stageLabel:'Finalize (run)',
+            output:{ value: value || '', confidence },
+            bbox:{ pixel: boxPx || placement?.boxPx || null, normalized: placement?.bbox || null },
+            counts:{ tokens: tokens.length },
+            notes: value ? 'value extracted' : 'no value extracted'
+          }
+        );
       }
     }
     if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
     const lineItems = await extractLineItems(activeProfile);
     if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
+    traceEvent(runSpanKey,'columns:merge',{
+      stageLabel:'Line items extracted',
+      counts:{ lineItems: lineItems.length },
+      notes: lineItems.length ? 'line items captured' : 'no line items found'
+    });
     const compiled = compileDocument(state.currentFileId, lineItems);
     if(state.snapshotMode){
       const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
       if(manifest){ compiled.snapshotManifestId = manifest.id; }
     }
     if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
+    traceEvent(runSpanKey,'finalize',{
+      stageLabel:'Run complete',
+      output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length },
+      notes:'Run mode finished'
+    });
   } finally {
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
