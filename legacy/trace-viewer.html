@@ -27,13 +27,22 @@
       <label><input type="checkbox" id="ovTok">Tokens</label>
       <label><input type="checkbox" id="ovAnc">Anchors</label>
       <label><input type="checkbox" id="ovHeat">Heatmap</label>
-      <button id="copyTraceBtn" class="btn">Copy trace JSON</button>
+      <div class="toggle-inline"><input type="checkbox" id="verboseToggle">Show verbose fields</div>
+    </div>
+    <div class="actions" id="copyControls">
+      <button id="copyEventBtn" class="btn">Copy full event JSON</button>
+      <button id="copySummaryBtn" class="btn">Copy summary text</button>
+      <button id="copyTraceBtn" class="btn">Copy full trace JSON</button>
     </div>
     <div id="imgWrap" style="position:relative">
       <img id="detailImg" />
       <canvas id="ovCanvas" style="position:absolute;left:0;top:0;"></canvas>
+      <div id="ovHints"></div>
     </div>
-    <pre id="eventJson" class="code"></pre>
+    <div id="summaryPanel" class="panel minimal">
+      <pre id="eventSummary" class="code"></pre>
+      <pre id="eventJson" class="code"></pre>
+    </div>
   </div>
 </body>
 </html>

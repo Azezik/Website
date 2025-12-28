@@ -101,6 +101,15 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 #thumbs img.thumb{ width:80px; height:auto; margin:4px; border:1px solid var(--border); cursor:pointer; }
 #thumbs img.thumb.selected{ border-color:var(--accent); }
 #overlayControls{ margin:8px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+#copyControls{ margin:8px 0 0; display:flex; flex-wrap:wrap; gap:8px; }
+
+#summaryPanel{ margin-top:10px; }
+#summaryPanel .code{ margin:0 0 8px; padding:10px; background:#0b1111; border:1px solid var(--border); border-radius:10px; }
+
+#ovHints{ position:absolute; left:0; top:0; pointer-events:none; }
+.ov-hint{ position:absolute; border:1px dashed rgba(255,255,255,0.35); box-shadow:0 0 0 1px rgba(0,0,0,0.2); }
+.ov-hint.ov-tok{ border-color:rgba(255,255,0,0.55); }
+.ov-hint.ov-anc{ border-color:rgba(255,0,0,0.55); }
 
 /* Static debug log viewer */
 .modal{ position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:1000; padding:20px; }
