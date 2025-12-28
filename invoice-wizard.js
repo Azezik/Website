@@ -1566,7 +1566,9 @@ function summarizeTokens(tokens=[], max=5){
 function summarizeTokenCache(){
   const store = state.tokensByPage || [];
   const entries = Array.isArray(store)
-    ? store.map((tokens, idx) => ({ page: idx, tokens }))
+    ? store
+        .map((tokens, idx) => tokens ? { page: idx, tokens } : null)
+        .filter(Boolean)
     : Object.entries(store || {}).map(([k,v]) => ({ page: Number(k) || 0, tokens: v }));
   let totalTokens = 0;
   const perPage = [];
