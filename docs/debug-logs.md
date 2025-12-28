@@ -2,11 +2,11 @@
 
 ## Where traces live and what they contain
 - Traces are stored in-memory via `TraceStore` under the global `debugTraces` instance. Each trace has:
-  - `traceId` (UUID), `spanKey` with `{ docId, pageIndex, fieldKey }`, `started` timestamp, and an `events` array. 【F:trace.js†L9-L26】
-  - Events carry `traceId`, `spanKey`, `stage`, `ts`, `durationMs`, `input`, `output`, `warnings`, `errors`, and optional `artifact` (usually a data URL for viewer thumbnails). Duration defaults to the time since the prior event unless `durationMs` is provided. 【F:trace.js†L18-L26】
-- The helper `traceEvent(spanKey, stage, payload)` lazily creates or reuses a trace keyed by `(docId, pageIndex, fieldKey)` and appends an event with the payload as `output`. 【F:trace.js†L53-L61】
-- You can export a trace to a JSON file with `exportTraceFile(traceId)`, which downloads `trace-<id>.json`. 【F:trace.js†L31-L36】
-- You can copy the raw JSON to the clipboard with `copyTraceJson(traceId)`. It pretty-prints the entire trace (including all events) before copying. 【F:trace.js†L38-L47】
+  - `traceId` (UUID), `spanKey` with `{ docId, pageIndex, fieldKey }`, `started` timestamp, and an `events` array. 【F:trace.js†L1-L99】
+  - Events now include standardized metadata: `stage`, `stageLabel`, `stepNumber`, `docMeta`, `fieldMeta`, `bbox`, `counts`, `ocrConfig`, `heuristics`, `confidence`, `timing`, `notes`, `inputsSnapshot`, `ts`, `durationMs`, `input`, `output`, normalized `warnings`/`errors`, and optional `artifact` (usually a data URL for viewer thumbnails). Duration defaults to the time since the prior event unless `durationMs` is provided. Warnings/errors are always `{ code, message, details }` objects for clean copy/paste. 【F:trace.js†L43-L99】
+- The helper `traceEvent(spanKey, stage, payload)` lazily creates or reuses a trace keyed by `(docId, pageIndex, fieldKey)`, auto-fills doc/field metadata (and bbox when provided), and appends an event with the payload merged into the standardized envelope. 【F:trace.js†L125-L148】
+- You can export a trace to a JSON file with `exportTraceFile(traceId)`, which downloads `trace-<id>.json`. 【F:trace.js†L101-L107】
+- You can copy the raw JSON to the clipboard with `copyTraceJson(traceId)`. It pretty-prints the entire trace (including all events) before copying. 【F:trace.js†L108-L118】
 
 ## How traces are grouped and filtered in the viewer
 - `trace-viewer.js` reads `window.debugTraces.traces` and builds dropdown filters:
@@ -44,6 +44,11 @@
 ```json
 {
   "stage": "anchor-detect",
+  "stageLabel": "Anchor detect",
+  "stepNumber": 2,
+  "docMeta": { "docId": "file-123", "pageIndex": 0 },
+  "fieldMeta": { "fieldKey": "invoice_total" },
+  "bbox": { "pixel": { "x": 120, "y": 300, "w": 180, "h": 60 } },
   "durationMs": 12,
   "input": { "boxPx": { "x": 120, "y": 300, "w": 180, "h": 60 } },
   "output": { "anchors": [{ "x": 132, "y": 312, "w": 40, "h": 16 }] },
@@ -56,10 +61,12 @@
 ```json
 {
   "stage": "tokenize",
+  "stageLabel": "Tokenize",
+  "stepNumber": 1,
   "durationMs": 240,
   "input": { "normBox": { "x0n": 0.42, "y0n": 0.18, "wN": 0.12, "hN": 0.04 } },
   "output": { "tokens": [], "anchors": [] },
-  "warnings": ["no tokens in bbox"],
+  "warnings": [{ "code": "no_tokens", "message": "no tokens in bbox" }],
   "errors": []
 }
 ```

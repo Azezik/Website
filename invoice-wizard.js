@@ -1363,7 +1363,19 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
   saveTimer = setTimeout(()=>{
     try{ LS.setProfile(u, d, p, wizardId); }
     catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
-    try{ traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' }, 'save.persisted', { docType:d }); }catch{}
+    try{
+      traceEvent(
+        { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' },
+        'save.persisted',
+        {
+          stageLabel:'Profile saved',
+          stepNumber:0,
+          notes:'Persisted profile to local storage',
+          inputsSnapshot:{ docType:d, wizardId },
+          output:{ docType:d }
+        }
+      );
+    }catch{}
   },300);
 }
 function loadProfile(u, d, wizardId = currentWizardId()){
@@ -2745,7 +2757,17 @@ const FieldDataEngine = (() => {
       if(best.collapseChanged){
         repeatCollapsed = true;
         if(spanKey){
-          traceEvent(spanKey,'ocrmagic.repeatCollapse',{ from: best.collapseBefore, to: best.collapseAfter, expectation: best.expectation, magicType });
+          traceEvent(spanKey,'ocrmagic.repeatCollapse',{
+            from: best.collapseBefore,
+            to: best.collapseAfter,
+            expectation: best.expectation,
+            magicType,
+            stageLabel:'Repeat collapse',
+            stepNumber:3,
+            counts:{ tokens: tokens.length },
+            heuristics:{ repeatCollapsed:true },
+            notes:'Collapsed repeated characters during OCR magic token cleanup'
+          });
         }
       }
       const bestScore = best.score;
@@ -2775,7 +2797,16 @@ const FieldDataEngine = (() => {
     else if(magicType === MAGIC_DATA_TYPE.TEXT) rulesApplied.push('text-only-field');
     if(correctionsApplied.length) rulesApplied.push('token-substitution');
     if(repeatCollapsed) rulesApplied.push('repeat-collapse');
-    if(spanKey) traceEvent(spanKey,'ocrmagic',{ magicType, cleaned, tokens: correctedTokens });
+    if(spanKey) traceEvent(spanKey,'ocrmagic',{
+      magicType,
+      cleaned,
+      tokens: correctedTokens,
+      stageLabel:'OCR magic apply',
+      stepNumber:3,
+      counts:{ tokens: correctedTokens.length, numericTokens: numericTokens.length },
+      heuristics:{ repeatCollapsed, rulesApplied },
+      inputsSnapshot:{ cleanedPreview: cleaned.slice(0,120) }
+    });
     ocrMagicDebug({
       event: 'ocrmagic.apply',
       mode: mode || state.mode || ModeEnum.RUN,
@@ -2814,7 +2845,14 @@ const FieldDataEngine = (() => {
     const arr = Array.isArray(input) ? input : [{text:String(input||'')}];
     const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
     const raw = lineStrs.join(' ').trim();
-    if(spanKey) traceEvent(spanKey,'clean.start',{ raw });
+    const tokenCount = lineStrs.join(' ').split(/\s+/g).filter(Boolean).length;
+    if(spanKey) traceEvent(spanKey,'clean.start',{
+      raw,
+      stageLabel:'Clean start',
+      stepNumber:2,
+      counts:{ lines: lineStrs.length, tokens: tokenCount },
+      inputsSnapshot:{ raw }
+    });
     const baseResult = runBaseOcrMagic(raw);
     const baseCleaned = typeof baseResult === 'string' ? baseResult : (baseResult?.cleaned ?? String(raw ?? ''));
     const layer1RulesApplied = Array.isArray(baseResult?.rulesApplied) ? baseResult.rulesApplied : [];
@@ -2875,7 +2913,18 @@ const FieldDataEngine = (() => {
     if(isValid && dom.shape && dom.shape===shape) score++;
     if(isValid && dom.len && dom.len===txt.length) score++;
     if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
-    if(spanKey) traceEvent(spanKey,'clean.success',{ value:txt, score, isValid, invalidReason, magicType });
+    if(spanKey) traceEvent(spanKey,'clean.success',{
+      value:txt,
+      score,
+      isValid,
+      invalidReason,
+      magicType,
+      stageLabel:'Clean success',
+      stepNumber:4,
+      confidence:{ score, isValid, fingerprintMatch },
+      heuristics:{ magicType },
+      notes: invalidReason ? `invalid:${invalidReason}` : null
+    });
     if(state.mode === ModeEnum.RUN && staticDebugEnabled() && isStaticFieldDebugTarget(spanKey?.fieldKey || ftype)){
       const expectedCode = getDominantFingerprintCode(ftype, spanKey?.fieldKey || ftype);
       const fingerprintOk = fingerprintMatches(ftype, code, mode, spanKey?.fieldKey, { enabled:false, fieldKey: spanKey?.fieldKey || ftype, cleanedValue: txt });
@@ -4924,7 +4973,20 @@ async function ocrBox(boxPx, fieldKey){
   }
 
   const { tokens: baseTokens, avg: baseAvg } = await runBox(boxPx);
-  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.raw', { tokens: baseTokens.length });
+  traceEvent(
+    { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey },
+    'ocr.raw',
+    {
+      tokens: baseTokens.length,
+      stageLabel:'OCR raw pass',
+      stepNumber:1,
+      counts:{ tokens: baseTokens.length },
+      bbox:{ pixel: boxPx },
+      ocrConfig:{ psm: cfg.psm, whitelist: !!cfg.whitelist, scale },
+      confidence:{ averageWordConfidence: baseAvg },
+      inputsSnapshot:{ boxPx }
+    }
+  );
 
   const TILE=512, OVER=0.15;
   const area=boxPx.w*boxPx.h;
@@ -4958,7 +5020,21 @@ async function ocrBox(boxPx, fieldKey){
     }
   }
 
-  traceEvent({ docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey }, 'ocr.tiled', { tiles: tiles.map((t,i)=>({ index:i, tokens:t.tokens.length })) });
+  const totalTileTokens = tiles.reduce((sum,t)=>sum + (t.tokens?.length || 0),0);
+  traceEvent(
+    { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (boxPx.page||1)-1, fieldKey },
+    'ocr.tiled',
+    {
+      tiles: tiles.map((t,i)=>({ index:i, tokens:t.tokens.length })),
+      stageLabel:'OCR tiled pass',
+      stepNumber:2,
+      counts:{ tiles: tiles.length, tokens: totalTileTokens },
+      bbox:{ pixel: boxPx },
+      ocrConfig:{ psm: cfg.psm, whitelist: !!cfg.whitelist, scale },
+      heuristics:{ tiled:true, overlap: OVER },
+      notes:'Tiled OCR used due to size/confidence threshold'
+    }
+  );
   return merged;
 }
 
@@ -5135,11 +5211,23 @@ function labelValueHeuristic(fieldSpec, tokens){
     let boxPx = null;
     if(isConfigMode() && state.snappedPx){
       boxPx = state.snappedPx;
-      traceEvent(spanKey,'selection.captured',{ boxPx });
+      traceEvent(spanKey,'selection.captured',{
+        boxPx,
+        stageLabel:'Selection captured',
+        stepNumber:0,
+        bbox:{ pixel: boxPx },
+        inputsSnapshot:{ selectionBox: boxPx }
+      });
     } else if(fieldSpec.bbox){
       const raw = toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       boxPx = applyTransform(raw);
-      traceEvent(spanKey,'selection.captured',{ boxPx });
+      traceEvent(spanKey,'selection.captured',{
+        boxPx,
+        stageLabel:'Selection captured',
+        stepNumber:0,
+        bbox:{ pixel: boxPx },
+        inputsSnapshot:{ selectionBox: boxPx }
+      });
     }
     if(!boxPx){ return { value:'', raw:'', confidence:0, boxPx:null, tokens:[], method:'raw' }; }
     const docId = state.currentFileId || state.currentFileName || 'doc';
@@ -5156,14 +5244,41 @@ function labelValueHeuristic(fieldSpec, tokens){
     const probe = await runOcrProbes(cropBitmap);
     const best = chooseBestProbe(probe);
     const rawText = (best.raw || '').trim();
-    traceEvent(spanKey,'ocr.raw',{ mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false, tokens: best.tokensLength, crop: cropBitmap.toDataURL('image/png') });
+    traceEvent(spanKey,'ocr.raw',{
+      mode:'raw',
+      washed:false,
+      cleaning:false,
+      fallback:false,
+      dedupe:false,
+      tokens: best.tokensLength,
+      crop: cropBitmap.toDataURL('image/png'),
+      stageLabel:'OCR raw (probe)',
+      stepNumber:1,
+      counts:{ tokens: best.tokensLength },
+      bbox:{ pixel: boxPx, normalized: normBox },
+      ocrConfig:{ probe:true },
+      inputsSnapshot:{ selectionBox: boxPx, normBox }
+    });
     if(!rawText && !confirm('OCR returned empty. Keep empty value?')){
       alert('Please re-select the field.');
       return { value:'', raw:'', confidence:0, boxPx, tokens:[], method:'raw' };
     }
     const tokensOut = best.tokens.map(t=>({ text:t }));
     const result = { value: rawText, raw: rawText, corrected: rawText, code:null, shape:null, score:null, correctionsApplied:[], boxPx, confidence:1, tokens: tokensOut, method:'raw' };
-    traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method:'raw', mode:'raw', washed:false, cleaning:false, fallback:false, dedupe:false });
+    traceEvent(spanKey,'value.finalized',{
+      value: result.value,
+      confidence: result.confidence,
+      method:'raw',
+      mode:'raw',
+      washed:false,
+      cleaning:false,
+      fallback:false,
+      dedupe:false,
+      stageLabel:'Value finalized',
+      stepNumber:5,
+      confidenceDetails:{ method:'raw', score: result.confidence },
+      notes:'Raw OCR path finalized value'
+    });
     return result;
   }
 
@@ -5175,7 +5290,15 @@ function labelValueHeuristic(fieldSpec, tokens){
       const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       boxPx = applyTransform(raw);
     }
-    if(boxPx){ traceEvent(spanKey,'selection.captured',{ boxPx }); }
+    if(boxPx){
+      traceEvent(spanKey,'selection.captured',{
+        boxPx,
+        stageLabel:'Selection captured',
+        stepNumber:0,
+        bbox:{ pixel: boxPx },
+        inputsSnapshot:{ selectionBox: boxPx }
+      });
+    }
     if(!boxPx){
       return { value:'', raw:'', corrected:'', code:null, shape:null, score:null, correctionsApplied:[], boxPx:null, confidence:0, tokens:[], method:'config-permissive' };
     }
@@ -5223,7 +5346,17 @@ function labelValueHeuristic(fieldSpec, tokens){
       tokens: hits,
       method:'config-permissive'
     };
-    traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method, mode:'CONFIG' });
+    traceEvent(spanKey,'value.finalized',{
+      value: result.value,
+      confidence: result.confidence,
+      method: result.method,
+      mode:'CONFIG',
+      stageLabel:'Value finalized',
+      stepNumber:5,
+      bbox:{ pixel: usedBox },
+      confidenceDetails:{ mode:'CONFIG', score: result.confidence },
+      notes:'Config extraction finalized value'
+    });
     return result;
   }
 
@@ -5688,7 +5821,14 @@ function labelValueHeuristic(fieldSpec, tokens){
       keywordContext = keywordContext || blended;
     }
 
-    traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
+    traceEvent(spanKey,'selection.captured',{
+      boxPx: basePx,
+      stageLabel:'Selection captured',
+      stepNumber:0,
+      bbox:{ pixel: basePx },
+      counts:{ tokens: tokens.length },
+      inputsSnapshot:{ selectionBox: basePx }
+    });
 
     if(staticRun && anchorBox){
       const mostlyInside = (tok, box) => {
@@ -5760,7 +5900,14 @@ function labelValueHeuristic(fieldSpec, tokens){
     }
 
     if(!result){
-      traceEvent(spanKey,'selection.captured',{ boxPx: basePx });
+      traceEvent(spanKey,'selection.captured',{
+        boxPx: basePx,
+        stageLabel:'Selection captured',
+        stepNumber:0,
+        bbox:{ pixel: basePx },
+        counts:{ tokens: tokens.length },
+        inputsSnapshot:{ selectionBox: basePx }
+      });
       const initialAttempt = await attempt(basePx);
       if(initialAttempt && initialAttempt.anchorOk === false){ initialAttempt.cleanedOk = false; }
       if(initialAttempt){
@@ -5893,9 +6040,21 @@ function labelValueHeuristic(fieldSpec, tokens){
   }
 
   if(!result){
-    traceEvent(spanKey,'fallback.search',{});
+    traceEvent(spanKey,'fallback.search',{
+      stageLabel:'Fallback search',
+      stepNumber:6,
+      notes:'No confident result; evaluating snapped text fallback',
+      inputsSnapshot:{ selectionText: state.snappedText || null }
+    });
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
-    traceEvent(spanKey,'fallback.pick',{ value: fb.value || fb.raw });
+    traceEvent(spanKey,'fallback.pick',{
+      value: fb.value || fb.raw,
+      stageLabel:'Fallback pick',
+      stepNumber:7,
+      bbox:{ pixel: state.snappedPx || basePx || null },
+      confidence:{ score: fb.value ? 0.3 : 0 },
+      notes:'Fallback value chosen after heuristics'
+    });
     result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   if(!result.value && selectionRaw){
@@ -6071,7 +6230,17 @@ function labelValueHeuristic(fieldSpec, tokens){
       { box: finalBox, configMask }
     );
   }
-  traceEvent(spanKey,'value.finalized',{ value: result.value, confidence: result.confidence, method: result.method });
+  traceEvent(spanKey,'value.finalized',{
+    value: result.value,
+    confidence: result.confidence,
+    method: result.method,
+    stageLabel:'Value finalized',
+    stepNumber:8,
+    bbox:{ pixel: result.boxPx || basePx || null },
+    confidence:{ score: result.confidence, comparator: result.comparator, method: result.method },
+    timing:{ stageUsed: stageUsed.value },
+    notes:'Final output after extraction pipeline'
+  });
   result.tokens = result.tokens || [];
   return result;
 }
@@ -8050,7 +8219,19 @@ async function finalizeSelection(e) {
   const nb = normalizeBox(state.snappedPx, vp.width, vp.height);
   const pinned = isOverlayPinned();
   const srcRect = (state.isImage?els.imgCanvas:els.pdfCanvas).getBoundingClientRect();
-  traceEvent(spanKey,'selection.captured',{ normBox: nb, pixelBox: state.snappedPx, cssBox: state.snappedCss, cssSize:{ w:srcRect.width, h:srcRect.height }, pxSize:{ w:vp.width, h:vp.height }, dpr: window.devicePixelRatio || 1, overlayPinned: pinned });
+  traceEvent(spanKey,'selection.captured',{
+    normBox: nb,
+    pixelBox: state.snappedPx,
+    cssBox: state.snappedCss,
+    cssSize:{ w:srcRect.width, h:srcRect.height },
+    pxSize:{ w:vp.width, h:vp.height },
+    dpr: window.devicePixelRatio || 1,
+    overlayPinned: pinned,
+    stageLabel:'Selection captured',
+    stepNumber:0,
+    bbox:{ pixel: state.snappedPx, normalized: nb, css: state.snappedCss },
+    inputsSnapshot:{ selectionBox: state.snappedPx, normBox: nb }
+  });
   drawOverlay();
 }
 

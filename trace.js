@@ -6,6 +6,31 @@
       return v.toString(16);
     });
   }
+  function normalizeIssues(list){
+    const arr = Array.isArray(list) ? list : (list ? [list] : []);
+    return arr.map(item=>{
+      if(!item) return null;
+      if(typeof item === 'string') return { code:'generic', message:item };
+      if(item instanceof Error) return { code:item.name || 'error', message:item.message || String(item), details: item.stack || null };
+      if(typeof item === 'object') return { code:item.code || 'generic', message:item.message || String(item), details:item.details || item.info || null };
+      return { code:'generic', message:String(item) };
+    }).filter(Boolean);
+  }
+  function deriveDocMeta(spanKey){
+    if(!spanKey) return { docId:'doc', pageIndex:0 };
+    return {
+      docId: spanKey.docId || spanKey.doc || spanKey.docID || spanKey.id || 'doc',
+      pageIndex: Number.isFinite(spanKey.pageIndex) ? spanKey.pageIndex : 0,
+      pageLabel: spanKey.pageLabel || null
+    };
+  }
+  function deriveFieldMeta(spanKey){
+    if(!spanKey) return null;
+    const fm = {};
+    if(spanKey.fieldKey) fm.fieldKey = spanKey.fieldKey;
+    if(spanKey.fieldLabel) fm.fieldLabel = spanKey.fieldLabel;
+    return Object.keys(fm).length ? fm : null;
+  }
   class TraceStore{
     constructor(max=25){ this.max=max; this.traces=[]; }
     start(spanKey){
@@ -15,12 +40,57 @@
       if(this.traces.length>this.max) this.traces.shift();
       return traceId;
     }
-    add(traceId, stage, {input={},output={},warnings=[],errors=[],durationMs,artifact}={}){
+    add(traceId, stage, payload={}){
       const t=this.traces.find(tr=>tr.traceId===traceId); if(!t) return;
       const now=performance.now();
+      const {
+        input={},
+        output,
+        warnings=[],
+        errors=[],
+        durationMs,
+        artifact,
+        stageLabel,
+        stepNumber=null,
+        docMeta,
+        fieldMeta,
+        bbox=null,
+        counts=null,
+        ocrConfig=null,
+        heuristics=null,
+        confidence=null,
+        timing=null,
+        notes=null,
+        inputsSnapshot=null,
+        ...legacy
+      } = payload;
       const dur=durationMs!=null?durationMs:now-t._last;
       t._last=now;
-      const ev={traceId, spanKey:t.spanKey, stage, ts:Date.now(), durationMs:dur, input, output, warnings, errors};
+      const mergedOutput = output ?? legacy ?? {};
+      if(confidence != null && mergedOutput.confidence == null){ mergedOutput.confidence = confidence; }
+      const ev={
+        traceId,
+        spanKey:t.spanKey,
+        stage,
+        stageLabel: stageLabel || stage,
+        stepNumber,
+        ts:Date.now(),
+        durationMs:dur,
+        docMeta: docMeta || deriveDocMeta(t.spanKey),
+        fieldMeta: fieldMeta || deriveFieldMeta(t.spanKey),
+        bbox: bbox || null,
+        counts: counts || null,
+        ocrConfig: ocrConfig || null,
+        heuristics: heuristics || null,
+        confidence: confidence ?? null,
+        timing: timing || null,
+        notes: notes || null,
+        inputsSnapshot: inputsSnapshot || null,
+        input,
+        output: mergedOutput,
+        warnings: normalizeIssues(warnings),
+        errors: normalizeIssues(errors)
+      };
       if(artifact) ev.artifact=artifact;
       t.events.push(ev);
       return ev;
@@ -57,6 +127,23 @@
     const key=_spanKeyKey(spanKey);
     let id=_traceMap.get(key);
     if(!id){ id=global.debugTraces.start(spanKey); _traceMap.set(key,id); }
-    global.debugTraces.add(id, stage, { output: payload });
+    const docMeta = { ...deriveDocMeta(spanKey), ...(payload.docMeta||{}) };
+    const baseFieldMeta = deriveFieldMeta(spanKey);
+    const fieldMeta = (payload.fieldMeta || baseFieldMeta)
+      ? { ...(baseFieldMeta||{}), ...(payload.fieldMeta||{}) }
+      : null;
+    const inferredBbox = payload.bbox || payload.boxPx || payload.pixelBox || payload.normBox ? {
+      pixel: payload.boxPx || payload.pixelBox || null,
+      normalized: payload.normBox || null,
+      css: payload.cssBox || null
+    } : null;
+    const enrichedPayload = {
+      ...payload,
+      docMeta,
+      fieldMeta,
+      bbox: payload.bbox || inferredBbox,
+      inputsSnapshot: payload.inputsSnapshot || (payload.boxPx ? { boxPx: payload.boxPx } : payload.inputsSnapshot)
+    };
+    global.debugTraces.add(id, stage, enrichedPayload);
   };
 })(window);
