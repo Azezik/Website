@@ -1,4 +1,24 @@
 (function(global){
+  const TRACE_STAGE_PLAN=[
+    { stage:'bbox:read', label:'BBox read', required:['input.boxPx','input.normBox','ocrConfig'] },
+    { stage:'bbox:expand:pass2', label:'BBox micro-expand', required:['input.boxPx','input.expansion','output.bbox'] },
+    { stage:'tokens:rank', label:'Token rank', required:['input.tokens','output.tokens','output.value'] },
+    { stage:'columns:merge', label:'Column merge', required:['input.tokens','output.rows','output.columns'] },
+    { stage:'arith:check', label:'Arithmetic check', required:['input.lineItems','output.subtotal','output.total'] },
+    { stage:'finalize', label:'Finalize', required:['output.value','confidence'] }
+  ];
+  const TRACE_STAGE_INDEX=new Map(TRACE_STAGE_PLAN.map((item,idx)=>[item.stage,{...item,index:idx,stepTotal:TRACE_STAGE_PLAN.length}]));
+  function resolveStageMeta(stage,{stageLabel,stepNumber,stepTotal}){
+    const plan=TRACE_STAGE_INDEX.get(stage);
+    const total=stepTotal!=null?stepTotal:(plan?plan.stepTotal:null);
+    const number=stepNumber!=null?stepNumber:(plan?plan.index+1:null);
+    return {
+      stageLabel: stageLabel || plan?.label || stage,
+      stepNumber: number,
+      stepTotal: total,
+      stagePlan: plan || null
+    };
+  }
   function uuid(){
     if(global.crypto?.randomUUID) return global.crypto.randomUUID();
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{
@@ -35,7 +55,7 @@
     constructor(max=25){ this.max=max; this.traces=[]; }
     start(spanKey){
       const traceId=uuid();
-      const t={traceId, spanKey, events:[], started:Date.now(), _last:performance.now()};
+      const t={traceId, spanKey, events:[], started:Date.now(), _last:performance.now(), _lastPlanIndex:-1};
       this.traces.push(t);
       if(this.traces.length>this.max) this.traces.shift();
       return traceId;
@@ -52,6 +72,7 @@
         artifact,
         stageLabel,
         stepNumber=null,
+        stepTotal=null,
         docMeta,
         fieldMeta,
         bbox=null,
@@ -64,16 +85,23 @@
         inputsSnapshot=null,
         ...legacy
       } = payload;
+      const meta = resolveStageMeta(stage,{stageLabel, stepNumber, stepTotal});
       const dur=durationMs!=null?durationMs:now-t._last;
       t._last=now;
       const mergedOutput = output ?? legacy ?? {};
       if(confidence != null && mergedOutput.confidence == null){ mergedOutput.confidence = confidence; }
+      const planIndex=meta.stagePlan?.index;
+      const inferredStepNumber = planIndex!=null ? planIndex+1 : stepNumber;
+      const finalStepNumber = inferredStepNumber!=null ? inferredStepNumber : t.events.length+1;
+      if(planIndex!=null && planIndex>t._lastPlanIndex){ t._lastPlanIndex=planIndex; }
       const ev={
         traceId,
         spanKey:t.spanKey,
         stage,
-        stageLabel: stageLabel || stage,
-        stepNumber,
+        stageLabel: meta.stageLabel,
+        stepNumber: finalStepNumber,
+        stepTotal: meta.stepTotal,
+        stagePlan: meta.stagePlan,
         ts:Date.now(),
         durationMs:dur,
         docMeta: docMeta || deriveDocMeta(t.spanKey),

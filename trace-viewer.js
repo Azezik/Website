@@ -211,8 +211,9 @@
   }
   function formatEventSummary(ev, verbose=false){
     const lines=[];
+    const totalStr = ev.stepTotal!=null ? ` of ${ev.stepTotal}` : '';
     lines.push('Static Debug Log');
-    lines.push(`Stage: ${ev.stepNumber!=null?`#${ev.stepNumber} `:''}${ev.stageLabel||ev.stage||'unknown'} (${ev.stage||'n/a'})`);
+    lines.push(`Stage: ${ev.stepNumber!=null?`#${ev.stepNumber}${totalStr} `:''}${ev.stageLabel||ev.stage||'unknown'} (${ev.stage||'n/a'})`);
     lines.push(`Duration: ${Math.round((ev.durationMs||0)*10)/10} ms`);
     lines.push(`Doc: ${ev.docMeta?.docId||'doc'} page ${ev.docMeta?.pageIndex ?? 0}${ev.docMeta?.pageLabel?` (${ev.docMeta.pageLabel})`:''}`);
     lines.push(`Field: ${ev.fieldMeta?.fieldKey||'n/a'}${ev.fieldMeta?.fieldLabel?` [${ev.fieldMeta.fieldLabel}]`:''}`);
