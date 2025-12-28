@@ -232,6 +232,34 @@ const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
 const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
 const magicTypeResolutionLog = new Set();
 
+function normalizeWizardId(raw){
+  if(raw === undefined || raw === null) return '';
+  const trimmed = String(raw).trim();
+  if(!trimmed) return '';
+  return trimmed.replace(/\s+/g, '_');
+}
+
+function readEnvWizardBootstrap(){
+  if(typeof window === 'undefined') return null;
+  const env = window.__ENV__ || {};
+  const cfg = env.profileConfig || env.PROFILE_CONFIG || env.profile || env.PROFILE || {};
+  const profileName = env.WIZARD_PROFILE_NAME || env.PROFILE_NAME || cfg.profileName || cfg.name || cfg.wizardName || '';
+  const wizardId = normalizeWizardId(env.WIZARD_PROFILE_ID || env.PROFILE_ID || env.WIZARD_ID || cfg.wizardId || cfg.profileId || cfg.id || profileName);
+  const profileType = (env.WIZARD_PROFILE_TYPE || env.PROFILE_TYPE || cfg.profileType || cfg.type || '').toUpperCase();
+  const docType = env.DOC_TYPE || env.DOCUMENT_TYPE || env.docType || cfg.docType || '';
+  const profileVersionRaw = env.PROFILE_VERSION ?? cfg.profileVersion ?? cfg.version;
+  const profileVersion = Number.isFinite(Number(profileVersionRaw)) ? Number(profileVersionRaw) : null;
+  const patternBundle = env.PATTERN_BUNDLE || env.patternBundle || cfg.patternBundle || null;
+  const profile = cfg.profile || null;
+  const username = env.WIZARD_USERNAME || env.PROFILE_USERNAME || env.username || null;
+  if(profileName || wizardId || docType || patternBundle || profile){
+    return { profileName, wizardId, profileType, docType, profileVersion, patternBundle, profile, username };
+  }
+  return null;
+}
+
+const envWizardBootstrap = readEnvWizardBootstrap();
+
 const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
 const ModeEnum = modeHelpers?.WizardMode || { CONFIG:'CONFIG', RUN:'RUN' };
 const modeController = modeHelpers?.createModeController ? modeHelpers.createModeController(console) : null;
@@ -292,8 +320,8 @@ if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(locat
 
 let state = {
   username: null,
-  docType: 'invoice',
-  activeWizardId: isSkinV2 ? '' : DEFAULT_WIZARD_ID,
+  docType: envWizardBootstrap?.docType || 'invoice',
+  activeWizardId: isSkinV2 ? (envWizardBootstrap?.wizardId || '') : DEFAULT_WIZARD_ID,
   wizardTemplates: [],
   mode: ModeEnum.CONFIG,
   modes: { rawData: false },
@@ -848,8 +876,29 @@ function getWizardTemplateById(id){
   return (state.wizardTemplates || []).find(t => t.id === id) || null;
 }
 
+function injectEnvWizardTemplate(){
+  if(!envWizardBootstrap) return;
+  if(envWizardBootstrap.profileType && envWizardBootstrap.profileType !== PROFILE_TYPE.CUSTOM_WIZARD) return;
+  if(envWizardBootstrap.docType && envWizardBootstrap.docType !== state.docType) return;
+  const wizardId = envWizardBootstrap.wizardId || normalizeWizardId(envWizardBootstrap.profileName);
+  if(!wizardId) return;
+  const existing = (state.wizardTemplates || []).some(t => t.id === wizardId);
+  if(existing) return;
+  state.wizardTemplates = [
+    {
+      id: wizardId,
+      wizardName: envWizardBootstrap.profileName || wizardId,
+      documentTypeId: state.docType,
+      version: envWizardBootstrap.profileVersion || PROFILE_VERSION,
+      fields: []
+    },
+    ...(state.wizardTemplates || [])
+  ];
+}
+
 function refreshWizardTemplates(){
   state.wizardTemplates = loadTemplatesForUser(state.username, state.docType);
+  injectEnvWizardTemplate();
   return state.wizardTemplates;
 }
 
@@ -1168,14 +1217,15 @@ function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID){
 }
 
 function importPatternBundle(bundle, meta = {}){
-  if(!bundle || typeof bundle !== 'object') return false;
+  if(!bundle || typeof bundle !== 'object') return 0;
   const { patterns, version, profileVersion, fields } = bundle;
   const source = meta.source || bundle.source || 'bundle';
   const uri = meta.uri || bundle.uri || null;
-  const bundleVersion = Number.isFinite(version) ? version : null;
+  const bundleVersion = Number.isFinite(version) ? version : PATTERN_BUNDLE_VERSION;
   const fieldCount = Array.isArray(fields) ? fields.length : null;
-  if(patterns && typeof patterns === 'object'){
-    FieldDataEngine.importPatterns(patterns, { source, uri, version: bundleVersion ?? profileVersion ?? null });
+  const patternCount = patterns && typeof patterns === 'object' ? Object.keys(patterns).length : 0;
+  if(patternCount && patterns && typeof patterns === 'object'){
+    FieldDataEngine.importPatterns(patterns, { source, uri, version: bundleVersion ?? profileVersion ?? PATTERN_BUNDLE_VERSION });
     ocrMagicDebug({
       event: 'ocrmagic.patterns.load',
       source,
@@ -1183,11 +1233,11 @@ function importPatternBundle(bundle, meta = {}){
       version: bundleVersion,
       profileVersion,
       fieldCount,
-      count: Object.keys(patterns || {}).length
+      count: patternCount
     });
-    return true;
+    return patternCount;
   }
-  return false;
+  return 0;
 }
 
 function readPatternBundleFromCache(docType, wizardId){
@@ -1197,11 +1247,12 @@ function readPatternBundleFromCache(docType, wizardId){
     if(!raw) return null;
     const parsed = JSON.parse(raw, jsonReviver);
     if(!parsed || typeof parsed !== 'object') return null;
-    if(parsed.version !== PATTERN_BUNDLE_VERSION){
+    const parsedVersion = Number.isFinite(parsed.version) ? parsed.version : PATTERN_BUNDLE_VERSION;
+    if(parsedVersion !== PATTERN_BUNDLE_VERSION){
       ocrMagicDebug({ event: 'ocrmagic.patterns.cache.stale', key, foundVersion: parsed.version, expected: PATTERN_BUNDLE_VERSION });
       return null;
     }
-    return { key, bundle: parsed };
+    return { key, bundle: { ...parsed, version: parsedVersion } };
   } catch(err){
     console.warn('Failed to read pattern bundle cache', err);
     return null;
@@ -1232,6 +1283,36 @@ function persistPatternBundle(profile, { patterns=null } = {}){
   }
 }
 
+function applyEnvProfileConfig(cfg){
+  if(!cfg) return;
+  const wizardId = cfg.wizardId || normalizeWizardId(cfg.profileName);
+  if(cfg.docType){
+    state.docType = cfg.docType;
+  }
+  if(wizardId && !state.activeWizardId){
+    state.activeWizardId = wizardId;
+  }
+  if(cfg.profile && !state.profile){
+    const hydrated = migrateProfile(clonePlain(cfg.profile));
+    if(wizardId && !hydrated.wizardId) hydrated.wizardId = wizardId;
+    if(cfg.docType && !hydrated.docType) hydrated.docType = cfg.docType;
+    state.profile = hydrated;
+  }
+  if(cfg.patternBundle){
+    const normalized = {
+      ...cfg.patternBundle,
+      version: Number.isFinite(cfg.patternBundle?.version) ? cfg.patternBundle.version : PATTERN_BUNDLE_VERSION,
+      profileVersion: cfg.patternBundle?.profileVersion ?? cfg.profileVersion ?? cfg.profile?.version ?? null,
+      wizardId: wizardId || cfg.patternBundle?.wizardId,
+      docType: cfg.docType || cfg.patternBundle?.docType || state.docType || 'invoice'
+    };
+    const importedCount = importPatternBundle(normalized, { source: 'env', uri: 'env.patternBundle' });
+    if(importedCount > 0 && state.profile){
+      persistPatternBundle(state.profile, { patterns: normalized.patterns });
+    }
+  }
+}
+
 function resolvePatternBundleUri(docType){
   const env = (typeof window !== 'undefined' && window.__ENV__) ? window.__ENV__ : {};
   const direct = (typeof window !== 'undefined' ? (window.PATTERN_BUNDLE_URL || window.PATTERN_STORE_URI || window.PATTERN_STORE_URL) : null) || env.PATTERN_BUNDLE_URL || env.PATTERN_STORE_URI || env.PATTERN_STORE_URL;
@@ -1254,8 +1335,8 @@ function refreshPatternBundleFromRemote(profile){
       return res.json();
     })
     .then(bundle => {
-      const ok = importPatternBundle(bundle, { source:'remote', uri });
-      if(ok && profile){
+      const importedCount = importPatternBundle(bundle, { source:'remote', uri });
+      if(importedCount > 0 && profile){
         persistPatternBundle(profile, { patterns: bundle.patterns });
       }
     })
@@ -2932,17 +3013,23 @@ function hydrateFingerprintsFromProfile(profile){
   if(isSkinV2){
     const cached = readPatternBundleFromCache(docType, wizardId);
     if(cached?.bundle){
-      const imported = importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key });
-      if(imported){
+      const cachedCount = cached.bundle.patterns && typeof cached.bundle.patterns === 'object' ? Object.keys(cached.bundle.patterns).length : 0;
+      const imported = cachedCount ? importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key }) : 0;
+      if(imported > 0){
         refreshPatternBundleFromRemote(profile);
         return;
       }
     }
   }
   const tallies = collectPersistedFingerprints(profile);
-  FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints', version: profile?.version || null });
-  if(isSkinV2 && profile){
-    persistPatternBundle(profile, { patterns: tallies });
+  const tallyCount = Object.keys(tallies).length;
+  if(tallyCount){
+    FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints', version: profile?.version || null });
+    if(isSkinV2 && profile){
+      persistPatternBundle(profile, { patterns: tallies });
+    }
+  }
+  if(isSkinV2){
     refreshPatternBundleFromRemote(profile);
   }
 }
@@ -8858,7 +8945,8 @@ function renderConfirmedTables(rec){
 function completeLogin(opts = {}){
   const nameInput = opts.username ?? els.username?.value ?? 'demo';
   state.username = String(nameInput || 'demo').trim() || 'demo';
-  state.docType = opts.docType || els.docType?.value || 'invoice';
+  const resolvedDocType = opts.docType || envWizardBootstrap?.docType || els.docType?.value || state.docType || 'invoice';
+  state.docType = resolvedDocType;
   refreshWizardTemplates();
   const wizardId = isSkinV2
     ? requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true })
@@ -8866,7 +8954,7 @@ function completeLogin(opts = {}){
   state.activeWizardId = wizardId || (isSkinV2 ? firstCustomWizardId() : DEFAULT_WIZARD_ID);
   const targetWizardId = state.activeWizardId || (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
   const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId) : null;
-  state.profile = existing || null;
+  state.profile = existing || state.profile || null;
   hydrateFingerprintsFromProfile(state.profile);
   const hasWizard = !!state.activeWizardId;
   if(els.loginSection){ els.loginSection.style.display = 'none'; }
@@ -8881,7 +8969,7 @@ els.loginForm?.addEventListener('submit', (e)=>{
 });
 
 if(isSkinV2){
-  completeLogin({ username: 'demo' });
+  completeLogin({ username: envWizardBootstrap?.username || 'demo', docType: envWizardBootstrap?.docType || state.docType });
 }
 els.logoutBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
@@ -9452,6 +9540,7 @@ async function processBatch(files){
 }
 
 /* ------------------------ Init on load ---------------------------- */
+applyEnvProfileConfig(envWizardBootstrap);
 renderResultsTable();
 renderReports();
 syncRawModeUI();
