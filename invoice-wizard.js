@@ -336,7 +336,7 @@ let state = {
   viewport: { w: 0, h: 0, scale: 1 },
   pageViewports: [],       // viewport per page
   pageOffsets: [],         // y-offset of each page within pdfCanvas
-  tokensByPage: {},          // {page:number: Token[] in px}
+  tokensByPage: [],          // {page:number: Token[] in px}
   keywordIndexByPage: {},   // per-page keyword bbox cache
   areaMatchesByPage: {},    // per-page detected area occurrences
   areaOccurrencesById: {},  // area occurrences keyed by areaId
@@ -470,7 +470,7 @@ function clearTransientStateLocal(){
   state.telemetry = []; state.currentTraceId = null;
   state.lastOcrCropPx = null; state.lastOcrCropCss = null;
   state.cropAudits = []; state.cropHashes = {};
-  state.tokensByPage = {}; state.currentLineItems = [];
+  state.tokensByPage = []; state.currentLineItems = [];
   state.areaMatchesByPage = {}; state.areaOccurrencesById = {}; state.areaExtractions = {}; state.currentAreaRows = [];
   state.currentFileId = ''; state.currentFileName = '';
   state.lineLayout = null;
@@ -1561,6 +1561,27 @@ function resolveStaticPlacement(field, viewports=[], totalPages){
 function summarizeTokens(tokens=[], max=5){
   if(!tokens.length) return '';
   return tokens.slice(0, max).map(t => (t.text || '').trim()).filter(Boolean).join(' | ');
+}
+
+function summarizeTokenCache(){
+  const store = state.tokensByPage || [];
+  const entries = Array.isArray(store)
+    ? store
+        .map((tokens, idx) => tokens ? { page: idx, tokens } : null)
+        .filter(Boolean)
+    : Object.entries(store || {}).map(([k,v]) => ({ page: Number(k) || 0, tokens: v }));
+  let totalTokens = 0;
+  const perPage = [];
+  for(const entry of entries){
+    const count = Array.isArray(entry.tokens) ? entry.tokens.length : (entry.tokens?.length || 0);
+    const page = entry.page || (perPage.length + 1);
+    if(page > 0 || count > 0){
+      perPage.push({ page, tokens: count });
+    }
+    totalTokens += count;
+  }
+  const pageCount = state.numPages || perPage.length || (Array.isArray(store) ? store.length : entries.length) || 0;
+  return { totalTokens, pageCount, perPage };
 }
 
 // Convert normalized [0-1] coords into the canonical logical pixel space used by
@@ -7384,7 +7405,7 @@ async function openFile(file){
   }
 }
 function cleanupDoc(){
-  state.tokensByPage = {};
+  state.tokensByPage = [];
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -7486,6 +7507,7 @@ async function prepareRunDocument(file){
     // pdf.js text items may be non-extensible in some browsers; clone before annotating
     const tokens = rawTokens.map(t => ({ ...t, page: i }));
     state.tokensByPage[i] = tokens;
+    await buildKeywordIndexForPage(i, tokens, vp);
     if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
     totalH += vp.height;
   }
@@ -9658,12 +9680,32 @@ async function runModeExtractFileWithProfile(file, profile){
     const activeProfile = state.profile || profile || { fields: [] };
     const prepared = await prepareRunDocument(file);
     if(!prepared){ return; }
-    if(isRunMode()) mirrorDebugLog(`[run-mode] tokens cached for ${state.numPages} page(s)`);
+    const tokenStats = summarizeTokenCache();
+    if(!state.numPages && tokenStats.pageCount){
+      state.numPages = tokenStats.pageCount;
+    }
+    if(isRunMode()){
+      mirrorDebugLog(`[run-mode] tokens cached for ${tokenStats.pageCount || state.numPages || 0} page(s), total tokens=${tokenStats.totalTokens}`);
+      if(tokenStats.perPage?.length){
+        const preview = tokenStats.perPage.filter(p => p.page > 0).map(p => `p${p.page}:${p.tokens}`).join(', ');
+        if(preview) mirrorDebugLog(`[run-mode] token breakdown: ${preview}`);
+      }
+    }
     traceEvent(runSpanKey,'tokens:rank',{
       stageLabel:'Tokens ready',
-      counts:{ tokens: state.tokensByPage?.reduce?.((n,p)=>n+(p?.length||0),0) || 0, pages: state.numPages||0 },
+      counts:{ tokens: tokenStats.totalTokens, pages: tokenStats.pageCount || state.numPages || 0 },
       notes:'Tokens cached for run mode'
     });
+    if(tokenStats.totalTokens === 0){
+      const warnMsg = 'Tokenization returned zero tokens; extraction may be empty';
+      console.warn('[run-mode]', warnMsg);
+      mirrorDebugLog(`[run-mode][warn] ${warnMsg}`);
+      traceEvent(runSpanKey,'tokens:warn',{
+        stageLabel:'Tokenization warning',
+        counts:{ tokens: 0, pages: tokenStats.pageCount || state.numPages || 0 },
+        notes: warnMsg
+      });
+    }
 
     await extractAreaRows(activeProfile);
     traceEvent(runSpanKey,'columns:merge',{
@@ -9685,6 +9727,7 @@ async function runModeExtractFileWithProfile(file, profile){
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
       const tokens = state.tokensByPage[targetPage] || [];
+      const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
       const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
       const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
@@ -9722,8 +9765,22 @@ async function runModeExtractFileWithProfile(file, profile){
       }
       state.snappedPx = null; state.snappedText = '';
       const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
+      const resolvedBox = boxPx || placement?.boxPx || null;
+      if(spec.type === 'static'){
+        const normalizedResolved = resolvedBox ? toPct(targetViewport, resolvedBox) : placement?.bbox || null;
+        traceEvent(
+          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          'bbox:expand',
+          {
+            stageLabel:'BBox expand (run)',
+            bbox:{ pixel: resolvedBox, normalized: normalizedResolved },
+            counts:{ tokens: tokens.length },
+            notes: resolvedBox ? 'resolved search box' : 'using placement bbox only'
+          }
+        );
+      }
       if(value){
-        const vp = state.pageViewports[targetPage-1] || state.viewport || {width:1,height:1};
+        const vp = targetViewport || {width:1,height:1};
         const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
         const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
         const arr = rawStore.get(state.currentFileId) || [];
