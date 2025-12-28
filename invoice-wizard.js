@@ -958,6 +958,8 @@ window.dumpMaster = function(){
 
 /* ---------- Profile versioning & persistence helpers ---------- */
 const PROFILE_VERSION = 8;
+const PATTERN_BUNDLE_VERSION = 3;
+const PATTERN_STORE_KEY_PREFIX = 'wiz.patternBundle';
 const migrations = {
   1: p => { (p.fields||[]).forEach(f=>{ if(!f.type) f.type = 'static'; }); },
   2: p => {
@@ -1157,6 +1159,110 @@ function jsonReviver(key, value){
 
 function serializeProfile(p){
   return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer, 2);
+}
+
+function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID){
+  const safeDoc = String(docType || 'invoice').replace(/\s+/g, '_');
+  const safeWizard = wizardId || DEFAULT_WIZARD_ID;
+  return `${PATTERN_STORE_KEY_PREFIX}.${safeDoc}.${safeWizard}`;
+}
+
+function importPatternBundle(bundle, meta = {}){
+  if(!bundle || typeof bundle !== 'object') return false;
+  const { patterns, version, profileVersion, fields } = bundle;
+  const source = meta.source || bundle.source || 'bundle';
+  const uri = meta.uri || bundle.uri || null;
+  const bundleVersion = Number.isFinite(version) ? version : null;
+  const fieldCount = Array.isArray(fields) ? fields.length : null;
+  if(patterns && typeof patterns === 'object'){
+    FieldDataEngine.importPatterns(patterns, { source, uri, version: bundleVersion ?? profileVersion ?? null });
+    ocrMagicDebug({
+      event: 'ocrmagic.patterns.load',
+      source,
+      uri,
+      version: bundleVersion,
+      profileVersion,
+      fieldCount,
+      count: Object.keys(patterns || {}).length
+    });
+    return true;
+  }
+  return false;
+}
+
+function readPatternBundleFromCache(docType, wizardId){
+  try{
+    const key = patternStoreKey(docType, wizardId);
+    const raw = localStorage.getItem(key);
+    if(!raw) return null;
+    const parsed = JSON.parse(raw, jsonReviver);
+    if(!parsed || typeof parsed !== 'object') return null;
+    if(parsed.version !== PATTERN_BUNDLE_VERSION){
+      ocrMagicDebug({ event: 'ocrmagic.patterns.cache.stale', key, foundVersion: parsed.version, expected: PATTERN_BUNDLE_VERSION });
+      return null;
+    }
+    return { key, bundle: parsed };
+  } catch(err){
+    console.warn('Failed to read pattern bundle cache', err);
+    return null;
+  }
+}
+
+function persistPatternBundle(profile, { patterns=null } = {}){
+  if(!profile || !isSkinV2 || !window?.localStorage) return null;
+  try{
+    const docType = profile.docType || state.docType || 'invoice';
+    const wizardId = profile.wizardId || currentWizardId();
+    const bundle = {
+      version: PATTERN_BUNDLE_VERSION,
+      profileVersion: profile.version || PROFILE_VERSION,
+      docType,
+      wizardId,
+      fields: (profile.fields || []).map(f => ({ fieldKey: f.fieldKey, type: f.type, label: f.label })),
+      updatedAt: new Date().toISOString(),
+      patterns: patterns || FieldDataEngine.exportPatterns()
+    };
+    const key = patternStoreKey(docType, wizardId);
+    localStorage.setItem(key, JSON.stringify(bundle));
+    ocrMagicDebug({ event: 'ocrmagic.patterns.cache.write', key, count: Object.keys(bundle.patterns || {}).length, fieldCount: bundle.fields.length, version: bundle.version });
+    return { key, bundle };
+  } catch(err){
+    console.warn('Failed to persist pattern bundle', err);
+    return null;
+  }
+}
+
+function resolvePatternBundleUri(docType){
+  const env = (typeof window !== 'undefined' && window.__ENV__) ? window.__ENV__ : {};
+  const direct = (typeof window !== 'undefined' ? (window.PATTERN_BUNDLE_URL || window.PATTERN_STORE_URI || window.PATTERN_STORE_URL) : null) || env.PATTERN_BUNDLE_URL || env.PATTERN_STORE_URI || env.PATTERN_STORE_URL;
+  if(typeof direct === 'string' && direct.trim()){
+    return direct.replace('{docType}', docType || 'invoice');
+  }
+  return null;
+}
+
+function refreshPatternBundleFromRemote(profile){
+  if(!isSkinV2 || typeof fetch !== 'function') return;
+  const docType = profile?.docType || state.docType || 'invoice';
+  const wizardId = profile?.wizardId || currentWizardId();
+  const uri = resolvePatternBundleUri(docType);
+  ocrMagicDebug({ event: 'ocrmagic.patterns.resolve', uri, docType, wizardId });
+  if(!uri) return;
+  fetch(uri, { cache: 'no-cache' })
+    .then(res => {
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(bundle => {
+      const ok = importPatternBundle(bundle, { source:'remote', uri });
+      if(ok && profile){
+        persistPatternBundle(profile, { patterns: bundle.patterns });
+      }
+    })
+    .catch(err => {
+      ocrMagicDebug({ event: 'ocrmagic.patterns.load_failed', uri, reason: err?.message || String(err) });
+      console.warn('Pattern bundle fetch failed', err);
+    });
 }
 
 function normalizeRowsPayload(payload){
@@ -2701,9 +2807,12 @@ const FieldDataEngine = (() => {
   }
 
   function exportPatterns(){ return patterns; }
-  function importPatterns(p){
+  function importPatterns(p, ctx = {}){
     Object.keys(patterns).forEach(k => delete patterns[k]);
-    if(!p || typeof p !== 'object') return;
+    if(!p || typeof p !== 'object'){
+      ocrMagicDebug({ event: 'ocrmagic.patterns.import', importedKeys: [], count: 0, source: ctx.source || null, uri: ctx.uri || ctx.path || null, version: ctx.version ?? null });
+      return;
+    }
     for(const [key, data] of Object.entries(p)){
       if(data && typeof data === 'object'){
         patterns[key] = clonePlain(data);
@@ -2711,7 +2820,14 @@ const FieldDataEngine = (() => {
       }
     }
     const importedKeys = Object.keys(patterns);
-    ocrMagicDebug({ event: 'ocrmagic.patterns.import', importedKeys, count: importedKeys.length });
+    ocrMagicDebug({
+      event: 'ocrmagic.patterns.import',
+      importedKeys,
+      count: importedKeys.length,
+      source: ctx.source || null,
+      uri: ctx.uri || ctx.path || null,
+      version: ctx.version ?? null
+    });
   }
 
   return { codeOf, shapeOf, digitRatio, clean, exportPatterns, importPatterns, dominant };
@@ -2811,8 +2927,24 @@ function collectPersistedFingerprints(profile){
 }
 
 function hydrateFingerprintsFromProfile(profile){
+  const docType = profile?.docType || state.docType || 'invoice';
+  const wizardId = profile?.wizardId || currentWizardId();
+  if(isSkinV2){
+    const cached = readPatternBundleFromCache(docType, wizardId);
+    if(cached?.bundle){
+      const imported = importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key });
+      if(imported){
+        refreshPatternBundleFromRemote(profile);
+        return;
+      }
+    }
+  }
   const tallies = collectPersistedFingerprints(profile);
-  FieldDataEngine.importPatterns(tallies);
+  FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints', version: profile?.version || null });
+  if(isSkinV2 && profile){
+    persistPatternBundle(profile, { patterns: tallies });
+    refreshPatternBundleFromRemote(profile);
+  }
 }
 
 function groupIntoLines(tokens, tol=4){
@@ -3353,6 +3485,9 @@ function ensureProfile(){
   state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
   hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
+  if(isSkinV2){
+    persistPatternBundle(state.profile);
+  }
 }
 
 /* ------------------------ Wizard Steps --------------------------- */
@@ -4367,6 +4502,9 @@ function captureGlobalLandmarks(){
     return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
   });
   saveProfile(state.username, state.docType, state.profile);
+  if(isSkinV2){
+    persistPatternBundle(state.profile);
+  }
 }
 
 /* ----------------------- Field Extraction ------------------------ */
@@ -8603,6 +8741,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   saveProfile(state.username, state.docType, state.profile);
+  if(isSkinV2){
+    persistPatternBundle(state.profile);
+  }
 }
 function ensureAnchorFor(fieldKey){
   if(!state.profile) return;
@@ -8619,6 +8760,9 @@ function ensureAnchorFor(fieldKey){
   if(anchorMap[fieldKey]){
     f.anchor = anchorMap[fieldKey];
     saveProfile(state.username, state.docType, state.profile);
+    if(isSkinV2){
+      persistPatternBundle(state.profile);
+    }
   }
 }
 
