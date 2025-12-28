@@ -149,6 +149,7 @@ const els = {
   newWizardBtn:    document.getElementById('new-wizard-btn'),
   demoBtn:         document.getElementById('demo-btn'),
   staticDebugBtn:  document.getElementById('static-debug-btn'),
+  staticDebugCopy: document.getElementById('copyStaticDebug'),
   snapshotModeToggle: document.getElementById('snapshot-mode-toggle'),
   uploadBtn:       document.getElementById('upload-btn'),
   resetModelBtn:   document.getElementById('reset-model-btn'),
@@ -394,7 +395,33 @@ function normalizeStaticDebugLogs(logs = staticDebugLogs){
   });
 }
 window.getStaticDebugLogs = () => staticDebugLogs.slice();
-window.clearStaticDebugLogs = () => { staticDebugLogs.length = 0; return []; };
+window.clearStaticDebugLogs = () => {
+  staticDebugLogs.length = 0;
+  if(window.debugTraces?.traces){ window.debugTraces.traces.length = 0; }
+  return [];
+};
+
+function serializeTraceEvents(){
+  const traces = window.debugTraces?.traces || [];
+  if(!traces.length) return '(no trace events)';
+  try{
+    return JSON.stringify(traces, null, 2);
+  }catch(err){
+    return `Trace serialization failed: ${err?.message || err}`;
+  }
+}
+function buildFullDebugDump(){
+  const logs = window.getStaticDebugLogs ? window.getStaticDebugLogs() : [];
+  const lines = normalizeStaticDebugLogs(logs);
+  const traceBlock = serializeTraceEvents();
+  return [
+    '=== STATIC DEBUG LOGS ===',
+    ...lines,
+    '',
+    '=== TRACE EVENTS (copy/paste JSON) ===',
+    traceBlock
+  ].join('\n');
+}
 
 function showStaticDebugModal(){
   if(!els.staticDebugModal) return;
@@ -410,9 +437,7 @@ function hideStaticDebugModal(){
 }
 function renderStaticDebugLogs(){
   if(!els.staticDebugText) return;
-  const logs = window.getStaticDebugLogs ? window.getStaticDebugLogs() : [];
-  const lines = normalizeStaticDebugLogs(logs).join('\n');
-  els.staticDebugText.value = lines;
+  els.staticDebugText.value = buildFullDebugDump();
 }
 function syncStaticDebugToggleUI(){
   if(els.staticDebugToggle){
@@ -9212,6 +9237,19 @@ els.staticDebugBtn?.addEventListener('click', showStaticDebugModal);
 els.staticDebugClose?.addEventListener('click', hideStaticDebugModal);
 els.staticDebugRefresh?.addEventListener('click', renderStaticDebugLogs);
 els.staticDebugClear?.addEventListener('click', ()=>{ window.clearStaticDebugLogs?.(); renderStaticDebugLogs(); });
+els.staticDebugCopy?.addEventListener('click', ()=>{
+  if(!els.staticDebugText) return;
+  const txt = els.staticDebugText.value || '';
+  if(!txt) return;
+  if(window.navigator?.clipboard?.writeText){
+    window.navigator.clipboard.writeText(txt);
+  } else {
+    const ta=document.createElement('textarea');
+    ta.value=txt; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); }catch(err){}
+    document.body.removeChild(ta);
+  }
+});
 els.staticDebugToggle?.addEventListener('change', ()=>{
   const enabled = !!els.staticDebugToggle.checked;
   window.DEBUG_STATIC_FIELDS = enabled;
