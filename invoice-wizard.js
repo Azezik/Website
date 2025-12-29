@@ -1565,6 +1565,81 @@ function loadModelById(id){
   hydrateFingerprintsFromProfile(state.profile);
   return m;
 }
+function peekModelById(id){
+  return getModels().find(x => x.id === id) || null;
+}
+
+function resolveSelectedWizardContext(){
+  const sel = document.getElementById('model-select');
+  const value = sel?.value || '';
+  const label = sel?.selectedOptions?.[0]?.textContent?.trim() || '';
+  const base = { value, label, wizardId: '', source: '', modelId: '', model: null, displayName: label || '' };
+  if(value === DEFAULT_WIZARD_ID){
+    return { ...base, wizardId: DEFAULT_WIZARD_ID, source: 'default', displayName: label || 'Default Wizard' };
+  }
+  if(value.startsWith('custom:')){
+    const wizardId = value.replace('custom:','').trim();
+    const tpl = getWizardTemplateById(wizardId);
+    return { ...base, wizardId, source: 'custom', displayName: label || tpl?.wizardName || wizardId };
+  }
+  if(value.startsWith('model:')){
+    const modelId = value.replace('model:','');
+    const model = peekModelById(modelId);
+    const wizardId = model?.wizardId || '';
+    return { ...base, wizardId, source: 'model', modelId, model, displayName: label || model?.wizardName || wizardId };
+  }
+  if(!value && state.activeWizardId){
+    const tpl = getWizardTemplateById(state.activeWizardId);
+    return { ...base, wizardId: state.activeWizardId, source: 'activeWizard', displayName: label || tpl?.wizardName || state.activeWizardId };
+  }
+  return base;
+}
+
+function logWizardSelection(event, ctx){
+  try {
+    console.info('[wizard-select]', JSON.stringify({
+      event,
+      wizardId: ctx?.wizardId || null,
+      displayName: ctx?.displayName || ctx?.label || null,
+      source: ctx?.source || null,
+      value: ctx?.value || null,
+      modelId: ctx?.modelId || null,
+      activeWizardId: state.activeWizardId,
+      profileWizardId: state.profile?.wizardId || null
+    }));
+  } catch(err){ console.warn('[wizard-select] log failed', err); }
+}
+
+function resolveRunWizardContext(opts = {}){
+  const selection = resolveSelectedWizardContext();
+  const incomingProfile = opts.profileOverride ? migrateProfile(clonePlain(opts.profileOverride)) : null;
+  const modelProfile = selection.model ? migrateProfile(clonePlain(selection.model.profile)) : null;
+  const wizardId = selection.wizardId || incomingProfile?.wizardId || modelProfile?.wizardId || state.activeWizardId || currentWizardId();
+  const displayName = selection.displayName || selection.label || (wizardId === DEFAULT_WIZARD_ID ? 'Default Wizard' : wizardId);
+  const ctx = {
+    wizardId,
+    displayName,
+    selectionValue: selection.value,
+    selectionSource: selection.source || '',
+    modelId: selection.modelId || '',
+    profile: modelProfile || incomingProfile || state.profile
+  };
+  if(!wizardId){
+    const payload = {
+      ...ctx,
+      selectionValue: selection.value,
+      selectionLabel: selection.label,
+      activeWizardId: state.activeWizardId,
+      profileWizardId: state.profile?.wizardId || null
+    };
+    console.error('[wizard-select][error]', payload);
+    throw new Error('No wizard selected or resolvable. Please choose a wizard before running extraction.');
+  }
+  if(ctx.profile && !ctx.profile.wizardId){
+    ctx.profile.wizardId = wizardId;
+  }
+  return ctx;
+}
 
 /* ------------------------- Utilities ------------------------------ */
 const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
@@ -3645,10 +3720,15 @@ const ANCHOR_HINTS = {
 };
 
 /* --------------------------- Landmarks ---------------------------- */
-function ensureProfile(){
-  const wizardId = currentWizardId();
-  const profileKey = LS.profileKey(state.username, state.docType, wizardId);
-  if(state.profile && state.profile.wizardId === wizardId){
+function ensureProfile(requestedWizardId){
+  const wizardId = requestedWizardId || currentWizardId();
+  const resolvedWizardId = wizardId || currentWizardId();
+  const profileKey = resolvedWizardId ? LS.profileKey(state.username, state.docType, resolvedWizardId) : null;
+  if(!resolvedWizardId){
+    console.warn('[id-drift][ensureProfile] missing wizardId', { requestedWizardId, activeWizardId: state.activeWizardId, profileWizardId: state.profile?.wizardId || null });
+    return null;
+  }
+  if(state.profile && state.profile.wizardId === resolvedWizardId){
     hydrateFingerprintsFromProfile(state.profile);
     try {
       const hasGeom = Array.isArray(state.profile.fields) && state.profile.fields.some(hasFieldGeometry);
@@ -3657,16 +3737,17 @@ function ensureProfile(){
         username: state.username,
         docType: state.docType,
         activeWizardId: state.activeWizardId,
-        wizardId,
+        wizardId: resolvedWizardId,
+        requestedWizardId,
         profileKey,
         foundProfile: true,
         hasGeometry: hasGeom
       }));
     } catch(err){ console.warn('[id-drift][ensureProfile] log failed', err); }
-    return;
+    return state.profile;
   }
 
-  const existing = loadProfile(state.username, state.docType, wizardId);
+  const existing = loadProfile(state.username, state.docType, resolvedWizardId);
   try {
     const hasGeom = Array.isArray(existing?.fields) && existing.fields.some(hasFieldGeometry);
     console.info('[id-drift][ensureProfile]', JSON.stringify({
@@ -3674,13 +3755,14 @@ function ensureProfile(){
       username: state.username,
       docType: state.docType,
       activeWizardId: state.activeWizardId,
-      wizardId,
+      wizardId: resolvedWizardId,
+      requestedWizardId,
       profileKey,
       foundProfile: !!existing,
       hasGeometry: hasGeom
     }));
   } catch(err){ console.warn('[id-drift][ensureProfile] log failed', err); }
-  const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
+  const templateRaw = resolvedWizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(resolvedWizardId);
   const template = normalizeTemplate(templateRaw);
   const templateFields = template ? (template.fields || []).map(f => {
     const normalizedType = (f.fieldType || 'static').toLowerCase();
@@ -3713,7 +3795,7 @@ function ensureProfile(){
   state.profile = existing || {
     username: state.username,
     docType: state.docType,
-    wizardId,
+    wizardId: resolvedWizardId,
     version: PROFILE_VERSION,
     fields: templateFields,
     globals: [],
@@ -3764,7 +3846,7 @@ function ensureProfile(){
   };
 
   if(state.profile && !state.profile.wizardId){
-    state.profile.wizardId = wizardId;
+    state.profile.wizardId = resolvedWizardId;
   }
 
   if(existing?.fields?.length){
@@ -9456,6 +9538,7 @@ function completeLogin(opts = {}){
   if(els.app){ els.app.style.display = hasWizard ? 'block' : 'none'; }
   if(hasWizard){ showTab('document-dashboard'); }
   populateModelSelect(isSkinV2 && state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
+  logWizardSelection('restore', resolveSelectedWizardContext());
   renderResultsTable();
 }
 els.loginForm?.addEventListener('submit', (e)=>{
@@ -9567,6 +9650,7 @@ els.docType?.addEventListener('change', ()=>{
     els.app.style.display = state.activeWizardId ? 'block' : 'none';
   }
   populateModelSelect(isSkinV2 && state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
+  logWizardSelection('docType-change', resolveSelectedWizardContext());
 });
 
 els.configureCustomBtn?.addEventListener('click', openBuilderFromSelection);
@@ -9590,17 +9674,18 @@ const modelSelect = document.getElementById('model-select');
 if(modelSelect){
   modelSelect.addEventListener('change', ()=>{
     const val = modelSelect.value;
+    let selectionLogged = false;
     if(!val){
       if(isSkinV2){
         const ensured = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true });
         if(ensured){
           state.activeWizardId = ensured;
           populateModelSelect(`custom:${ensured}`);
+          logWizardSelection('change', resolveSelectedWizardContext());
+          selectionLogged = true;
         }
       }
-      return;
-    }
-    if(val === DEFAULT_WIZARD_ID){
+    } else if(val === DEFAULT_WIZARD_ID){
       if(isSkinV2){
         const ensured = requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true });
         if(ensured){
@@ -9609,15 +9694,13 @@ if(modelSelect){
         } else {
           alert('Please create or choose a custom wizard.');
         }
-        return;
+      } else {
+        state.activeWizardId = DEFAULT_WIZARD_ID;
+        state.profile = loadProfile(state.username, state.docType, currentWizardId());
+        hydrateFingerprintsFromProfile(state.profile);
+        alert('Default wizard selected. Click Configure Wizard to edit.');
       }
-      state.activeWizardId = DEFAULT_WIZARD_ID;
-      state.profile = loadProfile(state.username, state.docType, currentWizardId());
-      hydrateFingerprintsFromProfile(state.profile);
-      alert('Default wizard selected. Click Configure Wizard to edit.');
-      return;
-    }
-    if(val.startsWith('custom:')){
+    } else if(val.startsWith('custom:')){
       state.activeWizardId = val.replace('custom:','');
       state.profile = loadProfile(state.username, state.docType, currentWizardId());
       hydrateFingerprintsFromProfile(state.profile);
@@ -9625,9 +9708,7 @@ if(modelSelect){
         populateModelSelect(`custom:${state.activeWizardId}`);
       }
       alert('Custom wizard selected. Click Configure Wizard to edit.');
-      return;
-    }
-    if(val.startsWith('model:')){
+    } else if(val.startsWith('model:')){
       const loaded = loadModelById(val.replace('model:',''));
       if(loaded?.wizardId){
         state.activeWizardId = loaded.wizardId;
@@ -9640,6 +9721,9 @@ if(modelSelect){
       renderConfirmedTables();
       renderResultsTable();
       alert('Model selected. Drop files to auto-extract.');
+    }
+    if(!selectionLogged){
+      logWizardSelection('change', resolveSelectedWizardContext());
     }
   });
 }
@@ -9694,11 +9778,22 @@ els.closeSnapshotBtn?.addEventListener('click', closeSnapshotPanel);
 els.wizardFile?.addEventListener('change', async e=>{
   const f = e.target.files?.[0]; if(!f) return;
   if(isRunMode()){
+    let runCtx;
+    try{
+      runCtx = resolveRunWizardContext({ profileOverride: state.profile });
+    } catch(err){
+      console.error('Run mode aborted: wizard selection missing', err);
+      alert(err?.message || 'Select a wizard before running extraction.');
+      return;
+    }
+    state.activeWizardId = runCtx.wizardId;
+    state.profile = runCtx.profile || state.profile;
     activateRunMode({ clearDoc: true });
     els.app.style.display = 'none';
     els.wizardSection.style.display = 'block';
-    ensureProfile();
-    await runModeExtractFileWithProfile(f, state.profile);
+    ensureProfile(runCtx.wizardId);
+    logWizardSelection('run.start.single', { ...runCtx, value: runCtx.selectionValue });
+    await runModeExtractFileWithProfile(f, state.profile, runCtx);
     renderSavedFieldsTable();
     renderConfirmedTables();
     return;
@@ -10131,7 +10226,7 @@ function scanWizardStorageKeys(wizardId){
 }
 
 /* ---------------------------- Batch ------------------------------- */
-async function runModeExtractFileWithProfile(file, profile){
+async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   const guardKey = runKeyForFile(file);
   const guardStarted = runLoopGuard?.start ? runLoopGuard.start(guardKey) : true;
   if(runLoopGuard && !guardStarted){
@@ -10143,7 +10238,27 @@ async function runModeExtractFileWithProfile(file, profile){
   }
   try {
     activateRunMode({ clearDoc: true });
-    const wizardId = currentWizardId();
+    const wizardId = runContext.wizardId || profile?.wizardId || currentWizardId();
+    const selectionValue = runContext.selectionValue || runContext.value || null;
+    const selectionSource = runContext.selectionSource || runContext.source || null;
+    const displayName = runContext.displayName || runContext.selectionLabel || null;
+    if(!wizardId){
+      const payload = {
+        fileName: file?.name || null,
+        selectionValue,
+        selectionSource,
+        displayName,
+        activeWizardId: state.activeWizardId,
+        profileWizardId: profile?.wizardId || state.profile?.wizardId || null
+      };
+      console.error('[wizard-run][error]', payload);
+      alert('Please select a wizard before running extraction.');
+      throw new Error('Wizard ID missing for run mode');
+    }
+    logWizardSelection('run.resolve', { wizardId, displayName, value: selectionValue, source: selectionSource, modelId: runContext.modelId || null });
+    if(state.activeWizardId !== wizardId){
+      state.activeWizardId = wizardId;
+    }
     const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
     const storedProfile = loadProfile(state.username, state.docType, wizardId);
     let geomSnapshotCursor = snapshotProfileGeometry(profile);
@@ -10154,6 +10269,9 @@ async function runModeExtractFileWithProfile(file, profile){
       docType: state.docType,
       wizardId,
       profileKey: profileStorageKey,
+      displayName,
+      selectionValue,
+      selectionSource,
       profile,
       snapshot: geomSnapshotCursor,
       note:'incoming-profile'
@@ -10169,7 +10287,10 @@ async function runModeExtractFileWithProfile(file, profile){
         activeWizardId: state.activeWizardId,
         wizardId,
         profileKey: profileStorageKey,
-        patternKey
+        patternKey,
+        displayName,
+        selectionValue,
+        selectionSource
       }));
     } catch(err){ console.warn('[id-drift][runModeExtractFileWithProfile] log failed', err); }
     const incomingProfile = profile ? migrateProfile(clonePlain(profile)) : null;
@@ -10236,6 +10357,9 @@ async function runModeExtractFileWithProfile(file, profile){
       });
     }
     state.profile = resolvedProfile;
+    if(state.profile && !state.profile.wizardId){
+      state.profile.wizardId = wizardId;
+    }
     syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
     const ensuredSnapshot = snapshotProfileGeometry(state.profile);
@@ -10676,18 +10800,25 @@ async function runModeExtractFileWithProfile(file, profile){
 
 async function processBatch(files){
   if(!files.length) return;
+  let runCtx;
+  try{
+    runCtx = resolveRunWizardContext({ profileOverride: state.profile });
+  } catch(err){
+    console.error('Batch extraction aborted: wizard selection missing', err);
+    alert(err?.message || 'Select a wizard before running extraction.');
+    return;
+  }
+  state.activeWizardId = runCtx.wizardId;
+  state.profile = runCtx.profile || state.profile;
   activateRunMode({ clearDoc: true });
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
-  const modelId = document.getElementById('model-select')?.value || '';
-  const model = modelId ? getModels().find(m => m.id === modelId) : null;
-  const profile = model ? model.profile : state.profile;
-  syncActiveWizardId(profile);
-  ensureProfile(); renderSavedFieldsTable();
+  ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
+  logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
 
   try {
     for(const f of files){
-      await runModeExtractFileWithProfile(f, profile);
+      await runModeExtractFileWithProfile(f, state.profile, runCtx);
     }
   } catch(err){
     console.error('Batch extraction failed', err);
