@@ -162,6 +162,7 @@ const els = {
   staticDebugRefresh: document.getElementById('refreshStaticDebug'),
   staticDebugClear: document.getElementById('clearStaticDebug'),
   staticDebugToggle: document.getElementById('staticDebugToggle'),
+  staticDebugDownload: document.getElementById('downloadStaticDebug'),
 
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
@@ -438,6 +439,23 @@ function hideStaticDebugModal(){
 function renderStaticDebugLogs(){
   if(!els.staticDebugText) return;
   els.staticDebugText.value = buildFullDebugDump();
+}
+function downloadStaticDebugLogs(){
+  try {
+    const text = buildFullDebugDump() || '(no logs)';
+    const blob = new Blob([text], { type:'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `static-debug-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  } catch(err){
+    console.error('static debug download failed', err);
+    alert('Failed to download static debug logs.');
+  }
 }
 function syncStaticDebugToggleUI(){
   if(els.staticDebugToggle){
@@ -1420,6 +1438,19 @@ let saveTimer=null;
 function saveProfile(u, d, p, wizardId = currentWizardId()){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
+    const key = LS.profileKey(u, d, wizardId);
+    const preSaveSnapshot = snapshotProfileGeometry(p);
+    traceSnapshot('config.pre-save',{
+      stage:'config.pre-save',
+      mode:'config',
+      username:u,
+      docType:d,
+      wizardId,
+      profileKey:key,
+      profile:p,
+      snapshot: preSaveSnapshot,
+      note:'before-persist'
+    });
     try{
       LS.setProfile(u, d, p, wizardId);
     } catch(err){
@@ -1428,7 +1459,6 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
       return;
     }
     try {
-      const key = LS.profileKey(u, d, wizardId);
       const hasGeom = Array.isArray(p?.fields) && p.fields.some(hasFieldGeometry);
       console.info('[id-drift][saveProfile]', JSON.stringify({
         isSkinV2,
@@ -1452,6 +1482,24 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
         }
       );
     }catch{}
+    try{
+      const persistedProfile = loadProfile(u, d, wizardId);
+      const postSaveSnapshot = snapshotProfileGeometry(persistedProfile);
+      traceSnapshot('config.post-save',{
+        stage:'config.post-save',
+        mode:'config',
+        username:u,
+        docType:d,
+        wizardId,
+        profileKey:key,
+        profile: persistedProfile,
+        snapshot: postSaveSnapshot,
+        previousSnapshot: preSaveSnapshot,
+        note:'read-after-save'
+      });
+    }catch(err){
+      console.warn('[flight-recorder][config.post-save] snapshot failed', err);
+    }
   },300);
 }
 function loadProfile(u, d, wizardId = currentWizardId()){
@@ -9100,6 +9148,7 @@ function renderReports(){
 /* ---------------------- Profile save / table --------------------- */
 function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[], rawBox=null) {
   ensureProfile();
+  const prevGeomSnapshot = snapshotProfileGeometry(state.profile);
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   const areaId = step.areaId || (step.isArea ? (step.fieldKey || step.fieldId) : null) || step.fieldKey;
@@ -9245,6 +9294,21 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     entry.fingerprints = nextFingerprints;
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
+  const wizardId = state.profile?.wizardId || currentWizardId();
+  const profileKey = LS.profileKey(state.username, state.docType, wizardId);
+  const capturedSnapshot = snapshotProfileGeometry(state.profile);
+  traceSnapshot('config.field-captured',{
+    stage:'config.capture',
+    mode:'config',
+    username: state.username,
+    docType: state.docType,
+    wizardId,
+    profileKey,
+    profile: state.profile,
+    snapshot: capturedSnapshot,
+    previousSnapshot: prevGeomSnapshot,
+    note: `field=${step.fieldKey || ''}`
+  });
   saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
@@ -9483,6 +9547,7 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   DEBUG_OCRMAGIC = enabled;
   persistStaticDebugPref(enabled);
 });
+els.staticDebugDownload?.addEventListener('click', downloadStaticDebugLogs);
 syncStaticDebugToggleUI();
 
 els.docType?.addEventListener('change', ()=>{
@@ -9868,6 +9933,143 @@ function normalizePayloadForLog(payload){
   return payload;
 }
 
+function snapshotProfileGeometry(profile){
+  const fields = Array.isArray(profile?.fields) ? profile.fields : [];
+  const staticFields = fields.filter(f => (f.type || f.fieldType || 'static') === 'static');
+  const toNormBox = (field) => {
+    if(field?.normBox){
+      const nb = field.normBox;
+      const x0 = Number.isFinite(nb.x0n) ? nb.x0n : Number.isFinite(nb.x0) ? nb.x0 : null;
+      const y0 = Number.isFinite(nb.y0n) ? nb.y0n : Number.isFinite(nb.y0) ? nb.y0 : null;
+      const w = Number.isFinite(nb.wN) ? nb.wN : Number.isFinite(nb.w) ? nb.w : null;
+      const h = Number.isFinite(nb.hN) ? nb.hN : Number.isFinite(nb.h) ? nb.h : null;
+      if([x0,y0,w,h].every(v => typeof v === 'number' && Number.isFinite(v))){
+        return { x0, y0, x1: x0 + w, y1: y0 + h };
+      }
+    }
+    if(field?.bboxPct){
+      const { x0, y0, x1, y1 } = field.bboxPct;
+      if([x0,y0,x1,y1].every(v => typeof v === 'number' && Number.isFinite(v))){
+        return { x0, y0, x1, y1 };
+      }
+    }
+    if(Array.isArray(field?.bbox) && field.bbox.length === 4){
+      const [x0, y0, x1, y1] = field.bbox;
+      if([x0,y0,x1,y1].every(v => typeof v === 'number' && Number.isFinite(v))){
+        return { x0, y0, x1, y1 };
+      }
+    }
+    return null;
+  };
+  const toPxBox = (field) => {
+    if(field?.boxPx){
+      const { x, y, w, h, page } = field.boxPx;
+      if([x,y,w,h].every(v => typeof v === 'number' && Number.isFinite(v))){
+        return { x, y, w, h, page: page ?? (field.page ?? (Number.isFinite(field.pageIndex) ? field.pageIndex + 1 : null)) };
+      }
+    }
+    if(field?.rawBox){
+      const { x, y, w, h, page } = field.rawBox;
+      if([x,y,w,h].every(v => typeof v === 'number' && Number.isFinite(v))){
+        return { x, y, w, h, page: page ?? (field.page ?? (Number.isFinite(field.pageIndex) ? field.pageIndex + 1 : null)) };
+      }
+    }
+    return null;
+  };
+  const snapshotFields = staticFields.map(f => {
+    const normBox = toNormBox(f);
+    const pxBox = toPxBox(f);
+    return {
+      fieldKey: f.fieldKey,
+      page: f.page ?? (Number.isFinite(f.pageIndex) ? f.pageIndex + 1 : null),
+      hasNormBox: !!normBox,
+      normBox,
+      hasPxBox: !!pxBox,
+      pxBox
+    };
+  });
+  return { fieldCount: snapshotFields.length, fields: snapshotFields };
+}
+
+function countGeom(snapshot){
+  const fields = Array.isArray(snapshot?.fields) ? snapshot.fields : [];
+  let norm = 0, px = 0;
+  fields.forEach(f => {
+    if(f?.hasNormBox) norm += 1;
+    if(f?.hasPxBox) px += 1;
+  });
+  return { total: fields.length, norm, px };
+}
+
+function diffGeom(prev, next){
+  const prevSnap = prev || { fields: [] };
+  const nextSnap = next || { fields: [] };
+  const prevCounts = countGeom(prevSnap);
+  const nextCounts = countGeom(nextSnap);
+  const prevMap = new Map((Array.isArray(prevSnap.fields) ? prevSnap.fields : []).map(f => [f.fieldKey, f]));
+  const nextMap = new Map((Array.isArray(nextSnap.fields) ? nextSnap.fields : []).map(f => [f.fieldKey, f]));
+  const lostFields = [];
+  const lostNormFields = [];
+  const lostPxFields = [];
+  for(const [key, prevField] of prevMap.entries()){
+    const nextField = nextMap.get(key);
+    if(!nextField){
+      lostFields.push(key);
+      if(prevField?.hasNormBox) lostNormFields.push(key);
+      if(prevField?.hasPxBox) lostPxFields.push(key);
+      continue;
+    }
+    if(prevField?.hasNormBox && !nextField?.hasNormBox) lostNormFields.push(key);
+    if(prevField?.hasPxBox && !nextField?.hasPxBox) lostPxFields.push(key);
+  }
+  return {
+    prev: prevCounts,
+    next: nextCounts,
+    delta: {
+      total: nextCounts.total - prevCounts.total,
+      norm: nextCounts.norm - prevCounts.norm,
+      px: nextCounts.px - prevCounts.px
+    },
+    lostFields,
+    lostNormFields,
+    lostPxFields,
+    geometryDropped: (nextCounts.norm < prevCounts.norm) || (nextCounts.px < prevCounts.px)
+  };
+}
+
+function traceSnapshot(tag, ctx={}){
+  const wizardId = ctx.wizardId ?? currentWizardId();
+  const username = ctx.username ?? state.username ?? null;
+  const docType = ctx.docType ?? state.docType ?? null;
+  const profileKey = ctx.profileKey ?? (LS?.profileKey ? LS.profileKey(username, docType, wizardId) : null);
+  const snapshot = ctx.snapshot || snapshotProfileGeometry(ctx.profile || state.profile);
+  const previousSnapshot = ctx.previousSnapshot || null;
+  const payload = {
+    tag,
+    stage: ctx.stage || tag,
+    mode: ctx.mode || (isRunMode() ? 'run' : 'config'),
+    username,
+    docType,
+    wizardId,
+    profileKey,
+    note: ctx.note || undefined,
+    snapshot
+  };
+  if(previousSnapshot){
+    const diff = diffGeom(previousSnapshot, snapshot);
+    payload.previousCounts = countGeom(previousSnapshot);
+    payload.diff = diff;
+  }
+  console.info('[flight-recorder]', JSON.stringify(payload));
+  if(previousSnapshot){
+    const delta = payload.diff || diffGeom(previousSnapshot, snapshot);
+    if(delta.geometryDropped){
+      console.warn('[GEOM_DROPPED]', JSON.stringify({ tag, stage: payload.stage, wizardId, profileKey, delta }));
+    }
+  }
+  return snapshot;
+}
+
 function hasFieldGeometry(field){
   if(!field || typeof field !== 'object') return false;
   return !!(field.normBox || field.bboxPct || field.bbox || field.boxPx || field.rawBox || field.staticGeom || field.configBox);
@@ -9944,6 +10146,18 @@ async function runModeExtractFileWithProfile(file, profile){
     const wizardId = currentWizardId();
     const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
     const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    let geomSnapshotCursor = snapshotProfileGeometry(profile);
+    traceSnapshot('run.start',{
+      stage:'run.start',
+      mode:'run',
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      profileKey: profileStorageKey,
+      profile,
+      snapshot: geomSnapshotCursor,
+      note:'incoming-profile'
+    });
     try {
       const patternKey = patternStoreKey(state.docType, wizardId);
       console.info('[id-drift][runModeExtractFileWithProfile]', JSON.stringify({
@@ -9963,6 +10177,34 @@ async function runModeExtractFileWithProfile(file, profile){
     const storedSnapshot = profileGeometrySnapshot(storedProfile);
     const wizardStorageScan = scanWizardStorageKeys(wizardId);
     const geometryKeys = wizardStorageScan.filter(entry => entry.hasGeometry).map(entry => entry.key);
+    const loadedSnapshot = snapshotProfileGeometry(storedProfile);
+    traceSnapshot('run.loaded',{
+      stage:'run.loaded',
+      mode:'run',
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      profileKey: profileStorageKey,
+      profile: storedProfile,
+      snapshot: loadedSnapshot,
+      previousSnapshot: geomSnapshotCursor,
+      note:'stored-profile'
+    });
+    geomSnapshotCursor = loadedSnapshot;
+    const mergedSnapshot = snapshotProfileGeometry(resolvedProfile);
+    traceSnapshot('run.post-merge',{
+      stage:'run.post-merge',
+      mode:'run',
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      profileKey: profileStorageKey,
+      profile: resolvedProfile,
+      snapshot: mergedSnapshot,
+      previousSnapshot: geomSnapshotCursor,
+      note:'post-merge'
+    });
+    geomSnapshotCursor = mergedSnapshot;
     const runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     traceEvent(runSpanKey,'bbox:read',{
@@ -9996,6 +10238,20 @@ async function runModeExtractFileWithProfile(file, profile){
     state.profile = resolvedProfile;
     syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
+    const ensuredSnapshot = snapshotProfileGeometry(state.profile);
+    traceSnapshot('run.post-ensure',{
+      stage:'run.post-ensure',
+      mode:'run',
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      profileKey: profileStorageKey,
+      profile: state.profile,
+      snapshot: ensuredSnapshot,
+      previousSnapshot: geomSnapshotCursor,
+      note:'post-ensure'
+    });
+    geomSnapshotCursor = ensuredSnapshot;
     const activeProfile = state.profile || profile || { fields: [] };
     if(isRunMode()){
       const profileFieldDiagnostics = (activeProfile.fields || []).map(f => ({
@@ -10104,6 +10360,12 @@ async function runModeExtractFileWithProfile(file, profile){
         keywordRelations,
         configMask
       };
+      const fieldSpanKey = {
+        docId: state.currentFileId || state.currentFileName || 'doc',
+        pageIndex: targetPage-1,
+        fieldKey: spec.fieldKey || '',
+        parentFieldKey: '__run__'
+      };
       if(isRunMode() && spec.type === 'static'){
         const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1;
         const viewportMeta = {
@@ -10135,7 +10397,7 @@ async function runModeExtractFileWithProfile(file, profile){
           { tokens: hitTokens.length, preview: summarizeTokens(hitTokens) }
         );
         traceEvent(
-          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          fieldSpanKey,
           'bbox:read',
           {
             stageLabel:'BBox read (run)',
@@ -10190,6 +10452,39 @@ async function runModeExtractFileWithProfile(file, profile){
           }
         });
       }
+      if(isRunMode() && spec.type === 'static'){
+        const extractorPath = spec.landmark ? 'static.landmark+bbox' : 'static.bbox-first';
+        const preExtractPayload = {
+          tag:'run.before-extract',
+          stage:'run.extract.start',
+          mode:'run',
+          username: state.username,
+          docType: state.docType,
+          wizardId,
+          profileKey: profileStorageKey,
+          fieldKey: spec.fieldKey || null,
+          page: targetPage,
+          extractorPath,
+          bbox:{
+            placementNorm: placement?.bbox || null,
+            placementPx: placement?.boxPx || null,
+            profileNorm: spec.normBox || spec.bboxPct || bboxArr || null,
+            profilePx: spec.boxPx || null
+          }
+        };
+        console.info('[flight-recorder]', JSON.stringify(preExtractPayload));
+        traceEvent(fieldSpanKey,'extract.start',{
+          stageLabel:'Static extract start',
+          bbox:{ pixel: placement?.boxPx || null, normalized: placement?.bbox || null },
+          input:{
+            extractorPath,
+            profileNorm: spec.normBox || spec.bboxPct || bboxArr || null,
+            profilePx: spec.boxPx || null,
+            placementPx: placement?.boxPx || null
+          },
+          notes:`page=${targetPage}`
+        });
+      }
       const extractionResult = await extractFieldValue(fieldSpec, tokens, state.viewport);
       const normalizedExtractionPayload = normalizePayloadForLog(extractionResult);
       if(isRunMode() && spec.type === 'static'){
@@ -10241,9 +10536,38 @@ async function runModeExtractFileWithProfile(file, profile){
           payload: normalizedExtractionPayload
         });
       }
+      if(isRunMode() && spec.type === 'static'){
+        const extractorPath = method || extractionResult?.method || (spec.landmark ? 'static.landmark+bbox' : 'static.bbox-first');
+        const postExtractPayload = {
+          tag:'run.after-extract',
+          stage:'run.extract.done',
+          mode:'run',
+          username: state.username,
+          docType: state.docType,
+          wizardId,
+          profileKey: profileStorageKey,
+          fieldKey: spec.fieldKey || null,
+          page: targetPage,
+          extractorPath,
+          value: value || '',
+          confidence: confidence ?? null,
+          bbox:{
+            normalized: normalizedResolved || placement?.bbox || null,
+            pixel: resolvedBox || placement?.boxPx || null
+          },
+          rejectionReason
+        };
+        console.info('[flight-recorder]', JSON.stringify(postExtractPayload));
+        traceEvent(fieldSpanKey,'extract.done',{
+          stageLabel:'Static extract done',
+          bbox:{ pixel: resolvedBox || placement?.boxPx || null, normalized: normalizedResolved || placement?.bbox || null },
+          output:{ value: value || '', confidence: confidence ?? null, method: extractorPath },
+          notes: rejectionReason ? `rejection=${rejectionReason}` : 'value extracted'
+        });
+      }
       if(spec.type === 'static'){
         traceEvent(
-          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          fieldSpanKey,
           'bbox:expand',
           {
             stageLabel:'BBox expand (run)',
@@ -10309,7 +10633,7 @@ async function runModeExtractFileWithProfile(file, profile){
           { tokens: postTokens.length, preview: summarizeTokens(postTokens) }
         );
         traceEvent(
-          { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
+          fieldSpanKey,
           'finalize',
           {
             stageLabel:'Finalize (run)',
