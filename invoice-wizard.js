@@ -8702,6 +8702,42 @@ function displayTrace(traceId){
 }
 
 /* ---------------------- Results “DB” table ----------------------- */
+function resolveMasterDbConfigForRecord(profile, template, recordFields){
+  const activeProfile = profile || {};
+  const masterConfig = buildMasterDbConfigFromProfile(activeProfile, activeProfile?.masterDbConfig, template);
+  const derivedStaticFields = deriveMasterDbSchema(activeProfile.fields || []);
+  const recordFieldKeys = new Set(Object.keys(recordFields || {}));
+  const alignedDerivedStatics = derivedStaticFields.filter(f => recordFieldKeys.has(f.fieldKey));
+  let staticFields = (masterConfig.staticFields || []).filter(f => recordFieldKeys.has(f.fieldKey));
+  const missingStaticKeys = alignedDerivedStatics
+    .filter(f => !staticFields.some(sf => sf.fieldKey === f.fieldKey))
+    .map(f => f.fieldKey);
+  if(!staticFields.length || missingStaticKeys.length){
+    console.warn('[masterdb] masterDbConfig static fields missing or misaligned; rebuilding from profile schema', { missingStaticKeys });
+    staticFields = alignedDerivedStatics;
+  }
+  if(!staticFields.length && recordFieldKeys.size){
+    staticFields = Array.from(recordFieldKeys).map(key => ({ fieldKey: key, label: key }));
+  }
+  const areaFieldKeys = Array.from(new Set([
+    ...(Array.isArray(masterConfig.areaFieldKeys) ? masterConfig.areaFieldKeys : []),
+    ...staticFields.filter(f => f.isArea || f.isSubordinate).map(f => f.fieldKey)
+  ])).filter(key => recordFieldKeys.has(key));
+  const documentFieldKeys = (Array.isArray(masterConfig.documentFieldKeys) && masterConfig.documentFieldKeys.length)
+    ? masterConfig.documentFieldKeys.filter(k => recordFieldKeys.has(k) && !areaFieldKeys.includes(k))
+    : staticFields.filter(f => !areaFieldKeys.includes(f.fieldKey)).map(f => f.fieldKey);
+  const normalizedConfig = {
+    ...masterConfig,
+    staticFields,
+    areaFieldKeys,
+    documentFieldKeys
+  };
+  if(activeProfile && typeof activeProfile === 'object'){
+    activeProfile.masterDbConfig = normalizedConfig;
+  }
+  return normalizedConfig;
+}
+
 function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
   const byKey = {};
@@ -8772,7 +8808,7 @@ function compileDocument(fileId, lineItems){
       total: byKey['invoice_total']?.value || '',
       discount: byKey['discounts_amount']?.value || ''
     },
-    masterDbConfig: buildMasterDbConfigFromProfile(state.profile, state.profile?.masterDbConfig, activeTemplate),
+    masterDbConfig: resolveMasterDbConfigForRecord(state.profile, activeTemplate, byKey),
     lineItems: enriched,
     areaRows: (state.currentAreaRows || []).map(r => clonePlain(r)),
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
