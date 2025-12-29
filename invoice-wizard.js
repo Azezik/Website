@@ -8898,7 +8898,10 @@ function renderResultsTable(){
     console.info('[run-mode][diag] masterdb read', {
       count: db.length,
       firstFileId: db[0]?.fileId || null,
-      fieldKeys: Object.keys(previewFields || {})
+      fieldKeys: Object.keys(previewFields || {}),
+      sampleFields: normalizePayloadForLog(previewFields),
+      sampleTotals: db[0]?.totals || null,
+      sampleInvoice: db[0]?.invoice || null
     });
   }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
@@ -9751,6 +9754,17 @@ els.finishWizardBtn?.addEventListener('click', ()=>{
   saveWizardAndReturn();
 });
 
+function normalizePayloadForLog(payload){
+  if(payload instanceof Map){
+    return Object.fromEntries(Array.from(payload.entries()).map(([k,v]) => [k, normalizePayloadForLog(v)]));
+  }
+  if(Array.isArray(payload)) return payload.map(normalizePayloadForLog);
+  if(payload && typeof payload === 'object'){
+    return Object.fromEntries(Object.entries(payload).map(([k,v]) => [k, normalizePayloadForLog(v)]));
+  }
+  return payload;
+}
+
 /* ---------------------------- Batch ------------------------------- */
 async function runModeExtractFileWithProfile(file, profile){
   const guardKey = runKeyForFile(file);
@@ -9919,7 +9933,29 @@ async function runModeExtractFileWithProfile(file, profile){
         );
       }
       state.snappedPx = null; state.snappedText = '';
+      if(isRunMode() && spec.type === 'static'){
+        console.info('[run-mode][diag] static extraction payload (pre-call)', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          profileBoxes: {
+            normBox: spec.normBox || spec.bboxPct || null,
+            bbox: spec.bbox || null,
+            boxPx: spec.boxPx || null,
+            configBox: spec.configBox || null
+          },
+          placementBox: placement?.boxPx || null,
+          placementNormBox: placement?.bbox || null
+        });
+      }
       const extractionResult = await extractFieldValue(fieldSpec, tokens, state.viewport);
+      const normalizedExtractionPayload = normalizePayloadForLog(extractionResult);
+      if(isRunMode() && spec.type === 'static'){
+        console.info('[run-mode][diag] static extraction payload (post-call)', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          payload: normalizedExtractionPayload
+        });
+      }
       const {
         value,
         boxPx,
@@ -9935,6 +9971,32 @@ async function runModeExtractFileWithProfile(file, profile){
       const resultTokens = extractionResult?.tokens || [];
       const resolvedBox = boxPx || placement?.boxPx || null;
       const normalizedResolved = resolvedBox ? toPct(targetViewport, resolvedBox) : placement?.bbox || null;
+      const rejectionReason = value ? null : (!extractionResult ? 'no_result' : (cleanedOk === false ? 'clean_failed_or_empty' : 'empty_value'));
+      if(isRunMode()){
+        console.info('[run-mode][diag] field iteration summary', {
+          fieldKey: spec.fieldKey,
+          type: spec.type || null,
+          targetPage,
+          profileBoxes: {
+            normBox: spec.normBox || spec.bboxPct || null,
+            bbox: spec.bbox || null,
+            boxPx: spec.boxPx || null,
+            configBox: spec.configBox || null
+          },
+          placementBox: placement?.boxPx || null,
+          placementNormBox: placement?.bbox || null,
+          runtimeBox: resolvedBox,
+          runtimeNormBox: normalizedResolved,
+          valueFlow: {
+            rawText: raw || '',
+            cleanedText: corrected ?? value ?? '',
+            finalValue: value || ''
+          },
+          rejectionReason,
+          discarded: !value,
+          payload: normalizedExtractionPayload
+        });
+      }
       if(spec.type === 'static'){
         traceEvent(
           { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
@@ -9948,7 +10010,14 @@ async function runModeExtractFileWithProfile(file, profile){
         );
       }
       if(isRunMode() && spec.type === 'static'){
-        const rejectionReason = value ? null : (!extractionResult ? 'no_result' : (cleanedOk === false ? 'clean_failed_or_empty' : 'empty_value'));
+        console.info('[run-mode][diag] static extraction payload (post-processed)', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          payload: normalizedExtractionPayload,
+          rejectionReason,
+          resolvedBox,
+          normalizedBox: normalizedResolved
+        });
         console.info('[run-mode][diag] static extraction result', {
           fieldKey: spec.fieldKey,
           targetPage,
