@@ -2,6 +2,8 @@
 
 Files touched:
 - `invoice-wizard.js`
+- `document-dashboard.html`
+- `legacy/invoice-wizard.html`
 - `docs/flight-recorder-note.md`
 
 Log tags emitted:

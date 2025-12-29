@@ -162,6 +162,7 @@ const els = {
   staticDebugRefresh: document.getElementById('refreshStaticDebug'),
   staticDebugClear: document.getElementById('clearStaticDebug'),
   staticDebugToggle: document.getElementById('staticDebugToggle'),
+  staticDebugDownload: document.getElementById('downloadStaticDebug'),
 
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
@@ -438,6 +439,23 @@ function hideStaticDebugModal(){
 function renderStaticDebugLogs(){
   if(!els.staticDebugText) return;
   els.staticDebugText.value = buildFullDebugDump();
+}
+function downloadStaticDebugLogs(){
+  try {
+    const text = buildFullDebugDump() || '(no logs)';
+    const blob = new Blob([text], { type:'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `static-debug-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  } catch(err){
+    console.error('static debug download failed', err);
+    alert('Failed to download static debug logs.');
+  }
 }
 function syncStaticDebugToggleUI(){
   if(els.staticDebugToggle){
@@ -9529,6 +9547,7 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   DEBUG_OCRMAGIC = enabled;
   persistStaticDebugPref(enabled);
 });
+els.staticDebugDownload?.addEventListener('click', downloadStaticDebugLogs);
 syncStaticDebugToggleUI();
 
 els.docType?.addEventListener('change', ()=>{
