@@ -1289,6 +1289,16 @@ function persistPatternBundle(profile, { patterns=null } = {}){
   try{
     const docType = profile.docType || state.docType || 'invoice';
     const wizardId = profile.wizardId || currentWizardId();
+    const exported = patterns || FieldDataEngine.exportPatterns();
+    // Merge any persisted fingerprints from the profile to avoid count mismatches
+    // (e.g., pattern bundle says fieldCount=2 but only 1 pattern key gets written).
+    const merged = { ...collectPersistedFingerprints(profile), ...clonePlain(exported) };
+    // Ensure every fieldKey has an entry, even if empty, so count aligns with fields.
+    (profile.fields || []).forEach(f => {
+      if(f?.fieldKey && merged[f.fieldKey] === undefined){
+        merged[f.fieldKey] = merged[f.fieldKey] || {};
+      }
+    });
     const bundle = {
       version: PATTERN_BUNDLE_VERSION,
       profileVersion: profile.version || PROFILE_VERSION,
@@ -1296,11 +1306,12 @@ function persistPatternBundle(profile, { patterns=null } = {}){
       wizardId,
       fields: (profile.fields || []).map(f => ({ fieldKey: f.fieldKey, type: f.type, label: f.label })),
       updatedAt: new Date().toISOString(),
-      patterns: patterns || FieldDataEngine.exportPatterns()
+      patterns: merged
     };
     const key = patternStoreKey(docType, wizardId);
     localStorage.setItem(key, JSON.stringify(bundle));
-    ocrMagicDebug({ event: 'ocrmagic.patterns.cache.write', key, count: Object.keys(bundle.patterns || {}).length, fieldCount: bundle.fields.length, version: bundle.version });
+    const patternCount = Object.keys(bundle.patterns || {}).length;
+    ocrMagicDebug({ event: 'ocrmagic.patterns.cache.write', key, count: patternCount, fieldCount: bundle.fields.length, version: bundle.version, patterns: Object.keys(bundle.patterns || {}) });
     return { key, bundle };
   } catch(err){
     console.warn('Failed to persist pattern bundle', err);
@@ -2948,7 +2959,7 @@ const FieldDataEngine = (() => {
     const digit = digitRatio(txt);
     const before = dominant(ftype);
     const fingerprintMatch = isValid && (!before.code || before.code === code);
-    const shouldLearn = isValid && magicTypeInfo.isExplicit && (mode === 'CONFIG' || fingerprintMatch);
+    const shouldLearn = isValid && (mode === 'CONFIG' || magicTypeInfo.isExplicit || fingerprintMatch);
     if(shouldLearn){
       learn(ftype, txt);
       learnPosTemplates(ftype, magicTokens);
@@ -3111,6 +3122,15 @@ function hydrateFingerprintsFromProfile(profile){
       const cachedCount = cached.bundle.patterns && typeof cached.bundle.patterns === 'object' ? Object.keys(cached.bundle.patterns).length : 0;
       const imported = cachedCount ? importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key }) : 0;
       if(imported > 0){
+        // If the bundle is missing entries for fields, backfill from profile fingerprints.
+        const fieldCount = Array.isArray(profile?.fields) ? profile.fields.length : 0;
+        if(imported < fieldCount){
+          const tallies = collectPersistedFingerprints(profile);
+          if(Object.keys(tallies).length){
+            FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints.backfill', version: profile?.version || null });
+            persistPatternBundle(profile, { patterns: { ...cached.bundle.patterns, ...tallies } });
+          }
+        }
         refreshPatternBundleFromRemote(profile);
         return;
       }
