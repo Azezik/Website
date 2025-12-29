@@ -8892,6 +8892,10 @@ function compileDocument(fileId, lineItems){
     if(!compiled.fields || typeof compiled.fields !== 'object'){
       console.warn('[run-mode][diag] masterdb schema mismatch: fields payload missing or invalid', { fileId: compiled.fileId });
     }
+    console.info('[run-mode][diag] masterdb fields (pre-write)', {
+      fileId: compiled.fileId,
+      fields: normalizePayloadForLog(compiled.fields || {})
+    });
   }
   LS.setDb(state.username, state.docType, db, wizardId);
   refreshMasterDbRowsStore(db, compiled);
@@ -9784,6 +9788,66 @@ function normalizePayloadForLog(payload){
   return payload;
 }
 
+function hasFieldGeometry(field){
+  if(!field || typeof field !== 'object') return false;
+  return !!(field.normBox || field.bboxPct || field.bbox || field.boxPx || field.rawBox || field.staticGeom || field.configBox);
+}
+
+function profileGeometrySnapshot(profile){
+  const fields = Array.isArray(profile?.fields) ? profile.fields : [];
+  return {
+    keys: profile ? Object.keys(profile) : [],
+    fieldCount: fields.length,
+    fields: fields.map(f => ({
+      key: f.fieldKey,
+      page: f.page ?? (Number.isFinite(f.pageIndex) ? f.pageIndex + 1 : null),
+      hasNormBox: !!(f.normBox || f.bboxPct),
+      hasBBox: Array.isArray(f.bbox) && f.bbox.length === 4,
+      hasBoxPx: !!f.boxPx,
+      hasRawBox: !!f.rawBox,
+      hasStaticGeom: !!f.staticGeom
+    }))
+  };
+}
+
+function mergeProfileGeometry(preferred, fallback){
+  if(!preferred && !fallback) return null;
+  if(!preferred) return fallback;
+  if(!fallback) return preferred;
+  const fallbackByKey = new Map((fallback.fields || []).map(f => [f.fieldKey, f]));
+  const mergedFields = (preferred.fields || []).map(f => {
+    const donor = fallbackByKey.get(f.fieldKey);
+    if(!donor || hasFieldGeometry(f)) return f;
+    const merged = { ...f };
+    ['normBox','bbox','bboxPct','boxPx','rawBox','configBox','staticGeom','anchorMetrics','page','pageIndex','pageRole','verticalAnchor','anchor','configMask'].forEach(k => {
+      if(merged[k] === undefined && donor[k] !== undefined) merged[k] = donor[k];
+    });
+    return merged;
+  });
+  return { ...fallback, ...preferred, fields: mergedFields };
+}
+
+function scanWizardStorageKeys(wizardId){
+  if(typeof localStorage === 'undefined' || !wizardId) return [];
+  const matches = [];
+  for(let i=0;i<localStorage.length;i++){
+    const key = localStorage.key(i);
+    if(!key || !key.includes(wizardId)) continue;
+    const entry = { key, hasGeometry:false, fieldCount:null, parseError:null };
+    try{
+      const raw = localStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw, jsonReviver) : null;
+      const fields = Array.isArray(parsed?.fields) ? parsed.fields : null;
+      entry.fieldCount = fields ? fields.length : null;
+      entry.hasGeometry = !!(fields && fields.some(hasFieldGeometry));
+    } catch(err){
+      entry.parseError = err?.message || String(err);
+    }
+    matches.push(entry);
+  }
+  return matches;
+}
+
 /* ---------------------------- Batch ------------------------------- */
 async function runModeExtractFileWithProfile(file, profile){
   const guardKey = runKeyForFile(file);
@@ -9792,12 +9856,19 @@ async function runModeExtractFileWithProfile(file, profile){
     console.warn('Duplicate run detected; skipping auto extraction for', guardKey);
     return;
   }
-  const profileStorageKey = LS.profileKey(state.username, state.docType, currentWizardId());
   if(runDiagnostics && guardStarted){
     runDiagnostics.startExtraction(guardKey);
   }
   try {
     activateRunMode({ clearDoc: true });
+    const wizardId = currentWizardId();
+    const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
+    const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    const incomingProfile = profile ? migrateProfile(clonePlain(profile)) : null;
+    const resolvedProfile = mergeProfileGeometry(incomingProfile, storedProfile) || storedProfile || incomingProfile || null;
+    const storedSnapshot = profileGeometrySnapshot(storedProfile);
+    const wizardStorageScan = scanWizardStorageKeys(wizardId);
+    const geometryKeys = wizardStorageScan.filter(entry => entry.hasGeometry).map(entry => entry.key);
     const runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     traceEvent(runSpanKey,'bbox:read',{
@@ -9807,13 +9878,28 @@ async function runModeExtractFileWithProfile(file, profile){
         boxPx: null,
         normBox: null,
         profileKey: profileStorageKey,
-        wizardId: currentWizardId(),
+        wizardId,
         docType: state.docType || null
       },
       ocrConfig: null,
       notes:'Run mode extraction started'
     });
-    state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
+    if(isRunMode()){
+      console.info('[run-mode][diag] stored profile snapshot', {
+        profileKey: profileStorageKey,
+        hasProfile: !!storedProfile,
+        keys: storedSnapshot.keys,
+        fieldCount: storedSnapshot.fieldCount,
+        fields: storedSnapshot.fields
+      });
+      console.info('[run-mode][diag] wizard storage scan', {
+        wizardId,
+        profileKey: profileStorageKey,
+        matchingKeys: wizardStorageScan.map(entry => entry.key),
+        geometryKeys
+      });
+    }
+    state.profile = resolvedProfile;
     syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
     const activeProfile = state.profile || profile || { fields: [] };
