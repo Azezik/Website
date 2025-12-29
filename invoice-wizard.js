@@ -516,6 +516,18 @@ function setWizardMode(nextMode){
 function activateRunMode(opts = {}){
   clearTransientStateLocal();
   setWizardMode(ModeEnum.RUN);
+  try {
+    const wizId = currentWizardId();
+    const key = LS.profileKey(state.username, state.docType, wizId);
+    console.info('[id-drift][activateRunMode]', JSON.stringify({
+      isSkinV2,
+      username: state.username,
+      docType: state.docType,
+      activeWizardId: state.activeWizardId,
+      currentWizardId: wizId,
+      profileKey: key
+    }));
+  } catch(err){ console.warn('[id-drift][activateRunMode] log failed', err); }
   if(opts.clearDoc !== false) resetDocArtifacts();
 }
 
@@ -1289,6 +1301,17 @@ function persistPatternBundle(profile, { patterns=null } = {}){
   try{
     const docType = profile.docType || state.docType || 'invoice';
     const wizardId = profile.wizardId || currentWizardId();
+    try {
+      const key = patternStoreKey(docType, wizardId);
+      const exported = patterns || FieldDataEngine.exportPatterns();
+      const patternCount = exported && typeof exported === 'object' ? Object.keys(exported).length : 0;
+      console.info('[id-drift][persistPatternBundle]', JSON.stringify({
+        docType,
+        wizardId,
+        patternKey: key,
+        patternCount
+      }));
+    } catch(err){ console.warn('[id-drift][persistPatternBundle] log failed', err); }
     const exported = patterns || FieldDataEngine.exportPatterns();
     // Merge any persisted fingerprints from the profile to avoid count mismatches
     // (e.g., pattern bundle says fieldCount=2 but only 1 pattern key gets written).
@@ -1397,8 +1420,25 @@ let saveTimer=null;
 function saveProfile(u, d, p, wizardId = currentWizardId()){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    try{ LS.setProfile(u, d, p, wizardId); }
-    catch(e){ console.error('saveProfile', e); alert('Failed to save profile'); }
+    try{
+      LS.setProfile(u, d, p, wizardId);
+    } catch(err){
+      console.error('saveProfile', err);
+      alert('Failed to save profile');
+      return;
+    }
+    try {
+      const key = LS.profileKey(u, d, wizardId);
+      const hasGeom = Array.isArray(p?.fields) && p.fields.some(hasFieldGeometry);
+      console.info('[id-drift][saveProfile]', JSON.stringify({
+        isSkinV2,
+        username: u,
+        docType: d,
+        wizardId,
+        profileKey: key,
+        hasGeometry: hasGeom
+      }));
+    } catch(err){ console.warn('[id-drift][saveProfile] log failed', err); }
     try{
       traceEvent(
         { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: 0, fieldKey: 'profile' },
@@ -3559,12 +3599,39 @@ const ANCHOR_HINTS = {
 /* --------------------------- Landmarks ---------------------------- */
 function ensureProfile(){
   const wizardId = currentWizardId();
+  const profileKey = LS.profileKey(state.username, state.docType, wizardId);
   if(state.profile && state.profile.wizardId === wizardId){
     hydrateFingerprintsFromProfile(state.profile);
+    try {
+      const hasGeom = Array.isArray(state.profile.fields) && state.profile.fields.some(hasFieldGeometry);
+      console.info('[id-drift][ensureProfile]', JSON.stringify({
+        isSkinV2,
+        username: state.username,
+        docType: state.docType,
+        activeWizardId: state.activeWizardId,
+        wizardId,
+        profileKey,
+        foundProfile: true,
+        hasGeometry: hasGeom
+      }));
+    } catch(err){ console.warn('[id-drift][ensureProfile] log failed', err); }
     return;
   }
 
   const existing = loadProfile(state.username, state.docType, wizardId);
+  try {
+    const hasGeom = Array.isArray(existing?.fields) && existing.fields.some(hasFieldGeometry);
+    console.info('[id-drift][ensureProfile]', JSON.stringify({
+      isSkinV2,
+      username: state.username,
+      docType: state.docType,
+      activeWizardId: state.activeWizardId,
+      wizardId,
+      profileKey,
+      foundProfile: !!existing,
+      hasGeometry: hasGeom
+    }));
+  } catch(err){ console.warn('[id-drift][ensureProfile] log failed', err); }
   const templateRaw = wizardId === DEFAULT_WIZARD_ID ? null : getWizardTemplateById(wizardId);
   const template = normalizeTemplate(templateRaw);
   const templateFields = template ? (template.fields || []).map(f => {
@@ -9294,6 +9361,8 @@ function renderConfirmedTables(rec){
 /* --------------------------- Events ------------------------------ */
 // Auth
 function completeLogin(opts = {}){
+  const prevUser = state.username;
+  const prevWizard = state.activeWizardId;
   const nameInput = opts.username ?? els.username?.value ?? 'demo';
   state.username = String(nameInput || 'demo').trim() || 'demo';
   const resolvedDocType = opts.docType || envWizardBootstrap?.docType || els.docType?.value || state.docType || 'invoice';
@@ -9303,6 +9372,17 @@ function completeLogin(opts = {}){
     ? requireCustomWizard({ allowTemplateFallback: true, promptBuilder: true })
     : resolveWizardId();
   state.activeWizardId = wizardId || (isSkinV2 ? firstCustomWizardId() : DEFAULT_WIZARD_ID);
+  try {
+    const currId = currentWizardId();
+    console.info('[id-drift][completeLogin]', JSON.stringify({
+      isSkinV2,
+      prevUsername: prevUser,
+      username: state.username,
+      prevActiveWizardId: prevWizard,
+      activeWizardId: state.activeWizardId,
+      currentWizardId: currId
+    }));
+  } catch(err){ console.warn('[id-drift][completeLogin] log failed', err); }
   const targetWizardId = state.activeWizardId || (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
   const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId) : null;
   state.profile = existing || state.profile || null;
@@ -9864,6 +9944,20 @@ async function runModeExtractFileWithProfile(file, profile){
     const wizardId = currentWizardId();
     const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
     const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    try {
+      const patternKey = patternStoreKey(state.docType, wizardId);
+      console.info('[id-drift][runModeExtractFileWithProfile]', JSON.stringify({
+        isSkinV2,
+        fileName: file?.name || null,
+        docId: state.currentFileId || state.currentFileName || file?.name || 'doc',
+        username: state.username,
+        docType: state.docType,
+        activeWizardId: state.activeWizardId,
+        wizardId,
+        profileKey: profileStorageKey,
+        patternKey
+      }));
+    } catch(err){ console.warn('[id-drift][runModeExtractFileWithProfile] log failed', err); }
     const incomingProfile = profile ? migrateProfile(clonePlain(profile)) : null;
     const resolvedProfile = mergeProfileGeometry(incomingProfile, storedProfile) || storedProfile || incomingProfile || null;
     const storedSnapshot = profileGeometrySnapshot(storedProfile);
