@@ -6313,6 +6313,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       { box: finalBox, configMask }
     );
   }
+  result.rawBeforeClean = selectionRaw || result.raw || '';
   traceEvent(spanKey,'value.finalized',{
     value: result.value,
     confidence: result.confidence,
@@ -8879,6 +8880,18 @@ function compileDocument(fileId, lineItems){
       invoice: compiled.invoice,
       lineItems: compiled.lineItems?.length || 0
     });
+    console.info('[run-mode][diag] masterdb schema snapshot', {
+      fileId: compiled.fileId,
+      topLevelKeys: Object.keys(compiled || {}),
+      totalsKeys: Object.keys(compiled.totals || {}),
+      invoiceKeys: Object.keys(compiled.invoice || {}),
+      areaRowCount: compiled.areaRows?.length || 0,
+      templateKey: compiled.templateKey || null,
+      warnings: compiled.warnings || []
+    });
+    if(!compiled.fields || typeof compiled.fields !== 'object'){
+      console.warn('[run-mode][diag] masterdb schema mismatch: fields payload missing or invalid', { fileId: compiled.fileId });
+    }
   }
   LS.setDb(state.username, state.docType, db, wizardId);
   refreshMasterDbRowsStore(db, compiled);
@@ -8902,6 +8915,12 @@ function renderResultsTable(){
       sampleFields: normalizePayloadForLog(previewFields),
       sampleTotals: db[0]?.totals || null,
       sampleInvoice: db[0]?.invoice || null
+    });
+    console.info('[run-mode][diag] masterdb ui expectations', {
+      fields: 'Object keyed by fieldKey -> { value, raw, confidence, correctionsApplied }',
+      totals: '{ subtotal, tax, total, discount }',
+      invoice: '{ number, salesDateISO, salesperson, store }',
+      lineItems: 'array of line item records with normalized keys'
     });
   }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
@@ -9773,6 +9792,7 @@ async function runModeExtractFileWithProfile(file, profile){
     console.warn('Duplicate run detected; skipping auto extraction for', guardKey);
     return;
   }
+  const profileStorageKey = LS.profileKey(state.username, state.docType, currentWizardId());
   if(runDiagnostics && guardStarted){
     runDiagnostics.startExtraction(guardKey);
   }
@@ -9782,7 +9802,15 @@ async function runModeExtractFileWithProfile(file, profile){
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     traceEvent(runSpanKey,'bbox:read',{
       stageLabel:'Run start',
-      input:{ fileName: file?.name || null },
+      input:{
+        fileName: file?.name || null,
+        boxPx: null,
+        normBox: null,
+        profileKey: profileStorageKey,
+        wizardId: currentWizardId(),
+        docType: state.docType || null
+      },
+      ocrConfig: null,
       notes:'Run mode extraction started'
     });
     state.profile = profile ? migrateProfile(clonePlain(profile)) : profile;
@@ -9857,6 +9885,12 @@ async function runModeExtractFileWithProfile(file, profile){
         configMask: f.configMask || null
       }));
       console.info('[run-mode][diag] static extraction iteration list', { total: iterationList.length, fields: iterationList });
+      console.info('[run-mode][diag] static field order', {
+        wizardId: activeProfile.wizardId || state.activeWizardId || null,
+        docType: activeProfile.docType || state.docType || null,
+        profileKey: profileStorageKey,
+        fieldOrder: iterationList.map(f => f.key)
+      });
     }
 
     for(const spec of (activeProfile.fields || [])){
@@ -9947,6 +9981,35 @@ async function runModeExtractFileWithProfile(file, profile){
           placementNormBox: placement?.bbox || null
         });
       }
+      if(isRunMode() && spec.type === 'static'){
+        const profileBoxes = {
+          normBox: spec.normBox || spec.bboxPct || null,
+          bbox: spec.bbox || null,
+          boxPx: spec.boxPx || null,
+          configBox: spec.configBox || null
+        };
+        const missingBoxes = !profileBoxes.normBox && !profileBoxes.bbox && !profileBoxes.boxPx && !placement?.boxPx;
+        if(missingBoxes){
+          console.warn('[run-mode][diag] MISSING_BBOX', {
+            fieldKey: spec.fieldKey,
+            storageKey: profileStorageKey,
+            docId: state.currentFileId || state.currentFileName || null,
+            wizardId: currentWizardId(),
+            docType: state.docType || null,
+            targetPage
+          });
+        }
+        console.info('[run-mode][diag] static bbox resolve', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          profileBoxes,
+          placementBoxes: {
+            bboxNorm: placement?.bbox || null,
+            bboxArray: bboxArr || null,
+            boxPx: placement?.boxPx || null
+          }
+        });
+      }
       const extractionResult = await extractFieldValue(fieldSpec, tokens, state.viewport);
       const normalizedExtractionPayload = normalizePayloadForLog(extractionResult);
       if(isRunMode() && spec.type === 'static'){
@@ -9989,6 +10052,7 @@ async function runModeExtractFileWithProfile(file, profile){
           runtimeNormBox: normalizedResolved,
           valueFlow: {
             rawText: raw || '',
+            preCleanText: extractionResult?.rawBeforeClean || raw || '',
             cleanedText: corrected ?? value ?? '',
             finalValue: value || ''
           },
@@ -10023,6 +10087,7 @@ async function runModeExtractFileWithProfile(file, profile){
           targetPage,
           method: method || extractionResult?.method || null,
           rawText: raw,
+          rawBeforeClean: extractionResult?.rawBeforeClean || raw || '',
           cleanedText: corrected ?? value ?? '',
           finalValue: value || '',
           confidence,
