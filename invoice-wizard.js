@@ -3116,12 +3116,27 @@ function collectPersistedFingerprints(profile){
 function hydrateFingerprintsFromProfile(profile){
   const docType = profile?.docType || state.docType || 'invoice';
   const wizardId = profile?.wizardId || currentWizardId();
+  const logPatternDiag = (source, importedCount, extra={})=>{
+    if(state.mode !== ModeEnum.RUN) return;
+    const exported = FieldDataEngine.exportPatterns ? FieldDataEngine.exportPatterns() : {};
+    const keys = exported && typeof exported === 'object' ? Object.keys(exported) : [];
+    console.info('[run-mode][diag] pattern import', {
+      source,
+      importedCount,
+      keys,
+      docType,
+      wizardId,
+      fieldCount: extra.fieldCount ?? null,
+      cachedCount: extra.cachedCount ?? null
+    });
+  };
   if(isSkinV2){
     const cached = readPatternBundleFromCache(docType, wizardId);
     if(cached?.bundle){
       const cachedCount = cached.bundle.patterns && typeof cached.bundle.patterns === 'object' ? Object.keys(cached.bundle.patterns).length : 0;
       const imported = cachedCount ? importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key }) : 0;
       if(imported > 0){
+        logPatternDiag('cache', imported, { fieldCount: Array.isArray(profile?.fields) ? profile.fields.length : null, cachedCount });
         // If the bundle is missing entries for fields, backfill from profile fingerprints.
         const fieldCount = Array.isArray(profile?.fields) ? profile.fields.length : 0;
         if(imported < fieldCount){
@@ -3129,6 +3144,7 @@ function hydrateFingerprintsFromProfile(profile){
           if(Object.keys(tallies).length){
             FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints.backfill', version: profile?.version || null });
             persistPatternBundle(profile, { patterns: { ...cached.bundle.patterns, ...tallies } });
+            logPatternDiag('profile.fingerprints.backfill', Object.keys(tallies).length, { fieldCount, cachedCount: imported });
           }
         }
         refreshPatternBundleFromRemote(profile);
@@ -3140,6 +3156,7 @@ function hydrateFingerprintsFromProfile(profile){
   const tallyCount = Object.keys(tallies).length;
   if(tallyCount){
     FieldDataEngine.importPatterns(tallies, { source: 'profile.fingerprints', version: profile?.version || null });
+    logPatternDiag('profile.fingerprints', tallyCount, { fieldCount: Array.isArray(profile?.fields) ? profile.fields.length : null });
     if(isSkinV2 && profile){
       persistPatternBundle(profile, { patterns: tallies });
     }
@@ -8847,6 +8864,22 @@ function compileDocument(fileId, lineItems){
   if(state.lastSnapshotManifestId){
     compiled.snapshotManifestId = state.lastSnapshotManifestId;
   }
+  if(state.mode === ModeEnum.RUN){
+    const staticFieldShape = Object.fromEntries(Object.entries(compiled.fields || {}).map(([k,v])=>[k,{
+      value: v?.value ?? '',
+      raw: v?.raw ?? '',
+      confidence: v?.confidence ?? 0,
+      correctionsApplied: v?.correctionsApplied || []
+    }]));
+    console.info('[run-mode][diag] masterdb write payload', {
+      fileId: compiled.fileId,
+      fieldKeys: Object.keys(compiled.fields || {}),
+      fields: staticFieldShape,
+      totals: compiled.totals,
+      invoice: compiled.invoice,
+      lineItems: compiled.lineItems?.length || 0
+    });
+  }
   LS.setDb(state.username, state.docType, db, wizardId);
   refreshMasterDbRowsStore(db, compiled);
   renderResultsTable();
@@ -8860,6 +8893,14 @@ function renderResultsTable(){
   const dt = els.dataDocType?.value || state.docType;
   const wizardId = currentWizardId();
   let db = LS.getDb(state.username, dt, wizardId);
+  if(isRunMode()){
+    const previewFields = db[0]?.fields || {};
+    console.info('[run-mode][diag] masterdb read', {
+      count: db.length,
+      firstFileId: db[0]?.fileId || null,
+      fieldKeys: Object.keys(previewFields || {})
+    });
+  }
   if(!db.length){ mount.innerHTML = '<p class="sub">No extractions yet.</p>'; return; }
   db = db.sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO));
 
@@ -9734,6 +9775,27 @@ async function runModeExtractFileWithProfile(file, profile){
     syncActiveWizardId(state.profile);
     hydrateFingerprintsFromProfile(state.profile);
     const activeProfile = state.profile || profile || { fields: [] };
+    if(isRunMode()){
+      const profileFieldDiagnostics = (activeProfile.fields || []).map(f => ({
+        key: f.fieldKey,
+        type: f.type,
+        page: f.page ?? (Number.isFinite(f.pageIndex) ? f.pageIndex + 1 : null),
+        pageIndex: f.pageIndex ?? null,
+        hasNormBox: !!(f.normBox || f.bboxPct),
+        hasBBox: Array.isArray(f.bbox) && f.bbox.length === 4,
+        normBox: f.normBox || f.bboxPct || null,
+        bbox: f.bbox || null,
+        configBox: f.configBox || f.rawBox || null,
+        configMask: f.configMask || null,
+        hasBoxPx: !!f.boxPx
+      }));
+      console.info('[run-mode][diag] profile fields snapshot', {
+        wizardId: activeProfile.wizardId || state.activeWizardId || null,
+        docType: activeProfile.docType || state.docType || null,
+        fieldCount: profileFieldDiagnostics.length,
+        fields: profileFieldDiagnostics
+      });
+    }
     const prepared = await prepareRunDocument(file);
     if(!prepared){ return; }
     const tokenStats = summarizeTokenCache();
@@ -9769,6 +9831,19 @@ async function runModeExtractFileWithProfile(file, profile){
       counts:{ areas: (activeProfile.fields||[]).filter(f=>f.isArea || f.fieldType==='areabox').length },
       notes:'Area rows extraction complete'
     });
+    if(isRunMode()){
+      const iterationList = (activeProfile.fields || []).map(f => ({
+        key: f.fieldKey,
+        type: f.type,
+        page: f.page ?? (Number.isFinite(f.pageIndex) ? f.pageIndex + 1 : null),
+        isArea: f.isArea || f.fieldType === 'areabox',
+        areaId: f.areaId || null,
+        hasBBox: Array.isArray(f.bbox) && f.bbox.length === 4,
+        hasNormBox: !!(f.normBox || f.bboxPct),
+        configMask: f.configMask || null
+      }));
+      console.info('[run-mode][diag] static extraction iteration list', { total: iterationList.length, fields: iterationList });
+    }
 
     for(const spec of (activeProfile.fields || [])){
       const isAreaField = spec.isArea || spec.fieldType === 'areabox';
@@ -9801,6 +9876,30 @@ async function runModeExtractFileWithProfile(file, profile){
         keywordRelations,
         configMask
       };
+      if(isRunMode() && spec.type === 'static'){
+        const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1;
+        const viewportMeta = {
+          width: targetViewport?.width ?? targetViewport?.w ?? null,
+          height: targetViewport?.height ?? targetViewport?.h ?? null,
+          scale: targetViewport?.scale ?? null,
+          dpr,
+          rotation: state.pageTransform?.rotation ?? 0
+        };
+        console.info('[run-mode][diag] static search input', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          placement: {
+            bboxNorm: placement?.bbox || null,
+            bboxArray: bboxArr || null,
+            boxPx: placement?.boxPx || null,
+            configMask,
+            configBox: spec.configBox || null
+          },
+          viewport: viewportMeta,
+          keywordRelations: !!keywordRelations,
+          anchorMetrics: !!spec.anchorMetrics
+        });
+      }
       if(spec.type === 'static'){
         const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
         logStaticDebug(
@@ -9820,10 +9919,23 @@ async function runModeExtractFileWithProfile(file, profile){
         );
       }
       state.snappedPx = null; state.snappedText = '';
-      const { value, boxPx, confidence, raw, corrections } = await extractFieldValue(fieldSpec, tokens, state.viewport);
+      const extractionResult = await extractFieldValue(fieldSpec, tokens, state.viewport);
+      const {
+        value,
+        boxPx,
+        confidence,
+        raw,
+        corrections,
+        corrected,
+        method,
+        fingerprintOk,
+        anchorOk,
+        cleanedOk
+      } = extractionResult || {};
+      const resultTokens = extractionResult?.tokens || [];
       const resolvedBox = boxPx || placement?.boxPx || null;
+      const normalizedResolved = resolvedBox ? toPct(targetViewport, resolvedBox) : placement?.bbox || null;
       if(spec.type === 'static'){
-        const normalizedResolved = resolvedBox ? toPct(targetViewport, resolvedBox) : placement?.bbox || null;
         traceEvent(
           { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: targetPage-1, fieldKey: spec.fieldKey || '' },
           'bbox:expand',
@@ -9834,6 +9946,36 @@ async function runModeExtractFileWithProfile(file, profile){
             notes: resolvedBox ? 'resolved search box' : 'using placement bbox only'
           }
         );
+      }
+      if(isRunMode() && spec.type === 'static'){
+        const rejectionReason = value ? null : (!extractionResult ? 'no_result' : (cleanedOk === false ? 'clean_failed_or_empty' : 'empty_value'));
+        console.info('[run-mode][diag] static extraction result', {
+          fieldKey: spec.fieldKey,
+          targetPage,
+          method: method || extractionResult?.method || null,
+          rawText: raw,
+          cleanedText: corrected ?? value ?? '',
+          finalValue: value || '',
+          confidence,
+          fingerprintOk: fingerprintOk ?? null,
+          anchorOk: anchorOk ?? null,
+          cleanedOk: cleanedOk ?? null,
+          tokens: resultTokens.length,
+          boxPx: resolvedBox,
+          normalizedBox: normalizedResolved,
+          rejectionReason
+        });
+        if(!value){
+          console.warn('[run-mode][diag] discarding field value', {
+            fieldKey: spec.fieldKey,
+            reason: rejectionReason,
+            method: method || extractionResult?.method || null,
+            rawText: raw,
+            confidence,
+            fingerprintOk: fingerprintOk ?? null,
+            anchorOk: anchorOk ?? null
+          });
+        }
       }
       if(value){
         const vp = targetViewport || {width:1,height:1};
@@ -9858,7 +10000,7 @@ async function runModeExtractFileWithProfile(file, profile){
           {
             stageLabel:'Finalize (run)',
             output:{ value: value || '', confidence },
-            bbox:{ pixel: boxPx || placement?.boxPx || null, normalized: placement?.bbox || null },
+            bbox:{ pixel: boxPx || placement?.boxPx || null, normalized: normalizedResolved || placement?.bbox || null },
             counts:{ tokens: tokens.length },
             notes: value ? 'value extracted' : 'no value extracted'
           }
