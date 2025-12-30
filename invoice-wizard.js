@@ -10261,6 +10261,78 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
     const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
     const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    const runStartInput = {
+      fileName: file?.name || null,
+      boxPx: null,
+      normBox: null,
+      profileKey: profileStorageKey,
+      wizardId,
+      docType: state.docType || null
+    };
+    try {
+      const profileForLog = storedProfile || null;
+      const fields = Array.isArray(profileForLog?.fields) ? profileForLog.fields : [];
+      const formatBox = (box) => {
+        if(!box) return null;
+        if(Array.isArray(box) && box.length === 4){
+          return box.map(v => (typeof v === 'number' && Number.isFinite(v)) ? Number(v.toFixed(4)) : v);
+        }
+        const summaryKeys = ['x0','y0','x1','y1','w','h','wN','hN','x0n','y0n','x','y','page','pageIndex'];
+        const out = {};
+        summaryKeys.forEach(k => {
+          if(typeof box[k] === 'number' && Number.isFinite(box[k])) out[k] = Number(box[k].toFixed(4));
+        });
+        return Object.keys(out).length ? out : box;
+      };
+      const fieldSummaries = fields.map(spec => {
+        const hasNormBox = !!(spec?.normBox || spec?.bboxPct);
+        const hasPixelBox = !!(spec?.boxPx || spec?.rawBox || spec?.configBox);
+        const hasLegacyBox = Array.isArray(spec?.bbox) && spec.bbox.length === 4;
+        const normBox = formatBox(spec?.normBox || spec?.bboxPct || null);
+        const pixelBox = formatBox(spec?.boxPx || spec?.rawBox || spec?.configBox || null);
+        const fingerprintKeys = (spec?.fingerprints && typeof spec.fingerprints === 'object') ? Object.keys(spec.fingerprints) : [];
+        const edgeAnchorsPresent = !!(spec?.anchorMetrics || spec?.landmark || spec?.verticalAnchor || spec?.anchor);
+        const missingReason = (!hasNormBox && !hasPixelBox && !hasLegacyBox)
+          ? 'no normBox/bboxPct/bbox/boxPx/rawBox/configBox on field spec'
+          : null;
+        return {
+          fieldKey: spec?.fieldKey || spec?.fieldId || '<unknown>',
+          hasNormBox,
+          hasPixelBox,
+          hasLegacyBox,
+          normBox,
+          pixelBox,
+          fingerprintKeys,
+          hasLandmarkFingerprint: !!spec?.landmark,
+          edgeAnchorsPresent,
+          missingReason
+        };
+      });
+      const missingGeom = fieldSummaries.filter(f => !!f.missingReason);
+      console.groupCollapsed('[run-debug] profile hydration snapshot');
+      console.log('profileKey:', profileStorageKey, 'docType:', profileForLog?.docType ?? state.docType ?? null, 'wizardId:', profileForLog?.wizardId ?? wizardId ?? null);
+      console.log('profileVersion:', profileForLog?.version ?? profileForLog?.profileVersion ?? null, 'username:', profileForLog?.username ?? state.username ?? null, 'isNullProfile:', !profileForLog);
+      console.log('fields:', fieldSummaries.length);
+      fieldSummaries.forEach(f => {
+        console.log(f.fieldKey, {
+          hasNormBox: f.hasNormBox,
+          hasPixelBox: f.hasPixelBox,
+          hasLegacyBox: f.hasLegacyBox,
+          normBox: f.normBox,
+          pixelBox: f.pixelBox,
+          fingerprintKeys: f.fingerprintKeys,
+          hasLandmarkFingerprint: f.hasLandmarkFingerprint,
+          edgeAnchorsPresent: f.edgeAnchorsPresent
+        });
+      });
+      if(missingGeom.length){
+        console.warn('[run-debug] missing geometry', missingGeom);
+      }
+      console.log('[run-debug] trace input bbox snapshot', { boxPx: runStartInput.boxPx ?? null, normBox: runStartInput.normBox ?? null });
+      console.groupEnd();
+    } catch(err){
+      console.warn('[run-debug] profile hydration snapshot log failed', err);
+    }
     let geomSnapshotCursor = snapshotProfileGeometry(profile);
     traceSnapshot('run.start',{
       stage:'run.start',
@@ -10331,12 +10403,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     traceEvent(runSpanKey,'bbox:read',{
       stageLabel:'Run start',
       input:{
-        fileName: file?.name || null,
-        boxPx: null,
-        normBox: null,
-        profileKey: profileStorageKey,
-        wizardId,
-        docType: state.docType || null
+        ...runStartInput
       },
       ocrConfig: null,
       notes:'Run mode extraction started'
