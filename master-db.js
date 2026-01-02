@@ -597,7 +597,11 @@
     console.log('[MasterDB] integrity', { ...counts, first_item: firstItem, last_item: lastItem, row_majority: rowMajority });
 
     if(usableRowCount === 0){
-      throw new Error('Exporter input empty—SSOT not wired.');
+      if(configRef.includeLineItems){
+        throw new Error('Exporter input empty—SSOT not wired.');
+      } else {
+        console.warn('[MasterDB] no line items present, skipping dynamic rows');
+      }
     }
 
     const missingSummarySets = {
