@@ -62,7 +62,6 @@
       <section id="document-dashboard" class="panel">
         <div class="actions" style="margin-bottom:12px;">
           <button id="configure-btn" class="btn primary" type="button">Configure New Wizard</button>
-          <button id="reset-model-btn" class="btn ghost" type="button">Reset Wizard Model</button>
         </div>
 
         <div class="field inline">
@@ -77,7 +76,13 @@
       </section>
 
       <section id="wizard-manager" class="panel" style="display:none;">
-        <p class="sub" style="margin:0;color:var(--muted);">Wizard manager coming soon.</p>
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Wizard Manager</h3>
+          <button id="wizard-manager-new" class="btn primary" type="button">Create New Wizard</button>
+          <button id="reset-model-btn" class="btn ghost" type="button">Reset Wizard Data</button>
+        </div>
+        <div id="wizard-manager-empty" class="sub" style="display:none;color:var(--muted);margin-top:8px;">No saved wizards yet. Create one to get started.</div>
+        <div id="wizard-manager-list" class="wizard-list"></div>
       </section>
 
       <section id="extracted-data" class="panel" style="display:none">
