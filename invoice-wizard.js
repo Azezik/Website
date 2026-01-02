@@ -10307,17 +10307,40 @@ function mergeProfileGeometry(preferred, fallback){
   if(!preferred && !fallback) return null;
   if(!preferred) return fallback;
   if(!fallback) return preferred;
-  const fallbackByKey = new Map((fallback.fields || []).map(f => [f.fieldKey, f]));
-  const mergedFields = (preferred.fields || []).map(f => {
+  const preferredFields = Array.isArray(preferred.fields) ? preferred.fields : [];
+  const fallbackFields = Array.isArray(fallback.fields) ? fallback.fields : [];
+  if(!preferredFields.length && fallbackFields.length){
+    return { ...fallback, ...preferred, fields: fallbackFields };
+  }
+  const fallbackByKey = new Map(fallbackFields.map(f => [f.fieldKey, f]));
+  const mergedMap = new Map();
+  preferredFields.forEach(f => {
     const donor = fallbackByKey.get(f.fieldKey);
-    if(!donor || hasFieldGeometry(f)) return f;
+    const preferredHasGeom = hasFieldGeometry(f);
+    const donorHasGeom = hasFieldGeometry(donor);
+    if(!donor || preferredHasGeom){
+      mergedMap.set(f.fieldKey, f);
+      return;
+    }
+    // If the preferred field is missing geometry but the stored (donor) field has it,
+    // keep the donor geometry and overlay non-geometry props from the preferred field.
+    if(donorHasGeom && !preferredHasGeom){
+      const merged = { ...donor, ...f };
+      mergedMap.set(merged.fieldKey, merged);
+      return;
+    }
     const merged = { ...f };
     ['normBox','bbox','bboxPct','boxPx','rawBox','configBox','staticGeom','anchorMetrics','page','pageIndex','pageRole','verticalAnchor','anchor','configMask'].forEach(k => {
       if(merged[k] === undefined && donor[k] !== undefined) merged[k] = donor[k];
     });
-    return merged;
+    mergedMap.set(merged.fieldKey, merged);
   });
-  return { ...fallback, ...preferred, fields: mergedFields };
+  fallbackFields.forEach(f => {
+    if(!mergedMap.has(f.fieldKey)){
+      mergedMap.set(f.fieldKey, f);
+    }
+  });
+  return { ...fallback, ...preferred, fields: Array.from(mergedMap.values()) };
 }
 
 function scanWizardStorageKeys(wizardId){
