@@ -1537,6 +1537,10 @@ function getModels(){ try{ return JSON.parse(localStorage.getItem(MODELS_KEY) ||
 function setModels(m){ localStorage.setItem(MODELS_KEY, JSON.stringify(m, jsonReplacer)); }
 
 function saveCurrentProfileAsModel(){
+  if(isSkinV2){
+    // In skinV2 we rely on custom wizard templates instead of model snapshots.
+    return;
+  }
   ensureProfile();
   const id = `${state.username}:${state.docType}:${Date.now()}`;
   const wizardId = currentWizardId();
@@ -1550,7 +1554,7 @@ function saveCurrentProfileAsModel(){
 function populateModelSelect(forceValue){
   const sel = document.getElementById('model-select');
   if(!sel) return;
-  const models = getModels().filter(m => m.username === state.username && m.docType === state.docType);
+  const models = isSkinV2 ? [] : getModels().filter(m => m.username === state.username && m.docType === state.docType);
   const current = forceValue || sel.value;
   const options = [];
   if(isSkinV2){
