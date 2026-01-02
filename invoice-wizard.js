@@ -1017,6 +1017,29 @@ const LS = {
   removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ localStorage.removeItem(this.profileKey(u,d,wizardId)); }
 };
 
+function summarizeProfileGeometryForLog(profile){
+  const fields = Array.isArray(profile?.fields) ? profile.fields : [];
+  const missingNormBoxKeys = [];
+  let withNormBox = 0;
+  fields.forEach(f => {
+    const hasNormBox = !!(f?.normBox || f?.bboxPct || (Array.isArray(f?.bbox) && f.bbox.length === 4 && f.bbox.every(v => typeof v === 'number')));
+    if(hasNormBox) withNormBox += 1; else missingNormBoxKeys.push(f?.fieldKey || f?.fieldId || '<unknown>');
+  });
+  return { fieldCount: fields.length, withNormBox, missingNormBoxKeys };
+}
+
+function logProfileStorage(tag, opts = {}){
+  try {
+    const mode = opts.mode || (isRunMode() ? 'RUN' : 'CONFIG');
+    const docType = opts.docType || state.docType || null;
+    const wizardId = opts.wizardId || currentWizardId() || null;
+    const profileKey = opts.profileKey || (wizardId ? LS.profileKey(state.username, docType, wizardId) : null);
+    const stats = summarizeProfileGeometryForLog(opts.profile);
+    const missingList = stats.missingNormBoxKeys.join(',');
+    console.info(`[profile-${tag}] mode=${mode} docType=${docType} wizardId=${wizardId} key=${profileKey} fields=${stats.fieldCount} withNormBox=${stats.withNormBox} missing=[${missingList}]`);
+  } catch(err){ console.warn(`[profile-${tag}] log failed`, err); }
+}
+
 const MASTERDB_FILE_ID_HEADER = 'File ID';
 function extractFileIdFromRow(row){
   const fileIdx = MasterDB?.HEADERS ? MasterDB.HEADERS.indexOf(MASTERDB_FILE_ID_HEADER) : -1;
@@ -1475,6 +1498,13 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
     const key = LS.profileKey(u, d, wizardId);
+    logProfileStorage('save', {
+      mode: isRunMode() ? 'RUN' : 'CONFIG',
+      docType: d,
+      wizardId,
+      profileKey: key,
+      profile: p
+    });
     const preSaveSnapshot = snapshotProfileGeometry(p);
     traceSnapshot('config.pre-save',{
       stage:'config.pre-save',
@@ -1541,7 +1571,15 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
 function loadProfile(u, d, wizardId = currentWizardId()){
   try{
     const raw = LS.getProfile(u, d, wizardId);
-    return migrateProfile(raw);
+    const migrated = migrateProfile(raw);
+    logProfileStorage('load', {
+      mode: isRunMode() ? 'RUN' : 'CONFIG',
+      docType: d,
+      wizardId,
+      profileKey: LS.profileKey(u, d, wizardId),
+      profile: migrated
+    });
+    return migrated;
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
