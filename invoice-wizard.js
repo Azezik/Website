@@ -585,6 +585,12 @@ function activateConfigMode(){
   setWizardMode(ModeEnum.CONFIG);
   resetDocArtifacts();
   initStepsFromActiveWizard();
+  if(Array.isArray(state.steps) && state.steps.length){
+    goToStep(0);
+  } else {
+    updatePrompt();
+    drawOverlay();
+  }
 }
 
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
@@ -7803,7 +7809,27 @@ function cleanupDoc(){
   state.lineLayout = null;
   clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
-  overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  if(els.pdfCanvas){
+    const ctx = els.pdfCanvas.getContext('2d');
+    if(ctx) ctx.clearRect(0,0,els.pdfCanvas.width, els.pdfCanvas.height);
+    els.pdfCanvas.width = 0;
+    els.pdfCanvas.height = 0;
+    els.pdfCanvas.style.display = 'none';
+  }
+  if(els.imgCanvas){
+    const ctx = els.imgCanvas.getContext('2d');
+    if(ctx) ctx.clearRect(0,0,els.imgCanvas.width, els.imgCanvas.height);
+    els.imgCanvas.width = 0;
+    els.imgCanvas.height = 0;
+    els.imgCanvas.style.display = 'none';
+  }
+  if(els.overlayCanvas){
+    overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+    els.overlayCanvas.width = 0;
+    els.overlayCanvas.height = 0;
+  }
+  if(els.pageControls) els.pageControls.style.display = 'none';
+  if(els.viewer) els.viewer.scrollTop = 0;
 }
 
 function loadRunImageFromBuffer(arrayBuffer){
