@@ -276,6 +276,7 @@
     if(!anchorCandidates.length) return null;
 
     const matches = [];
+    let matchSeq = 0;
     const totalEdges = 1 + totalSupports + (constellation.crossLinks?.length || 0);
 
     for(const anchorCand of anchorCandidates){
@@ -355,6 +356,7 @@
       const confidence = clamp((matchedEdgeRatio * 0.65) + (supportCoverage * 0.25) + ((1 - errorPenalty) * 0.1), 0, 1);
 
       matches.push({
+        matchId: `constellation-${matchSeq++}`,
         anchor: anchorCand.token,
         anchorCenter: anchorCand.center,
         matchedEdges,
@@ -362,6 +364,7 @@
         matchedSupports,
         totalSupports,
         errorSum,
+        error: errorSum,
         predictedBoxPx,
         predictedBoxNorm,
         supportMatches: supportMatches.filter(Boolean),
@@ -412,6 +415,11 @@
           page,
           bboxPx: match.predictedBoxPx,
           bboxNorm,
+          matchId: match.matchId,
+          matchedEdges: match.matchedEdges,
+          totalEdges: match.totalEdges,
+          error: match.error ?? match.errorSum,
+          constellationMatch: match.matchId ? { id: match.matchId, score: match.confidence ?? 0 } : null,
           confidence: match.confidence ?? 0,
           source: 'area-constellation',
           validation: {
@@ -419,6 +427,7 @@
             totalEdges: match.totalEdges,
             matchedSupports: match.matchedSupports,
             totalSupports: match.totalSupports,
+            error: match.error ?? match.errorSum,
             errorSum: match.errorSum,
             supportMatches: match.supportMatches?.length || 0
           }
