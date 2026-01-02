@@ -504,6 +504,25 @@ function clearTransientStateLocal(){
   return state;
 }
 
+function wipeAllWizardData(){
+  try {
+    localStorage.clear();
+  } catch(err){
+    console.warn('Failed to clear localStorage', err);
+  }
+  state.profile = null;
+  state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
+  state.wizardTemplates = [];
+  clearTransientStateLocal();
+  hydrateFingerprintsFromProfile(null);
+  refreshWizardTemplates();
+  populateModelSelect();
+  renderWizardManagerList();
+  renderSavedFieldsTable();
+  renderConfirmedTables();
+  renderResultsTable();
+}
+
 function resetDocArtifacts(){
   cleanupDoc();
   state.grayCanvases = {};
@@ -9642,20 +9661,11 @@ els.logoutBtn?.addEventListener('click', ()=>{
   state.profile = null;
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
-  if(!state.username) return;
-  if(!confirm('Clear saved model and extracted records?')) return;
-  const wizardId = currentWizardId();
-  LS.removeProfile(state.username, state.docType, wizardId);
-  const models = getModels().filter(m => !(m.username === state.username && m.docType === state.docType && (m.wizardId || DEFAULT_WIZARD_ID) === wizardId));
-  setModels(models);
-  localStorage.removeItem(LS.dbKey(state.username, state.docType, wizardId));
-  localStorage.removeItem(LS.rowsKey(state.username, state.docType, wizardId));
-  state.profile = null;
-  hydrateFingerprintsFromProfile(null);
-  renderSavedFieldsTable();
-  populateModelSelect();
-  renderResultsTable();
-  alert('Model and records reset.');
+  const msg = 'Are you sure? This will wipe ALL wizard data (templates, models, and extracted records) site-wide. Only use if needed.';
+  if(!confirm(msg)) return;
+  wipeAllWizardData();
+  alert('All wizard data cleared. Please create or select a wizard in Wizard Manager.');
+  showWizardManagerTab();
 });
 function openBuilderFromSelection(){
   const val = modelSelect?.value || '';
