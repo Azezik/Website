@@ -1654,7 +1654,11 @@ function resolveRunWizardContext(opts = {}){
   const selection = resolveSelectedWizardContext();
   const incomingProfile = opts.profileOverride ? migrateProfile(clonePlain(opts.profileOverride)) : null;
   const modelProfile = selection.model ? migrateProfile(clonePlain(selection.model.profile)) : null;
-  const wizardId = selection.wizardId || incomingProfile?.wizardId || modelProfile?.wizardId || state.activeWizardId || currentWizardId();
+  let wizardId = selection.wizardId || incomingProfile?.wizardId || modelProfile?.wizardId || state.activeWizardId || currentWizardId();
+  // If the selection is empty but we have a profile with geometry, prefer that profile's wizardId to avoid running the wrong wizard.
+  if(!wizardId && incomingProfile?.wizardId){
+    wizardId = incomingProfile.wizardId;
+  }
   const displayName = selection.displayName || selection.label || (wizardId === DEFAULT_WIZARD_ID ? 'Default Wizard' : wizardId);
   const ctx = {
     wizardId,
