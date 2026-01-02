@@ -9663,7 +9663,13 @@ els.loginForm?.addEventListener('submit', (e)=>{
 });
 
 if(isSkinV2){
-  completeLogin({ username: envWizardBootstrap?.username || 'demo', docType: envWizardBootstrap?.docType || state.docType });
+  const autoUser = envWizardBootstrap?.username || '';
+  if(autoUser){
+    completeLogin({ username: autoUser, docType: envWizardBootstrap?.docType || state.docType });
+  } else {
+    if(els.loginSection){ els.loginSection.style.display = 'block'; }
+    if(els.app){ els.app.style.display = 'none'; }
+  }
 }
 els.logoutBtn?.addEventListener('click', ()=>{
   els.app.style.display = 'none';
