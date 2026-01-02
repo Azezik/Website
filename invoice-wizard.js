@@ -10307,17 +10307,31 @@ function mergeProfileGeometry(preferred, fallback){
   if(!preferred && !fallback) return null;
   if(!preferred) return fallback;
   if(!fallback) return preferred;
-  const fallbackByKey = new Map((fallback.fields || []).map(f => [f.fieldKey, f]));
-  const mergedFields = (preferred.fields || []).map(f => {
+  const preferredFields = Array.isArray(preferred.fields) ? preferred.fields : [];
+  const fallbackFields = Array.isArray(fallback.fields) ? fallback.fields : [];
+  if(!preferredFields.length && fallbackFields.length){
+    return { ...fallback, ...preferred, fields: fallbackFields };
+  }
+  const fallbackByKey = new Map(fallbackFields.map(f => [f.fieldKey, f]));
+  const mergedMap = new Map();
+  preferredFields.forEach(f => {
     const donor = fallbackByKey.get(f.fieldKey);
-    if(!donor || hasFieldGeometry(f)) return f;
+    if(!donor || hasFieldGeometry(f)){
+      mergedMap.set(f.fieldKey, f);
+      return;
+    }
     const merged = { ...f };
     ['normBox','bbox','bboxPct','boxPx','rawBox','configBox','staticGeom','anchorMetrics','page','pageIndex','pageRole','verticalAnchor','anchor','configMask'].forEach(k => {
       if(merged[k] === undefined && donor[k] !== undefined) merged[k] = donor[k];
     });
-    return merged;
+    mergedMap.set(merged.fieldKey, merged);
   });
-  return { ...fallback, ...preferred, fields: mergedFields };
+  fallbackFields.forEach(f => {
+    if(!mergedMap.has(f.fieldKey)){
+      mergedMap.set(f.fieldKey, f);
+    }
+  });
+  return { ...fallback, ...preferred, fields: Array.from(mergedMap.values()) };
 }
 
 function scanWizardStorageKeys(wizardId){
