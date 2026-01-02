@@ -5597,6 +5597,11 @@ function labelValueHeuristic(fieldSpec, tokens){
   let hintBand = null;
   let nearHintCount = 0;
   let viewportDims = getViewportDimensions(viewportPx);
+  const suppliedTokens = Array.isArray(tokens) ? tokens : [];
+  tokens = suppliedTokens;
+  const tokensScoped = fieldSpec.tokenScope === 'area' || fieldSpec.useSuppliedTokensOnly || fieldSpec.tokensScoped;
+  const preferSuppliedTokens = staticRun && tokensScoped;
+  const keywordCacheable = !preferSuppliedTokens;
   if(!viewportDims.width || !viewportDims.height){
     viewportDims = getPageViewportSize(fieldSpec.page || state.pageNum || 1);
   }
@@ -5634,10 +5639,13 @@ function labelValueHeuristic(fieldSpec, tokens){
   const ensureKeywordIndexForPage = async (page)=>{
     if(!page) return [];
     const vp = state.pageViewports[(page||1)-1] || state.viewport || viewportDims;
-    const pageTokens = (page === (fieldSpec.page || state.pageNum || page))
+    let pageTokens = (page === (fieldSpec.page || state.pageNum || page))
       ? tokens
-      : (state.tokensByPage?.[page] || null);
-    return await buildKeywordIndexForPage(page, pageTokens, vp);
+      : (preferSuppliedTokens ? [] : (state.tokensByPage?.[page] || null));
+    if(!preferSuppliedTokens && (pageTokens?.length || 0) === 0 && ensureTokensForPage){
+      pageTokens = await ensureTokensForPage(page);
+    }
+    return await buildKeywordIndexForPage(page, pageTokens, vp, { cache: keywordCacheable });
   };
   const getPageSize = (page)=>{
     const vp = state.pageViewports[(page||1)-1] || viewportDims || {};
@@ -6221,8 +6229,10 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(staticRun && keywordConstellation && KeywordConstellation?.matchConstellation){
       const page = basePx.page || fieldSpec.page || state.pageNum || 1;
       const { pageW, pageH } = getPageSize(page);
-      let pageTokens = (page === (fieldSpec.page || state.pageNum || page)) ? tokens : (state.tokensByPage?.[page] || []);
-      if((pageTokens?.length || 0) === 0 && ensureTokensForPage){
+      let pageTokens = (page === (fieldSpec.page || state.pageNum || page))
+        ? tokens
+        : (preferSuppliedTokens ? [] : (state.tokensByPage?.[page] || []));
+      if((pageTokens?.length || 0) === 0 && ensureTokensForPage && !preferSuppliedTokens){
         pageTokens = await ensureTokensForPage(page);
       }
       constellationContext = KeywordConstellation.matchConstellation(keywordConstellation, pageTokens || [], {
@@ -6236,8 +6246,7 @@ function labelValueHeuristic(fieldSpec, tokens){
       }
     }
     if(staticRun && keywordRelations){
-      await ensureKeywordIndexForPage(basePx.page);
-      keywordIndex = state.keywordIndexByPage?.[basePx.page] || [];
+      keywordIndex = await ensureKeywordIndexForPage(basePx.page);
       const { pageW, pageH } = getPageSize(basePx.page);
       const extraSeeds = [];
       if(constellationBox){
@@ -6440,10 +6449,9 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length){
     const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
-    if(!state.keywordIndexByPage?.[page]){
-      await ensureKeywordIndexForPage(page);
+    if(!keywordIndex){
+      keywordIndex = await ensureKeywordIndexForPage(page);
     }
-    keywordIndex = keywordIndex || state.keywordIndexByPage?.[page] || [];
     keywordContext = keywordContext || (KeywordWeighting?.triangulateBox
       ? KeywordWeighting.triangulateBox(keywordRelations, keywordIndex, pageW, pageH, basePx, { configWeight: 1.2 })
       : null);
@@ -6504,10 +6512,9 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(staticRun && keywordRelations && result && basePx && !hintLocked){
     const page = result.boxPx?.page || basePx.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
-    if(!state.keywordIndexByPage?.[page]){
-      await ensureKeywordIndexForPage(page);
+    if(!keywordIndex){
+      keywordIndex = await ensureKeywordIndexForPage(page);
     }
-    keywordIndex = keywordIndex || state.keywordIndexByPage?.[page] || [];
     if(!keywordPrediction && keywordContext?.motherPred?.predictedBox){
       keywordPrediction = keywordContext.motherPred.predictedBox;
       keywordMatch = keywordContext.motherPred.entry || keywordRelations.mother;
@@ -8118,8 +8125,9 @@ function buildSavedAreaOccurrence(areaField){
   };
 }
 
-async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
-  if(state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
+async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null, options={}){
+  const { cache=true } = options || {};
+  if(cache && state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
   const catalogue = getKeywordCatalogue();
   const activeLangs = ['en'];
   const keywordEntries = [];
@@ -8200,7 +8208,9 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null){
     }
   }
 
-  state.keywordIndexByPage[pageNum] = matches;
+  if(cache){
+    state.keywordIndexByPage[pageNum] = matches;
+  }
   logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
 
   const areaFields = areaConfigsForPage();
@@ -8253,6 +8263,8 @@ async function extractAreaRows(profile){
       for(const sub of subs){
         const scoped = clonePlain(sub);
         scoped.page = page;
+        scoped.tokenScope = 'area';
+        scoped.useSuppliedTokensOnly = true;
         const absBox = sub.areaRelativeBox ? absoluteBoxFromRelative(sub.areaRelativeBox, areaBoxPx) : null;
         if(absBox){
           const nb = normalizeBox(absBox, pageW, pageH);
