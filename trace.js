@@ -57,9 +57,16 @@
       const traceId=uuid();
       const t={traceId, spanKey, events:[], started:Date.now(), _last:performance.now(), _lastPlanIndex:-1};
       this.traces.push(t);
-      if(this.traces.length>this.max) this.traces.shift();
+      if(this.traces.length>this.max){
+        const removed=this.traces.shift();
+        const removedKey=_spanKeyKey(removed?.spanKey || {});
+        if(_traceMap.get(removedKey)===removed?.traceId){
+          _traceMap.delete(removedKey);
+        }
+      }
       return traceId;
     }
+    reset(){ this.traces.length=0; _traceMap.clear(); }
     add(traceId, stage, payload={}){
       const t=this.traces.find(tr=>tr.traceId===traceId); if(!t) return;
       const now=performance.now();
