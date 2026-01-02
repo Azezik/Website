@@ -10316,8 +10316,17 @@ function mergeProfileGeometry(preferred, fallback){
   const mergedMap = new Map();
   preferredFields.forEach(f => {
     const donor = fallbackByKey.get(f.fieldKey);
-    if(!donor || hasFieldGeometry(f)){
+    const preferredHasGeom = hasFieldGeometry(f);
+    const donorHasGeom = hasFieldGeometry(donor);
+    if(!donor || preferredHasGeom){
       mergedMap.set(f.fieldKey, f);
+      return;
+    }
+    // If the preferred field is missing geometry but the stored (donor) field has it,
+    // keep the donor geometry and overlay non-geometry props from the preferred field.
+    if(donorHasGeom && !preferredHasGeom){
+      const merged = { ...donor, ...f };
+      mergedMap.set(merged.fieldKey, merged);
       return;
     }
     const merged = { ...f };
