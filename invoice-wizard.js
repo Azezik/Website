@@ -1968,12 +1968,17 @@ function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
     };
   };
 
+  const areaConstellation = (AreaFinder?.captureAreaConstellation)
+    ? AreaFinder.captureAreaConstellation(areaBox, tokens, pageW, pageH, {})
+    : null;
+
   return {
     // This fingerprint captures the shape of the AREABOX plus normalized keyword layout
     // so RUN mode can validate orientation/size without re-OCR or new coordinate systems.
     page: areaPage,
     bboxPct,
     keywords,
+    areaConstellation,
     orientation: {
       topRight: pickCornerKeyword(1, 0, 'topRight'),
       bottomLeft: pickCornerKeyword(0, 1, 'bottomLeft')
