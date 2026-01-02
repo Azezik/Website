@@ -514,6 +514,8 @@ function wipeAllWizardData(){
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.wizardTemplates = [];
   clearTransientStateLocal();
+  resetDocArtifacts();
+  cleanupDoc();
   hydrateFingerprintsFromProfile(null);
   refreshWizardTemplates();
   populateModelSelect();
@@ -521,6 +523,9 @@ function wipeAllWizardData(){
   renderSavedFieldsTable();
   renderConfirmedTables();
   renderResultsTable();
+  if(els.wizardSection) els.wizardSection.style.display = 'none';
+  setWizardMode(ModeEnum.CONFIG);
+  initStepsFromActiveWizard();
 }
 
 function resetDocArtifacts(){
@@ -4587,6 +4592,13 @@ function renderWizardManagerList(selectedId=null){
       if(selectedId === t.id){ selectedId = null; }
       if(state.activeWizardId === t.id){
         state.activeWizardId = firstCustomWizardId();
+        state.profile = null;
+        clearTransientStateLocal();
+        resetDocArtifacts();
+        cleanupDoc();
+        renderSavedFieldsTable();
+        renderConfirmedTables();
+        initStepsFromActiveWizard();
       }
       renderWizardManagerList(selectedId);
       populateModelSelect(state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
