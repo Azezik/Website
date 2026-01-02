@@ -518,6 +518,41 @@ textarea.code {
   color: var(--text);
 }
 
+.wizard-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wizard-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wizard-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 2px solid var(--panel-border);
+  border-radius: 10px;
+  background: #fffaf1;
+}
+.wizard-name {
+  font-weight: 700;
+}
+.wizard-meta {
+  color: var(--muted);
+  flex: 1;
+}
+.wizard-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 @media (max-width: 900px) {
   .topbar {
     grid-template-columns: 1fr;
