@@ -1879,6 +1879,45 @@ function computeAreaRelativeBox(areaPct, fieldPct){
   };
 }
 
+function serializeAreaConstellation(constellation){
+  if(!constellation) return null;
+  const serializePoint = (p) => (p && Number.isFinite(p.x) && Number.isFinite(p.y)) ? { x: p.x, y: p.y } : null;
+  const serializeBox = (b) => (!b || !Number.isFinite(b.w) || !Number.isFinite(b.h))
+    ? null
+    : { x: b.x || 0, y: b.y || 0, w: b.w, h: b.h, page: b.page };
+  const serializeDelta = (d) => ({ dx: Number.isFinite(d?.dx) ? d.dx : 0, dy: Number.isFinite(d?.dy) ? d.dy : 0 });
+  const serializeSupport = (s) => ({
+    text: s?.text || '',
+    normText: s?.normText || '',
+    center: serializePoint(s?.center) || { x: 0, y: 0 },
+    box: serializeBox(s?.box),
+    fieldDelta: serializeDelta(s?.fieldDelta),
+    anchorDelta: serializeDelta(s?.anchorDelta)
+  });
+  const anchor = constellation.anchor ? {
+    text: constellation.anchor.text || '',
+    normText: constellation.anchor.normText || '',
+    center: serializePoint(constellation.anchor.center) || { x: 0, y: 0 },
+    box: serializeBox(constellation.anchor.box),
+    fieldDelta: serializeDelta(constellation.anchor.fieldDelta),
+    supports: Array.isArray(constellation.anchor.supports) ? [...constellation.anchor.supports] : []
+  } : null;
+
+  return {
+    page: constellation.page,
+    bboxPct: constellation.bboxPct,
+    origin: serializePoint(constellation.origin) || { x: 0, y: 0 },
+    fieldSize: constellation.fieldSize ? { w: constellation.fieldSize.w || 0, h: constellation.fieldSize.h || 0 } : null,
+    tolerance: constellation.tolerance,
+    anchor,
+    supports: Array.isArray(constellation.supports) ? constellation.supports.map(serializeSupport) : [],
+    crossLinks: Array.isArray(constellation.crossLinks)
+      ? constellation.crossLinks.map(link => ({ from: link.from, to: link.to, delta: serializeDelta(link.delta) }))
+      : [],
+    minSupportMatches: constellation.minSupportMatches
+  };
+}
+
 function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
   if(!areaBox) return null;
   const bboxPct = areaBox.bboxPct || (areaBox.normBox ? {
@@ -1968,9 +2007,10 @@ function buildAreaFingerprint(areaBox, tokens, pageW=1, pageH=1){
     };
   };
 
-  const areaConstellation = (AreaFinder?.captureAreaConstellation)
+  const areaConstellationRaw = (AreaFinder?.captureAreaConstellation)
     ? AreaFinder.captureAreaConstellation(areaBox, tokens, pageW, pageH, {})
     : null;
+  const areaConstellation = serializeAreaConstellation(areaConstellationRaw);
 
   return {
     // This fingerprint captures the shape of the AREABOX plus normalized keyword layout
@@ -8282,6 +8322,12 @@ async function extractAreaRows(profile){
           tokens: res.tokens || []
         };
       }
+      const constellationMatch = occ.constellationMatch || (occ.matchId ? { id: occ.matchId, score: occ.confidence ?? 0 } : null);
+      const matchMetrics = {
+        matchedEdges: occ.matchedEdges ?? occ.validation?.matchedEdges ?? null,
+        totalEdges: occ.totalEdges ?? occ.validation?.totalEdges ?? null,
+        error: occ.error ?? occ.validation?.error ?? occ.validation?.errorSum ?? null
+      };
       rows.push({
         areaId,
         occurrenceIndex: i,
@@ -8289,6 +8335,8 @@ async function extractAreaRows(profile){
         bboxPx: areaBoxPx,
         bboxNorm,
         confidence: occ.confidence || 0,
+        constellationMatch,
+        matchMetrics,
         fields: rowFields
       });
     }
@@ -9495,6 +9543,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(extras.areaBox){ entry.areaBox = clonePlain(extras.areaBox); }
   if(extras.areaRelativeBox){ entry.areaRelativeBox = clonePlain(extras.areaRelativeBox); }
   if(extras.areaFingerprint){ entry.areaFingerprint = clonePlain(extras.areaFingerprint); }
+  if(extras.areaConstellation !== undefined){
+    entry.areaConstellation = extras.areaConstellation ? clonePlain(extras.areaConstellation) : null;
+  }
   if(step.isArea || (step.fieldType === 'areabox')){
     entry.isArea = true;
   } else if(areaId){
@@ -10110,7 +10161,12 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   }
   if(isAreaStep && areaBoxForStep){
     const areaFingerprint = buildAreaFingerprint(areaBoxForStep, tokens, canvasW, canvasH);
-    if(areaFingerprint){ extras.areaFingerprint = areaFingerprint; }
+    if(areaFingerprint){
+      extras.areaFingerprint = areaFingerprint;
+      if(areaFingerprint.areaConstellation){
+        extras.areaConstellation = clonePlain(areaFingerprint.areaConstellation);
+      }
+    }
   }
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
