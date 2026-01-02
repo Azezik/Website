@@ -120,7 +120,7 @@
           }))
           .filter(area => area.id || area.name)
       : [];
-    const includeLineItems = !!cfg.includeLineItems;
+    const includeLineItems = cfg.includeLineItems === undefined ? true : !!cfg.includeLineItems;
     const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
     const isCustomMasterDb = !!cfg.isCustomMasterDb;
     const globalFields = Array.isArray(cfg.globalFields) ? cfg.globalFields : [];
