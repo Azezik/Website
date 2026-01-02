@@ -398,7 +398,8 @@ function normalizeStaticDebugLogs(logs = staticDebugLogs){
 window.getStaticDebugLogs = () => staticDebugLogs.slice();
 window.clearStaticDebugLogs = () => {
   staticDebugLogs.length = 0;
-  if(window.debugTraces?.traces){ window.debugTraces.traces.length = 0; }
+  if(window.debugTraces?.reset){ window.debugTraces.reset(); }
+  else if(window.debugTraces?.traces){ window.debugTraces.traces.length = 0; }
   return [];
 };
 
