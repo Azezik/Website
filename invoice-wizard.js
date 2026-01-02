@@ -10669,10 +10669,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       });
     }
 
+    const includeLineItems = activeProfile?.masterDbConfig?.includeLineItems !== false;
     for(const spec of (activeProfile.fields || [])){
       const isAreaField = spec.isArea || spec.fieldType === 'areabox';
       const isSubordinateField = !!spec.areaId && !isAreaField;
-      if(isAreaField || isSubordinateField){ continue; }
+      // Only skip subordinate fields when we are actually treating them as dynamic (line-item) children.
+      if(isAreaField){ continue; }
+      if(isSubordinateField && includeLineItems){ continue; }
       const placement = spec.type === 'static'
         ? resolveStaticPlacement(spec, state.pageViewports, state.numPages)
         : null;
