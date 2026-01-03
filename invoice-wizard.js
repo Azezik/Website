@@ -9321,6 +9321,111 @@ function compileDocument(fileId, lineItems){
   return compiled;
 }
 
+function normalizeAreaFieldBag(fields){
+  const map = {};
+  Object.entries(fields || {}).forEach(([key, value]) => {
+    if(!key) return;
+    if(value && typeof value === 'object'){
+      const val = value.value ?? value.raw ?? value.text ?? '';
+      const confidence = typeof value.confidence === 'number' ? value.confidence : (typeof value.confidenceScore === 'number' ? value.confidenceScore : null);
+      map[key] = { value: val, confidence };
+    } else {
+      map[key] = { value, confidence: null };
+    }
+  });
+  return map;
+}
+
+function normalizeAreaOccurrencesForRecord(areaRows){
+  const rows = Array.isArray(areaRows) ? areaRows.filter(Boolean) : [];
+  const groups = new Map();
+  const pushOccurrence = (areaId, areaName, fields, idx=null) => {
+    if(!areaId) areaId = areaName || 'Area';
+    if(!groups.has(areaId)) groups.set(areaId, { areaId, areaName, occurrences: [] });
+    const group = groups.get(areaId);
+    if(!group.areaName) group.areaName = areaName || areaId;
+    const index = Number.isFinite(idx) ? idx : group.occurrences.length + 1;
+    group.occurrences.push({ index, fields: fields || {} });
+  };
+  rows.forEach(row => {
+    const areaId = row?.areaId || row?.areaName || row?.name || 'Area';
+    const areaName = resolveAreaLabel(areaId, row?.areaName || row?.name || null);
+    const nestedRows = Array.isArray(row?.rows) ? row.rows.filter(Boolean) : [];
+    if(nestedRows.length){
+      nestedRows.forEach((nested, idx) => {
+        const fields = normalizeAreaFieldBag(nested?.fields || nested?.values || nested?.cells || nested?.subFields || nested?.subordinates);
+        pushOccurrence(areaId, areaName, fields, idx + 1);
+      });
+    } else {
+      const fields = normalizeAreaFieldBag(row?.fields || row?.values || row?.cells || row?.subFields || row?.subordinates);
+      pushOccurrence(areaId, areaName, fields);
+    }
+  });
+  return Array.from(groups.values());
+}
+
+function resolveAreaLabel(areaId, fallback){
+  const areaField = (state.profile?.fields || []).find(f => (f.isArea || f.fieldType === 'areabox') && (f.areaId === areaId || f.fieldKey === areaId));
+  return areaField?.label || areaField?.name || fallback || areaId || 'Area';
+}
+
+function resolveAreaColumns(areaId, occurrences, labelMap){
+  const subs = (state.profile?.fields || []).filter(f => f.areaId === areaId && !(f.isArea || f.fieldType === 'areabox'));
+  const orderedKeys = subs.map(f => f.fieldKey).filter(Boolean);
+  const seen = new Set(orderedKeys);
+  occurrences.forEach(occ => {
+    Object.keys(occ.fields || {}).forEach(key => {
+      if(!key || seen.has(key)) return;
+      seen.add(key);
+      orderedKeys.push(key);
+    });
+  });
+  return orderedKeys.map(key => ({ key, label: labelMap[key] || key }));
+}
+
+function renderAreaOccurrencesPanel(record, labelMap){
+  const panel = document.getElementById('areaOccurrencesPanel');
+  if(!panel) return;
+  if(!record){
+    panel.innerHTML = '<p class="sub">Select a run to view area occurrences.</p>';
+    return;
+  }
+  const groups = normalizeAreaOccurrencesForRecord(record.areaRows);
+  if(!groups.length){
+    panel.innerHTML = '<p class="sub">No area occurrences for this run.</p>';
+    return;
+  }
+  const cards = groups.map(group => {
+    const columns = resolveAreaColumns(group.areaId, group.occurrences, labelMap);
+    const header = `<tr><th>Occurrence</th>${columns.map(col => `<th>${col.label}</th>`).join('')}</tr>`;
+    const rows = group.occurrences.map(occ => {
+      const cells = columns.map(col => {
+        const cell = occ.fields?.[col.key] || { value:'', confidence:null };
+        const warn = typeof cell.confidence === 'number' && cell.confidence < 0.8 ? '<span class="warn">⚠️</span>' : '';
+        const conf = typeof cell.confidence === 'number' ? `<span class="confidence">${Math.round(cell.confidence * 100)}%</span>` : '';
+        return `<td>${cell.value ?? ''}${warn}${conf}</td>`;
+      }).join('');
+      return `<tr><td class="occ-label">#${occ.index}</td>${cells}</tr>`;
+    }).join('');
+    return `
+      <div class="area-card" data-area="${group.areaId}">
+        <div class="area-card__header">
+          <div>
+            <div class="area-name">${group.areaName || group.areaId || 'Area'}</div>
+            <div class="area-meta">${group.occurrences.length} occurrence${group.occurrences.length === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        <div class="area-card__body">
+          <table class="line-items-table area-table">
+            <thead>${header}</thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }).join('');
+  panel.innerHTML = cards;
+}
+
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
   const dt = els.dataDocType?.value || state.docType;
@@ -9379,7 +9484,23 @@ function renderResultsTable(){
     return `<tr class="${rowClass}" data-file="${r.fileId}"><td>${r.fileName}</td>${cells}<td>${liTable}</td></tr>`;
   }).join('');
 
-  mount.innerHTML = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
+  const selectedRecord = db.find(r => r.fileId === state.selectedRunId) || db[0] || null;
+  const tableHtml = `<div class="results-table-scroll"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>${thead}</thead><tbody>${rows}</tbody></table></div>`;
+  const selectedLabel = selectedRecord ? (selectedRecord.fileName || selectedRecord.fileId || 'Selected run') : 'Select a run to view details';
+  mount.innerHTML = `
+    <div class="results-layout">
+      ${tableHtml}
+      <div class="area-panel-container">
+        <div class="area-panel-header">
+          <div>
+            <div class="area-panel-title">Area occurrences</div>
+            <div class="sub">Grouped by detected instances of each area. Values align to the subordinate fields saved for that area.</div>
+          </div>
+          <div class="sub area-selected-label">${selectedLabel}</div>
+        </div>
+        <div id="areaOccurrencesPanel"></div>
+      </div>
+    </div>`;
 
   mount.querySelectorAll('input.editField').forEach(inp=>inp.addEventListener('change', ()=>{
     const fileId = inp.dataset.file;
@@ -9393,20 +9514,23 @@ function renderResultsTable(){
       if(prop === 'value'){
         rec.fields[field].confidence = 1;
         if(rec.invoice[field] !== undefined) rec.invoice[field] = inp.value;
-      if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
+        if(rec.totals[field] !== undefined) rec.totals[field] = inp.value;
+      }
+      LS.setDb(state.username, dt, db, wizardId);
+      renderResultsTable();
+      renderReports();
+      renderSavedFieldsTable();
     }
-    LS.setDb(state.username, dt, db, wizardId);
-    renderResultsTable();
-    renderReports();
-    renderSavedFieldsTable();
-  }
   }));
   mount.querySelectorAll('tr[data-file]').forEach(tr => tr.addEventListener('click', evt => {
     if((evt.target?.tagName||'').toLowerCase() === 'input') return;
     state.selectedRunId = tr.dataset.file || '';
     mount.querySelectorAll('tr[data-file]').forEach(row => row.classList.toggle('results-selected', row.dataset.file === state.selectedRunId));
     syncSnapshotUi();
+    const nextSelected = db.find(r => r.fileId === state.selectedRunId) || null;
+    renderAreaOccurrencesPanel(nextSelected, labelMap);
   }));
+  renderAreaOccurrencesPanel(selectedRecord, labelMap);
   syncSnapshotUi();
 }
 
