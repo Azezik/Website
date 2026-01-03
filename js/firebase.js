@@ -16,6 +16,15 @@ export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
+function safeDoc(...segments) {
+  const path = segments.join('/');
+  console.info('[firestore][safeDoc]', { path });
+  if (segments.length % 2 !== 0) {
+    throw new Error(`[firestore] Invalid document reference: ${path} (requires even number of segments).`);
+  }
+  return doc(db, ...segments);
+}
+
 async function setUserMeta(tx, metaRef, payload, merge = false) {
   if (merge) {
     tx.set(metaRef, payload, { merge: true });
@@ -29,7 +38,7 @@ export async function claimUsername(firebaseUid, username, email) {
   if (!firebaseUid || !usernameDisplay) return null;
   const usernameLower = usernameDisplay.toLowerCase();
   const emailLower = (email || '').trim().toLowerCase() || null;
-  const metaRef = doc(db, 'Users', firebaseUid, 'meta');
+  const metaRef = safeDoc('Users', firebaseUid, 'meta', 'profile');
   const usernameRef = doc(db, 'Usernames', usernameLower);
   const now = serverTimestamp();
   const result = await runTransaction(db, async (tx) => {
@@ -66,7 +75,7 @@ export async function persistUsernameMapping(firebaseUid, username, email) {
 
 export async function fetchUserMeta(firebaseUid) {
   if (!firebaseUid) return null;
-  const ref = doc(db, 'Users', firebaseUid, 'meta');
+  const ref = safeDoc('Users', firebaseUid, 'meta', 'profile');
   const snapshot = await getDoc(ref);
   return snapshot.exists() ? snapshot.data() : null;
 }
@@ -90,6 +99,7 @@ if (typeof window !== 'undefined') {
     claimUsername,
     fetchUserMeta,
     fetchUsernameMapping,
+    safeDoc,
     doc,
     getDoc,
     setDoc,

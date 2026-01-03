@@ -279,6 +279,55 @@ function readEnvWizardBootstrap(){
 
 const envWizardBootstrap = readEnvWizardBootstrap();
 
+const DASHBOARD_PATH_RE = /document-dashboard\.html/i;
+
+function logAuthContext(context){
+  try {
+    const locationHref = window.location?.href || '';
+    const authUser = window.firebaseApi?.auth?.currentUser || null;
+    console.info('[auth-guard]', { context, location: locationHref, authUser: authUser ? authUser.uid : null });
+  } catch(logErr){
+    console.warn('[auth-guard] log failed', logErr);
+  }
+}
+
+function redirectToHome(reason){
+  logAuthContext(`redirect:${reason}`);
+  try {
+    window.location.replace('/');
+  } catch(err){
+    console.warn('[auth-guard] redirect failed', err);
+  }
+}
+
+function enforceDashboardAuthGuard(reason='bootstrap'){
+  if(typeof window === 'undefined') return;
+  const path = window.location?.pathname || '';
+  if(!DASHBOARD_PATH_RE.test(path)) return;
+  const api = window.firebaseApi;
+  logAuthContext(`guard:${reason}`);
+  if(!api?.auth){
+    redirectToHome('auth-missing');
+    return;
+  }
+  const currentUser = api.auth.currentUser;
+  if(currentUser){ return; }
+  let unsub = null;
+  if(typeof api.onAuthStateChanged === 'function'){
+    unsub = api.onAuthStateChanged(api.auth, (user)=>{
+      logAuthContext('auth-change');
+      if(user){
+        if(typeof unsub === 'function'){ unsub(); }
+        return;
+      }
+      redirectToHome('no-user');
+    });
+  } else {
+    redirectToHome('auth-handler-missing');
+  }
+}
+enforceDashboardAuthGuard();
+
 const modeHelpers = (typeof WizardMode !== 'undefined') ? WizardMode : null;
 const ModeEnum = modeHelpers?.WizardMode || { CONFIG:'CONFIG', RUN:'RUN' };
 const modeController = modeHelpers?.createModeController ? modeHelpers.createModeController(console) : null;
@@ -10677,6 +10726,7 @@ function setupAuthStateListener(){
   const api = window.firebaseApi;
   if (!api?.onAuthStateChanged || !api?.auth) return false;
   api.onAuthStateChanged(api.auth, async (user) => {
+    logAuthContext('auth-listener');
     if (user) {
       let username = '';
       try {
@@ -10695,8 +10745,7 @@ function setupAuthStateListener(){
       const wizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || state.activeWizardId || '';
       completeLogin({ username, docType, wizardId });
     } else if (isSkinV2) {
-      loginHydrated = false;
-      showLoginUi();
+      redirectToHome('auth-missing');
     }
   });
   return true;
@@ -10710,11 +10759,12 @@ if(isSkinV2){
   if(autoUser){
     completeLogin({ username: autoUser, docType: autoDocType, wizardId: autoWizardId });
   } else if(!authListenerReady) {
-    showLoginUi();
+    redirectToHome('auth-listener-missing');
   }
 }
 els.logoutBtn?.addEventListener('click', async ()=>{
   const api = window.firebaseApi;
+  logAuthContext('logout-click');
   if(api?.signOut && api?.auth){
     try {
       await api.signOut(api.auth);
@@ -10723,10 +10773,10 @@ els.logoutBtn?.addEventListener('click', async ()=>{
     }
   }
   loginHydrated = false;
-  showLoginUi();
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
   try { window.SessionStore?.clearActiveSession?.(); } catch(err){ console.warn('[session] clear failed', err); }
+  redirectToHome('logout');
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   const msg = 'Are you sure? This will wipe ALL wizard data (templates, models, and extracted records) site-wide. Only use if needed.';
