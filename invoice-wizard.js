@@ -9352,7 +9352,11 @@ function renderResultsTable(){
   }
 
   const keySet = new Set();
-  db.forEach(r => Object.keys(r.fields||{}).forEach(k=>keySet.add(k)));
+  const areaFieldKeys = getAreaFieldKeys();
+  db.forEach(r => Object.keys(r.fields||{}).forEach(k=>{
+    if(areaFieldKeys.has(k)) return;
+    keySet.add(k);
+  }));
   const keys = Array.from(keySet);
   const showRaw = state.modes.rawData || els.showRawToggle?.checked;
   const labelMap = getFieldLabelMap();
@@ -9650,6 +9654,15 @@ function getFieldLabelMap(){
 function getFieldLabel(key){
   const map = getFieldLabelMap();
   return map[key] || key;
+}
+
+function getAreaFieldKeys(){
+  return new Set(
+    (state.profile?.fields || [])
+      .filter(f => f && (f.isArea || (f.fieldType || f.type) === 'areabox'))
+      .map(f => f.fieldKey)
+      .filter(Boolean)
+  );
 }
 function renderSavedFieldsTable(){
   const wizardId = currentWizardId();
