@@ -588,6 +588,20 @@ function activateConfigMode(){
   initStepsFromActiveWizard();
 }
 
+function notifyRunIssue(message){
+  const msg = message || 'Run validation failed. Please try again.';
+  const toast = (typeof window !== 'undefined') ? (window.showToast || window.toast || null) : null;
+  if(typeof toast === 'function'){
+    toast(msg);
+    return;
+  }
+  if(typeof modeHelpers?.notify === 'function'){
+    modeHelpers.notify(msg, { variant:'error', mode:'run' });
+    return;
+  }
+  alert(msg);
+}
+
 window.__debugBlankAvoided = window.__debugBlankAvoided || 0;
 function bumpDebugBlank(){
   window.__debugBlankAvoided = (window.__debugBlankAvoided || 0) + 1;
@@ -3371,6 +3385,7 @@ const FieldDataEngine = (() => {
       learnPosTemplates(ftype, magicTokens);
     }
     const dom = shouldLearn ? dominant(ftype) : before;
+    const isValidValue = !hardInvalid;
     let score=0;
     if(!hardInvalid && dom.code && dom.code===code) score++;
     if(!hardInvalid && dom.shape && dom.shape===shape) score++;
@@ -3379,12 +3394,12 @@ const FieldDataEngine = (() => {
     if(spanKey) traceEvent(spanKey,'clean.success',{
       value:txt,
       score,
-      isValid: !hardInvalid,
+      isValid: isValidValue,
       invalidReason,
       magicType,
       stageLabel:'Clean success',
       stepNumber:4,
-      confidence:{ score, isValid, fingerprintMatch },
+      confidence:{ score, isValid: isValidValue, fingerprintMatch },
       heuristics:{ magicType },
       notes: invalidReason ? `invalid:${invalidReason}` : null
     });
@@ -3408,7 +3423,7 @@ const FieldDataEngine = (() => {
       correctionsApplied,
       digit,
       fingerprintMatch,
-      isValid: !hardInvalid,
+      isValid: isValidValue,
       invalidReason,
       validity,
       warnings
@@ -11023,8 +11038,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         profileWizardId: profile?.wizardId || state.profile?.wizardId || null
       };
       console.error('[wizard-run][error]', payload);
-      alert('Please select a wizard before running extraction.');
-      throw new Error('Wizard ID missing for run mode');
+      notifyRunIssue('Please select a wizard before running extraction.');
+      return;
     }
     logWizardSelection('run.resolve', { wizardId, displayName, value: selectionValue, source: selectionSource, modelId: runContext.modelId || null });
     if(state.activeWizardId !== wizardId){
@@ -11644,6 +11659,9 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length },
       notes:'Run mode finished'
     });
+  } catch(err){
+    console.error('Run mode extraction failed', err);
+    notifyRunIssue(err?.message || 'Extraction failed. Please try again.');
   } finally {
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
