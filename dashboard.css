@@ -553,6 +553,96 @@ textarea.code {
   justify-content: flex-end;
 }
 
+.results-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.results-table-scroll {
+  overflow: auto;
+  border: 2px solid var(--panel-border);
+  border-radius: 10px;
+  background: #fffaf1;
+}
+
+.results-table-scroll table {
+  width: 100%;
+}
+
+.line-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.line-items-table th,
+.line-items-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px;
+  text-align: left;
+}
+
+.area-panel-container {
+  border: 2px solid var(--panel-border);
+  background: var(--bg-soft);
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.area-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.area-panel-title {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.area-selected-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.area-card {
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.area-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.area-card .area-name {
+  font-weight: 700;
+}
+
+.area-card .area-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.area-table th,
+.area-table td {
+  border-bottom: 1px solid var(--border);
+}
+
+.occ-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 @media (max-width: 900px) {
   .topbar {
     grid-template-columns: 1fr;
