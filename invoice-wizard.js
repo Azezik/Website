@@ -10442,9 +10442,15 @@ if(isSkinV2){
     showLoginUi();
   }
 }
-els.logoutBtn?.addEventListener('click', ()=>{
+els.logoutBtn?.addEventListener('click', async ()=>{
   const api = window.firebaseApi;
-  api?.signOut?.(api.auth)?.catch(err => console.warn('[logout] signOut failed', err));
+  if(api?.signOut && api?.auth){
+    try {
+      await api.signOut(api.auth);
+    } catch(err){
+      console.warn('[logout] signOut failed', err);
+    }
+  }
   loginHydrated = false;
   showLoginUi();
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
