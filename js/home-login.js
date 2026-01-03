@@ -24,6 +24,24 @@
     window.location.href = `/document-dashboard.html?${params.toString()}`;
   }
 
+  function bootstrapAuthSession() {
+    const api = window.firebaseApi;
+    if (!api?.onAuthStateChanged || !api?.auth) return;
+    api.onAuthStateChanged(api.auth, async (user) => {
+      if (!user) return;
+      let username = '';
+      try {
+        const mapping = await api.fetchUsernameMapping?.(user.uid);
+        if (mapping?.username) {
+          username = mapping.username;
+        }
+      } catch (err) {
+        console.warn('[auth] failed to fetch username mapping', err);
+      }
+      performLogin(username || undefined);
+    });
+  }
+
   async function handleSignup(event) {
     event?.preventDefault?.();
     const username = (usernameInput.value || '').trim();
@@ -67,4 +85,5 @@
 
   form.addEventListener('submit', completeLoginFromHome);
   signupBtn?.addEventListener('click', handleSignup);
+  bootstrapAuthSession();
 })();
