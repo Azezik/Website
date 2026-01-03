@@ -10718,6 +10718,8 @@ els.logoutBtn?.addEventListener('click', async ()=>{
   if(api?.signOut && api?.auth){
     try {
       await api.signOut(api.auth);
+      window.location.replace('/');
+      return;
     } catch(err){
       console.warn('[logout] signOut failed', err);
     }
@@ -10727,6 +10729,7 @@ els.logoutBtn?.addEventListener('click', async ()=>{
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
   try { window.SessionStore?.clearActiveSession?.(); } catch(err){ console.warn('[session] clear failed', err); }
+  window.location.replace('/');
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   const msg = 'Are you sure? This will wipe ALL wizard data (templates, models, and extracted records) site-wide. Only use if needed.';
