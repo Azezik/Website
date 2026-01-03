@@ -2068,6 +2068,38 @@ function tokensWithinArea(tokens, areaBoxPx){
   return tokensInBox(tokens, areaBoxPx, { minOverlap: 0 });
 }
 
+function resolveAreaField(areaId){
+  if(!areaId || !state.profile?.fields) return null;
+  return state.profile.fields.find(f => (f.isArea || f.fieldType === 'areabox') && (f.areaId === areaId || f.fieldKey === areaId || f.id === areaId)) || null;
+}
+
+function pickAreaScope(areaId, targetPage, options = {}){
+  const { lowConfidenceFloor = 0.2 } = options || {};
+  const candidates = (state.areaOccurrencesById?.[areaId] || [])
+    .map(occ => ({ occ, box: resolveAreaBoxPx(occ) }))
+    .filter(entry => !!entry.box);
+  const fallbackArea = resolveAreaField(areaId);
+  const fallbackOccurrence = fallbackArea ? buildSavedAreaOccurrence(fallbackArea) : null;
+  if(fallbackOccurrence){
+    const fbBox = resolveAreaBoxPx(fallbackOccurrence);
+    if(fbBox){
+      candidates.push({
+        occ: { ...fallbackOccurrence, source: fallbackOccurrence.source || 'config-fallback' },
+        box: fbBox
+      });
+    }
+  }
+  if(!candidates.length) return null;
+  const pageMatches = candidates.filter(entry => (entry.box.page || entry.occ.page || 1) === targetPage);
+  const scoped = (pageMatches.length ? pageMatches : candidates).sort((a,b)=> (b.occ?.confidence ?? 0) - (a.occ?.confidence ?? 0));
+  let chosen = scoped[0];
+  const configFallback = scoped.find(entry => entry.occ?.source === 'config' || entry.occ?.source === 'config-fallback');
+  if(chosen && (chosen.occ?.confidence ?? 0) < lowConfidenceFloor && configFallback){
+    chosen = configFallback;
+  }
+  return chosen;
+}
+
 function groupFieldsByArea(fields = []){
   const map = new Map();
   fields.forEach(f => {
@@ -3217,8 +3249,28 @@ const FieldDataEngine = (() => {
     let correctionsApplied = magic.corrections || [];
     const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
     const numericCandidate = magic.numericCandidate || txt;
-    let isValid = true;
     let invalidReason = null;
+    let validity = 'ok';
+    let warningOnly = false;
+    const warnings = [];
+    let hardInvalid = false;
+    const flagWarning = (reason) => {
+      if(reason){
+        invalidReason = invalidReason || reason;
+        warnings.push(reason);
+      }
+      validity = 'warning';
+      warningOnly = true;
+    };
+    const flagInvalid = (reason) => {
+      if(reason){
+        invalidReason = invalidReason || reason;
+        warnings.push(reason);
+      }
+      validity = 'invalid';
+      hardInvalid = true;
+    };
+    const isLikelyDateText = (text) => /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(text) || /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/.test(text);
     if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       // Normalize common OCR digit confusions (e.g., $I3999 -> 13999.00) before stripping non-numeric chars.
@@ -3241,32 +3293,38 @@ const FieldDataEngine = (() => {
       const looksLikeTimestamp = digitsSeparatorsOnly && hasTime && (slashCount || dashCount || colonCount >= 2);
       const mixedSlashColon = digitsSeparatorsOnly && slashCount && colonCount;
       if(hasMonthWord || looksLikeTimestamp || (looksLikeDate && !containsAlpha) || mixedSlashColon){
-        isValid = false;
-        invalidReason = 'looks_like_date';
+        flagWarning('looks_like_date');
       }
-      txt = isValid ? sanitized : '';
+      txt = sanitized;
     }
-    const conf = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
+    if(magicType === MAGIC_DATA_TYPE.NUMERIC && isLikelyDateText(raw || '')){
+      flagWarning('type_mismatch_date_like');
+    }
+    const confBase = arr.reduce((s,t)=>s+(t.confidence||1),0)/arr.length;
+    let conf = confBase;
+    if(validity === 'warning'){
+      conf = conf * 0.82;
+    }
     const code = codeOf(txt);
     const shape = shapeOf(txt);
     const digit = digitRatio(txt);
     const before = dominant(ftype);
-    const fingerprintMatch = isValid && (!before.code || before.code === code);
-    const shouldLearn = isValid && (mode === 'CONFIG' || magicTypeInfo.isExplicit || fingerprintMatch);
+    const fingerprintMatch = !hardInvalid && (!before.code || before.code === code);
+    const shouldLearn = !hardInvalid && validity !== 'warning' && (mode === 'CONFIG' || magicTypeInfo.isExplicit || fingerprintMatch);
     if(shouldLearn){
       learn(ftype, txt);
       learnPosTemplates(ftype, magicTokens);
     }
     const dom = shouldLearn ? dominant(ftype) : before;
     let score=0;
-    if(isValid && dom.code && dom.code===code) score++;
-    if(isValid && dom.shape && dom.shape===shape) score++;
-    if(isValid && dom.len && dom.len===txt.length) score++;
-    if(isValid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
+    if(!hardInvalid && dom.code && dom.code===code) score++;
+    if(!hardInvalid && dom.shape && dom.shape===shape) score++;
+    if(!hardInvalid && dom.len && dom.len===txt.length) score++;
+    if(!hardInvalid && dom.digit && Math.abs(dom.digit-digit)<0.01) score++;
     if(spanKey) traceEvent(spanKey,'clean.success',{
       value:txt,
       score,
-      isValid,
+      isValid: !hardInvalid,
       invalidReason,
       magicType,
       stageLabel:'Clean success',
@@ -3283,7 +3341,23 @@ const FieldDataEngine = (() => {
         { field: spanKey?.fieldKey || ftype, cleaned: txt, code, expected: expectedCode, fingerprintOk }
       );
     }
-    return { value:txt, raw: isValid ? raw : '', rawOriginal: raw, corrected:txt, conf, code, shape, score, correctionsApplied, digit, fingerprintMatch, isValid, invalidReason };
+    return {
+      value: hardInvalid ? '' : txt,
+      raw: hardInvalid ? '' : raw,
+      rawOriginal: raw,
+      corrected: txt,
+      conf,
+      code,
+      shape,
+      score,
+      correctionsApplied,
+      digit,
+      fingerprintMatch,
+      isValid: !hardInvalid,
+      invalidReason,
+      validity,
+      warnings
+    };
   }
 
   function exportPatterns(){ return patterns; }
@@ -10994,13 +11068,21 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
-      const tokens = state.tokensByPage[targetPage] || [];
+      let tokens = state.tokensByPage[targetPage] || [];
       const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
       const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
       const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
       if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){
         keywordRelations.page = targetPage;
+      }
+      let areaScope = null;
+      if(isSubordinateField){
+        const scopedArea = pickAreaScope(spec.areaId, targetPage, { lowConfidenceFloor: 0.2 });
+        if(scopedArea && scopedArea.box){
+          areaScope = { box: scopedArea.box, confidence: scopedArea.occ?.confidence ?? null, source: scopedArea.occ?.source || null };
+          tokens = tokensWithinArea(tokens, scopedArea.box);
+        }
       }
       const fieldSpec = {
         fieldKey: spec.fieldKey,
@@ -11011,8 +11093,15 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         type: spec.type,
         anchorMetrics: spec.anchorMetrics || null,
         keywordRelations,
-        configMask
+        configMask,
+        tokenScope: areaScope ? 'area' : undefined,
+        useSuppliedTokensOnly: !!areaScope,
+        tokensScoped: !!areaScope
       };
+      if(areaScope){
+        fieldSpec.areaBoxPx = areaScope.box;
+        fieldSpec.areaScope = areaScope;
+      }
       const fieldSpanKey = {
         docId: state.currentFileId || state.currentFileName || 'doc',
         pageIndex: targetPage-1,
