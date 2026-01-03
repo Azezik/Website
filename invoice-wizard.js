@@ -231,6 +231,14 @@ const defaultWizardSubhead = els.wizardSubhead?.textContent || '';
 const runWizardTitle = 'Wizard Run Mode';
 const runWizardSubhead = 'Drop a document to extract using the saved wizard.';
 const isSkinV2 = document.body.classList.contains('skin-v2');
+const sessionBootstrap = (()=>{
+  try {
+    return window.SessionStore?.getActiveSession?.() || null;
+  } catch(err){
+    console.warn('[session] bootstrap read failed', err);
+    return null;
+  }
+})();
 
 const DEFAULT_WIZARD_ID = 'default';
 const MAX_CUSTOM_FIELDS = 30;
@@ -329,9 +337,9 @@ els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
 
 let state = {
-  username: null,
-  docType: envWizardBootstrap?.docType || 'invoice',
-  activeWizardId: isSkinV2 ? (envWizardBootstrap?.wizardId || '') : DEFAULT_WIZARD_ID,
+  username: sessionBootstrap?.username || null,
+  docType: sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice',
+  activeWizardId: isSkinV2 ? (envWizardBootstrap?.wizardId || sessionBootstrap?.wizardId || '') : DEFAULT_WIZARD_ID,
   wizardTemplates: [],
   mode: ModeEnum.CONFIG,
   modes: { rawData: false },
@@ -10278,9 +10286,11 @@ function completeLogin(opts = {}){
   const resolvedDocType = opts.docType || envWizardBootstrap?.docType || els.docType?.value || state.docType || 'invoice';
   state.docType = resolvedDocType;
   refreshWizardTemplates();
-  const wizardId = isSkinV2
-    ? requireCustomWizard({ allowTemplateFallback: true, promptBuilder: false })
-    : resolveWizardId();
+  const wizardId = (opts.wizardId && isSkinV2)
+    ? opts.wizardId
+    : (isSkinV2
+      ? requireCustomWizard({ allowTemplateFallback: true, promptBuilder: false })
+      : resolveWizardId());
   state.activeWizardId = wizardId || (isSkinV2 ? firstCustomWizardId() : DEFAULT_WIZARD_ID);
   if(isSkinV2 && !state.activeWizardId){
     showWizardManagerTab();
@@ -10300,6 +10310,17 @@ function completeLogin(opts = {}){
   const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId) : null;
   state.profile = existing || state.profile || null;
   hydrateFingerprintsFromProfile(state.profile);
+  try {
+    if(window.SessionStore?.setActiveSession){
+      window.SessionStore.setActiveSession({
+        username: state.username,
+        docType: state.docType,
+        wizardId: state.activeWizardId || ''
+      });
+    }
+  } catch(err){
+    console.warn('[session] persist failed', err);
+  }
   const hasWizard = !!state.activeWizardId;
   if(els.loginSection){ els.loginSection.style.display = 'none'; }
   if(els.app){ els.app.style.display = 'block'; }
@@ -10315,9 +10336,11 @@ els.loginForm?.addEventListener('submit', (e)=>{
 });
 
 if(isSkinV2){
-  const autoUser = envWizardBootstrap?.username || '';
+  const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';
+  const autoDocType = envWizardBootstrap?.docType || sessionBootstrap?.docType || state.docType;
+  const autoWizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || '';
   if(autoUser){
-    completeLogin({ username: autoUser, docType: envWizardBootstrap?.docType || state.docType });
+    completeLogin({ username: autoUser, docType: autoDocType, wizardId: autoWizardId });
   } else {
     if(els.loginSection){ els.loginSection.style.display = 'block'; }
     if(els.app){ els.app.style.display = 'none'; }
@@ -10329,6 +10352,7 @@ els.logoutBtn?.addEventListener('click', ()=>{
   els.loginSection.style.display = 'block';
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
+  try { window.SessionStore?.clearActiveSession?.(); } catch(err){ console.warn('[session] clear failed', err); }
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
   const msg = 'Are you sure? This will wipe ALL wizard data (templates, models, and extracted records) site-wide. Only use if needed.';
