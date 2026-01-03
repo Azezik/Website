@@ -2164,6 +2164,60 @@ function persistAreaRows(rows = []){
   });
 }
 
+function buildAreaOccurrencesPayload(){
+  const occurrences = [];
+  const rowsByArea = new Map();
+  (state.currentAreaRows || []).forEach(row => {
+    if(!row?.areaId) return;
+    const idx = Number.isFinite(row.occurrenceIndex) ? row.occurrenceIndex : (rowsByArea.get(row.areaId)?.length || 0);
+    if(!rowsByArea.has(row.areaId)) rowsByArea.set(row.areaId, []);
+    rowsByArea.get(row.areaId)[idx] = row;
+  });
+
+  const areaMap = state.areaOccurrencesById || {};
+  Object.entries(areaMap).forEach(([areaId, occListRaw]) => {
+    const occList = Array.isArray(occListRaw) ? occListRaw : [];
+    occList.forEach((occ, idx) => {
+      const matchedRow = (rowsByArea.get(areaId) || [])[idx] || null;
+      const entry = clonePlain(occ || {});
+      entry.areaId = entry.areaId || areaId;
+      entry.areaName = entry.areaName || resolveAreaLabel(entry.areaId, entry.areaName || null);
+      entry.occurrenceIndex = Number.isFinite(entry.occurrenceIndex) ? entry.occurrenceIndex : idx;
+      if(matchedRow){
+        entry.fields = clonePlain(matchedRow.fields || {});
+        entry.page = entry.page || matchedRow.page;
+        entry.bboxNorm = entry.bboxNorm || entry.bboxPct || matchedRow.bboxNorm || matchedRow.bboxPct || null;
+        entry.bboxPx = entry.bboxPx || matchedRow.bboxPx || null;
+        entry.confidence = entry.confidence ?? matchedRow.confidence ?? null;
+        entry.constellationMatch = entry.constellationMatch || matchedRow.constellationMatch || null;
+        entry.matchMetrics = entry.matchMetrics || matchedRow.matchMetrics || null;
+      }
+      occurrences.push(entry);
+    });
+  });
+
+  (state.currentAreaRows || []).forEach(row => {
+    if(!row?.areaId) return;
+    const idx = Number.isFinite(row.occurrenceIndex) ? row.occurrenceIndex : null;
+    const already = occurrences.some(o => o.areaId === row.areaId && (Number.isFinite(idx) ? (Number.isFinite(o.occurrenceIndex) && o.occurrenceIndex === idx) : !Number.isFinite(o.occurrenceIndex)));
+    if(already) return;
+    occurrences.push({
+      areaId: row.areaId,
+      areaName: resolveAreaLabel(row.areaId, row.areaName || null),
+      occurrenceIndex: idx,
+      page: row.page,
+      bboxNorm: row.bboxNorm || row.bboxPct || null,
+      bboxPx: row.bboxPx || null,
+      fields: clonePlain(row.fields || {}),
+      confidence: row.confidence ?? null,
+      constellationMatch: row.constellationMatch || null,
+      matchMetrics: row.matchMetrics || null
+    });
+  });
+
+  return occurrences;
+}
+
 const normalizeBox = (boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
   y0n: boxPx.y / canvasH,
@@ -9381,6 +9435,7 @@ function compileDocument(fileId, lineItems){
     },
     masterDbConfig: resolveMasterDbConfigForRecord(state.profile, activeTemplate, byKey),
     lineItems: enriched,
+    areaOccurrences: buildAreaOccurrencesPayload(),
     areaRows: (state.currentAreaRows || []).map(r => clonePlain(r)),
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
     warnings: []
@@ -9453,8 +9508,10 @@ function normalizeAreaFieldBag(fields){
   return map;
 }
 
-function normalizeAreaOccurrencesForRecord(areaRows){
-  const rows = Array.isArray(areaRows) ? areaRows.filter(Boolean) : [];
+function normalizeAreaOccurrencesForRecord(record){
+  const rows = Array.isArray(record?.areaRows) ? record.areaRows.filter(Boolean) : [];
+  const occurrences = Array.isArray(record?.areaOccurrences) ? record.areaOccurrences.filter(Boolean) : [];
+  const source = occurrences.length ? occurrences : rows;
   const groups = new Map();
   const pushOccurrence = (areaId, areaName, fields, idx=null) => {
     if(!areaId) areaId = areaName || 'Area';
@@ -9464,7 +9521,7 @@ function normalizeAreaOccurrencesForRecord(areaRows){
     const index = Number.isFinite(idx) ? idx : group.occurrences.length + 1;
     group.occurrences.push({ index, fields: fields || {} });
   };
-  rows.forEach(row => {
+  source.forEach(row => {
     const areaId = row?.areaId || row?.areaName || row?.name || 'Area';
     const areaName = resolveAreaLabel(areaId, row?.areaName || row?.name || null);
     const nestedRows = Array.isArray(row?.rows) ? row.rows.filter(Boolean) : [];
@@ -9507,7 +9564,7 @@ function renderAreaOccurrencesPanel(record, labelMap){
     panel.innerHTML = '<p class="sub">Select a run to view area occurrences.</p>';
     return;
   }
-  const groups = normalizeAreaOccurrencesForRecord(record.areaRows);
+  const groups = normalizeAreaOccurrencesForRecord(record);
   if(!groups.length){
     panel.innerHTML = '<p class="sub">No area occurrences for this run.</p>';
     return;
