@@ -8130,7 +8130,9 @@ function areaConfigsForPage(){
   return state.profile.fields.filter(f => f && (f.isArea || f.fieldType === 'areabox') && f.areaFingerprint);
 }
 
-function cacheAreaOccurrencesForPage(pageNum, matches = []){
+function cacheAreaOccurrencesForPage(pageNum, matches = [], options = {}){
+  const { skipClearIfEmpty = false } = options || {};
+  if(!matches.length && skipClearIfEmpty) return;
   if(!state.areaOccurrencesById) state.areaOccurrencesById = {};
   Object.keys(state.areaOccurrencesById).forEach(key => {
     state.areaOccurrencesById[key] = (state.areaOccurrencesById[key] || []).filter(m => m.page !== pageNum);
@@ -8166,8 +8168,8 @@ function buildSavedAreaOccurrence(areaField){
 }
 
 async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null, options={}){
-  const { cache=true } = options || {};
-  if(cache && state.keywordIndexByPage[pageNum]) return state.keywordIndexByPage[pageNum];
+  const { cache=true, forceAreaScan=false } = options || {};
+  const cachedKeywords = cache ? state.keywordIndexByPage[pageNum] : null;
   const catalogue = getKeywordCatalogue();
   const activeLangs = ['en'];
   const keywordEntries = [];
@@ -8191,84 +8193,110 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null, o
   const pageH = Math.max(1, Number(vp.height || vp.h || (state.isImage ? els.imgCanvas?.height : els.pdfCanvas?.height) || 0));
 
   const lines = groupIntoLines(tokens);
-  const matches = [];
+  const matches = cachedKeywords ? cachedKeywords.slice() : [];
 
-  const alreadyRecorded = (bbox, entry) => {
-    return matches.some(m => m.keyword === entry.keyword && m.category === entry.category && Math.abs(m.bboxPx.x - bbox.x) < 1 && Math.abs(m.bboxPx.y - bbox.y) < 1 && Math.abs(m.bboxPx.w - bbox.w) < 1 && Math.abs(m.bboxPx.h - bbox.h) < 1);
-  };
+  if(!cachedKeywords){
+    const alreadyRecorded = (bbox, entry) => {
+      return matches.some(m => m.keyword === entry.keyword && m.category === entry.category && Math.abs(m.bboxPx.x - bbox.x) < 1 && Math.abs(m.bboxPx.y - bbox.y) < 1 && Math.abs(m.bboxPx.w - bbox.w) < 1 && Math.abs(m.bboxPx.h - bbox.h) < 1);
+    };
 
-  const pushMatch = (bboxPx, entry, fontHeight=0) => {
-    if(!bboxPx || !Number.isFinite(bboxPx.x) || !Number.isFinite(bboxPx.y)) return;
-    if(alreadyRecorded(bboxPx, entry)) return;
-    const bboxNorm = normalizeBBoxForPage(bboxPx, pageW, pageH);
-    matches.push({ page: pageNum, bboxPx, bboxNorm, keyword: entry.keyword, category: entry.category, fontHeight: fontHeight || bboxPx.h });
-  };
+    const pushMatch = (bboxPx, entry, fontHeight=0) => {
+      if(!bboxPx || !Number.isFinite(bboxPx.x) || !Number.isFinite(bboxPx.y)) return;
+      if(alreadyRecorded(bboxPx, entry)) return;
+      const bboxNorm = normalizeBBoxForPage(bboxPx, pageW, pageH);
+      matches.push({ page: pageNum, bboxPx, bboxNorm, keyword: entry.keyword, category: entry.category, fontHeight: fontHeight || bboxPx.h });
+    };
 
-  for(const token of tokens){
-    const normText = normalizeKeywordText(token.text || token.raw || '');
-    if(!normText) continue;
-    for(const entry of keywordEntries){
-      if(normText.includes(entry.norm)){
-        pushMatch({ x: token.x, y: token.y, w: token.w, h: token.h, page: token.page }, entry, token.h);
+    for(const token of tokens){
+      const normText = normalizeKeywordText(token.text || token.raw || '');
+      if(!normText) continue;
+      for(const entry of keywordEntries){
+        if(normText.includes(entry.norm)){
+          pushMatch({ x: token.x, y: token.y, w: token.w, h: token.h, page: token.page }, entry, token.h);
+        }
       }
     }
-  }
 
-  for(const line of lines){
-    const normalizedParts = line.tokens
-      .map((t, idx) => ({ part: normalizeKeywordText(t.text || t.raw || ''), idx }))
-      .filter(p => p.part);
-    let lineNorm = '';
-    const spans = [];
-    for(let i=0;i<normalizedParts.length;i++){
-      const { part, idx } = normalizedParts[i];
-      if(lineNorm) lineNorm += ' ';
-      const actualStart = lineNorm.length;
-      lineNorm += part;
-      spans.push({ start: actualStart, end: lineNorm.length, idx });
-    }
-    if(!lineNorm) continue;
-    const lineBox = lineBounds(line);
+    for(const line of lines){
+      const normalizedParts = line.tokens
+        .map((t, idx) => ({ part: normalizeKeywordText(t.text || t.raw || ''), idx }))
+        .filter(p => p.part);
+      let lineNorm = '';
+      const spans = [];
+      for(let i=0;i<normalizedParts.length;i++){
+        const { part, idx } = normalizedParts[i];
+        if(lineNorm) lineNorm += ' ';
+        const actualStart = lineNorm.length;
+        lineNorm += part;
+        spans.push({ start: actualStart, end: lineNorm.length, idx });
+      }
+      if(!lineNorm) continue;
+      const lineBox = lineBounds(line);
 
-    for(const entry of keywordEntries){
-      let searchFrom = 0;
-      while(true){
-        const idx = lineNorm.indexOf(entry.norm, searchFrom);
-        if(idx === -1) break;
-        const endIdx = idx + entry.norm.length;
-        const startTok = spans.find(s => s.end > idx);
-        const endTok = [...spans].reverse().find(s => s.start < endIdx);
-        const slice = (startTok && endTok)
-          ? line.tokens.slice(startTok.idx, endTok.idx + 1)
-          : [];
-        const bbox = slice.length ? mergeTokenBounds(slice) : { x: lineBox.left, y: lineBox.top, w: lineBox.width, h: lineBox.height, page: line.page };
-        pushMatch(bbox, entry, lineBox.height);
-        searchFrom = endIdx;
+      for(const entry of keywordEntries){
+        let searchFrom = 0;
+        while(true){
+          const idx = lineNorm.indexOf(entry.norm, searchFrom);
+          if(idx === -1) break;
+          const endIdx = idx + entry.norm.length;
+          const startTok = spans.find(s => s.end > idx);
+          const endTok = [...spans].reverse().find(s => s.start < endIdx);
+          const slice = (startTok && endTok)
+            ? line.tokens.slice(startTok.idx, endTok.idx + 1)
+            : [];
+          const bbox = slice.length ? mergeTokenBounds(slice) : { x: lineBox.left, y: lineBox.top, w: lineBox.width, h: lineBox.height, page: line.page };
+          pushMatch(bbox, entry, lineBox.height);
+          searchFrom = endIdx;
+        }
       }
     }
-  }
 
-  if(cache){
-    state.keywordIndexByPage[pageNum] = matches;
+    if(cache){
+      state.keywordIndexByPage[pageNum] = matches;
+    }
+    logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
+  } else {
+    logStaticDebug(`keyword-index page=${pageNum} (cached)`, { tokens: tokens.length, matches: matches.length });
   }
-  logStaticDebug(`keyword-index page=${pageNum}`, { tokens: tokens.length, matches: matches.length });
 
   const areaFields = areaConfigsForPage();
-  if(AreaFinder && areaFields.length){
+  const existingAreaMatches = state.areaMatchesByPage?.[pageNum] || null;
+  const wantsAreaScan = !!(areaFields.length && (forceAreaScan || !existingAreaMatches));
+  const pushFallbackOccurrences = () => {
+    const fallbacks = [];
+    areaFields.forEach(field => {
+      const occ = buildSavedAreaOccurrence(field);
+      if(occ && (occ.page || 1) === pageNum){
+        const confidence = Number.isFinite(occ.confidence) ? occ.confidence : 0.05;
+        fallbacks.push({ ...occ, confidence, source: occ.source || 'config-fallback' });
+      }
+    });
+    return fallbacks;
+  };
+  if(wantsAreaScan && AreaFinder){
     try {
-      const areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH, page: pageNum }) || [];
-      const matchesByArea = new Map();
-      areaMatches.forEach(m => {
-        const key = m.areaId || m.fieldKey;
-        if(!key) return;
-        if(!matchesByArea.has(key)) matchesByArea.set(key, []);
-        matchesByArea.get(key).push(m);
-      });
+      let areaMatches = AreaFinder.findAreaOccurrencesForPage(areaFields, tokens, { pageW, pageH, page: pageNum }) || [];
+      if(!areaMatches.length){
+        areaMatches = pushFallbackOccurrences();
+      }
       state.areaMatchesByPage[pageNum] = areaMatches;
-      cacheAreaOccurrencesForPage(pageNum, areaMatches);
+      cacheAreaOccurrencesForPage(pageNum, areaMatches, { skipClearIfEmpty: true });
     } catch(err){
       console.warn('AREAFINDER failed', err);
+      const fallbacks = pushFallbackOccurrences();
+      if(fallbacks.length){
+        state.areaMatchesByPage[pageNum] = fallbacks;
+        cacheAreaOccurrencesForPage(pageNum, fallbacks, { skipClearIfEmpty: true });
+      }
     }
+  } else if(wantsAreaScan && !AreaFinder){
+    const fallbacks = pushFallbackOccurrences();
+    if(fallbacks.length){
+      state.areaMatchesByPage[pageNum] = fallbacks;
+      cacheAreaOccurrencesForPage(pageNum, fallbacks, { skipClearIfEmpty: true });
+    }
+  } else if(existingAreaMatches){
+    cacheAreaOccurrencesForPage(pageNum, existingAreaMatches, { skipClearIfEmpty: true });
   }
   return matches;
 }
@@ -8279,7 +8307,7 @@ async function extractAreaRows(profile){
   seedAreaOccurrencesFromConfig(groups);
   const totalPages = Math.max(1, state.numPages || state.pageViewports?.length || state.pdf?.numPages || 1);
   for(let page=1; page<=totalPages; page++){
-    await buildKeywordIndexForPage(page);
+    await buildKeywordIndexForPage(page, null, null, { forceAreaScan: true });
   }
 
   const rows = [];
@@ -8305,6 +8333,8 @@ async function extractAreaRows(profile){
         scoped.page = page;
         scoped.tokenScope = 'area';
         scoped.useSuppliedTokensOnly = true;
+        scoped.areaBoxPx = areaBoxPx;
+        scoped.areaRelativeBox = sub.areaRelativeBox || null;
         const absBox = sub.areaRelativeBox ? absoluteBoxFromRelative(sub.areaRelativeBox, areaBoxPx) : null;
         if(absBox){
           const nb = normalizeBox(absBox, pageW, pageH);
