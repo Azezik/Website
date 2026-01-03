@@ -10363,10 +10363,38 @@ async function handleSignupClick(e){
     alert(err?.message || 'Sign up failed. Please try again.');
   }
 }
-els.loginForm?.addEventListener('submit', (e)=>{
+async function handleLogin(e){
   e.preventDefault();
-  completeLogin({});
-});
+  const email = (els.email?.value || '').trim();
+  const password = els.password?.value || '';
+  const api = window.firebaseApi;
+  if (!api?.signInWithEmailAndPassword || !api?.auth) {
+    console.warn('[login] firebase not available; proceeding with local login');
+    const username = (els.username?.value || '').trim() || 'demo';
+    state.username = username;
+    completeLogin({ username });
+    return;
+  }
+  try {
+    const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
+    let username = '';
+    try {
+      const mapping = await api.fetchUsernameMapping?.(cred.user.uid);
+      if (mapping?.username) {
+        username = mapping.username;
+      }
+    } catch (err) {
+      console.warn('[login] failed to load username mapping', err);
+    }
+    const resolvedUsername = username || (els.username?.value || '').trim() || 'demo';
+    state.username = resolvedUsername;
+    completeLogin({ username: resolvedUsername });
+  } catch (err) {
+    console.error('[login] failed', err);
+    alert(err?.message || 'Login failed. Please try again.');
+  }
+}
+els.loginForm?.addEventListener('submit', handleLogin);
 els.signupBtn?.addEventListener('click', handleSignupClick);
 
 if(isSkinV2){
