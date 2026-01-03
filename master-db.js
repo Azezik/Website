@@ -88,7 +88,7 @@
   function normalizeMasterConfig(record){
     const cfg = record?.masterDbConfig || {};
     const staticFieldsRaw = Array.isArray(cfg.staticFields) ? cfg.staticFields : [];
-    const staticFields = staticFieldsRaw
+    const normalizedStaticFields = staticFieldsRaw
       .map(f => ({
         ...f,
         fieldKey: f?.fieldKey || f?.key || f?.name,
@@ -97,15 +97,15 @@
         isSubordinate: !!f?.isSubordinate
       }))
       .filter(f => !!f.fieldKey);
+    const staticFields = normalizedStaticFields.filter(f => !f.isArea);
     const areaFieldKeysFromConfig = Array.isArray(cfg.areaFieldKeys) ? cfg.areaFieldKeys : [];
-    const areaFieldKeysFromStatic = staticFields
+    const areaFieldKeysFromStatic = normalizedStaticFields
       .filter(f => f.isArea || f.isSubordinate)
       .map(f => f.fieldKey);
     const areaFieldKeys = Array.from(new Set([...areaFieldKeysFromConfig, ...areaFieldKeysFromStatic])).filter(Boolean);
     const documentFieldKeysOverride = Array.isArray(cfg.documentFieldKeys) ? cfg.documentFieldKeys.filter(Boolean) : null;
-    const documentFieldKeys = documentFieldKeysOverride || staticFields
-      .filter(f => !areaFieldKeys.includes(f.fieldKey))
-      .map(f => f.fieldKey);
+    const documentFieldKeys = documentFieldKeysOverride ?? staticFields.map(f => f.fieldKey);
+    const hasNonAreaFields = documentFieldKeys.length > 0 || (documentFieldKeysOverride === null && !areaFieldKeys.length);
     const areas = Array.isArray(cfg.areas)
       ? cfg.areas
           .map(area => ({
@@ -124,7 +124,6 @@
     const lineItemFields = Array.isArray(cfg.lineItemFields) ? cfg.lineItemFields : [];
     const isCustomMasterDb = !!cfg.isCustomMasterDb;
     const globalFields = Array.isArray(cfg.globalFields) ? cfg.globalFields : [];
-    const hasNonAreaFields = documentFieldKeys.length > 0 || (!areaFieldKeys.length && documentFieldKeysOverride === null);
     return {
       isCustomMasterDb,
       includeLineItems,
