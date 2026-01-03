@@ -10526,12 +10526,17 @@ async function handleSignupClick(e){
   try {
     const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
     try {
-      await api.persistUsernameMapping?.(cred.user.uid, username);
+      const claimed = await api.claimUsername?.(cred.user.uid, username, email);
+      const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
+      state.username = resolvedUsername;
+      completeLogin({ username: resolvedUsername });
+      return;
     } catch (err) {
-      console.warn('[signup] failed to persist username mapping', err);
+      console.error('[signup] failed to persist username mapping', err);
+      try { await api.signOut?.(api.auth); } catch(signOutErr){ console.warn('[signup] signOut after failure failed', signOutErr); }
+      alert(err?.message || 'Username is already taken or could not be saved.');
+      return;
     }
-    state.username = username;
-    completeLogin({ username });
   } catch (err) {
     console.error('[signup] failed', err);
     alert(err?.message || 'Sign up failed. Please try again.');
@@ -10551,16 +10556,11 @@ async function handleLogin(e){
   }
   try {
     const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
-    let username = '';
-    try {
-      const mapping = await api.fetchUsernameMapping?.(cred.user.uid);
-      if (mapping?.username) {
-        username = mapping.username;
-      }
-    } catch (err) {
-      console.warn('[login] failed to load username mapping', err);
+    const meta = await api.fetchUserMeta?.(cred.user.uid);
+    const resolvedUsername = meta?.usernameDisplay || meta?.usernameLower;
+    if (!resolvedUsername) {
+      throw new Error('No username is linked to this account. Please contact support.');
     }
-    const resolvedUsername = username || (els.username?.value || '').trim() || 'demo';
     state.username = resolvedUsername;
     completeLogin({ username: resolvedUsername });
   } catch (err) {
@@ -10577,14 +10577,29 @@ async function backupToCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const username = state.username || sessionBootstrap?.username || '';
-  if(!username){
+  const user = api.auth.currentUser;
+  const uid = user?.uid;
+  let username = state.username || sessionBootstrap?.username || '';
+  if(!username && uid){
+    try{
+      const meta = await api.fetchUserMeta?.(uid);
+      if(meta?.usernameDisplay || meta?.usernameLower){
+        username = meta.usernameDisplay || meta.usernameLower;
+      }
+    } catch(err){
+      console.warn('[backup] failed to resolve username from meta', err);
+    }
+  }
+  if(!username || !uid){
     alert('Please log in before running a backup.');
     return;
   }
   try{
     const payload = buildBackupPayload(username);
-    const ref = api.doc(api.db, 'Accounts', username, 'Backups', 'manual');
+    const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
+    const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
+    const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
     await api.setDoc(ref, { payload, updatedAt: payload.savedAt }, { merge: true });
     alert('Backup completed.');
   } catch(err){
@@ -10599,8 +10614,20 @@ async function restoreFromCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const username = state.username || sessionBootstrap?.username || '';
-  if(!username){
+  const user = api.auth.currentUser;
+  const uid = user?.uid;
+  let username = state.username || sessionBootstrap?.username || '';
+  if(!username && uid){
+    try{
+      const meta = await api.fetchUserMeta?.(uid);
+      if(meta?.usernameDisplay || meta?.usernameLower){
+        username = meta.usernameDisplay || meta.usernameLower;
+      }
+    } catch(err){
+      console.warn('[restore] failed to resolve username from meta', err);
+    }
+  }
+  if(!username || !uid){
     alert('Please log in before restoring.');
     return;
   }
@@ -10608,7 +10635,10 @@ async function restoreFromCloud(){
     return;
   }
   try{
-    const ref = api.doc(api.db, 'Accounts', username, 'Backups', 'manual');
+    const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
+    const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
+    const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
     const snap = await api.getDoc(ref);
     if(!snap.exists()){
       alert('No backup found for this user.');
@@ -10633,18 +10663,22 @@ function setupAuthStateListener(){
   if (!api?.onAuthStateChanged || !api?.auth) return false;
   api.onAuthStateChanged(api.auth, async (user) => {
     if (user) {
-      let username = state.username || sessionBootstrap?.username || '';
+      let username = '';
       try {
-        const mapping = await api.fetchUsernameMapping?.(user.uid);
-        if (mapping?.username) {
-          username = mapping.username;
+        const meta = await api.fetchUserMeta?.(user.uid);
+        if (meta?.usernameDisplay || meta?.usernameLower) {
+          username = meta.usernameDisplay || meta.usernameLower;
         }
       } catch (err) {
         console.warn('[auth] failed to load username mapping', err);
       }
+      if (!username) {
+        console.warn('[auth] username mapping missing; skipping auto-login');
+        return;
+      }
       const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
       const wizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || state.activeWizardId || '';
-      completeLogin({ username: username || 'demo', docType, wizardId });
+      completeLogin({ username, docType, wizardId });
     } else if (isSkinV2) {
       loginHydrated = false;
       showLoginUi();

@@ -31,14 +31,18 @@
       if (!user) return;
       let username = '';
       try {
-        const mapping = await api.fetchUsernameMapping?.(user.uid);
-        if (mapping?.username) {
-          username = mapping.username;
+        const meta = await api.fetchUserMeta?.(user.uid);
+        if (meta?.usernameDisplay || meta?.usernameLower) {
+          username = meta.usernameDisplay || meta.usernameLower;
         }
       } catch (err) {
         console.warn('[auth] failed to fetch username mapping', err);
       }
-      performLogin(username || undefined);
+      if (!username) {
+        console.warn('[auth] username mapping missing; skip auto-login');
+        return;
+      }
+      performLogin(username);
     });
   }
 
@@ -60,17 +64,22 @@
     try {
       const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
       try {
-        await api.persistUsernameMapping?.(cred.user.uid, username);
+        const claimed = await api.claimUsername?.(cred.user.uid, username, email);
+        const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
+        if (window.state) {
+          window.state.username = resolvedUsername;
+        }
+        if (typeof window.completeLogin === 'function') {
+          window.completeLogin({ username: resolvedUsername });
+        } else {
+          performLogin(resolvedUsername);
+        }
+        return;
       } catch (err) {
-        console.warn('[signup] failed to persist username mapping', err);
-      }
-      if (window.state) {
-        window.state.username = username;
-      }
-      if (typeof window.completeLogin === 'function') {
-        window.completeLogin({ username });
-      } else {
-        performLogin(username);
+        console.error('[signup] failed to persist username mapping', err);
+        try { await api.signOut?.(api.auth); } catch(signOutErr){ console.warn('[signup] signOut after failure failed', signOutErr); }
+        alert(err?.message || 'Username is already taken or could not be saved.');
+        return;
       }
     } catch (err) {
       console.error('[signup] failed', err);
