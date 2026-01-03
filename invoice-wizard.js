@@ -113,7 +113,9 @@ const els = {
   loginSection:    document.getElementById('login-section'),
   loginForm:       document.getElementById('login-form'),
   username:        document.getElementById('username'),
+  email:           document.getElementById('email'),
   password:        document.getElementById('password'),
+  signupBtn:       document.getElementById('signup-btn'),
   app:             document.getElementById('app'),
   tabs:            document.querySelectorAll('#dashTabs button'),
   docDashboard:    document.getElementById('document-dashboard'),
@@ -10330,10 +10332,42 @@ function completeLogin(opts = {}){
   logWizardSelection('restore', resolveSelectedWizardContext());
   renderResultsTable();
 }
+
+async function handleSignupClick(e){
+  e.preventDefault();
+  const username = (els.username?.value || '').trim();
+  if (!username) {
+    alert('Please choose a username.');
+    return;
+  }
+  const email = (els.email?.value || '').trim();
+  const password = els.password?.value || '';
+  const api = window.firebaseApi;
+  if (!api?.createUserWithEmailAndPassword || !api?.auth) {
+    console.warn('[signup] firebase not available; proceeding with local login');
+    state.username = username;
+    completeLogin({ username });
+    return;
+  }
+  try {
+    const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
+    try {
+      await api.persistUsernameMapping?.(cred.user.uid, username);
+    } catch (err) {
+      console.warn('[signup] failed to persist username mapping', err);
+    }
+    state.username = username;
+    completeLogin({ username });
+  } catch (err) {
+    console.error('[signup] failed', err);
+    alert(err?.message || 'Sign up failed. Please try again.');
+  }
+}
 els.loginForm?.addEventListener('submit', (e)=>{
   e.preventDefault();
   completeLogin({});
 });
+els.signupBtn?.addEventListener('click', handleSignupClick);
 
 if(isSkinV2){
   const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';

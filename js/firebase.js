@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
-import { getAuth } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-import { getFirestore } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+import { getAuth, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+import { getFirestore, doc, setDoc } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA59N6Oqr6keapLIIabGxKmaeZ9dqKsbps",
@@ -15,3 +15,20 @@ const firebaseConfig = {
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+export async function persistUsernameMapping(firebaseUid, username) {
+  if (!firebaseUid || !username) return null;
+  const ref = doc(db, 'usernames', firebaseUid);
+  await setDoc(ref, { username });
+  return ref;
+}
+
+if (typeof window !== 'undefined') {
+  window.firebaseApi = {
+    app,
+    auth,
+    db,
+    createUserWithEmailAndPassword,
+    persistUsernameMapping,
+  };
+}
