@@ -730,6 +730,7 @@ function deriveMasterDbSchema(fields){
         isArea,
         isSubordinate,
         areaId: areaId || undefined,
+        nonExtractable: !!f.nonExtractable || isArea,
         isGlobal: !!f.isGlobal
       };
     });
@@ -824,6 +825,7 @@ function buildMasterDbConfigFromProfile(profile, templateConfig, template){
     const isSubordinate = !!(field?.isSubordinate || source.isSubordinate || (!!inferredAreaId && !isArea));
     const isGlobal = !isArea && !isSubordinate && !!(field?.isGlobal ?? source.isGlobal);
     const label = field?.label || field?.name || source.label || source.name || fieldKey;
+    const nonExtractable = field?.nonExtractable ?? source.nonExtractable ?? isArea;
     return {
       ...source,
       ...field,
@@ -835,6 +837,7 @@ function buildMasterDbConfigFromProfile(profile, templateConfig, template){
       isArea,
       isSubordinate,
       isGlobal,
+      nonExtractable,
       label,
       name: field?.name || source.name || label
     };
@@ -4364,17 +4367,20 @@ function normalizeAreaLink(field){
     field.areaId = field.areaId || field.id;
     field.isSubordinate = false;
     field.isGlobal = false;
+    field.nonExtractable = true;
     return field.areaId;
   }
   if(field.areaId){
     field.isSubordinate = true;
     field.isArea = false;
     field.isGlobal = false;
+    field.nonExtractable = !!field.nonExtractable && !field.isGlobal;
     return field.areaId;
   }
   field.isArea = false;
   field.isSubordinate = false;
   field.isGlobal = !!field.isGlobal;
+  field.nonExtractable = !!field.nonExtractable && !field.isGlobal;
   return null;
 }
 
@@ -9190,7 +9196,10 @@ function resolveMasterDbConfigForRecord(profile, template, recordFields){
   const activeProfile = profile || {};
   const masterConfig = buildMasterDbConfigFromProfile(activeProfile, activeProfile?.masterDbConfig, template);
   const derivedStaticFields = deriveMasterDbSchema(activeProfile.fields || []);
-  const recordFieldKeys = new Set(Object.keys(recordFields || {}));
+  const areaKeys = getAreaFieldKeys(activeProfile.fields);
+  const recordFieldKeys = new Set(
+    Object.keys(recordFields || {}).filter(key => !areaKeys.has(key))
+  );
   const alignedDerivedStatics = derivedStaticFields.filter(f => recordFieldKeys.has(f.fieldKey));
   let staticFields = (masterConfig.staticFields || []).filter(f => recordFieldKeys.has(f.fieldKey));
   const missingStaticKeys = alignedDerivedStatics
@@ -9227,10 +9236,14 @@ function compileDocument(fileId, lineItems){
   const byKey = {};
   const wizardId = currentWizardId();
   const activeTemplate = wizardId === DEFAULT_WIZARD_ID ? null : normalizeTemplate(getWizardTemplateById(wizardId));
+  const areaFieldKeys = getAreaFieldKeys();
   if(!state.snapshotMode){ state.lastSnapshotManifestId = ''; }
   state.selectedRunId = fileId || state.selectedRunId;
-  raw.forEach(r=>{ byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] }; });
-  (state.profile?.fields||[]).forEach(f=>{
+  raw.forEach(r=>{
+    if(areaFieldKeys.has(r.fieldKey)) return;
+    byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] };
+  });
+  getExtractableFields().forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
   });
   const cleanScalar = val => {
@@ -9673,6 +9686,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     configBox: configPctBox || null,
     rawBox,
     value,
+    nonExtractable: isAreaField || existing?.nonExtractable || false,
     confidence,
     raw,
     correctionsApplied: corrections,
@@ -9810,20 +9824,38 @@ function getFieldLabel(key){
   return map[key] || key;
 }
 
-function getAreaFieldKeys(){
+function isAreaField(field){
+  if(!field) return false;
+  const type = (field.fieldType || field.type || '').toLowerCase();
+  return !!field.isArea || type === 'areabox';
+}
+
+function isNonExtractableField(field){
+  if(!field) return false;
+  if(field.nonExtractable === true) return true;
+  return isAreaField(field);
+}
+
+function getAreaFieldKeys(fields){
+  const source = Array.isArray(fields) ? fields : (state.profile?.fields || []);
   return new Set(
-    (state.profile?.fields || [])
-      .filter(f => f && (f.isArea || (f.fieldType || f.type) === 'areabox'))
+    source
+      .filter(f => isAreaField(f))
       .map(f => f.fieldKey)
       .filter(Boolean)
   );
+}
+
+function getExtractableFields(fields){
+  const source = Array.isArray(fields) ? fields : (state.profile?.fields || []);
+  return source.filter(f => !isNonExtractableField(f));
 }
 function renderSavedFieldsTable(){
   const wizardId = currentWizardId();
   const db = LS.getDb(state.username, state.docType, wizardId);
   const latest = db.slice().sort((a,b)=> new Date(b.processedAtISO) - new Date(a.processedAtISO))[0];
   state.savedFieldsRecord = latest || null;
-  const order = (state.profile?.fields||[]).map(f=>f.fieldKey);
+  const order = getExtractableFields().map(f=>f.fieldKey);
   const labelMap = getFieldLabelMap();
   const fields = order.map(k => ({ fieldKey:k, value: latest?.fields?.[k]?.value }))
     .filter(f => f.value !== undefined && f.value !== null && String(f.value).trim() !== '');
