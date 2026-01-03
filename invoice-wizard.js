@@ -10599,7 +10599,7 @@ async function backupToCloud(){
     const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
     const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
     const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
-    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Backups', 'manual');
     await api.setDoc(ref, { payload, updatedAt: payload.savedAt }, { merge: true });
     alert('Backup completed.');
   } catch(err){
@@ -10638,7 +10638,7 @@ async function restoreFromCloud(){
     const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
     const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
     const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
-    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Backups', 'manual');
     const snap = await api.getDoc(ref);
     if(!snap.exists()){
       alert('No backup found for this user.');
