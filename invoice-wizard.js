@@ -10608,13 +10608,28 @@ async function backupToCloud(){
   }
 }
 
+function waitForAuthResolution(api){
+  if(!api?.onAuthStateChanged || !api?.auth) return Promise.resolve(null);
+  return new Promise((resolve)=>{
+    let unsubscribe = ()=>{};
+    unsubscribe = api.onAuthStateChanged(api.auth, (user)=>{
+      try { unsubscribe?.(); } catch(err){ console.warn('[auth] unsubscribe failed', err); }
+      resolve(user);
+    }, (err)=>{
+      console.warn('[auth] onAuthStateChanged failed', err);
+      try { unsubscribe?.(); } catch(unsubErr){ console.warn('[auth] unsubscribe failed', unsubErr); }
+      resolve(null);
+    });
+  });
+}
+
 async function restoreFromCloud(){
   const api = window.firebaseApi;
-  if(!api?.auth || !api?.auth?.currentUser || !api?.db || !api?.doc || !api?.getDoc){
+  if(!api?.auth || !api?.db || !api?.doc || !api?.getDoc){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const user = api.auth.currentUser;
+  const user = api.auth.currentUser || await waitForAuthResolution(api);
   const uid = user?.uid;
   let username = state.username || sessionBootstrap?.username || '';
   if(!username && uid){
