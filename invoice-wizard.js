@@ -138,6 +138,7 @@ const els = {
   regenerateSnapshotBtn: document.getElementById('regenerateSnapshotBtn'),
   snapshotMeta: document.getElementById('snapshotMeta'),
   snapshotList: document.getElementById('snapshotList'),
+  snapshotAreaDebug: document.getElementById('snapshotAreaDebug'),
   snapshotDetail: document.getElementById('snapshotDetail'),
   ocrCropList:    document.getElementById('ocrCropList'),
   telemetryPanel: document.getElementById('telemetryPanel'),
@@ -8490,6 +8491,8 @@ async function extractAreaRows(profile){
       const matchMetrics = {
         matchedEdges: occ.matchedEdges ?? occ.validation?.matchedEdges ?? null,
         totalEdges: occ.totalEdges ?? occ.validation?.totalEdges ?? null,
+        matchedSupports: occ.matchedSupports ?? occ.validation?.matchedSupports ?? occ.validation?.supportMatches?.length ?? null,
+        totalSupports: occ.totalSupports ?? occ.validation?.totalSupports ?? null,
         error: occ.error ?? occ.validation?.error ?? occ.validation?.errorSum ?? null
       };
       rows.push({
@@ -9167,6 +9170,7 @@ async function renderSnapshotDetail(manifest, pageNumber){
   const page = (manifest?.pages || []).find(p => p.pageNumber === pageNumber);
   if(!page){
     els.snapshotDetail.innerHTML = '<p class="snapshot-empty">No snapshot for this page.</p>';
+    renderSnapshotAreaDebug(manifest, pageNumber);
     return;
   }
   let dataUrl = page.dataUrl;
@@ -9179,14 +9183,17 @@ async function renderSnapshotDetail(manifest, pageNumber){
   }
   if(!dataUrl){
     els.snapshotDetail.innerHTML = '<p class="snapshot-empty">Snapshot unavailable for this page.</p>';
+    renderSnapshotAreaDebug(manifest, pageNumber);
     return;
   }
   els.snapshotDetail.innerHTML = `<img src="${dataUrl}" alt="Snapshot page ${page.pageNumber}" />`;
+  renderSnapshotAreaDebug(manifest, page.pageNumber);
 }
 
 function renderSnapshotPanel(manifest){
   if(!els.snapshotPanel || !manifest){
     if(els.snapshotPanel) els.snapshotPanel.style.display = 'none';
+    if(els.snapshotAreaDebug) els.snapshotAreaDebug.innerHTML = '';
     return;
   }
   els.snapshotPanel.style.display = 'block';
@@ -9198,6 +9205,7 @@ function renderSnapshotPanel(manifest){
   if(!pages.length){
     if(els.snapshotList) els.snapshotList.innerHTML = '<p class="snapshot-empty">No snapshots captured.</p>';
     if(els.snapshotDetail) els.snapshotDetail.innerHTML = '';
+    renderSnapshotAreaDebug(manifest, null);
     return;
   }
   if(!state.snapshotPanels.activePage || !pages.some(p => p.pageNumber === state.snapshotPanels.activePage)){
@@ -9248,6 +9256,9 @@ function closeSnapshotPanel(){
   if(els.snapshotPanel){
     els.snapshotPanel.style.display = 'none';
     els.snapshotPanel.dataset.open = '0';
+  }
+  if(els.snapshotAreaDebug){
+    els.snapshotAreaDebug.innerHTML = '';
   }
 }
 
@@ -9600,6 +9611,163 @@ function renderAreaOccurrencesPanel(record, labelMap){
   panel.innerHTML = cards;
 }
 
+function formatAreaBoxForDisplay(boxPx, boxNorm, page){
+  if(boxPx && [boxPx.x, boxPx.y, boxPx.w, boxPx.h].every(v => Number.isFinite(v))){
+    const pg = boxPx.page || page || '?';
+    return `${Math.round(boxPx.x)},${Math.round(boxPx.y)} • ${Math.round(boxPx.w)}×${Math.round(boxPx.h)} (p${pg}, px)`;
+  }
+  const norm = boxNorm || {};
+  if([norm.x0, norm.y0, norm.x1, norm.y1].every(v => typeof v === 'number' && Number.isFinite(v))){
+    const pg = norm.page || page || '?';
+    const w = (norm.x1 - norm.x0) * 100;
+    const h = (norm.y1 - norm.y0) * 100;
+    return `${(norm.x0 * 100).toFixed(1)}%,${(norm.y0 * 100).toFixed(1)}% • ${w.toFixed(1)}×${h.toFixed(1)}% (p${pg}, norm)`;
+  }
+  return '—';
+}
+
+function collectAreaDebugEntries(record, options = {}){
+  const { page = null } = options || {};
+  const occurrences = Array.isArray(record?.areaOccurrences) ? record.areaOccurrences.filter(Boolean) : [];
+  const entries = occurrences
+    .filter(occ => !page || ((occ.page || occ.bboxPx?.page || occ.bboxNorm?.page || occ.bboxPct?.page) === page))
+    .map(occ => {
+      const supportMatches = Array.isArray(occ.supportMatches) ? occ.supportMatches : (Array.isArray(occ.validation?.supportMatches) ? occ.validation.supportMatches : []);
+      const supportTokens = supportMatches.map(s => s?.text || s?.token?.text || s?.token?.raw || '').filter(Boolean);
+      const supportCount = Number.isFinite(occ.validation?.matchedSupports)
+        ? occ.validation.matchedSupports
+        : (Number.isFinite(occ.matchMetrics?.matchedSupports) ? occ.matchMetrics.matchedSupports : (supportTokens.length || null));
+      const supportTotal = Number.isFinite(occ.validation?.totalSupports)
+        ? occ.validation.totalSupports
+        : (Number.isFinite(occ.matchMetrics?.totalSupports) ? occ.matchMetrics.totalSupports : null);
+      const matchesFound = Number.isFinite(occ.matchesFound) ? occ.matchesFound : (supportTokens.length || supportCount || null);
+      const pageNum = occ.page || occ.bboxPx?.page || occ.bboxNorm?.page || occ.bboxPct?.page || null;
+      const idx = Number.isFinite(occ.occurrenceIndex) ? occ.occurrenceIndex + 1 : (Number.isFinite(occ.index) ? occ.index : null);
+      const areaId = occ.areaId || occ.areaName || 'Area';
+      const areaName = resolveAreaLabel(areaId, occ.areaName || null);
+      return {
+        areaId,
+        areaName,
+        occurrenceIndex: idx,
+        page: pageNum,
+        confidence: occ.confidence ?? null,
+        matchesFound,
+        anchorText: occ.anchor?.text || occ.validation?.anchorText || '',
+        supportTokens,
+        supportCount,
+        supportTotal,
+        boxPx: occ.bboxPx || null,
+        boxNorm: occ.bboxNorm || occ.bboxPct || null
+      };
+    });
+
+  if(!entries.length && Array.isArray(record?.areaRows)){
+    record.areaRows.forEach((row, i) => {
+      const pageNum = row?.page || row?.bboxPx?.page || null;
+      if(page && pageNum && pageNum !== page) return;
+      const areaId = row?.areaId || row?.areaName || 'Area';
+      entries.push({
+        areaId,
+        areaName: resolveAreaLabel(areaId, row?.areaName || null),
+        occurrenceIndex: Number.isFinite(row?.occurrenceIndex) ? row.occurrenceIndex + 1 : (i + 1),
+        page: pageNum,
+        confidence: row?.confidence ?? null,
+        matchesFound: null,
+        anchorText: '',
+        supportTokens: [],
+        supportCount: null,
+        supportTotal: null,
+        boxPx: row?.bboxPx || null,
+        boxNorm: row?.bboxNorm || row?.bboxPct || null
+      });
+    });
+  }
+
+  return entries.sort((a, b) => {
+    if(a.areaName === b.areaName){
+      return (a.occurrenceIndex || 0) - (b.occurrenceIndex || 0);
+    }
+    return (a.areaName || '').localeCompare(b.areaName || '');
+  });
+}
+
+function areaDebugCardsHtml(entries){
+  return entries.map(entry => {
+    const confidence = Number.isFinite(entry.confidence) ? `${Math.round(entry.confidence * 100)}%` : '—';
+    const matches = Number.isFinite(entry.matchesFound)
+      ? entry.matchesFound
+      : (entry.matchesFound === 0 ? 0 : (entry.matchesFound || '—'));
+    const supportDenom = Number.isFinite(entry.supportTotal) ? `/${entry.supportTotal}` : '';
+    const supports = Number.isFinite(entry.supportCount) || entry.supportTokens.length
+      ? `${Number.isFinite(entry.supportCount) ? entry.supportCount : entry.supportTokens.length}${supportDenom}`
+      : `0${supportDenom}`;
+    const supportTokens = entry.supportTokens.length ? ` (${entry.supportTokens.join(', ')})` : '';
+    const anchor = entry.anchorText ? `"${entry.anchorText}"` : '—';
+    const box = formatAreaBoxForDisplay(entry.boxPx, entry.boxNorm, entry.page);
+    const occLabel = Number.isFinite(entry.occurrenceIndex) ? `#${entry.occurrenceIndex}` : '#?';
+    const pageLabel = entry.page ? `Page ${entry.page}` : 'Page ?';
+    return `
+      <div class="area-debug-card">
+        <div class="area-debug-card__header">
+          <div>
+            <div class="area-name">${entry.areaName || entry.areaId || 'Area'}</div>
+            <div class="area-meta">${occLabel} • ${pageLabel}</div>
+          </div>
+          <div class="confidence-pill">${confidence}</div>
+        </div>
+        <div class="area-debug-card__body">
+          <div><strong>Matches found:</strong> ${matches}</div>
+          <div><strong>Anchor:</strong> ${anchor}</div>
+          <div><strong>Support tokens:</strong> ${supports}${supportTokens}</div>
+          <div><strong>Subordinate box:</strong> ${box}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderAreaDebugPanel(record){
+  const panel = document.getElementById('areaDebugPanel');
+  if(!panel) return;
+  if(!record){
+    panel.innerHTML = '<p class="sub">Select a run to view area detection details.</p>';
+    return;
+  }
+  const entries = collectAreaDebugEntries(record);
+  if(!entries.length){
+    panel.innerHTML = '<p class="sub">No area matches were recorded for this run.</p>';
+    return;
+  }
+  panel.innerHTML = areaDebugCardsHtml(entries);
+}
+
+function getRecordByFileId(fileId){
+  if(!fileId) return null;
+  const dt = els.dataDocType?.value || state.docType;
+  const wizardId = currentWizardId();
+  const db = LS.getDb(state.username, dt, wizardId);
+  return db.find(r => r.fileId === fileId) || null;
+}
+
+function renderSnapshotAreaDebug(manifest, pageNumber){
+  const panel = els.snapshotAreaDebug || document.getElementById('snapshotAreaDebug');
+  if(!panel) return;
+  if(!manifest){
+    panel.innerHTML = '<p class="sub">No snapshot selected.</p>';
+    return;
+  }
+  const record = getRecordByFileId(manifest.fileId || state.selectedRunId);
+  if(!record){
+    panel.innerHTML = '<p class="sub">No run data available for this snapshot.</p>';
+    return;
+  }
+  const entries = collectAreaDebugEntries(record, { page: pageNumber || null });
+  if(!entries.length){
+    panel.innerHTML = '<p class="sub">No area matches on this page.</p>';
+    return;
+  }
+  panel.innerHTML = areaDebugCardsHtml(entries);
+}
+
 function renderResultsTable(){
   const mount = document.getElementById('resultsMount');
   const dt = els.dataDocType?.value || state.docType;
@@ -9667,12 +9835,23 @@ function renderResultsTable(){
       <div class="area-panel-container">
         <div class="area-panel-header">
           <div>
-            <div class="area-panel-title">Area occurrences</div>
-            <div class="sub">Grouped by detected instances of each area. Values align to the subordinate fields saved for that area.</div>
+            <div class="area-panel-title">Area diagnostics</div>
+            <div class="sub">Matches found, confidence, anchors/supports, and the area box used to scope subordinate extraction.</div>
           </div>
           <div class="sub area-selected-label">${selectedLabel}</div>
         </div>
-        <div id="areaOccurrencesPanel"></div>
+        <div class="area-panel-grid">
+          <div class="area-debug-panel">
+            <div class="area-panel-title">Detection summary</div>
+            <div class="sub">Per-occurrence confidence, anchors, and support tokens.</div>
+            <div id="areaDebugPanel"></div>
+          </div>
+          <div class="area-occurrences-panel">
+            <div class="area-panel-title">Area occurrences</div>
+            <div class="sub">Grouped by detected instances of each area. Values align to the subordinate fields saved for that area.</div>
+            <div id="areaOccurrencesPanel"></div>
+          </div>
+        </div>
       </div>
     </div>`;
 
@@ -9703,8 +9882,10 @@ function renderResultsTable(){
     syncSnapshotUi();
     const nextSelected = db.find(r => r.fileId === state.selectedRunId) || null;
     renderAreaOccurrencesPanel(nextSelected, labelMap);
+    renderAreaDebugPanel(nextSelected);
   }));
   renderAreaOccurrencesPanel(selectedRecord, labelMap);
+  renderAreaDebugPanel(selectedRecord);
   syncSnapshotUi();
 }
 

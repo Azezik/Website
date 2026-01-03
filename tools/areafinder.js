@@ -400,6 +400,7 @@
       const constellationMatches = fp.areaConstellation
         ? matchAreaConstellation(fp, tokens, { page, pageW, pageH, maxResults: opts.maxResults || 5 })
         : null;
+      const totalMatches = constellationMatches?.matches?.length || 0;
       const matchedOccurrences = (constellationMatches?.matches || []).map(match => {
         const bboxNorm = match.predictedBoxNorm
           ? {
@@ -409,12 +410,24 @@
               y1: match.predictedBoxNorm.y + (match.predictedBoxNorm.h || 0)
             }
           : toPctBox(match.predictedBoxPx, pageW, pageH);
+        const anchorText = match.anchor ? (match.anchor.text || match.anchor.raw || '') : '';
+        const supportMatches = (match.supportMatches || []).map(s => {
+          const text = s?.token?.text || s?.token?.raw || '';
+          return {
+            text,
+            normText: normTokenText(text),
+            error: s?.error ?? null
+          };
+        });
         return {
           areaId: area.areaId || area.fieldKey || '',
           fieldKey: area.fieldKey || area.areaId || '',
           page,
           bboxPx: match.predictedBoxPx,
           bboxNorm,
+          matchesFound: totalMatches,
+          anchor: anchorText ? { text: anchorText, normText: normTokenText(anchorText) } : null,
+          supportMatches,
           matchId: match.matchId,
           matchedEdges: match.matchedEdges,
           totalEdges: match.totalEdges,
@@ -423,17 +436,20 @@
           confidence: match.confidence ?? 0,
           source: 'area-constellation',
           validation: {
+            anchorText,
+            supportMatches,
+            supportMatchCount: match.supportMatches?.length ?? supportMatches.length,
             matchedEdges: match.matchedEdges,
             totalEdges: match.totalEdges,
             matchedSupports: match.matchedSupports,
             totalSupports: match.totalSupports,
             error: match.error ?? match.errorSum,
-            errorSum: match.errorSum,
-            supportMatches: match.supportMatches?.length || 0
+            errorSum: match.errorSum
           }
         };
       });
 
+      const existingMatchCount = matchedOccurrences.length;
       const fallbackMatches = (!matchedOccurrences.length && fp.orientation)
         ? (() => {
             const expectedW = Math.max(1, (fp.bboxPct.x1 - fp.bboxPct.x0) * pageW);
@@ -501,15 +517,22 @@
               const confidence = clamp(geometryScore * 0.4 + layoutScore * 0.6 * (1 - relPenalty * 0.5), 0, 1);
 
               const bboxNorm = toPctBox(mergedBox, pageW, pageH);
+              const supportMatches = partnerToken ? [{ text: partnerToken.text || partnerToken.raw || '', normText: normTokenText(partnerToken.text || partnerToken.raw || '') }] : [];
+              const anchorText = seed?.text || seed?.raw || '';
               localMatches.push({
                 areaId: area.areaId || area.fieldKey || '',
                 fieldKey: area.fieldKey || area.areaId || '',
                 page,
                 bboxPx: { x: mergedBox.x, y: mergedBox.y, w: mergedBox.w, h: mergedBox.h, page },
                 bboxNorm,
+                matchesFound: existingMatchCount || localMatches.length || 1,
+                anchor: anchorText ? { text: anchorText, normText: normTokenText(anchorText) } : null,
+                supportMatches,
                 confidence,
                 source: 'area-orientation',
                 validation: {
+                  anchorText,
+                  supportMatches,
                   sizeRatioW,
                   sizeRatioH,
                   relPenalty,
