@@ -742,6 +742,46 @@
     return cleaned ? cleaned.toLowerCase() : '';
   }
 
+  function normalizeAreaFieldBag(fields){
+    if(!fields) return {};
+    if(Array.isArray(fields)){
+      const map = {};
+      fields.forEach(entry => {
+        if(!entry) return;
+        const key = cleanText(entry.label || entry.fieldKey || entry.key || entry.name);
+        if(!key) return;
+        const value = entry && typeof entry === 'object' && 'value' in entry
+          ? entry.value
+          : (entry && typeof entry === 'object' && 'raw' in entry ? entry.raw : entry);
+        map[key] = value;
+      });
+      return map;
+    }
+    if(typeof fields === 'object') return fields;
+    return {};
+  }
+
+  function normalizeAreaRows(record){
+    const rows = Array.isArray(record?.areaRows) ? record.areaRows.filter(Boolean) : [];
+    const occurrences = Array.isArray(record?.areaOccurrences) ? record.areaOccurrences.filter(Boolean) : [];
+    if(!occurrences.length) return rows;
+    return occurrences.map(occ => {
+      const areaId = occ?.areaId || occ?.id || occ?.name;
+      const areaName = occ?.areaName || occ?.name || areaId;
+      const fields = normalizeAreaFieldBag(occ?.fields || occ?.values || occ?.cells || occ?.subFields || occ?.subordinates);
+      const nestedRows = Array.isArray(occ?.rows)
+        ? occ.rows.map(r => ({
+            ...r,
+            fields: normalizeAreaFieldBag(r?.fields || r?.values || r?.cells || r?.subFields || r?.subordinates)
+          }))
+        : null;
+      if(nestedRows && nestedRows.length){
+        return { areaId, areaName, rows: nestedRows };
+      }
+      return { areaId, areaName, fields };
+    });
+  }
+
   function buildAreaRegistry(config){
     const registry = new Map();
     const areas = Array.isArray(config?.areas) ? config.areas : [];
@@ -841,7 +881,12 @@
       const key = resolved.key;
       const label = resolved.label;
       const combinedFields = { ...(globalFieldMap || {}), ...(rowFields || {}) };
-      const incomingCols = Object.keys(combinedFields);
+      const columnLabelByKey = new Map((resolved.columns || []).map(col => [cleanText(col.key), col.label]));
+      const withColumnLabels = Object.fromEntries(Object.entries(combinedFields).map(([k, v]) => {
+        const mapped = columnLabelByKey.get(cleanText(k));
+        return [mapped || k, v];
+      }));
+      const incomingCols = Object.keys(withColumnLabels);
       let header = buildSchemaHeader(resolved, incomingCols);
       const hasSchema = Array.isArray(resolved.columns) && resolved.columns.length > 0;
       if(hasSchema){
@@ -869,14 +914,14 @@
         header = existing.header;
       }
       existing.rows = alignExistingRows(existing.rows, previousHeader, existing.header);
-      const normalizedFields = hasSchema ? normalizeFieldsToSchema(existing.header, combinedFields) : combinedFields;
+      const normalizedFields = hasSchema ? normalizeFieldsToSchema(existing.header, withColumnLabels) : withColumnLabels;
       existing.rows.push(normalizeAreaSheetRow(existing.header, normalizedFields, fileId));
       sheets.set(key, existing);
     };
 
     records.forEach(record => {
       const fileId = record?.fileId || record?.fileHash || '';
-      const areaRows = Array.isArray(record?.areaRows) ? record.areaRows : [];
+      const areaRows = normalizeAreaRows(record);
       const recordConfig = normalizeMasterConfig(record);
       const recordGlobalFields = Array.isArray(recordConfig?.globalFields) ? recordConfig.globalFields : [];
       const recordGlobalColumns = recordGlobalFields.map(f => f.label || f.fieldKey);

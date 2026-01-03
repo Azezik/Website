@@ -315,6 +315,44 @@ assert.deepStrictEqual(
   ['CS1', 'CS2', 'CS3']
 );
 
+const occurrenceRecord = {
+  fields: {
+    invoice_number: { value: 'OCC-1' }
+  },
+  fileId: 'file-occurrence',
+  masterDbConfig: {
+    globalFields: [
+      { fieldKey: 'invoice_number', label: 'Invoice #' }
+    ],
+    areas: [
+      {
+        id: 'Zone',
+        name: 'Zone',
+        columns: [
+          { fieldKey: 'slot', label: 'Slot' }
+        ]
+      }
+    ]
+  },
+  lineItems: [
+    { sku: 'ITEM-1', description: 'One', quantity: '1', unit_price: '10', amount: '10', line_no: '1' }
+  ],
+  areaOccurrences: [
+    { areaId: 'Zone', fields: { slot: { value: 'Z1' } } },
+    { areaId: 'Zone', rows: [{ fields: { slot: { value: 'Z2' } } }] }
+  ]
+};
+
+const { sheets: occurrenceSheets } = MasterDB.flatten(occurrenceRecord);
+const occurrenceRoot = occurrenceSheets.find(s => s.name === 'MasterDB');
+assert.ok(occurrenceRoot, 'root sheet retained alongside area sheets');
+const zoneOccurrenceSheet = occurrenceSheets.find(s => s.areaId === 'Zone');
+assert.ok(zoneOccurrenceSheet, 'zone sheet built from areaOccurrences');
+assert.deepStrictEqual(zoneOccurrenceSheet.header, ['Invoice #', 'Slot', 'File ID']);
+assert.strictEqual(zoneOccurrenceSheet.rows.length, 3);
+assert.deepStrictEqual(zoneOccurrenceSheet.rows[1], ['OCC-1', 'Z1', 'file-occurrence']);
+assert.deepStrictEqual(zoneOccurrenceSheet.rows[2], ['OCC-1', 'Z2', 'file-occurrence']);
+
 const schemaRecord = {
   fields: {
     invoice_number: { value: 'SCHEMA-100' }
