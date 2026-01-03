@@ -206,6 +206,8 @@ const els = {
   exportMissingBtn: document.getElementById('exportMissingBtn'),
   exportBtn:       document.getElementById('exportBtn'),
   finishWizardBtn: document.getElementById('finishWizardBtn'),
+  backupCloudBtn: document.getElementById('backup-cloud-btn'),
+  restoreCloudBtn: document.getElementById('restore-cloud-btn'),
 
   // Custom wizard builder
   builderSection: document.getElementById('builder-section'),
@@ -1052,6 +1054,169 @@ const LS = {
   setProfile(u,d,p,wizardId = DEFAULT_WIZARD_ID){ localStorage.setItem(this.profileKey(u,d,wizardId), serializeProfile(p)); },
   removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ localStorage.removeItem(this.profileKey(u,d,wizardId)); }
 };
+
+function cloneJsonSafe(obj){
+  try {
+    return JSON.parse(JSON.stringify(obj, jsonReplacer));
+  } catch(err){
+    return null;
+  }
+}
+
+function escapeRegex(str){
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function collectWizardContextsForUser(username){
+  const contexts = new Map(); // docType -> Set<wizardId>
+  const userPattern = escapeRegex(username);
+  for(let i=0;i<localStorage.length;i++){
+    const key = localStorage.key(i);
+    if(!key) continue;
+    const profileMatch = key.match(new RegExp(`^wiz\\.profile\\.${userPattern}\\.([^\\.]+)(?:\\.([^\\.]+))?$`));
+    if(profileMatch){
+      const docType = profileMatch[1];
+      const wizardId = profileMatch[2] || DEFAULT_WIZARD_ID;
+      if(!contexts.has(docType)) contexts.set(docType, new Set());
+      contexts.get(docType).add(wizardId);
+      continue;
+    }
+    const accountMatch = key.match(new RegExp(`^accounts\\.${userPattern}\\.wizards\\.([^\\.]+)(?:\\.([^\\.]+))?\\.(?:masterdb|masterdb_rows)$`));
+    if(accountMatch){
+      const docType = accountMatch[1];
+      const wizardId = accountMatch[2] || DEFAULT_WIZARD_ID;
+      if(!contexts.has(docType)) contexts.set(docType, new Set());
+      contexts.get(docType).add(wizardId);
+      continue;
+    }
+    const patternMatch = key.match(/^wiz\.patternBundle\.([^.]+)\.([^.]+)$/);
+    if(patternMatch){
+      const docType = patternMatch[1];
+      const wizardId = patternMatch[2] || DEFAULT_WIZARD_ID;
+      if(!contexts.has(docType)) contexts.set(docType, new Set());
+      contexts.get(docType).add(wizardId);
+    }
+  }
+  return contexts;
+}
+
+function buildBackupPayload(username){
+  const nowIso = new Date().toISOString();
+  const payload = {
+    username,
+    savedAt: nowIso,
+    session: null,
+    staticDebug: null,
+    snapshotMode: null,
+    customTemplates: [],
+    models: [],
+    ocrmagic: {},
+    wizards: {}
+  };
+  try {
+    const sessionRaw = localStorage.getItem('wiz.session');
+    payload.session = sessionRaw ? JSON.parse(sessionRaw) : null;
+  } catch(err){ payload.session = null; }
+  try { payload.staticDebug = localStorage.getItem(STATIC_DEBUG_STORAGE_KEY); } catch(err){ payload.staticDebug = null; }
+  try { payload.snapshotMode = localStorage.getItem(SNAPSHOT_MODE_KEY); } catch(err){ payload.snapshotMode = null; }
+
+  try {
+    const templates = getStoredTemplates();
+    payload.customTemplates = Array.isArray(templates) ? templates.filter(t => t?.username === username) : [];
+  } catch(err){ payload.customTemplates = []; }
+
+  try {
+    const models = getModels();
+    payload.models = Array.isArray(models) ? models.filter(m => m?.username === username) : [];
+  } catch(err){ payload.models = []; }
+
+  try {
+    payload.ocrmagic.segmentStore = localStorage.getItem('ocrmagic.segmentStore') || null;
+    payload.ocrmagic.segmentStoreChunks = localStorage.getItem('ocrmagic.segmentStore.chunks') || null;
+  } catch(err){ payload.ocrmagic = {}; }
+
+  const contexts = collectWizardContextsForUser(username);
+  contexts.forEach((wizardIds, docType) => {
+    if(!payload.wizards[docType]) payload.wizards[docType] = {};
+    wizardIds.forEach(wizardId => {
+      const wizardEntry = {};
+      const profile = LS.getProfile(username, docType, wizardId);
+      if(profile) wizardEntry.profile = cloneJsonSafe(profile) || profile;
+      const db = LS.getDb(username, docType, wizardId);
+      if(db && db.length) wizardEntry.masterDb = cloneJsonSafe(db) || db;
+      const rows = LS.getRows(username, docType, wizardId);
+      if(rows && rows.rows && rows.rows.length) wizardEntry.masterDbRows = cloneJsonSafe(rows) || rows;
+      const patternKey = patternStoreKey(docType, wizardId);
+      try{
+        const patternRaw = localStorage.getItem(patternKey);
+        if(patternRaw){
+          wizardEntry.patternBundle = JSON.parse(patternRaw, jsonReviver);
+        }
+      } catch(err){ /* ignore pattern parse failures */ }
+      payload.wizards[docType][wizardId] = wizardEntry;
+    });
+  });
+
+  return payload;
+}
+
+function mergeAndSetTemplatesForUser(username, incoming = []){
+  const existing = getStoredTemplates();
+  const filtered = Array.isArray(existing) ? existing.filter(t => t?.username !== username) : [];
+  const normalizedIncoming = Array.isArray(incoming) ? incoming.map(normalizeTemplate) : [];
+  setStoredTemplates([...filtered, ...normalizedIncoming]);
+}
+
+function mergeAndSetModelsForUser(username, incoming = []){
+  const existing = getModels();
+  const filtered = Array.isArray(existing) ? existing.filter(m => m?.username !== username) : [];
+  const normalizedIncoming = Array.isArray(incoming) ? incoming.map(m => ({ ...m, username })) : [];
+  setModels([...filtered, ...normalizedIncoming]);
+}
+
+function applyRestorePayload(payload){
+  if(!payload || typeof payload !== 'object') throw new Error('Invalid restore payload');
+  const username = payload.username || state.username || sessionBootstrap?.username || 'demo';
+  if(payload.session){
+    try { localStorage.setItem('wiz.session', JSON.stringify(payload.session)); } catch(err){ console.warn('[restore] session persist failed', err); }
+  }
+  if(payload.staticDebug !== null && payload.staticDebug !== undefined){
+    try { localStorage.setItem(STATIC_DEBUG_STORAGE_KEY, payload.staticDebug); } catch(err){ console.warn('[restore] staticDebug persist failed', err); }
+  }
+  if(payload.snapshotMode !== null && payload.snapshotMode !== undefined){
+    try { localStorage.setItem(SNAPSHOT_MODE_KEY, payload.snapshotMode); } catch(err){ console.warn('[restore] snapshotMode persist failed', err); }
+  }
+  if(payload.customTemplates){
+    mergeAndSetTemplatesForUser(username, payload.customTemplates);
+  }
+  if(payload.models){
+    mergeAndSetModelsForUser(username, payload.models);
+  }
+  if(payload.ocrmagic){
+    try {
+      if(payload.ocrmagic.segmentStore !== undefined) localStorage.setItem('ocrmagic.segmentStore', payload.ocrmagic.segmentStore);
+      if(payload.ocrmagic.segmentStoreChunks !== undefined) localStorage.setItem('ocrmagic.segmentStore.chunks', payload.ocrmagic.segmentStoreChunks);
+    } catch(err){ console.warn('[restore] ocrmagic persist failed', err); }
+  }
+  const wizards = payload.wizards || {};
+  Object.entries(wizards).forEach(([docType, byWizard]) => {
+    Object.entries(byWizard || {}).forEach(([wizardId, data]) => {
+      if(data?.profile) LS.setProfile(username, docType, data.profile, wizardId);
+      if(data?.masterDb) LS.setDb(username, docType, data.masterDb, wizardId);
+      if(data?.masterDbRows) LS.setRows(username, docType, data.masterDbRows, wizardId);
+      if(data?.patternBundle){
+        try{
+          const key = patternStoreKey(docType, wizardId);
+          localStorage.setItem(key, JSON.stringify(data.patternBundle, jsonReplacer));
+        } catch(err){ console.warn('[restore] pattern bundle persist failed', err); }
+      }
+    });
+  });
+  refreshWizardTemplates();
+  populateModelSelect();
+  renderWizardManagerList();
+  renderResultsTable();
+}
 
 function summarizeProfileGeometryForLog(profile){
   const fields = Array.isArray(profile?.fields) ? profile.fields : [];
@@ -10406,6 +10571,63 @@ async function handleLogin(e){
 els.loginForm?.addEventListener('submit', handleLogin);
 els.signupBtn?.addEventListener('click', handleSignupClick);
 
+async function backupToCloud(){
+  const api = window.firebaseApi;
+  if(!api?.auth || !api?.auth?.currentUser || !api?.db || !api?.doc || !api?.setDoc){
+    alert('Firebase is not available. Please log in first.');
+    return;
+  }
+  const username = state.username || sessionBootstrap?.username || '';
+  if(!username){
+    alert('Please log in before running a backup.');
+    return;
+  }
+  try{
+    const payload = buildBackupPayload(username);
+    const ref = api.doc(api.db, 'Accounts', username, 'Backups', 'manual');
+    await api.setDoc(ref, { payload, updatedAt: payload.savedAt }, { merge: true });
+    alert('Backup completed.');
+  } catch(err){
+    console.error('[backup] failed', err);
+    alert(err?.message || 'Backup failed. Please try again.');
+  }
+}
+
+async function restoreFromCloud(){
+  const api = window.firebaseApi;
+  if(!api?.auth || !api?.auth?.currentUser || !api?.db || !api?.doc || !api?.getDoc){
+    alert('Firebase is not available. Please log in first.');
+    return;
+  }
+  const username = state.username || sessionBootstrap?.username || '';
+  if(!username){
+    alert('Please log in before restoring.');
+    return;
+  }
+  if(!confirm('Restore from cloud? This will overwrite your local wizard data for your account.')){
+    return;
+  }
+  try{
+    const ref = api.doc(api.db, 'Accounts', username, 'Backups', 'manual');
+    const snap = await api.getDoc(ref);
+    if(!snap.exists()){
+      alert('No backup found for this user.');
+      return;
+    }
+    const data = snap.data();
+    const payload = data?.payload;
+    if(!payload){
+      alert('Backup is empty or invalid.');
+      return;
+    }
+    applyRestorePayload(payload);
+    alert('Restore completed.');
+  } catch(err){
+    console.error('[restore] failed', err);
+    alert(err?.message || 'Restore failed. Please try again.');
+  }
+}
+
 function setupAuthStateListener(){
   const api = window.firebaseApi;
   if (!api?.onAuthStateChanged || !api?.auth) return false;
@@ -10464,6 +10686,8 @@ els.resetModelBtn?.addEventListener('click', ()=>{
   alert('All wizard data cleared. Please create or select a wizard in Wizard Manager.');
   showWizardManagerTab();
 });
+els.backupCloudBtn?.addEventListener('click', backupToCloud);
+els.restoreCloudBtn?.addEventListener('click', restoreFromCloud);
 function openBuilderFromSelection(){
   const val = modelSelect?.value || '';
   const templateId = val.startsWith('custom:') ? val.replace('custom:','') : (isSkinV2 ? state.activeWizardId : '');

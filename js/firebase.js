@@ -41,5 +41,8 @@ if (typeof window !== 'undefined') {
     signOut,
     persistUsernameMapping,
     fetchUsernameMapping,
+    doc,
+    getDoc,
+    setDoc,
   };
 }
