@@ -4,6 +4,7 @@ const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
 const KeywordConstellation = window.KeywordConstellation || null;
+const AreaScoping = window.AreaScoping || null;
 const AreaFinder = window.AreaFinder || null;
 
 const STATIC_DEBUG_STORAGE_KEY = 'wiz.staticDebug';
@@ -709,11 +710,12 @@ function normalizeTemplateFields(fields){
     const rawType = (field?.fieldType || field?.type || 'static').toLowerCase();
     const normalizedType = rawType === 'dynamic' ? 'dynamic' : (rawType === 'areabox' ? 'areabox' : 'static');
     const magicDataType = normalizeMagicDataType(field?.magicDataType || field?.magicType);
-    const areaId = normalizedType === 'areabox'
-      ? (field.areaId || field.id || field.fieldKey || key)
-      : (field.areaId || null);
     const isArea = normalizedType === 'areabox';
-    const isSubordinate = !!areaId && !isArea;
+    const claimedSubordinate = field?.isSubordinate === true || !!field?.areaRelativeBox;
+    const areaId = isArea
+      ? (field.areaId || field.id || field.fieldKey || key)
+      : (claimedSubordinate ? (field.areaId || null) : null);
+    const isSubordinate = !isArea && (field?.isSubordinate === true || !!field?.areaRelativeBox);
     const allowGlobal = !isSubordinate && !isArea;
     const isGlobal = allowGlobal && !!field?.isGlobal;
     return {
@@ -737,8 +739,9 @@ function deriveMasterDbSchema(fields){
     .map(f => {
       const normalizedType = (f.fieldType || f.type || 'static').toLowerCase();
       const isArea = !!f.isArea || normalizedType === 'areabox';
-      const areaId = f.areaId || (isArea ? (f.id || f.fieldId || f.fieldKey) : null);
-      const isSubordinate = !!f.isSubordinate || (!!areaId && !isArea);
+      const declaredSubordinate = f.isSubordinate === true || !!f.areaRelativeBox;
+      const areaId = isArea ? (f.areaId || f.id || f.fieldId || f.fieldKey) : (declaredSubordinate ? (f.areaId || null) : null);
+      const isSubordinate = !isArea && declaredSubordinate;
       return {
         fieldKey: f.fieldKey,
         label: f.label || f.name || f.fieldKey,
@@ -835,9 +838,12 @@ function buildMasterDbConfigFromProfile(profile, templateConfig, template){
     const fieldKey = source.fieldKey || field?.fieldKey;
     const rawType = (field?.fieldType || field?.type || source.fieldType || source.type || 'static').toLowerCase();
     const normalizedType = rawType === 'dynamic' ? 'dynamic' : (rawType === 'areabox' ? 'areabox' : 'static');
-    const inferredAreaId = source.areaId || field?.areaId || (normalizedType === 'areabox' ? (source.id || source.fieldId || fieldKey) : null);
+    const declaredSubordinate = (field?.isSubordinate === true || source.isSubordinate === true || !!field?.areaRelativeBox || !!source.areaRelativeBox);
+    const inferredAreaId = normalizedType === 'areabox'
+      ? (source.areaId || field?.areaId || source.id || source.fieldId || fieldKey)
+      : (declaredSubordinate ? (source.areaId || field?.areaId || null) : null);
     const isArea = !!(field?.isArea || source.isArea || normalizedType === 'areabox');
-    const isSubordinate = !!(field?.isSubordinate || source.isSubordinate || (!!inferredAreaId && !isArea));
+    const isSubordinate = !isArea && declaredSubordinate;
     const isGlobal = !isArea && !isSubordinate && !!(field?.isGlobal ?? source.isGlobal);
     const label = field?.label || field?.name || source.label || source.name || fieldKey;
     const nonExtractable = field?.nonExtractable ?? source.nonExtractable ?? isArea;
@@ -2088,6 +2094,14 @@ function resolveAreaField(areaId){
   return state.profile.fields.find(f => (f.isArea || f.fieldType === 'areabox') && (f.areaId === areaId || f.fieldKey === areaId || f.id === areaId)) || null;
 }
 
+function isExplicitSubordinate(field){
+  if(AreaScoping?.isExplicitSubordinate) return AreaScoping.isExplicitSubordinate(field);
+  if(!field || field.isArea || field.fieldType === 'areabox') return false;
+  if(field.isSubordinate === true) return true;
+  if(field.areaRelativeBox) return true;
+  return false;
+}
+
 function pickAreaScope(areaId, targetPage, options = {}){
   const { lowConfidenceFloor = 0.2 } = options || {};
   const candidates = (state.areaOccurrencesById?.[areaId] || [])
@@ -2127,7 +2141,7 @@ function groupFieldsByArea(fields = []){
   });
   fields.forEach(f => {
     if(!f || f.isArea || f.fieldType === 'areabox') return;
-    if(!f.areaId) return;
+    if(!isExplicitSubordinate(f) || !f.areaId) return;
     if(!map.has(f.areaId)) map.set(f.areaId, { area: null, subs: [] });
     map.get(f.areaId).subs.push(f);
   });
@@ -8462,7 +8476,7 @@ async function extractAreaRows(profile){
 
   const rows = [];
   for(const [areaId, entry] of groups.entries()){
-    const subs = entry.subs || [];
+    const subs = (entry.subs || []).filter(isExplicitSubordinate);
     const occurrences = (state.areaOccurrencesById?.[areaId] || []).slice();
     if(!subs.length || !occurrences.length) continue;
     for(let i=0; i<occurrences.length; i++){
@@ -9950,7 +9964,6 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   const prevGeomSnapshot = snapshotProfileGeometry(state.profile);
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
-  const areaId = step.areaId || (step.isArea ? (step.fieldKey || step.fieldId) : null) || step.fieldKey;
   const parsePctBox = box => {
     if(!box) return null;
     const x0 = Number.isFinite(box.x0) ? box.x0 : (Array.isArray(box) ? box[0] : null);
@@ -9972,7 +9985,10 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   const boxesOverlap = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0;
   let overlapDetails = null;
   const isAreaField = step.isArea || step.fieldType === 'areabox';
-  const isSubordinateField = !!step.areaId && !isAreaField;
+  const isSubordinateField = (step.isSubordinate === undefined ? !!existing?.isSubordinate : !!step.isSubordinate) && !isAreaField;
+  const areaId = isAreaField
+    ? (step.areaId || step.fieldKey || step.fieldId)
+    : (isSubordinateField ? (step.areaId || existing?.areaId || null) : null);
   if(step.type === 'static' && !isAreaField && !isSubordinateField){
     const clash = (state.profile.fields||[]).find(f=>{
       if(f.fieldKey===step.fieldKey || f.type!=='static' || f.page!==page) return false;
@@ -10047,8 +10063,8 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   }
   if(step.isArea || (step.fieldType === 'areabox')){
     entry.isArea = true;
-  } else if(areaId){
-    entry.isSubordinate = true;
+  } else {
+    entry.isSubordinate = !!isSubordinateField;
   }
   if(step.type === 'column' && extras.column){
     const columnExtras = clonePlain(extras.column);
@@ -11309,7 +11325,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     const includeLineItems = activeProfile?.masterDbConfig?.includeLineItems !== false;
     for(const spec of (activeProfile.fields || [])){
       const isAreaField = spec.isArea || spec.fieldType === 'areabox';
-      const isSubordinateField = !!spec.areaId && !isAreaField;
+      const isSubordinateField = isExplicitSubordinate(spec);
       // Only skip subordinate fields when we are actually treating them as dynamic (line-item) children.
       if(isAreaField){ continue; }
       if(isSubordinateField && includeLineItems){ continue; }
@@ -11330,7 +11346,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         keywordRelations.page = targetPage;
       }
       let areaScope = null;
-      if(isSubordinateField){
+      if(isSubordinateField && spec.areaId){
         const scopedArea = pickAreaScope(spec.areaId, targetPage, { lowConfidenceFloor: 0.2 });
         if(scopedArea && scopedArea.box){
           areaScope = { box: scopedArea.box, confidence: scopedArea.occ?.confidence ?? null, source: scopedArea.occ?.source || null };
