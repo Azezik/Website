@@ -1212,10 +1212,26 @@ function applyRestorePayload(payload){
       }
     });
   });
-  refreshWizardTemplates();
-  populateModelSelect();
-  renderWizardManagerList();
-  renderResultsTable();
+  rehydrateAfterRestore(username);
+}
+
+function rehydrateAfterRestore(username){
+  const resolvedUsername = username || state.username || sessionBootstrap?.username || 'demo';
+  try{
+    const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
+    const wizardId = currentWizardId?.() || state.activeWizardId || (isSkinV2 ? firstCustomWizardId() : DEFAULT_WIZARD_ID);
+    completeLogin({ username: resolvedUsername, docType, wizardId });
+  } catch(err){
+    console.warn('[restore] rehydrate failed', err);
+    try{
+      refreshWizardTemplates();
+      populateModelSelect();
+      renderWizardManagerList();
+      renderResultsTable();
+    } catch(innerErr){
+      console.warn('[restore] fallback refresh failed', innerErr);
+    }
+  }
 }
 
 function summarizeProfileGeometryForLog(profile){
@@ -10577,10 +10593,13 @@ async function backupToCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const user = api.auth.currentUser;
-  const uid = user?.uid;
+  const uid = api.auth?.currentUser?.uid;
+  if(!uid){
+    alert('Backup failed: missing user id. Please log in again.');
+    return;
+  }
   let username = state.username || sessionBootstrap?.username || '';
-  if(!username && uid){
+  if(!username){
     try{
       const meta = await api.fetchUserMeta?.(uid);
       if(meta?.usernameDisplay || meta?.usernameLower){
@@ -10596,10 +10615,8 @@ async function backupToCloud(){
   }
   try{
     const payload = buildBackupPayload(username);
-    const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
-    const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
-    const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
-    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Backups', 'manual');
+    console.log('[backup] writing', ref.path);
     await api.setDoc(ref, { payload, updatedAt: payload.savedAt }, { merge: true });
     alert('Backup completed.');
   } catch(err){
@@ -10614,10 +10631,13 @@ async function restoreFromCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const user = api.auth.currentUser;
-  const uid = user?.uid;
+  const uid = api.auth?.currentUser?.uid;
+  if(!uid){
+    alert('Restore failed: missing user id. Please log in again.');
+    return;
+  }
   let username = state.username || sessionBootstrap?.username || '';
-  if(!username && uid){
+  if(!username){
     try{
       const meta = await api.fetchUserMeta?.(uid);
       if(meta?.usernameDisplay || meta?.usernameLower){
@@ -10635,10 +10655,8 @@ async function restoreFromCloud(){
     return;
   }
   try{
-    const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
-    const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
-    const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
-    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Wizards', docType, safeWizardId, 'Backups', 'manual');
+    const ref = api.doc(api.db, 'Users', uid, 'Accounts', username, 'Backups', 'manual');
+    console.log('[restore] reading', ref.path);
     const snap = await api.getDoc(ref);
     if(!snap.exists()){
       alert('No backup found for this user.');
