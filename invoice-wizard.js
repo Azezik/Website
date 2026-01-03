@@ -400,6 +400,8 @@ let state = {
   wizardComplete: false,
 };
 
+let loginHydrated = false;
+
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
   return logs.map(entry => {
     if(typeof entry === 'string') return entry;
@@ -10281,6 +10283,7 @@ function renderConfirmedTables(rec){
 /* --------------------------- Events ------------------------------ */
 // Auth
 function completeLogin(opts = {}){
+  loginHydrated = true;
   const prevUser = state.username;
   const prevWizard = state.activeWizardId;
   const nameInput = opts.username ?? els.username?.value ?? 'demo';
@@ -10331,6 +10334,12 @@ function completeLogin(opts = {}){
   populateModelSelect(isSkinV2 && state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
   logWizardSelection('restore', resolveSelectedWizardContext());
   renderResultsTable();
+}
+
+function showLoginUi(){
+  if(els.loginSection){ els.loginSection.style.display = 'block'; }
+  if(els.app){ els.app.style.display = 'none'; }
+  if(els.wizardSection){ els.wizardSection.style.display = 'none'; }
 }
 
 async function handleSignupClick(e){
@@ -10397,21 +10406,47 @@ async function handleLogin(e){
 els.loginForm?.addEventListener('submit', handleLogin);
 els.signupBtn?.addEventListener('click', handleSignupClick);
 
+function setupAuthStateListener(){
+  const api = window.firebaseApi;
+  if (!api?.onAuthStateChanged || !api?.auth) return false;
+  api.onAuthStateChanged(api.auth, async (user) => {
+    if (user) {
+      let username = state.username || sessionBootstrap?.username || '';
+      try {
+        const mapping = await api.fetchUsernameMapping?.(user.uid);
+        if (mapping?.username) {
+          username = mapping.username;
+        }
+      } catch (err) {
+        console.warn('[auth] failed to load username mapping', err);
+      }
+      const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
+      const wizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || state.activeWizardId || '';
+      completeLogin({ username: username || 'demo', docType, wizardId });
+    } else if (isSkinV2) {
+      loginHydrated = false;
+      showLoginUi();
+    }
+  });
+  return true;
+}
+const authListenerReady = setupAuthStateListener();
+
 if(isSkinV2){
   const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';
   const autoDocType = envWizardBootstrap?.docType || sessionBootstrap?.docType || state.docType;
   const autoWizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || '';
   if(autoUser){
     completeLogin({ username: autoUser, docType: autoDocType, wizardId: autoWizardId });
-  } else {
-    if(els.loginSection){ els.loginSection.style.display = 'block'; }
-    if(els.app){ els.app.style.display = 'none'; }
+  } else if(!authListenerReady) {
+    showLoginUi();
   }
 }
 els.logoutBtn?.addEventListener('click', ()=>{
-  els.app.style.display = 'none';
-  els.wizardSection.style.display = 'none';
-  els.loginSection.style.display = 'block';
+  const api = window.firebaseApi;
+  api?.signOut?.(api.auth)?.catch(err => console.warn('[logout] signOut failed', err));
+  loginHydrated = false;
+  showLoginUi();
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
   try { window.SessionStore?.clearActiveSession?.(); } catch(err){ console.warn('[session] clear failed', err); }
