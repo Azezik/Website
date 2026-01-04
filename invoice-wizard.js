@@ -10521,6 +10521,94 @@ function setLoginUiBusy(isBusy, label){
   els.loginForm.classList.toggle('loading', Boolean(isBusy));
 }
 
+const AUTH_GATE_PREFIX = '[auth-gate]';
+function logAuthGate(event, detail){
+  const payload = detail && typeof detail === 'object' ? detail : { detail };
+  console.info(`${AUTH_GATE_PREFIX} ${event}`, payload);
+}
+function authIsRequired(){
+  const api = window.firebaseApi;
+  return Boolean(api?.auth);
+}
+async function confirmAuthenticatedUser(reason, opts = {}){
+  const api = window.firebaseApi;
+  const requireAuth = opts.requireAuth ?? authIsRequired();
+  const timeoutMs = opts.timeoutMs || 12000;
+  if(!requireAuth){
+    logAuthGate('demo-mode', { reason });
+    return null;
+  }
+  if(!api){
+    logAuthGate('unavailable', { reason });
+    return null;
+  }
+  try{
+    if(api.confirmAuthUser){
+      const confirmed = await api.confirmAuthUser({ reason, timeoutMs, authInstance: api.auth });
+      if(confirmed?.uid){
+        return confirmed;
+      }
+    } else if(api.requireAuthUser){
+      const confirmed = await api.requireAuthUser({ reason, timeoutMs, authInstance: api.auth });
+      if(confirmed?.uid){
+        return confirmed;
+      }
+    }
+    const fallback = await waitForAuthResolution(api, { requireUser: true, timeoutMs });
+    if(fallback?.uid){
+      return fallback;
+    }
+  } catch(err){
+    console.warn(`${AUTH_GATE_PREFIX} confirm failed`, err);
+  }
+  logAuthGate('missing-user', { reason, state: { hasAuth: !!api?.auth, hasUser: !!api?.auth?.currentUser } });
+  return null;
+}
+async function resolveUsernameForUser(user, fallbackUsername=''){
+  let username = fallbackUsername || state.username || sessionBootstrap?.username || '';
+  const api = window.firebaseApi;
+  if(!username && user?.uid){
+    try{
+      const meta = await api?.fetchUserMeta?.(user.uid);
+      if(meta?.usernameDisplay || meta?.usernameLower){
+        username = meta.usernameDisplay || meta.usernameLower;
+      }
+    } catch(err){
+      console.warn(`${AUTH_GATE_PREFIX} username lookup failed`, err);
+    }
+  }
+  return username;
+}
+async function resolveAuthenticatedIdentity(actionName, opts = {}){
+  const requireAuth = opts.requireAuth ?? authIsRequired();
+  const user = await confirmAuthenticatedUser(actionName, { requireAuth, timeoutMs: opts.timeoutMs || 12000 });
+  if(requireAuth && !user){
+    logAuthGate('blocked', { action: actionName, reason: 'no-auth-user' });
+    return { user: null, username: '' };
+  }
+  const username = await resolveUsernameForUser(user, opts.usernameHint || '');
+  if(requireAuth && (!username || !user?.uid)){
+    logAuthGate('blocked', { action: actionName, reason: 'missing-identity', state: { hasUser: !!user, username } });
+    return { user: null, username: '' };
+  }
+  return { user: user || null, username };
+}
+async function enterAppWithAuth(opts = {}, options = {}){
+  const reason = options.reason || 'login';
+  const requireAuth = options.requireAuth ?? authIsRequired();
+  const user = await confirmAuthenticatedUser(reason, { requireAuth, timeoutMs: options.timeoutMs || 12000 });
+  if(requireAuth && !user){
+    logAuthGate('login-blocked', { reason });
+    if(!options.silent){
+      alert('Could not confirm your login session. Please try again.');
+    }
+    showLoginUi();
+    return false;
+  }
+  completeLogin(opts);
+  return true;
+}
+
 async function handleSignupClick(e){
   e.preventDefault();
   const username = (els.username?.value || '').trim();
@@ -10533,8 +10621,7 @@ async function handleSignupClick(e){
   const api = window.firebaseApi;
   if (!api?.createUserWithEmailAndPassword || !api?.auth) {
     console.warn('[signup] firebase not available; proceeding with local login');
-    state.username = username;
-    completeLogin({ username });
+    await enterAppWithAuth({ username }, { reason: 'signup-demo', requireAuth: false, silent: true });
     return;
   }
   setLoginUiBusy(true, 'Signing up...');
@@ -10547,8 +10634,7 @@ async function handleSignupClick(e){
       }
       const claimed = await api.claimUsername?.(authUser.uid, username, email);
       const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
-      state.username = resolvedUsername;
-      completeLogin({ username: resolvedUsername });
+      await enterAppWithAuth({ username: resolvedUsername }, { reason: 'signup' });
       return;
     } catch (err) {
       console.error('[signup] failed to persist username mapping', err);
@@ -10571,8 +10657,7 @@ async function handleLogin(e){
   if (!api?.signInWithEmailAndPassword || !api?.auth) {
     console.warn('[login] firebase not available; proceeding with local login');
     const username = (els.username?.value || '').trim() || 'demo';
-    state.username = username;
-    completeLogin({ username });
+    await enterAppWithAuth({ username }, { reason: 'login-demo', requireAuth: false, silent: true });
     return;
   }
   setLoginUiBusy(true, 'Logging in...');
@@ -10587,8 +10672,7 @@ async function handleLogin(e){
     if (!resolvedUsername) {
       throw new Error('No username is linked to this account. Please contact support.');
     }
-    state.username = resolvedUsername;
-    completeLogin({ username: resolvedUsername });
+    await enterAppWithAuth({ username: resolvedUsername }, { reason: 'login' });
   } catch (err) {
     console.error('[login] failed', err);
     alert(err?.message || 'Login failed. Please try again.');
@@ -10601,28 +10685,13 @@ els.signupBtn?.addEventListener('click', handleSignupClick);
 
 async function backupToCloud(){
   const api = window.firebaseApi;
-  if(!api?.auth || !api?.auth?.currentUser || !api?.db || !api?.doc || !api?.setDoc){
-    alert('Firebase is not available. Please log in first.');
-    return;
-  }
-  const user = api.auth.currentUser;
-  const uid = user?.uid;
-  let username = state.username || sessionBootstrap?.username || '';
-  if(!username && uid){
-    try{
-      const meta = await api.fetchUserMeta?.(uid);
-      if(meta?.usernameDisplay || meta?.usernameLower){
-        username = meta.usernameDisplay || meta.usernameLower;
-      }
-    } catch(err){
-      console.warn('[backup] failed to resolve username from meta', err);
-    }
-  }
-  if(!username || !uid){
+  const { user, username } = await resolveAuthenticatedIdentity('backup', { usernameHint: state.username });
+  if(!user || !username){
     alert('Please log in before running a backup.');
     return;
   }
   try{
+    const uid = user.uid;
     const payload = buildBackupPayload(username);
     const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
     const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
@@ -10669,20 +10738,8 @@ async function restoreFromCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const user = api.auth.currentUser || await waitForAuthResolution(api, { requireUser: true });
-  const uid = user?.uid;
-  let username = state.username || sessionBootstrap?.username || '';
-  if(!username && uid){
-    try{
-      const meta = await api.fetchUserMeta?.(uid);
-      if(meta?.usernameDisplay || meta?.usernameLower){
-        username = meta.usernameDisplay || meta.usernameLower;
-      }
-    } catch(err){
-      console.warn('[restore] failed to resolve username from meta', err);
-    }
-  }
-  if(!username || !uid){
+  const { user, username } = await resolveAuthenticatedIdentity('restore', { usernameHint: state.username });
+  if(!user || !username){
     alert('Please log in before restoring.');
     return;
   }
@@ -10690,6 +10747,7 @@ async function restoreFromCloud(){
     return;
   }
   try{
+    const uid = user.uid;
     const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
     const wizardId = currentWizardId?.() || state.activeWizardId || DEFAULT_WIZARD_ID;
     const safeWizardId = wizardId || DEFAULT_WIZARD_ID;
@@ -10718,22 +10776,19 @@ function setupAuthStateListener(){
   if (!api?.onAuthStateChanged || !api?.auth) return false;
   api.onAuthStateChanged(api.auth, async (user) => {
     if (user) {
-      let username = '';
-      try {
-        const meta = await api.fetchUserMeta?.(user.uid);
-        if (meta?.usernameDisplay || meta?.usernameLower) {
-          username = meta.usernameDisplay || meta.usernameLower;
-        }
-      } catch (err) {
-        console.warn('[auth] failed to load username mapping', err);
+      const confirmedUser = await confirmAuthenticatedUser('auth-listener', { requireAuth: true });
+      if(!confirmedUser?.uid){
+        logAuthGate('blocked', { action: 'auth-listener', reason: 'no-confirmed-user' });
+        return;
       }
+      const username = await resolveUsernameForUser(confirmedUser);
       if (!username) {
         console.warn('[auth] username mapping missing; skipping auto-login');
         return;
       }
       const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
       const wizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || state.activeWizardId || '';
-      completeLogin({ username, docType, wizardId });
+      await enterAppWithAuth({ username, docType, wizardId }, { reason: 'auth-listener' });
     } else if (isSkinV2) {
       loginHydrated = false;
       showLoginUi();
@@ -10744,14 +10799,16 @@ function setupAuthStateListener(){
 const authListenerReady = setupAuthStateListener();
 
 if(isSkinV2){
-  const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';
-  const autoDocType = envWizardBootstrap?.docType || sessionBootstrap?.docType || state.docType;
-  const autoWizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || '';
-  if(autoUser){
-    completeLogin({ username: autoUser, docType: autoDocType, wizardId: autoWizardId });
-  } else if(!authListenerReady) {
-    showLoginUi();
-  }
+  (async ()=>{
+    const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';
+    const autoDocType = envWizardBootstrap?.docType || sessionBootstrap?.docType || state.docType;
+    const autoWizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || '';
+    if(autoUser){
+      await enterAppWithAuth({ username: autoUser, docType: autoDocType, wizardId: autoWizardId }, { reason: 'session-bootstrap', silent: true });
+    } else if(!authListenerReady) {
+      showLoginUi();
+    }
+  })();
 }
 async function waitForSignOut(api){
   if(!api?.onAuthStateChanged || !api?.auth) return;

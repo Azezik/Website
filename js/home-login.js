@@ -78,7 +78,7 @@
     try {
       const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
       try {
-        const authUser = await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
+        const authUser = await api.confirmAuthUser?.({ reason: 'home-signup', requireUser: true }) || await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
         if (!authUser?.uid) {
           throw new Error('Could not establish a login session. Please try again.');
         }
@@ -120,7 +120,7 @@
     setAuthBusy(true, 'Logging in...');
     try {
       const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
-      const authUser = await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
+      const authUser = await api.confirmAuthUser?.({ reason: 'home-login', requireUser: true }) || await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
       if (!authUser?.uid) {
         throw new Error('Login was created but Firebase authentication is not ready yet. Please try again.');
       }
