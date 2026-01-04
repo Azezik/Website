@@ -2,6 +2,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebas
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, runTransaction, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
 
+const AUTH_LOG_PREFIX = '[auth-boundary]';
+
 const firebaseConfig = {
   apiKey: "AIzaSyA59N6Oqr6keapLIIabGxKmaeZ9dqKsbps",
   authDomain: "wrokit-1a2be.firebaseapp.com",
@@ -15,6 +17,11 @@ const firebaseConfig = {
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+function logAuth(event, detail) {
+  const payload = detail && typeof detail === 'object' ? detail : { detail };
+  console.info(`${AUTH_LOG_PREFIX} ${event}`, payload);
+}
 
 function userMetaRef(firebaseUid) {
   return doc(db, 'Users', firebaseUid, 'meta', 'profile');
@@ -115,6 +122,53 @@ export async function waitForAuthUser(options = {}) {
   });
 }
 
+function describeAuthState(authInstance = auth) {
+  return {
+    hasAuth: Boolean(authInstance),
+    hasUser: Boolean(authInstance?.currentUser),
+    uid: authInstance?.currentUser?.uid || null,
+  };
+}
+
+export async function confirmAuthUser(options = {}) {
+  const { authInstance = auth, timeoutMs = 12000, reason = 'unspecified' } = options || {};
+  if (!authInstance) {
+    logAuth('unavailable', { reason });
+    return null;
+  }
+  if (authInstance.currentUser?.uid) {
+    logAuth('confirmed.cached', { reason, uid: authInstance.currentUser.uid });
+    return authInstance.currentUser;
+  }
+  const user = await waitForAuthUser({ authInstance, requireUser: true, timeoutMs });
+  if (user?.uid) {
+    logAuth('confirmed.async', { reason, uid: user.uid });
+    return user;
+  }
+  logAuth('blocked', { reason, state: describeAuthState(authInstance) });
+  return null;
+}
+
+export async function requireAuthUser(options = {}) {
+  const user = await confirmAuthUser(options);
+  if (!user) {
+    const err = new Error('Authentication required');
+    err.code = 'AUTH_REQUIRED';
+    throw err;
+  }
+  return user;
+}
+
+let authDebugSubscribed = false;
+function ensureAuthDebugLogging(authInstance = auth) {
+  if (authDebugSubscribed || !authInstance || typeof onAuthStateChanged !== 'function') return;
+  authDebugSubscribed = true;
+  onAuthStateChanged(authInstance, (user) => {
+    logAuth('transition', { uid: user?.uid || null });
+  });
+}
+ensureAuthDebugLogging(auth);
+
 if (typeof window !== 'undefined') {
   window.firebaseApi = {
     app,
@@ -134,5 +188,7 @@ if (typeof window !== 'undefined') {
     runTransaction,
     serverTimestamp,
     waitForAuthUser,
+    confirmAuthUser,
+    requireAuthUser,
   };
 }
