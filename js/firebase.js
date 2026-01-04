@@ -29,7 +29,7 @@ export async function claimUsername(firebaseUid, username, email) {
   if (!firebaseUid || !usernameDisplay) return null;
   const usernameLower = usernameDisplay.toLowerCase();
   const emailLower = (email || '').trim().toLowerCase() || null;
-  const metaRef = doc(db, 'Users', firebaseUid, 'meta');
+  const metaRef = doc(db, 'Users', firebaseUid, 'meta', 'profile');
   const usernameRef = doc(db, 'Usernames', usernameLower);
   const now = serverTimestamp();
   const result = await runTransaction(db, async (tx) => {
@@ -66,7 +66,7 @@ export async function persistUsernameMapping(firebaseUid, username, email) {
 
 export async function fetchUserMeta(firebaseUid) {
   if (!firebaseUid) return null;
-  const ref = doc(db, 'Users', firebaseUid, 'meta');
+  const ref = doc(db, 'Users', firebaseUid, 'meta', 'profile');
   const snapshot = await getDoc(ref);
   return snapshot.exists() ? snapshot.data() : null;
 }
