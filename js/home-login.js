@@ -7,6 +7,19 @@
 
   if (!form || !usernameInput) return;
 
+  function setAuthBusy(isBusy, label) {
+    const submitBtn = form?.querySelector('button[type="submit"]');
+    if (submitBtn && !submitBtn.dataset.label) {
+      submitBtn.dataset.label = submitBtn.textContent || 'Log In';
+    }
+    if (submitBtn) {
+      submitBtn.textContent = isBusy ? (label || submitBtn.dataset.label || 'Log In') : (submitBtn.dataset.label || 'Log In');
+    }
+    const controls = [usernameInput, emailInput, passwordInput, signupBtn, submitBtn].filter(Boolean);
+    controls.forEach((el) => { el.disabled = Boolean(isBusy); });
+    form.classList.toggle('loading', Boolean(isBusy));
+  }
+
   function performLogin(usernameOverride) {
     const username = (usernameOverride || usernameInput.value || '').trim() || 'demo';
     const docType = 'invoice';
@@ -61,10 +74,15 @@
       performLogin(username);
       return;
     }
+    setAuthBusy(true, 'Signing up...');
     try {
       const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
       try {
-        const claimed = await api.claimUsername?.(cred.user.uid, username, email);
+        const authUser = await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
+        if (!authUser?.uid) {
+          throw new Error('Could not establish a login session. Please try again.');
+        }
+        const claimed = await api.claimUsername?.(authUser.uid, username, email);
         const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
         if (window.state) {
           window.state.username = resolvedUsername;
@@ -84,15 +102,43 @@
     } catch (err) {
       console.error('[signup] failed', err);
       alert(err?.message || 'Sign up failed. Please try again.');
+    } finally {
+      setAuthBusy(false);
     }
   }
 
-  function completeLoginFromHome(event) {
-    event.preventDefault();
-    performLogin();
+  async function handleLogin(event) {
+    event?.preventDefault?.();
+    const email = (emailInput?.value || '').trim();
+    const password = passwordInput?.value || '';
+    const api = window.firebaseApi;
+    if (!api?.signInWithEmailAndPassword || !api?.auth) {
+      console.warn('[login] firebase not available; falling back to local login');
+      performLogin();
+      return;
+    }
+    setAuthBusy(true, 'Logging in...');
+    try {
+      const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
+      const authUser = await api.waitForAuthUser?.({ requireUser: true }) || cred.user || null;
+      if (!authUser?.uid) {
+        throw new Error('Login was created but Firebase authentication is not ready yet. Please try again.');
+      }
+      const meta = await api.fetchUserMeta?.(authUser.uid);
+      const resolvedUsername = meta?.usernameDisplay || meta?.usernameLower || (usernameInput.value || '').trim();
+      if (!resolvedUsername) {
+        throw new Error('No username is linked to this account. Please contact support.');
+      }
+      performLogin(resolvedUsername);
+    } catch (err) {
+      console.error('[login] failed', err);
+      alert(err?.message || 'Login failed. Please try again.');
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
-  form.addEventListener('submit', completeLoginFromHome);
+  form.addEventListener('submit', handleLogin);
   signupBtn?.addEventListener('click', handleSignup);
   bootstrapAuthSession();
 })();
