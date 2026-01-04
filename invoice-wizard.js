@@ -10507,6 +10507,20 @@ function showLoginUi(){
   if(els.wizardSection){ els.wizardSection.style.display = 'none'; }
 }
 
+function setLoginUiBusy(isBusy, label){
+  if(!els.loginForm) return;
+  const submitBtn = els.loginForm.querySelector('button[type="submit"]');
+  if(submitBtn && !submitBtn.dataset.label){
+    submitBtn.dataset.label = submitBtn.textContent || 'Login';
+  }
+  if(submitBtn){
+    submitBtn.textContent = isBusy ? (label || submitBtn.dataset.label || 'Login') : (submitBtn.dataset.label || 'Login');
+  }
+  const controls = [els.username, els.email, els.password, els.signupBtn, submitBtn].filter(Boolean);
+  controls.forEach((el)=>{ el.disabled = Boolean(isBusy); });
+  els.loginForm.classList.toggle('loading', Boolean(isBusy));
+}
+
 async function handleSignupClick(e){
   e.preventDefault();
   const username = (els.username?.value || '').trim();
@@ -10523,10 +10537,15 @@ async function handleSignupClick(e){
     completeLogin({ username });
     return;
   }
+  setLoginUiBusy(true, 'Signing up...');
   try {
     const cred = await api.createUserWithEmailAndPassword(api.auth, email, password);
     try {
-      const claimed = await api.claimUsername?.(cred.user.uid, username, email);
+      const authUser = await waitForAuthResolution(api, { requireUser: true }) || cred.user || null;
+      if(!authUser?.uid){
+        throw new Error('Could not establish a Firebase session. Please try again.');
+      }
+      const claimed = await api.claimUsername?.(authUser.uid, username, email);
       const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
       state.username = resolvedUsername;
       completeLogin({ username: resolvedUsername });
@@ -10540,6 +10559,8 @@ async function handleSignupClick(e){
   } catch (err) {
     console.error('[signup] failed', err);
     alert(err?.message || 'Sign up failed. Please try again.');
+  } finally {
+    setLoginUiBusy(false);
   }
 }
 async function handleLogin(e){
@@ -10554,9 +10575,14 @@ async function handleLogin(e){
     completeLogin({ username });
     return;
   }
+  setLoginUiBusy(true, 'Logging in...');
   try {
     const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
-    const meta = await api.fetchUserMeta?.(cred.user.uid);
+    const authUser = await waitForAuthResolution(api, { requireUser: true }) || cred.user || null;
+    if(!authUser?.uid){
+      throw new Error('Login was created but Firebase authentication is not ready yet. Please try again.');
+    }
+    const meta = await api.fetchUserMeta?.(authUser.uid);
     const resolvedUsername = meta?.usernameDisplay || meta?.usernameLower;
     if (!resolvedUsername) {
       throw new Error('No username is linked to this account. Please contact support.');
@@ -10566,6 +10592,8 @@ async function handleLogin(e){
   } catch (err) {
     console.error('[login] failed', err);
     alert(err?.message || 'Login failed. Please try again.');
+  } finally {
+    setLoginUiBusy(false);
   }
 }
 els.loginForm?.addEventListener('submit', handleLogin);
@@ -10608,18 +10636,30 @@ async function backupToCloud(){
   }
 }
 
-function waitForAuthResolution(api){
+function waitForAuthResolution(api, opts = {}){
+  const { requireUser = false, timeoutMs = 10000 } = opts || {};
+  if(api?.waitForAuthUser){
+    return api.waitForAuthUser({ requireUser, timeoutMs });
+  }
   if(!api?.onAuthStateChanged || !api?.auth) return Promise.resolve(null);
   return new Promise((resolve)=>{
+    let timer = null;
     let unsubscribe = ()=>{};
-    unsubscribe = api.onAuthStateChanged(api.auth, (user)=>{
+    const cleanup = (value)=>{
+      if(timer) clearTimeout(timer);
       try { unsubscribe?.(); } catch(err){ console.warn('[auth] unsubscribe failed', err); }
-      resolve(user);
+      resolve(value ?? null);
+    };
+    unsubscribe = api.onAuthStateChanged(api.auth, (user)=>{
+      if(requireUser && !user) return;
+      cleanup(user || null);
     }, (err)=>{
       console.warn('[auth] onAuthStateChanged failed', err);
-      try { unsubscribe?.(); } catch(unsubErr){ console.warn('[auth] unsubscribe failed', unsubErr); }
-      resolve(null);
+      cleanup(api.auth.currentUser || null);
     });
+    if(timeoutMs){
+      timer = setTimeout(()=>cleanup(api.auth.currentUser || null), timeoutMs);
+    }
   });
 }
 
@@ -10629,7 +10669,7 @@ async function restoreFromCloud(){
     alert('Firebase is not available. Please log in first.');
     return;
   }
-  const user = api.auth.currentUser || await waitForAuthResolution(api);
+  const user = api.auth.currentUser || await waitForAuthResolution(api, { requireUser: true });
   const uid = user?.uid;
   let username = state.username || sessionBootstrap?.username || '';
   if(!username && uid){
@@ -10713,22 +10753,46 @@ if(isSkinV2){
     showLoginUi();
   }
 }
-els.logoutBtn?.addEventListener('click', async ()=>{
-  const api = window.firebaseApi;
-  if(api?.signOut && api?.auth){
-    try {
-      await api.signOut(api.auth);
-      window.location.replace('https://wrokit.com');
-      return;
-    } catch(err){
-      console.warn('[logout] signOut failed', err);
-    }
-  }
+async function waitForSignOut(api){
+  if(!api?.onAuthStateChanged || !api?.auth) return;
+  if(!api.auth.currentUser) return;
+  await new Promise((resolve)=>{
+    let timer = setTimeout(()=>cleanup(), 3000);
+    let unsubscribe = ()=>{};
+    const cleanup = ()=>{
+      clearTimeout(timer);
+      try { unsubscribe?.(); } catch(err){ console.warn('[logout] unsubscribe failed', err); }
+      resolve();
+    };
+    unsubscribe = api.onAuthStateChanged(api.auth, (user)=>{
+      if(user) return;
+      cleanup();
+    }, (err)=>{
+      console.warn('[logout] onAuthStateChanged failed', err);
+      cleanup();
+    });
+  });
+}
+
+function clearLoginSession(){
   loginHydrated = false;
   showLoginUi();
   state.activeWizardId = isSkinV2 ? '' : DEFAULT_WIZARD_ID;
   state.profile = null;
   try { window.SessionStore?.clearActiveSession?.(); } catch(err){ console.warn('[session] clear failed', err); }
+}
+
+els.logoutBtn?.addEventListener('click', async ()=>{
+  const api = window.firebaseApi;
+  if(api?.signOut && api?.auth){
+    try {
+      await api.signOut(api.auth);
+      await waitForSignOut(api);
+    } catch(err){
+      console.warn('[logout] signOut failed', err);
+    }
+  }
+  clearLoginSession();
   window.location.replace('https://wrokit.com');
 });
 els.resetModelBtn?.addEventListener('click', ()=>{
