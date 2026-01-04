@@ -405,6 +405,17 @@ let state = {
 };
 
 let loginHydrated = false;
+const loginStatusEl = (() => {
+  const form = document.getElementById('login-form');
+  if (!form) return null;
+  const el = document.createElement('p');
+  el.id = 'login-status';
+  el.className = 'sub';
+  el.style.margin = '8px 0 0';
+  el.style.minHeight = '18px';
+  form.appendChild(el);
+  return el;
+})();
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
   return logs.map(entry => {
@@ -10602,6 +10613,67 @@ function renderConfirmedTables(rec){
 
 /* --------------------------- Events ------------------------------ */
 // Auth
+function setLoginStatus(message, variant = 'info'){
+  if(!loginStatusEl) return;
+  loginStatusEl.textContent = message || '';
+  loginStatusEl.style.color = variant === 'error' ? '#b00020' : 'var(--muted)';
+}
+function setLoginPending(pending, message){
+  const targets = [els.username, els.email, els.password, els.signupBtn];
+  targets.forEach((el)=>{ if(el) el.disabled = !!pending; });
+  if(els.loginForm){
+    Array.from(els.loginForm.querySelectorAll('button')).forEach((btn)=>{ btn.disabled = !!pending; });
+  }
+  if(pending && message){
+    setLoginStatus(message, 'info');
+  } else if(!pending && !loginHydrated){
+    setLoginStatus('');
+  }
+}
+function waitForAuthUser(api, timeoutMs = 8000){
+  if(!api?.onAuthStateChanged || !api?.auth){
+    return Promise.reject(new Error('Firebase authentication is unavailable. Please try again later.'));
+  }
+  if(api.auth.currentUser) return Promise.resolve(api.auth.currentUser);
+  return new Promise((resolve, reject)=>{
+    const timeout = setTimeout(()=>{
+      try { unsubscribe?.(); } catch(err){ console.warn('[auth] unsubscribe failed after timeout', err); }
+      reject(new Error('Login timed out while waiting for Firebase authentication. Please try again.'));
+    }, timeoutMs);
+    let unsubscribe = api.onAuthStateChanged(api.auth, (user)=>{
+      if(!user) return;
+      clearTimeout(timeout);
+      try { unsubscribe?.(); } catch(err){ console.warn('[auth] unsubscribe failed', err); }
+      resolve(user);
+    }, (err)=>{
+      clearTimeout(timeout);
+      try { unsubscribe?.(); } catch(unsubErr){ console.warn('[auth] unsubscribe failed', unsubErr); }
+      reject(err || new Error('Firebase authentication failed. Please try again.'));
+    });
+  });
+}
+async function hydrateFromAuthUser(user, opts = {}){
+  if(!user) throw new Error('Firebase authentication is required to continue.');
+  const api = window.firebaseApi;
+  let username = (opts.username || '').trim();
+  if(!username){
+    try {
+      const meta = await api?.fetchUserMeta?.(user.uid);
+      if(meta?.usernameDisplay || meta?.usernameLower){
+        username = meta.usernameDisplay || meta.usernameLower;
+      }
+    } catch(err){
+      console.warn('[auth] failed to load username mapping', err);
+    }
+  }
+  if(!username){
+    throw new Error('No username is linked to this account. Please contact support.');
+  }
+  const docType = opts.docType || state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
+  const wizardId = opts.wizardId ?? sessionBootstrap?.wizardId ?? envWizardBootstrap?.wizardId ?? state.activeWizardId ?? '';
+  console.info('[auth] login success', { hasAuth: !!api?.auth, hasUser: !!api?.auth?.currentUser, uid: user?.uid || null });
+  completeLogin({ username, docType, wizardId });
+}
 function completeLogin(opts = {}){
   loginHydrated = true;
   const prevUser = state.username;
@@ -10667,8 +10739,10 @@ function showLoginUi(){
 
 async function handleSignupClick(e){
   e.preventDefault();
+  setLoginPending(true, 'Creating account...');
   const username = (els.username?.value || '').trim();
   if (!username) {
+    setLoginPending(false);
     alert('Please choose a username.');
     return;
   }
@@ -10676,9 +10750,9 @@ async function handleSignupClick(e){
   const password = els.password?.value || '';
   const api = window.firebaseApi;
   if (!api?.createUserWithEmailAndPassword || !api?.auth) {
-    console.warn('[signup] firebase not available; proceeding with local login');
-    state.username = username;
-    completeLogin({ username });
+    console.warn('[signup] firebase not available; blocking login');
+    setLoginStatus('Firebase authentication is unavailable. Please try again later.', 'error');
+    setLoginPending(false);
     return;
   }
   try {
@@ -10687,17 +10761,23 @@ async function handleSignupClick(e){
       const claimed = await api.claimUsername?.(cred.user.uid, username, email);
       const resolvedUsername = claimed?.usernameDisplay || claimed?.usernameLower || username;
       state.username = resolvedUsername;
-      completeLogin({ username: resolvedUsername });
+      await hydrateFromAuthUser(cred.user, { username: resolvedUsername });
       return;
     } catch (err) {
       console.error('[signup] failed to persist username mapping', err);
       try { await api.signOut?.(api.auth); } catch(signOutErr){ console.warn('[signup] signOut after failure failed', signOutErr); }
       alert(err?.message || 'Username is already taken or could not be saved.');
+      setLoginPending(false);
       return;
     }
   } catch (err) {
     console.error('[signup] failed', err);
+    setLoginPending(false);
     alert(err?.message || 'Sign up failed. Please try again.');
+  } finally {
+    if(!loginHydrated){
+      setLoginPending(false);
+    }
   }
 }
 async function handleLogin(e){
@@ -10706,24 +10786,25 @@ async function handleLogin(e){
   const password = els.password?.value || '';
   const api = window.firebaseApi;
   if (!api?.signInWithEmailAndPassword || !api?.auth) {
-    console.warn('[login] firebase not available; proceeding with local login');
-    const username = (els.username?.value || '').trim() || 'demo';
-    state.username = username;
-    completeLogin({ username });
+    console.warn('[login] firebase not available; blocking login');
+    setLoginStatus('Firebase authentication is unavailable. Please try again later.', 'error');
     return;
   }
+  setLoginPending(true, 'Logging in...');
+  console.info('[auth] login attempt', { hasAuth: !!api?.auth, hasUser: !!api?.auth?.currentUser });
   try {
     const cred = await api.signInWithEmailAndPassword(api.auth, email, password);
-    const meta = await api.fetchUserMeta?.(cred.user.uid);
+    const user = cred.user || await waitForAuthUser(api);
+    const meta = await api.fetchUserMeta?.(user.uid);
     const resolvedUsername = meta?.usernameDisplay || meta?.usernameLower;
-    if (!resolvedUsername) {
-      throw new Error('No username is linked to this account. Please contact support.');
-    }
-    state.username = resolvedUsername;
-    completeLogin({ username: resolvedUsername });
+    await hydrateFromAuthUser(user, { username: resolvedUsername });
   } catch (err) {
     console.error('[login] failed', err);
+    try { await api.signOut?.(api.auth); } catch(signOutErr){ console.warn('[login] signOut after failure failed', signOutErr); }
+    setLoginStatus(err?.message || 'Login failed. Please try again.', 'error');
     alert(err?.message || 'Login failed. Please try again.');
+  } finally {
+    setLoginPending(false);
   }
 }
 els.loginForm?.addEventListener('submit', handleLogin);
@@ -10833,27 +10914,28 @@ async function restoreFromCloud(){
 
 function setupAuthStateListener(){
   const api = window.firebaseApi;
-  if (!api?.onAuthStateChanged || !api?.auth) return false;
+  if (!api?.onAuthStateChanged || !api?.auth) {
+    setLoginStatus('Firebase authentication is unavailable. Please try again later.', 'error');
+    return false;
+  }
   api.onAuthStateChanged(api.auth, async (user) => {
     if (user) {
-      let username = '';
       try {
-        const meta = await api.fetchUserMeta?.(user.uid);
-        if (meta?.usernameDisplay || meta?.usernameLower) {
-          username = meta.usernameDisplay || meta.usernameLower;
-        }
+        setLoginStatus('Logging in...', 'info');
+        await hydrateFromAuthUser(user, {
+          username: sessionBootstrap?.username,
+          docType: sessionBootstrap?.docType,
+          wizardId: sessionBootstrap?.wizardId
+        });
       } catch (err) {
-        console.warn('[auth] failed to load username mapping', err);
+        console.warn('[auth] auto-login failed', err);
+        setLoginStatus(err?.message || 'Login failed. Please try again.', 'error');
+        showLoginUi();
       }
-      if (!username) {
-        console.warn('[auth] username mapping missing; skipping auto-login');
-        return;
-      }
-      const docType = state.docType || sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice';
-      const wizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || state.activeWizardId || '';
-      completeLogin({ username, docType, wizardId });
     } else if (isSkinV2) {
       loginHydrated = false;
+      setLoginPending(false);
+      setLoginStatus('');
       showLoginUi();
     }
   });
@@ -10865,8 +10947,24 @@ if(isSkinV2){
   const autoUser = envWizardBootstrap?.username || sessionBootstrap?.username || '';
   const autoDocType = envWizardBootstrap?.docType || sessionBootstrap?.docType || state.docType;
   const autoWizardId = sessionBootstrap?.wizardId || envWizardBootstrap?.wizardId || '';
-  if(autoUser){
-    completeLogin({ username: autoUser, docType: autoDocType, wizardId: autoWizardId });
+  const api = window.firebaseApi;
+  const existingUser = api?.auth?.currentUser;
+  if(existingUser){
+    hydrateFromAuthUser(existingUser, { username: autoUser, docType: autoDocType, wizardId: autoWizardId })
+      .catch((err)=>{
+        console.warn('[auth] existing session login failed', err);
+        setLoginStatus(err?.message || 'Login failed. Please try again.', 'error');
+        showLoginUi();
+      });
+  } else if(autoUser && authListenerReady){
+    setLoginPending(true, 'Logging in...');
+    waitForAuthUser(api).then((user)=>{
+      return hydrateFromAuthUser(user, { username: autoUser, docType: autoDocType, wizardId: autoWizardId });
+    }).catch((err)=>{
+      console.warn('[auth] session bootstrap failed', err);
+      setLoginStatus(err?.message || 'Login failed. Please try again.', 'error');
+      showLoginUi();
+    }).finally(()=> setLoginPending(false));
   } else if(!authListenerReady) {
     showLoginUi();
   }
