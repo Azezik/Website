@@ -247,6 +247,7 @@ const sessionBootstrap = (()=>{
 })();
 
 const DEFAULT_WIZARD_ID = 'default';
+const DEFAULT_GEOMETRY_ID = 'geom0';
 const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
 
@@ -346,6 +347,7 @@ let state = {
   username: sessionBootstrap?.username || null,
   docType: sessionBootstrap?.docType || envWizardBootstrap?.docType || 'invoice',
   activeWizardId: isSkinV2 ? (envWizardBootstrap?.wizardId || sessionBootstrap?.wizardId || '') : DEFAULT_WIZARD_ID,
+  activeGeometryId: DEFAULT_GEOMETRY_ID,
   wizardTemplates: [],
   mode: ModeEnum.CONFIG,
   modes: { rawData: false },
@@ -675,6 +677,18 @@ function syncActiveWizardId(profile){
   if(!incoming) return;
   if(state.activeWizardId !== incoming){
     state.activeWizardId = incoming;
+  }
+}
+
+function currentGeometryId(){
+  return state.activeGeometryId || DEFAULT_GEOMETRY_ID;
+}
+
+function syncActiveGeometryId(profile){
+  const incoming = profile?.geometryId;
+  if(!incoming) return;
+  if(state.activeGeometryId !== incoming){
+    state.activeGeometryId = incoming;
   }
 }
 
@@ -1035,7 +1049,11 @@ function refreshWizardTemplates(){
 
 /* ---------------------- Storage / Persistence --------------------- */
 const LS = {
-  profileKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `wiz.profile.${u}.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}`,
+  profileKey: (u, d, wizardId = DEFAULT_WIZARD_ID, geometryId = null) => {
+    const base = `wiz.profile.${u}.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}`;
+    return geometryId ? `${base}.${geometryId}` : base;
+  },
+  geometryMetaKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `wiz.geometries.${u}.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}`,
   dbKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb`,
   rowsKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb_rows`,
   getDb(u, d, wizardId = DEFAULT_WIZARD_ID) {
@@ -1052,26 +1070,149 @@ const LS = {
     const payload = normalizeRowsPayload(rows);
     localStorage.setItem(this.rowsKey(u, d, wizardId), JSON.stringify(payload));
   },
-  getProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ const raw = localStorage.getItem(this.profileKey(u,d,wizardId)); return raw ? JSON.parse(raw, jsonReviver) : null; },
-  setProfile(u,d,p,wizardId = DEFAULT_WIZARD_ID){ localStorage.setItem(this.profileKey(u,d,wizardId), serializeProfile(p)); },
-  removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ localStorage.removeItem(this.profileKey(u,d,wizardId)); }
+  getProfile(u,d,wizardId = DEFAULT_WIZARD_ID, geometryId = null){
+    const keys = [];
+    const isDefaultGeom = !geometryId || geometryId === DEFAULT_GEOMETRY_ID;
+    keys.push(this.profileKey(u,d,wizardId, geometryId || null));
+    if(isDefaultGeom && geometryId){
+      keys.push(this.profileKey(u,d,wizardId, null));
+    }
+    for(const key of keys){
+      const raw = localStorage.getItem(key);
+      if(raw){
+        try { return JSON.parse(raw, jsonReviver); } catch(err){ continue; }
+      }
+    }
+    return null;
+  },
+  setProfile(u,d,p,wizardId = DEFAULT_WIZARD_ID, geometryId = null){ localStorage.setItem(this.profileKey(u,d,wizardId, geometryId || null), serializeProfile(p)); },
+  removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID, geometryId = null){
+    localStorage.removeItem(this.profileKey(u,d,wizardId, geometryId || null));
+  },
+  getGeometries(u,d,wizardId = DEFAULT_WIZARD_ID){
+    try{
+      const raw = localStorage.getItem(this.geometryMetaKey(u,d,wizardId));
+      const parsed = raw ? JSON.parse(raw, jsonReviver) : null;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch(err){ return []; }
+  },
+  setGeometries(u,d,list,wizardId = DEFAULT_WIZARD_ID){
+    try{
+      localStorage.setItem(this.geometryMetaKey(u,d,wizardId), JSON.stringify(Array.isArray(list) ? list : []));
+    } catch(err){ console.warn('[geom-meta][persist-failed]', err); }
+  }
 };
 
-function scrubSegmentStoreForWizard(wizardId){
+function normalizeGeometryMeta(meta={}, idx=0){
+  const geometryId = meta.geometryId || `${DEFAULT_GEOMETRY_ID}${idx ? `_${idx}` : ''}`;
+  const displayName = meta.displayName || `Layout ${idx + 1}`;
+  const createdAt = meta.createdAt || new Date().toISOString();
+  const pageSize = meta.pageSize || null;
+  return { geometryId, displayName, createdAt, pageSize };
+}
+
+function geometryPageSizeFromState(){
+  const vp = (state.pageViewports && state.pageViewports[0]) || state.viewport || {};
+  const width = vp.width || vp.w || 0;
+  const height = vp.height || vp.h || 0;
+  if(!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0){
+    return null;
+  }
+  return { pageWidthPx: width, pageHeightPx: height, aspect: height ? width/height : null };
+}
+
+function getGeometryIndex(username, docType, wizardId, derivedIds = []){
+  const stored = LS.getGeometries(username, docType, wizardId);
+  const seen = new Map();
+  const push = (entry, idx=0) => {
+    if(!entry || !entry.geometryId) return;
+    if(!seen.has(entry.geometryId)){
+      seen.set(entry.geometryId, normalizeGeometryMeta(entry, idx));
+    }
+  };
+  stored.forEach((meta, idx)=>push(meta, idx));
+  derivedIds.forEach((gid, idx)=>{
+    if(!gid) return;
+    push({ geometryId: gid, displayName: `Layout ${seen.size + 1}` }, stored.length + idx);
+  });
+  if(!seen.size){
+    push({ geometryId: DEFAULT_GEOMETRY_ID, displayName: 'Layout 1' }, 0);
+  }
+  return Array.from(seen.values());
+}
+
+function upsertGeometryMeta(username, docType, wizardId, meta){
+  const index = getGeometryIndex(username, docType, wizardId);
+  const existingIdx = index.findIndex(m => m.geometryId === meta.geometryId);
+  if(existingIdx >= 0){
+    index[existingIdx] = { ...index[existingIdx], ...meta };
+  } else {
+    index.push(normalizeGeometryMeta(meta, index.length));
+  }
+  LS.setGeometries(username, docType, index, wizardId);
+  return index;
+}
+
+function collectGeometryIdsForWizard(username, docType, wizardId){
+  const ids = new Set();
+  (LS.getGeometries(username, docType, wizardId) || []).forEach(meta => {
+    if(meta?.geometryId) ids.add(meta.geometryId);
+  });
+  const userPattern = escapeRegex(username);
+  const docPattern = escapeRegex(docType);
+  const wizardTarget = wizardId || DEFAULT_WIZARD_ID;
+  const wizardPattern = escapeRegex(wizardTarget);
+  for(let i=0;i<localStorage.length;i++){
+    const key = localStorage.key(i);
+    if(!key) continue;
+    const profileMatch = key.match(new RegExp(`^wiz\\.profile\\.${userPattern}\\.${docPattern}(?:\\.([^\\.]+))?(?:\\.([^\\.]+))?$`));
+    if(profileMatch){
+      const wid = profileMatch[1] || DEFAULT_WIZARD_ID;
+      const gid = profileMatch[2] || DEFAULT_GEOMETRY_ID;
+      if(wid === wizardTarget){
+        ids.add(gid);
+      }
+      continue;
+    }
+    const patternMatch = key.match(new RegExp(`^wiz\\.patternBundle\\.${docPattern}\\.(?:${wizardPattern})(?:\\.([^\\.]+))?$`));
+    if(patternMatch){
+      const gid = patternMatch[1] || DEFAULT_GEOMETRY_ID;
+      ids.add(gid);
+    }
+  }
+  if(!ids.size){
+    ids.add(DEFAULT_GEOMETRY_ID);
+  }
+  return Array.from(ids);
+}
+
+function scrubSegmentStoreForWizard(wizardId, geometryId=null){
   if(!wizardId || typeof localStorage === 'undefined') return;
   const storeRaw = localStorage.getItem('ocrmagic.segmentStore');
   const chunkRaw = localStorage.getItem('ocrmagic.segmentStore.chunks');
   try{
     const store = storeRaw ? JSON.parse(storeRaw) : null;
     if(store && typeof store === 'object'){
-      Object.keys(store).forEach(k => { if(k.startsWith(`${wizardId}::`)) delete store[k]; });
+      Object.keys(store).forEach(k => {
+        if(geometryId){
+          if(k.startsWith(`${wizardId}::${geometryId}`)) delete store[k];
+        } else if(k.startsWith(`${wizardId}::`)){
+          delete store[k];
+        }
+      });
       localStorage.setItem('ocrmagic.segmentStore', JSON.stringify(store));
     }
   } catch(err){ console.warn('[import] scrub segment store failed', err); }
   try{
     const chunkStore = chunkRaw ? JSON.parse(chunkRaw) : null;
     if(chunkStore && typeof chunkStore === 'object'){
-      Object.keys(chunkStore).forEach(k => { if(k.startsWith(`${wizardId}::`)) delete chunkStore[k]; });
+      Object.keys(chunkStore).forEach(k => {
+        if(geometryId){
+          if(k.startsWith(`${wizardId}::${geometryId}`)) delete chunkStore[k];
+        } else if(k.startsWith(`${wizardId}::`)){
+          delete chunkStore[k];
+        }
+      });
       localStorage.setItem('ocrmagic.segmentStore.chunks', JSON.stringify(chunkStore));
     }
   } catch(err){ console.warn('[import] scrub segment chunk store failed', err); }
@@ -1079,14 +1220,20 @@ function scrubSegmentStoreForWizard(wizardId){
 
 function clearWizardArtifacts(username, docType, wizardId){
   if(!wizardId) return;
+  let geometryIds = [DEFAULT_GEOMETRY_ID];
+  try { geometryIds = collectGeometryIdsForWizard(username, docType, wizardId); } catch(err){ geometryIds = [DEFAULT_GEOMETRY_ID]; }
   try { LS.removeProfile(username, docType, wizardId); } catch(err){}
   try { localStorage.removeItem(LS.dbKey(username, docType, wizardId)); } catch(err){}
   try { localStorage.removeItem(LS.rowsKey(username, docType, wizardId)); } catch(err){}
   try {
-    const patternKey = patternStoreKey(docType, wizardId);
-    localStorage.removeItem(patternKey);
+    geometryIds.forEach(gid => {
+      const patternKey = patternStoreKey(docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
+      localStorage.removeItem(patternKey);
+    });
+    const legacyPatternKey = patternStoreKey(docType, wizardId);
+    localStorage.removeItem(legacyPatternKey);
   } catch(err){}
-  scrubSegmentStoreForWizard(wizardId);
+  geometryIds.forEach(gid => scrubSegmentStoreForWizard(wizardId, gid));
 }
 
 function exportWizardDefinition(docType, wizardId){
@@ -1160,33 +1307,47 @@ function escapeRegex(str){
 }
 
 function collectWizardContextsForUser(username){
-  const contexts = new Map(); // docType -> Set<wizardId>
+  const contexts = new Map(); // docType -> Map<wizardId, Set<geometryId>>
   const userPattern = escapeRegex(username);
+  const addCtx = (docType, wizardId, geometryId = DEFAULT_GEOMETRY_ID) => {
+    if(!docType || !wizardId) return;
+    if(!contexts.has(docType)) contexts.set(docType, new Map());
+    const wizMap = contexts.get(docType);
+    if(!wizMap.has(wizardId)) wizMap.set(wizardId, new Set());
+    wizMap.get(wizardId).add(geometryId || DEFAULT_GEOMETRY_ID);
+  };
   for(let i=0;i<localStorage.length;i++){
     const key = localStorage.key(i);
     if(!key) continue;
-    const profileMatch = key.match(new RegExp(`^wiz\\.profile\\.${userPattern}\\.([^\\.]+)(?:\\.([^\\.]+))?$`));
+    const profileMatch = key.match(new RegExp(`^wiz\\.profile\\.${userPattern}\\.([^\\.]+)(?:\\.([^\\.]+))?(?:\\.([^\\.]+))?$`));
     if(profileMatch){
       const docType = profileMatch[1];
       const wizardId = profileMatch[2] || DEFAULT_WIZARD_ID;
-      if(!contexts.has(docType)) contexts.set(docType, new Set());
-      contexts.get(docType).add(wizardId);
+      const geometryId = profileMatch[3] || DEFAULT_GEOMETRY_ID;
+      addCtx(docType, wizardId, geometryId);
+      continue;
+    }
+    const geometryIndexMatch = key.match(new RegExp(`^wiz\\.geometries\\.${userPattern}\\.([^\\.]+)(?:\\.([^\\.]+))?$`));
+    if(geometryIndexMatch){
+      const docType = geometryIndexMatch[1];
+      const wizardId = geometryIndexMatch[2] || DEFAULT_WIZARD_ID;
+      const metas = LS.getGeometries(username, docType, wizardId);
+      metas.forEach(meta => addCtx(docType, wizardId, meta?.geometryId || DEFAULT_GEOMETRY_ID));
       continue;
     }
     const accountMatch = key.match(new RegExp(`^accounts\\.${userPattern}\\.wizards\\.([^\\.]+)(?:\\.([^\\.]+))?\\.(?:masterdb|masterdb_rows)$`));
     if(accountMatch){
       const docType = accountMatch[1];
       const wizardId = accountMatch[2] || DEFAULT_WIZARD_ID;
-      if(!contexts.has(docType)) contexts.set(docType, new Set());
-      contexts.get(docType).add(wizardId);
+      addCtx(docType, wizardId);
       continue;
     }
-    const patternMatch = key.match(/^wiz\.patternBundle\.([^.]+)\.([^.]+)$/);
+    const patternMatch = key.match(/^wiz\.patternBundle\.([^.]+)\.([^.]+)(?:\.([^.]+))?$/);
     if(patternMatch){
       const docType = patternMatch[1];
       const wizardId = patternMatch[2] || DEFAULT_WIZARD_ID;
-      if(!contexts.has(docType)) contexts.set(docType, new Set());
-      contexts.get(docType).add(wizardId);
+      const geometryId = patternMatch[3] || DEFAULT_GEOMETRY_ID;
+      addCtx(docType, wizardId, geometryId);
     }
   }
   return contexts;
@@ -1228,9 +1389,9 @@ function buildBackupPayload(username){
   } catch(err){ payload.ocrmagic = {}; }
 
   const contexts = collectWizardContextsForUser(username);
-  contexts.forEach((wizardIds, docType) => {
+  contexts.forEach((wizardMap, docType) => {
     if(!payload.wizards[docType]) payload.wizards[docType] = {};
-    wizardIds.forEach(wizardId => {
+    wizardMap.forEach((geometryIds, wizardId) => {
       const wizardEntry = {};
       const profile = LS.getProfile(username, docType, wizardId);
       if(profile) wizardEntry.profile = cloneJsonSafe(profile) || profile;
@@ -1245,6 +1406,33 @@ function buildBackupPayload(username){
           wizardEntry.patternBundle = JSON.parse(patternRaw, jsonReviver);
         }
       } catch(err){ /* ignore pattern parse failures */ }
+      const geometriesEntry = {};
+      const geomMetaList = LS.getGeometries(username, docType, wizardId) || [];
+      geometryIds.forEach(gid => {
+        const geomEntry = {};
+        const geomProfile = LS.getProfile(username, docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
+        if(geomProfile) geomEntry.profile = cloneJsonSafe(geomProfile) || geomProfile;
+        try{
+          const geomPatternKey = patternStoreKey(docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
+          const patternRaw = localStorage.getItem(geomPatternKey);
+          if(patternRaw){
+            geomEntry.patternBundle = JSON.parse(patternRaw, jsonReviver);
+          }
+        } catch(err){ /* ignore pattern parse failures */ }
+        if(Object.keys(geomEntry).length){
+          geomEntry.geometryId = gid;
+          const meta = geomMetaList.find(m => m?.geometryId === gid);
+          if(meta){
+            geomEntry.displayName = meta.displayName;
+            geomEntry.createdAt = meta.createdAt;
+            geomEntry.pageSize = meta.pageSize || null;
+          }
+          geometriesEntry[gid] = geomEntry;
+        }
+      });
+      if(Object.keys(geometriesEntry).length){
+        wizardEntry.geometries = geometriesEntry;
+      }
       payload.wizards[docType][wizardId] = wizardEntry;
     });
   });
@@ -1293,6 +1481,8 @@ function applyRestorePayload(payload){
   const wizards = payload.wizards || {};
   Object.entries(wizards).forEach(([docType, byWizard]) => {
     Object.entries(byWizard || {}).forEach(([wizardId, data]) => {
+      const geometryEntries = data?.geometries && typeof data.geometries === 'object' ? data.geometries : null;
+      const legacyGeometryId = DEFAULT_GEOMETRY_ID;
       if(data?.profile) LS.setProfile(username, docType, data.profile, wizardId);
       if(data?.masterDb) LS.setDb(username, docType, data.masterDb, wizardId);
       if(data?.masterDbRows) LS.setRows(username, docType, data.masterDbRows, wizardId);
@@ -1301,6 +1491,41 @@ function applyRestorePayload(payload){
           const key = patternStoreKey(docType, wizardId);
           localStorage.setItem(key, JSON.stringify(data.patternBundle, jsonReplacer));
         } catch(err){ console.warn('[restore] pattern bundle persist failed', err); }
+      }
+      if(geometryEntries){
+        Object.entries(geometryEntries).forEach(([geometryId, geomData]) => {
+          const gid = geometryId || DEFAULT_GEOMETRY_ID;
+          if(geomData?.profile) LS.setProfile(username, docType, geomData.profile, wizardId, gid);
+          if(geomData?.patternBundle){
+            try{
+              const key = patternStoreKey(docType, wizardId, gid);
+              localStorage.setItem(key, JSON.stringify(geomData.patternBundle, jsonReplacer));
+            } catch(err){ console.warn('[restore] pattern bundle persist failed', err); }
+          }
+          upsertGeometryMeta(username, docType, wizardId, {
+            geometryId: gid,
+            displayName: geomData?.displayName || geomData?.geometryId || `Layout ${gid}`,
+            createdAt: geomData?.createdAt || new Date().toISOString(),
+            pageSize: geomData?.profile?.geometry?.pageSize || geomData?.pageSize || null
+          });
+        });
+      } else {
+        // Legacy payload: mirror into default geometry entry.
+        upsertGeometryMeta(username, docType, wizardId, {
+          geometryId: legacyGeometryId,
+          displayName: 'Layout 1',
+          createdAt: new Date().toISOString(),
+          pageSize: data?.profile?.geometry?.pageSize || null
+        });
+        if(data?.profile){
+          LS.setProfile(username, docType, data.profile, wizardId, legacyGeometryId);
+        }
+        if(data?.patternBundle){
+          try{
+            const key = patternStoreKey(docType, wizardId, legacyGeometryId);
+            localStorage.setItem(key, JSON.stringify(data.patternBundle, jsonReplacer));
+          } catch(err){ console.warn('[restore] pattern bundle persist failed', err); }
+        }
       }
     });
   });
@@ -1326,10 +1551,11 @@ function logProfileStorage(tag, opts = {}){
     const mode = opts.mode || (isRunMode() ? 'RUN' : 'CONFIG');
     const docType = opts.docType || state.docType || null;
     const wizardId = opts.wizardId || currentWizardId() || null;
-    const profileKey = opts.profileKey || (wizardId ? LS.profileKey(state.username, docType, wizardId) : null);
+    const geometryId = opts.geometryId || currentGeometryId() || null;
+    const profileKey = opts.profileKey || (wizardId ? LS.profileKey(state.username, docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId) : null);
     const stats = summarizeProfileGeometryForLog(opts.profile);
     const missingList = stats.missingNormBoxKeys.join(',');
-    console.info(`[profile-${tag}] mode=${mode} docType=${docType} wizardId=${wizardId} key=${profileKey} fields=${stats.fieldCount} withNormBox=${stats.withNormBox} missing=[${missingList}]`);
+    console.info(`[profile-${tag}] mode=${mode} docType=${docType} wizardId=${wizardId} geometryId=${geometryId} key=${profileKey} fields=${stats.fieldCount} withNormBox=${stats.withNormBox} missing=[${missingList}]`);
   } catch(err){ console.warn(`[profile-${tag}] log failed`, err); }
 }
 
@@ -1617,10 +1843,11 @@ function serializeProfile(p){
   return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer, 2);
 }
 
-function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID){
+function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID, geometryId = null){
   const safeDoc = String(docType || 'invoice').replace(/\s+/g, '_');
   const safeWizard = wizardId || DEFAULT_WIZARD_ID;
-  return `${PATTERN_STORE_KEY_PREFIX}.${safeDoc}.${safeWizard}`;
+  const base = `${PATTERN_STORE_KEY_PREFIX}.${safeDoc}.${safeWizard}`;
+  return geometryId ? `${base}.${geometryId}` : base;
 }
 
 function importPatternBundle(bundle, meta = {}){
@@ -1647,9 +1874,9 @@ function importPatternBundle(bundle, meta = {}){
   return 0;
 }
 
-function readPatternBundleFromCache(docType, wizardId){
+function readPatternBundleFromCache(docType, wizardId, geometryId = null){
   try{
-    const key = patternStoreKey(docType, wizardId);
+    const key = patternStoreKey(docType, wizardId, geometryId || null);
     const raw = localStorage.getItem(key);
     if(!raw) return null;
     const parsed = JSON.parse(raw, jsonReviver);
@@ -1671,13 +1898,15 @@ function persistPatternBundle(profile, { patterns=null } = {}){
   try{
     const docType = profile.docType || state.docType || 'invoice';
     const wizardId = profile.wizardId || currentWizardId();
+    const geometryId = profile.geometryId || state.activeGeometryId || null;
     try {
-      const key = patternStoreKey(docType, wizardId);
+      const key = patternStoreKey(docType, wizardId, geometryId || null);
       const exported = patterns || FieldDataEngine.exportPatterns();
       const patternCount = exported && typeof exported === 'object' ? Object.keys(exported).length : 0;
       console.info('[id-drift][persistPatternBundle]', JSON.stringify({
         docType,
         wizardId,
+        geometryId,
         patternKey: key,
         patternCount
       }));
@@ -1697,11 +1926,12 @@ function persistPatternBundle(profile, { patterns=null } = {}){
       profileVersion: profile.version || PROFILE_VERSION,
       docType,
       wizardId,
+      geometryId: geometryId || null,
       fields: (profile.fields || []).map(f => ({ fieldKey: f.fieldKey, type: f.type, label: f.label })),
       updatedAt: new Date().toISOString(),
       patterns: merged
     };
-    const key = patternStoreKey(docType, wizardId);
+    const key = patternStoreKey(docType, wizardId, geometryId || null);
     localStorage.setItem(key, JSON.stringify(bundle));
     const patternCount = Object.keys(bundle.patterns || {}).length;
     ocrMagicDebug({ event: 'ocrmagic.patterns.cache.write', key, count: patternCount, fieldCount: bundle.fields.length, version: bundle.version, patterns: Object.keys(bundle.patterns || {}) });
@@ -1787,17 +2017,28 @@ function normalizeRowsPayload(payload){
 }
 
 let saveTimer=null;
-function saveProfile(u, d, p, wizardId = currentWizardId()){
+function saveProfile(u, d, p, wizardId = currentWizardId(), geometryId = currentGeometryId()){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
-    const key = LS.profileKey(u, d, wizardId);
+    const resolvedGeometryId = geometryId || DEFAULT_GEOMETRY_ID;
+    const key = LS.profileKey(u, d, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId);
+    const pageSize = geometryPageSizeFromState();
+    const geometryMeta = {
+      geometryId: resolvedGeometryId,
+      displayName: p?.geometry?.displayName || `Layout ${getGeometryIndex(u, d, wizardId).length + 1}`,
+      createdAt: p?.geometry?.createdAt || new Date().toISOString(),
+      pageSize: pageSize || p?.geometry?.pageSize || null
+    };
+    p.geometryId = resolvedGeometryId;
+    p.geometry = { ...(p.geometry || {}), ...geometryMeta };
     logProfileStorage('save', {
       mode: isRunMode() ? 'RUN' : 'CONFIG',
       docType: d,
       wizardId,
-      profileKey: key,
-      profile: p
-    });
+        geometryId: resolvedGeometryId,
+        profileKey: key,
+        profile: p
+      });
     const preSaveSnapshot = snapshotProfileGeometry(p);
     traceSnapshot('config.pre-save',{
       stage:'config.pre-save',
@@ -1811,7 +2052,8 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
       note:'before-persist'
     });
     try{
-      LS.setProfile(u, d, p, wizardId);
+      upsertGeometryMeta(u, d, wizardId, geometryMeta);
+      LS.setProfile(u, d, p, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId);
     } catch(err){
       console.error('saveProfile', err);
       alert('Failed to save profile');
@@ -1824,6 +2066,7 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
         username: u,
         docType: d,
         wizardId,
+        geometryId: resolvedGeometryId,
         profileKey: key,
         hasGeometry: hasGeom
       }));
@@ -1842,7 +2085,7 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
       );
     }catch{}
     try{
-      const persistedProfile = loadProfile(u, d, wizardId);
+      const persistedProfile = loadProfile(u, d, wizardId, resolvedGeometryId);
       const postSaveSnapshot = snapshotProfileGeometry(persistedProfile);
       traceSnapshot('config.post-save',{
         stage:'config.post-save',
@@ -1861,15 +2104,20 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
     }
   },300);
 }
-function loadProfile(u, d, wizardId = currentWizardId()){
+function loadProfile(u, d, wizardId = currentWizardId(), geometryId = currentGeometryId()){
   try{
-    const raw = LS.getProfile(u, d, wizardId);
+    const resolvedGeometryId = geometryId || DEFAULT_GEOMETRY_ID;
+    const raw = LS.getProfile(u, d, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId);
     const migrated = ensureConfiguredFlag(migrateProfile(raw));
+    if(migrated && !migrated.geometryId){
+      migrated.geometryId = resolvedGeometryId;
+    }
     logProfileStorage('load', {
       mode: isRunMode() ? 'RUN' : 'CONFIG',
       docType: d,
       wizardId,
-      profileKey: LS.profileKey(u, d, wizardId),
+      geometryId: resolvedGeometryId,
+      profileKey: LS.profileKey(u, d, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId),
       profile: migrated
     });
     return migrated;
@@ -3836,6 +4084,7 @@ function collectPersistedFingerprints(profile){
 function hydrateFingerprintsFromProfile(profile){
   const docType = profile?.docType || state.docType || 'invoice';
   const wizardId = profile?.wizardId || currentWizardId();
+  const geometryId = profile?.geometryId || state.activeGeometryId || null;
   const logPatternDiag = (source, importedCount, extra={})=>{
     if(state.mode !== ModeEnum.RUN) return;
     const exported = FieldDataEngine.exportPatterns ? FieldDataEngine.exportPatterns() : {};
@@ -3846,12 +4095,13 @@ function hydrateFingerprintsFromProfile(profile){
       keys,
       docType,
       wizardId,
+      geometryId,
       fieldCount: extra.fieldCount ?? null,
       cachedCount: extra.cachedCount ?? null
     });
   };
   if(isSkinV2){
-    const cached = readPatternBundleFromCache(docType, wizardId);
+    const cached = readPatternBundleFromCache(docType, wizardId, geometryId || null);
     if(cached?.bundle){
       const cachedCount = cached.bundle.patterns && typeof cached.bundle.patterns === 'object' ? Object.keys(cached.bundle.patterns).length : 0;
       const imported = cachedCount ? importPatternBundle(cached.bundle, { source: 'cache', uri: cached.key }) : 0;
@@ -4277,17 +4527,19 @@ const ANCHOR_HINTS = {
 };
 
 /* --------------------------- Landmarks ---------------------------- */
-function ensureProfile(requestedWizardId){
+function ensureProfile(requestedWizardId, requestedGeometryId = null){
   const wizardId = requestedWizardId || currentWizardId();
   const resolvedWizardId = wizardId || currentWizardId();
-  const profileKey = resolvedWizardId ? LS.profileKey(state.username, state.docType, resolvedWizardId) : null;
+  const resolvedGeometryId = requestedGeometryId || currentGeometryId();
+  const profileKey = resolvedWizardId ? LS.profileKey(state.username, state.docType, resolvedWizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId) : null;
   if(!resolvedWizardId){
     console.warn('[id-drift][ensureProfile] missing wizardId', { requestedWizardId, activeWizardId: state.activeWizardId, profileWizardId: state.profile?.wizardId || null });
     return null;
   }
-  if(state.profile && state.profile.wizardId === resolvedWizardId){
+  if(state.profile && state.profile.wizardId === resolvedWizardId && state.profile.geometryId === resolvedGeometryId){
     hydrateFingerprintsFromProfile(state.profile);
     ensureConfiguredFlag(state.profile);
+    syncActiveGeometryId(state.profile);
     try {
       const hasGeom = Array.isArray(state.profile.fields) && state.profile.fields.some(hasFieldGeometry);
       console.info('[id-drift][ensureProfile]', JSON.stringify({
@@ -4295,7 +4547,9 @@ function ensureProfile(requestedWizardId){
         username: state.username,
         docType: state.docType,
         activeWizardId: state.activeWizardId,
+        activeGeometryId: state.activeGeometryId,
         wizardId: resolvedWizardId,
+        geometryId: resolvedGeometryId,
         requestedWizardId,
         profileKey,
         foundProfile: true,
@@ -4305,7 +4559,7 @@ function ensureProfile(requestedWizardId){
     return state.profile;
   }
 
-  const existing = loadProfile(state.username, state.docType, resolvedWizardId);
+  const existing = loadProfile(state.username, state.docType, resolvedWizardId, resolvedGeometryId);
   try {
     const hasGeom = Array.isArray(existing?.fields) && existing.fields.some(hasFieldGeometry);
     console.info('[id-drift][ensureProfile]', JSON.stringify({
@@ -4313,7 +4567,9 @@ function ensureProfile(requestedWizardId){
       username: state.username,
       docType: state.docType,
       activeWizardId: state.activeWizardId,
+      activeGeometryId: state.activeGeometryId,
       wizardId: resolvedWizardId,
+      geometryId: resolvedGeometryId,
       requestedWizardId,
       profileKey,
       foundProfile: !!existing,
@@ -4349,11 +4605,15 @@ function ensureProfile(requestedWizardId){
   }) : [];
   const remapById = template ? Object.fromEntries((template.fields || []).map(f => [f.id, f.fieldKey])) : {};
   if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
+  const geometryIndex = getGeometryIndex(state.username, state.docType, resolvedWizardId, collectGeometryIdsForWizard(state.username, state.docType, resolvedWizardId));
+  const geometryMeta = geometryIndex.find(m => m.geometryId === resolvedGeometryId) || normalizeGeometryMeta({ geometryId: resolvedGeometryId, displayName: `Layout ${geometryIndex.length + 1}` });
 
   state.profile = existing || {
     username: state.username,
     docType: state.docType,
     wizardId: resolvedWizardId,
+    geometryId: resolvedGeometryId,
+    geometry: geometryMeta,
     version: PROFILE_VERSION,
     fields: templateFields,
     globals: [],
@@ -4402,6 +4662,12 @@ function ensureProfile(requestedWizardId){
       rowAnchor: null
     }
   };
+  if(state.profile){
+    state.profile.geometryId = resolvedGeometryId;
+    state.profile.geometry = { ...(state.profile.geometry || {}), ...geometryMeta };
+    upsertGeometryMeta(state.username, state.docType, resolvedWizardId, state.profile.geometry);
+    syncActiveGeometryId(state.profile);
+  }
   state.profile.isConfigured = ensureConfiguredFlag(existing || null)?.isConfigured || false;
 
   if(state.profile && !state.profile.wizardId){
@@ -5084,6 +5350,8 @@ function renderWizardManagerList(selectedId=null){
   const list = document.createElement('div');
   list.className = 'wizard-table';
   templates.forEach(t => {
+    const geometryIds = collectGeometryIdsForWizard(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID);
+    const geometryMeta = getGeometryIndex(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, geometryIds);
     const row = document.createElement('div');
     row.className = 'wizard-row';
     const name = document.createElement('div');
@@ -5091,7 +5359,7 @@ function renderWizardManagerList(selectedId=null){
     name.textContent = t.wizardName || t.id;
     const meta = document.createElement('div');
     meta.className = 'wizard-meta';
-    meta.textContent = `ID: ${t.id || ''}`;
+    meta.textContent = `ID: ${t.id || ''} • ${geometryMeta.length} layout${geometryMeta.length === 1 ? '' : 's'}`;
     const actions = document.createElement('div');
     actions.className = 'wizard-actions';
     const editBtn = document.createElement('button');
@@ -5103,6 +5371,29 @@ function renderWizardManagerList(selectedId=null){
       openBuilder(t);
     });
     actions.appendChild(editBtn);
+    const addGeomBtn = document.createElement('button');
+    addGeomBtn.type = 'button';
+    addGeomBtn.className = 'btn secondary';
+    addGeomBtn.textContent = 'Add Template';
+    addGeomBtn.addEventListener('click', () => {
+      state.activeWizardId = t.id || state.activeWizardId;
+      const geometryId = genId('geom');
+      const displayName = `Layout ${geometryMeta.length + 1}`;
+      const createdAt = new Date().toISOString();
+      upsertGeometryMeta(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, { geometryId, displayName, createdAt });
+      state.activeGeometryId = geometryId;
+      state.docType = t.documentTypeId || state.docType;
+      state.profile = null;
+      console.info('[geom-add-template]', { wizardId: state.activeWizardId, geometryId, displayName, createdAt });
+      activateConfigMode();
+      ensureProfile(t.id, geometryId);
+      if(els.wizardSection) els.wizardSection.style.display = 'block';
+      if(els.builderSection) els.builderSection.style.display = 'none';
+      if(els.app) els.app.style.display = 'none';
+      initStepsFromActiveWizard();
+      goToStep(0);
+    });
+    actions.appendChild(addGeomBtn);
     const exportBtn = document.createElement('button');
     exportBtn.type = 'button';
     exportBtn.className = 'btn';
@@ -10581,7 +10872,7 @@ function completeLogin(opts = {}){
     }));
   } catch(err){ console.warn('[id-drift][completeLogin] log failed', err); }
   const targetWizardId = state.activeWizardId || (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
-  const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId) : null;
+  const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
   state.profile = existing || state.profile || null;
   hydrateFingerprintsFromProfile(state.profile);
   try {
@@ -11047,7 +11338,7 @@ els.docType?.addEventListener('change', ()=>{
     state.activeWizardId = DEFAULT_WIZARD_ID;
   }
   const wizardId = state.activeWizardId || (isSkinV2 ? '' : currentWizardId());
-  const existing = wizardId ? loadProfile(state.username, state.docType, wizardId) : null;
+  const existing = wizardId ? loadProfile(state.username, state.docType, wizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
   renderSavedFieldsTable();
@@ -11110,13 +11401,15 @@ if(modelSelect){
         populateModelSelect(undefined);
       } else {
         state.activeWizardId = DEFAULT_WIZARD_ID;
-        state.profile = loadProfile(state.username, state.docType, currentWizardId());
+        state.activeGeometryId = DEFAULT_GEOMETRY_ID;
+        state.profile = loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
         hydrateFingerprintsFromProfile(state.profile);
         alert('Default wizard selected.');
       }
     } else if(val.startsWith('custom:')){
       state.activeWizardId = val.replace('custom:','');
-      state.profile = loadProfile(state.username, state.docType, currentWizardId());
+      state.activeGeometryId = DEFAULT_GEOMETRY_ID;
+      state.profile = loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
       hydrateFingerprintsFromProfile(state.profile);
       if(isSkinV2){
         populateModelSelect(`custom:${state.activeWizardId}`);
@@ -11678,6 +11971,100 @@ function scanWizardStorageKeys(wizardId){
   return matches;
 }
 
+function probeTypeHint(field){
+  const hintRaw = (field?.magicDataType || field?.magicType || '').toLowerCase();
+  const key = (field?.fieldKey || '').toLowerCase();
+  if(hintRaw.includes('date') || key.includes('date')) return 'date';
+  if(hintRaw.includes('currency') || hintRaw.includes('money') || /total|amount|tax|subtotal/.test(key)) return 'money';
+  if(hintRaw.includes('number') || hintRaw.includes('numeric') || key.includes('qty') || key.includes('quantity')) return 'number';
+  return '';
+}
+
+function pickProbeFields(profile){
+  const fields = Array.isArray(profile?.fields) ? profile.fields : [];
+  const globals = fields.filter(f => f.type === 'static' && !f.isArea && !f.isSubordinate);
+  const typed = globals.filter(f => !!probeTypeHint(f));
+  const seen = new Set();
+  const ordered = [...typed, ...globals].filter(f => {
+    if(!f?.fieldKey || seen.has(f.fieldKey)) return false;
+    seen.add(f.fieldKey);
+    return true;
+  });
+  return ordered.slice(0, 3);
+}
+
+function probeValuePlausibility(value, hint){
+  const text = (value || '').trim();
+  if(!text) return false;
+  const hasDigit = /\d/.test(text);
+  if(!hasDigit) return false;
+  if(hint === 'date'){
+    const hasSeparator = /[\/\-\s]/.test(text);
+    return (hasSeparator && hasDigit) || RE.date.test(text);
+  }
+  if(hint === 'money'){
+    return /\d[\d,\.\s-]*/.test(text) || RE.currency.test(text);
+  }
+  if(hint === 'number') return /[-+]?\d/.test(text);
+  return true;
+}
+
+function runGeometryProbe(profile){
+  const probeFields = pickProbeFields(profile);
+  if(!probeFields.length) return { pass: false, results: [] };
+  const results = probeFields.map(spec => {
+    const placement = resolveStaticPlacement(spec, state.pageViewports, state.numPages);
+    const targetPage = placement?.pageNumber ? clamp(placement.pageNumber, 1, state.numPages || 1) : 1;
+    const tokens = state.tokensByPage[targetPage] || [];
+    const text = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }).map(t => t.text).join(' ').trim() : '';
+    const hint = probeTypeHint(spec);
+    const plausible = probeValuePlausibility(text, hint);
+    return { fieldKey: spec.fieldKey, value: text, hint, plausible };
+  });
+  const plausibleCount = results.filter(r => r.value && r.plausible).length;
+  const needed = results.length >= 3 ? 2 : 1;
+  const pass = results.length > 0 && plausibleCount >= needed;
+  return { pass, results };
+}
+
+function geometrySizeDistance(targetSize, currentSize){
+  const tW = targetSize?.pageWidthPx || targetSize?.width || targetSize?.w || 0;
+  const tH = targetSize?.pageHeightPx || targetSize?.height || targetSize?.h || 0;
+  const cW = currentSize?.pageWidthPx || currentSize?.w || currentSize?.width || 0;
+  const cH = currentSize?.pageHeightPx || currentSize?.h || currentSize?.height || 0;
+  if(tW && tH && cW && cH){
+    return Math.abs(tW - cW) + Math.abs(tH - cH);
+  }
+  const tA = targetSize?.aspect;
+  const cA = currentSize?.aspect || (cH ? cW / cH : null);
+  if(tA && cA){
+    return Math.abs(tA - cA);
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function selectGeometryForRun({ wizardId, docType, geometryIds, preferredGeometryId }){
+  const candidates = geometryIds.map(gid => ({
+    geometryId: gid,
+    profile: loadProfile(state.username, docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid)
+  })).filter(c => !!c.profile);
+  if(candidates.length <= 1){
+    return { winner: candidates[0] || null, probePassed: true };
+  }
+  const currentSize = geometryPageSizeFromState();
+  const ranked = candidates.map(c => ({
+    ...c,
+    sizeDistance: geometrySizeDistance(c.profile?.geometry?.pageSize, currentSize)
+  })).sort((a,b)=> (a.sizeDistance - b.sizeDistance));
+  for(const cand of ranked){
+    const probe = runGeometryProbe(cand.profile);
+    if(probe.pass){
+      return { winner: cand, probePassed: true, probe };
+    }
+  }
+  return { winner: ranked[0] || null, probePassed: false };
+}
+
 /* ---------------------------- Batch ------------------------------- */
 async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   const guardKey = runKeyForFile(file);
@@ -11692,6 +12079,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   try {
     activateRunMode({ clearDoc: true });
     const wizardId = runContext.wizardId || profile?.wizardId || currentWizardId();
+    let geometryId = runContext.geometryId || profile?.geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID;
     const selectionValue = runContext.selectionValue || runContext.value || null;
     const selectionSource = runContext.selectionSource || runContext.source || null;
     const displayName = runContext.displayName || runContext.selectionLabel || null;
@@ -11702,6 +12090,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         selectionSource,
         displayName,
         activeWizardId: state.activeWizardId,
+        activeGeometryId: state.activeGeometryId,
         profileWizardId: profile?.wizardId || state.profile?.wizardId || null
       };
       console.error('[wizard-run][error]', payload);
@@ -11712,8 +12101,22 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     if(state.activeWizardId !== wizardId){
       state.activeWizardId = wizardId;
     }
-    const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
-    const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    state.activeGeometryId = geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID;
+    let profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
+    const geometryIds = collectGeometryIdsForWizard(state.username, state.docType, wizardId);
+    console.info('[geom-run-selector]', { wizardId, geometryIds, requestedGeometryId: geometryId, profileKey: profileStorageKey });
+    let storedProfile = loadProfile(state.username, state.docType, wizardId, geometryId);
+    if(!storedProfile){
+      for(const gid of geometryIds){
+        const candidateProfile = loadProfile(state.username, state.docType, wizardId, gid);
+        if(candidateProfile){
+          storedProfile = candidateProfile;
+          geometryId = gid;
+          profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
+          break;
+        }
+      }
+    }
     const hasGeom = Array.isArray(storedProfile?.fields) && storedProfile.fields.some(hasFieldGeometry);
     if(!storedProfile?.isConfigured || !hasGeom){
       notifyRunIssue('Please configure this wizard before running extraction.');
@@ -11728,6 +12131,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       normBox: null,
       profileKey: profileStorageKey,
       wizardId,
+      geometryId,
       docType: state.docType || null
     };
     try {
@@ -11810,7 +12214,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       note:'incoming-profile'
     });
     try {
-      const patternKey = patternStoreKey(state.docType, wizardId);
+      const patternKey = patternStoreKey(state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
       console.info('[id-drift][runModeExtractFileWithProfile]', JSON.stringify({
         isSkinV2,
         fileName: file?.name || null,
@@ -11819,6 +12223,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         docType: state.docType,
         activeWizardId: state.activeWizardId,
         wizardId,
+        geometryId,
         profileKey: profileStorageKey,
         patternKey,
         displayName,
@@ -11826,8 +12231,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         selectionSource
       }));
     } catch(err){ console.warn('[id-drift][runModeExtractFileWithProfile] log failed', err); }
-    const incomingProfile = profile ? migrateProfile(clonePlain(profile)) : null;
-    const resolvedProfile = mergeProfileGeometry(incomingProfile, storedProfile) || storedProfile || incomingProfile || null;
+    let incomingProfile = (profile && profile.geometryId === geometryId) ? migrateProfile(clonePlain(profile)) : null;
+    let resolvedProfile = storedProfile || incomingProfile || null;
     const storedSnapshot = profileGeometrySnapshot(storedProfile);
     const wizardStorageScan = scanWizardStorageKeys(wizardId);
     const geometryKeys = wizardStorageScan.filter(entry => entry.hasGeometry).map(entry => entry.key);
@@ -11904,7 +12309,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       note:'post-ensure'
     });
     geomSnapshotCursor = ensuredSnapshot;
-    const activeProfile = state.profile || profile || { fields: [] };
+    let activeProfile = state.profile || profile || { fields: [] };
     if(isRunMode()){
       const profileFieldDiagnostics = (activeProfile.fields || []).map(f => ({
         key: f.fieldKey,
@@ -11954,6 +12359,27 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         notes: warnMsg
       });
     }
+    if(geometryIds.length > 1){
+      const selection = selectGeometryForRun({ wizardId, docType: state.docType, geometryIds, preferredGeometryId: geometryId });
+      if(selection?.winner && selection.probePassed){
+        if(selection.winner.geometryId !== geometryId){
+          geometryId = selection.winner.geometryId;
+          profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
+          storedProfile = selection.winner.profile;
+          resolvedProfile = storedProfile || null;
+          state.profile = resolvedProfile;
+          state.activeGeometryId = geometryId;
+          syncActiveWizardId(state.profile);
+          syncActiveGeometryId(state.profile);
+          hydrateFingerprintsFromProfile(state.profile);
+          activeProfile = state.profile;
+        }
+      } else if(selection && !selection.probePassed){
+        notifyRunIssue('No matching template matched this document. Please configure or select a template.');
+        return;
+      }
+    }
+    state.activeGeometryId = geometryId;
 
     await extractAreaRows(activeProfile);
     traceEvent(runSpanKey,'columns:merge',{
