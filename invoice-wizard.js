@@ -1072,8 +1072,9 @@ const LS = {
   },
   getProfile(u,d,wizardId = DEFAULT_WIZARD_ID, geometryId = null){
     const keys = [];
+    const isDefaultGeom = !geometryId || geometryId === DEFAULT_GEOMETRY_ID;
     keys.push(this.profileKey(u,d,wizardId, geometryId || null));
-    if(geometryId){
+    if(isDefaultGeom && geometryId){
       keys.push(this.profileKey(u,d,wizardId, null));
     }
     for(const key of keys){
@@ -2034,10 +2035,10 @@ function saveProfile(u, d, p, wizardId = currentWizardId(), geometryId = current
       mode: isRunMode() ? 'RUN' : 'CONFIG',
       docType: d,
       wizardId,
-      geometryId: resolvedGeometryId,
-      profileKey: key,
-      profile: p
-    });
+        geometryId: resolvedGeometryId,
+        profileKey: key,
+        profile: p
+      });
     const preSaveSnapshot = snapshotProfileGeometry(p);
     traceSnapshot('config.pre-save',{
       stage:'config.pre-save',
@@ -5383,9 +5384,14 @@ function renderWizardManagerList(selectedId=null){
       state.activeGeometryId = geometryId;
       state.docType = t.documentTypeId || state.docType;
       state.profile = null;
+      console.info('[geom-add-template]', { wizardId: state.activeWizardId, geometryId, displayName, createdAt });
       activateConfigMode();
       ensureProfile(t.id, geometryId);
-      renderWizardManagerList(t.id);
+      if(els.wizardSection) els.wizardSection.style.display = 'block';
+      if(els.builderSection) els.builderSection.style.display = 'none';
+      if(els.app) els.app.style.display = 'none';
+      initStepsFromActiveWizard();
+      goToStep(0);
     });
     actions.appendChild(addGeomBtn);
     const exportBtn = document.createElement('button');
@@ -12098,6 +12104,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     state.activeGeometryId = geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID;
     let profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
     const geometryIds = collectGeometryIdsForWizard(state.username, state.docType, wizardId);
+    console.info('[geom-run-selector]', { wizardId, geometryIds, requestedGeometryId: geometryId, profileKey: profileStorageKey });
     let storedProfile = loadProfile(state.username, state.docType, wizardId, geometryId);
     if(!storedProfile){
       for(const gid of geometryIds){
@@ -12224,8 +12231,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         selectionSource
       }));
     } catch(err){ console.warn('[id-drift][runModeExtractFileWithProfile] log failed', err); }
-    let incomingProfile = profile ? migrateProfile(clonePlain(profile)) : null;
-    let resolvedProfile = mergeProfileGeometry(incomingProfile, storedProfile) || storedProfile || incomingProfile || null;
+    let incomingProfile = (profile && profile.geometryId === geometryId) ? migrateProfile(clonePlain(profile)) : null;
+    let resolvedProfile = storedProfile || incomingProfile || null;
     const storedSnapshot = profileGeometrySnapshot(storedProfile);
     const wizardStorageScan = scanWizardStorageKeys(wizardId);
     const geometryKeys = wizardStorageScan.filter(entry => entry.hasGeometry).map(entry => entry.key);
@@ -12359,7 +12366,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           geometryId = selection.winner.geometryId;
           profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
           storedProfile = selection.winner.profile;
-          resolvedProfile = mergeProfileGeometry(incomingProfile, storedProfile) || storedProfile || incomingProfile || null;
+          resolvedProfile = storedProfile || null;
           state.profile = resolvedProfile;
           state.activeGeometryId = geometryId;
           syncActiveWizardId(state.profile);
