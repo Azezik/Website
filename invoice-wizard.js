@@ -125,6 +125,8 @@ const els = {
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
   wizardManagerNewBtn: document.getElementById('wizard-manager-new'),
+  wizardManagerImportBtn: document.getElementById('wizard-manager-import'),
+  wizardDefinitionImportInput: document.getElementById('wizard-definition-import'),
   docType:         document.getElementById('doc-type'),
   dataDocType:     document.getElementById('data-doc-type'),
   showBoxesToggle: document.getElementById('show-boxes-toggle'),
@@ -1055,6 +1057,96 @@ const LS = {
   removeProfile(u,d,wizardId = DEFAULT_WIZARD_ID){ localStorage.removeItem(this.profileKey(u,d,wizardId)); }
 };
 
+function scrubSegmentStoreForWizard(wizardId){
+  if(!wizardId || typeof localStorage === 'undefined') return;
+  const storeRaw = localStorage.getItem('ocrmagic.segmentStore');
+  const chunkRaw = localStorage.getItem('ocrmagic.segmentStore.chunks');
+  try{
+    const store = storeRaw ? JSON.parse(storeRaw) : null;
+    if(store && typeof store === 'object'){
+      Object.keys(store).forEach(k => { if(k.startsWith(`${wizardId}::`)) delete store[k]; });
+      localStorage.setItem('ocrmagic.segmentStore', JSON.stringify(store));
+    }
+  } catch(err){ console.warn('[import] scrub segment store failed', err); }
+  try{
+    const chunkStore = chunkRaw ? JSON.parse(chunkRaw) : null;
+    if(chunkStore && typeof chunkStore === 'object'){
+      Object.keys(chunkStore).forEach(k => { if(k.startsWith(`${wizardId}::`)) delete chunkStore[k]; });
+      localStorage.setItem('ocrmagic.segmentStore.chunks', JSON.stringify(chunkStore));
+    }
+  } catch(err){ console.warn('[import] scrub segment chunk store failed', err); }
+}
+
+function clearWizardArtifacts(username, docType, wizardId){
+  if(!wizardId) return;
+  try { LS.removeProfile(username, docType, wizardId); } catch(err){}
+  try { localStorage.removeItem(LS.dbKey(username, docType, wizardId)); } catch(err){}
+  try { localStorage.removeItem(LS.rowsKey(username, docType, wizardId)); } catch(err){}
+  try {
+    const patternKey = patternStoreKey(docType, wizardId);
+    localStorage.removeItem(patternKey);
+  } catch(err){}
+  scrubSegmentStoreForWizard(wizardId);
+}
+
+function exportWizardDefinition(docType, wizardId){
+  const templates = getStoredTemplates();
+  const template = templates.find(t => t.id === wizardId && t.documentTypeId === docType);
+  if(!template){
+    alert('Wizard definition not found.');
+    return;
+  }
+  const payload = {
+    kind: 'wizard-definition',
+    version: PROFILE_VERSION,
+    wizardId: wizardId,
+    docType,
+    wizardName: template.wizardName || template.id,
+    fields: template.fields || [],
+    masterDbConfig: template.masterDbConfig || null,
+    source: { exportedAt: new Date().toISOString(), exportedBy: state.username || null }
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `wzrd.definition.${docType || 'invoice'}.${wizardId}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importWizardDefinition(defJson){
+  if(!defJson || typeof defJson !== 'object'){
+    alert('Invalid wizard definition file.');
+    return;
+  }
+  const fields = Array.isArray(defJson.fields) ? defJson.fields : [];
+  if(!fields.length){
+    alert('Wizard definition is missing fields.');
+    return;
+  }
+  const name = (defJson.wizardName || defJson.name || '').trim() || 'Imported Wizard';
+  const docType = defJson.docType || defJson.documentTypeId || state.docType || 'invoice';
+  const newWizardId = genId('wiz');
+  const template = normalizeTemplate({
+    id: newWizardId,
+    wizardName: name,
+    fields,
+    documentTypeId: docType,
+    masterDbConfig: defJson.masterDbConfig || null,
+    sourceWizardId: defJson.wizardId || defJson.id || null,
+    sourceImportMeta: defJson.source || null
+  });
+  persistTemplate(state.username, docType, template);
+  clearWizardArtifacts(state.username, docType, newWizardId);
+  state.docType = docType;
+  state.activeWizardId = newWizardId;
+  refreshWizardTemplates();
+  populateModelSelect(`custom:${newWizardId}`);
+  openBuilder(template);
+  alert('Wizard imported. Review and save to continue configuration.');
+}
+
 function cloneJsonSafe(obj){
   try {
     return JSON.parse(JSON.stringify(obj, jsonReplacer));
@@ -1772,7 +1864,7 @@ function saveProfile(u, d, p, wizardId = currentWizardId()){
 function loadProfile(u, d, wizardId = currentWizardId()){
   try{
     const raw = LS.getProfile(u, d, wizardId);
-    const migrated = migrateProfile(raw);
+    const migrated = ensureConfiguredFlag(migrateProfile(raw));
     logProfileStorage('load', {
       mode: isRunMode() ? 'RUN' : 'CONFIG',
       docType: d,
@@ -4195,6 +4287,7 @@ function ensureProfile(requestedWizardId){
   }
   if(state.profile && state.profile.wizardId === resolvedWizardId){
     hydrateFingerprintsFromProfile(state.profile);
+    ensureConfiguredFlag(state.profile);
     try {
       const hasGeom = Array.isArray(state.profile.fields) && state.profile.fields.some(hasFieldGeometry);
       console.info('[id-drift][ensureProfile]', JSON.stringify({
@@ -4309,6 +4402,7 @@ function ensureProfile(requestedWizardId){
       rowAnchor: null
     }
   };
+  state.profile.isConfigured = ensureConfiguredFlag(existing || null)?.isConfigured || false;
 
   if(state.profile && !state.profile.wizardId){
     state.profile.wizardId = resolvedWizardId;
@@ -4364,6 +4458,7 @@ function ensureProfile(requestedWizardId){
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
   const templateConfig = template?.masterDbConfig || null;
   state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
+  ensureConfiguredFlag(state.profile);
   hydrateFingerprintsFromProfile(state.profile);
   saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
@@ -5008,6 +5103,14 @@ function renderWizardManagerList(selectedId=null){
       openBuilder(t);
     });
     actions.appendChild(editBtn);
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.className = 'btn';
+    exportBtn.textContent = 'Export';
+    exportBtn.addEventListener('click', () => {
+      exportWizardDefinition(t.documentTypeId || state.docType, t.id);
+    });
+    actions.appendChild(exportBtn);
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.className = 'btn ghost';
@@ -10291,6 +10394,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   }
   if(existing) Object.assign(existing, entry); else state.profile.fields.push(entry);
   const wizardId = state.profile?.wizardId || currentWizardId();
+  state.profile.isConfigured = true;
   const profileKey = LS.profileKey(state.username, state.docType, wizardId);
   const capturedSnapshot = snapshotProfileGeometry(state.profile);
   traceSnapshot('config.field-captured',{
@@ -10959,6 +11063,21 @@ els.builderAddFieldBtn?.addEventListener('click', addBuilderField);
 els.builderSaveBtn?.addEventListener('click', saveBuilderTemplate);
 els.builderCancelBtn?.addEventListener('click', ()=>{ resetBuilderErrors(); closeBuilder(); });
 els.wizardManagerNewBtn?.addEventListener('click', ()=>{ state.activeWizardId = ''; openBuilder(null); });
+els.wizardManagerImportBtn?.addEventListener('click', ()=>{ els.wizardDefinitionImportInput?.click(); });
+els.wizardDefinitionImportInput?.addEventListener('change', async (e)=>{
+  const file = e.target.files?.[0];
+  if(!file) return;
+  try{
+    const text = await file.text();
+    const json = JSON.parse(text);
+    importWizardDefinition(json);
+  } catch(err){
+    console.error('[import] failed', err);
+    alert('Failed to import wizard definition.');
+  } finally {
+    e.target.value = '';
+  }
+});
 
 els.dataDocType?.addEventListener('change', ()=>{ renderResultsTable(); renderReports(); });
 els.showRawToggle?.addEventListener('change', ()=>{ renderResultsTable(); });
@@ -11473,6 +11592,14 @@ function hasFieldGeometry(field){
   return !!(field.normBox || field.bboxPct || field.bbox || field.boxPx || field.rawBox || field.staticGeom || field.configBox);
 }
 
+function ensureConfiguredFlag(profile){
+  if(!profile || typeof profile !== 'object') return profile;
+  if(profile.isConfigured === undefined){
+    profile.isConfigured = Array.isArray(profile.fields) ? profile.fields.some(hasFieldGeometry) : false;
+  }
+  return profile;
+}
+
 function profileGeometrySnapshot(profile){
   const fields = Array.isArray(profile?.fields) ? profile.fields : [];
   return {
@@ -11587,6 +11714,14 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
     const profileStorageKey = LS.profileKey(state.username, state.docType, wizardId);
     const storedProfile = loadProfile(state.username, state.docType, wizardId);
+    const hasGeom = Array.isArray(storedProfile?.fields) && storedProfile.fields.some(hasFieldGeometry);
+    if(!storedProfile?.isConfigured || !hasGeom){
+      notifyRunIssue('Please configure this wizard before running extraction.');
+      activateConfigMode({ clearDoc: true });
+      state.profile = storedProfile || state.profile;
+      state.activeWizardId = wizardId;
+      return;
+    }
     const runStartInput = {
       fileName: file?.name || null,
       boxPx: null,
