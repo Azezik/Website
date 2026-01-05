@@ -251,6 +251,7 @@ const DEFAULT_WIZARD_ID = 'default';
 const DEFAULT_GEOMETRY_ID = 'geom0';
 const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
+const EXTRACTED_WIZARD_SELECTION_KEY = 'wiz.extractedSelection';
 
 const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
 const magicTypeResolutionLog = new Set();
@@ -339,6 +340,10 @@ function showTab(id){
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
   if(id === 'wizard-manager'){
     renderWizardManagerList(state.activeWizardId);
+  } else if(id === 'extracted-data'){
+    syncExtractedWizardSelector();
+    renderResultsTable();
+    renderReports();
   }
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
@@ -1057,11 +1062,36 @@ function getWizardDocType(wizardId){
   return tpl?.documentTypeId || '';
 }
 
+function loadExtractedWizardSelection(){
+  const user = state.username || '';
+  if(!user) return null;
+  try{
+    const raw = localStorage.getItem(`${EXTRACTED_WIZARD_SELECTION_KEY}.${user}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch(err){
+    console.warn('[extracted-data] failed to load selection', err);
+    return null;
+  }
+}
+
+function persistExtractedWizardSelection(wizardId, docType){
+  const user = state.username || '';
+  if(!user) return;
+  try{
+    const payload = { wizardId: wizardId || '', docType: docType || state.docType || '' };
+    localStorage.setItem(`${EXTRACTED_WIZARD_SELECTION_KEY}.${user}`, JSON.stringify(payload));
+  } catch(err){
+    console.warn('[extracted-data] failed to persist selection', err);
+  }
+}
+
 function collectWizardOptionsForExtractedData(){
   const options = [];
   const seen = new Set();
   const keyFor = (wizardId, docType) => `${docType || ''}::${wizardId || '__blank__'}`;
-  const storedTemplates = getStoredTemplates().map(normalizeTemplate);
+  const storedTemplates = getStoredTemplates()
+    .map(normalizeTemplate)
+    .filter(t => t.username === state.username && (t.documentTypeId || state.docType) === state.docType);
   const templateByKey = new Map(storedTemplates.map(t => [keyFor(t.id, t.documentTypeId || state.docType), t]));
   const push = (wizardId, label, docType) => {
     const key = keyFor(wizardId, docType);
@@ -1097,7 +1127,8 @@ function syncExtractedWizardSelector(desiredId = null){
   if(!sel) return;
   const options = collectWizardOptionsForExtractedData();
   sel.innerHTML = options.map(opt => `<option value="${opt.wizardId}" data-doc-type="${opt.docType || state.docType}">${opt.label}</option>`).join('');
-  const desired = desiredId ?? state.extractedWizardId ?? state.activeWizardId ?? '';
+  const stored = loadExtractedWizardSelection();
+  const desired = desiredId ?? stored?.wizardId ?? state.extractedWizardId ?? state.activeWizardId ?? '';
   const hasDesired = options.some(opt => opt.wizardId === desired);
   const fallback = hasDesired
     ? desired
@@ -1105,14 +1136,17 @@ function syncExtractedWizardSelector(desiredId = null){
   sel.value = fallback;
   const selected = sel.selectedOptions?.[0];
   state.extractedWizardId = sel.value || '';
-  state.extractedWizardDocType = selected?.dataset.docType || getWizardDocType(state.extractedWizardId) || state.docType;
+  const resolvedDocType = selected?.dataset.docType || stored?.docType || getWizardDocType(state.extractedWizardId) || state.docType;
+  state.extractedWizardDocType = resolvedDocType || state.docType;
+  persistExtractedWizardSelection(state.extractedWizardId, state.extractedWizardDocType);
 }
 
 function resolveExtractedWizardContext(){
   syncExtractedWizardSelector();
   const sel = els.dataWizardSelect;
   const selectedValue = sel?.value || state.extractedWizardId || '';
-  const selectedDocType = sel?.selectedOptions?.[0]?.dataset.docType || state.extractedWizardDocType || '';
+  const stored = loadExtractedWizardSelection();
+  const selectedDocType = sel?.selectedOptions?.[0]?.dataset.docType || state.extractedWizardDocType || stored?.docType || '';
   let wizardId = selectedValue;
   if(!wizardId){
     wizardId = state.activeWizardId || currentWizardId() || DEFAULT_WIZARD_ID;
@@ -1121,6 +1155,7 @@ function resolveExtractedWizardContext(){
   if(!docType) docType = state.docType;
   state.extractedWizardId = wizardId;
   state.extractedWizardDocType = docType;
+  persistExtractedWizardSelection(wizardId, docType);
   return { wizardId, docType };
 }
 
@@ -11450,8 +11485,12 @@ els.wizardDefinitionImportInput?.addEventListener('change', async (e)=>{
 
 els.dataWizardSelect?.addEventListener('change', ()=>{
   const selected = els.dataWizardSelect.selectedOptions?.[0];
-  state.extractedWizardId = els.dataWizardSelect.value || '';
-  state.extractedWizardDocType = selected?.dataset.docType || getWizardDocType(state.extractedWizardId) || state.docType;
+  const nextWizardId = els.dataWizardSelect.value || '';
+  const nextDocType = selected?.dataset.docType || getWizardDocType(nextWizardId) || state.docType;
+  state.extractedWizardId = nextWizardId;
+  state.extractedWizardDocType = nextDocType;
+  persistExtractedWizardSelection(nextWizardId, nextDocType);
+  syncExtractedWizardSelector(nextWizardId);
   state.selectedRunId = '';
   renderResultsTable();
   renderReports();
