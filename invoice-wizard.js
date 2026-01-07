@@ -553,6 +553,44 @@ function clearTransientStateLocal(){
   return state;
 }
 
+function clearConfigResultsUi({ preserveProfileJson = true } = {}){
+  state.savedFieldsRecord = null;
+  state.selectedRunId = '';
+  if(els.fieldsPreview) els.fieldsPreview.innerHTML = '<p class="sub">No fields yet.</p>';
+  if(preserveProfileJson && els.savedJson){
+    els.savedJson.textContent = serializeProfile(state.profile);
+  } else if(els.savedJson){
+    els.savedJson.textContent = '';
+  }
+  const fDiv = document.getElementById('confirmedFields');
+  if(fDiv) fDiv.innerHTML = '<p class="sub">No fields yet.</p>';
+  const liDiv = document.getElementById('confirmedLineItems');
+  if(liDiv) liDiv.innerHTML = '<p class="sub">No line items.</p>';
+}
+
+function resetConfigSessionState(reason = 'config-entry'){
+  clearTransientStateLocal();
+  resetDocArtifacts();
+  if(els.imgCanvas){
+    els.imgCanvas.src = '';
+    els.imgCanvas.style.display = 'none';
+  }
+  if(els.pdfCanvas){
+    const ctx = els.pdfCanvas.getContext('2d');
+    if(ctx) ctx.clearRect(0, 0, els.pdfCanvas.width, els.pdfCanvas.height);
+    els.pdfCanvas.style.display = 'block';
+  }
+  if(els.pageControls) els.pageControls.style.display = 'none';
+  if(els.overlayHud) els.overlayHud.textContent = '';
+  clearConfigResultsUi({ preserveProfileJson: true });
+  console.info('[config-reset]', {
+    reason,
+    username: state.username,
+    docType: state.docType,
+    wizardId: currentWizardId()
+  });
+}
+
 function wipeAllWizardData(){
   try {
     localStorage.clear();
@@ -630,9 +668,8 @@ function activateRunMode(opts = {}){
 }
 
 function activateConfigMode(){
-  clearTransientStateLocal();
+  resetConfigSessionState('activate-config-mode');
   setWizardMode(ModeEnum.CONFIG);
-  resetDocArtifacts();
   initStepsFromActiveWizard();
 }
 
@@ -1106,6 +1143,23 @@ function persistExtractedWizardSelection(wizardId, docType){
   }
 }
 
+function clearExtractedWizardSelectionForWizard(username, docType, wizardId){
+  if(!username || !wizardId) return false;
+  const stored = loadExtractedWizardSelection();
+  const matchesStored = stored?.wizardId === wizardId && (!docType || stored?.docType === docType);
+  const matchesState = state.extractedWizardId === wizardId && (!docType || state.extractedWizardDocType === docType);
+  if(!matchesStored && !matchesState) return false;
+  state.extractedWizardId = '';
+  state.extractedWizardDocType = state.docType;
+  persistExtractedWizardSelection('', state.docType);
+  console.info('[wizard-delete] cleared extracted wizard selection', {
+    username,
+    docType,
+    wizardId
+  });
+  return true;
+}
+
 function collectWizardOptionsForExtractedData(){
   const options = [];
   const seen = new Set();
@@ -1367,6 +1421,98 @@ function clearWizardArtifacts(username, docType, wizardId){
     localStorage.removeItem(legacyPatternKey);
   } catch(err){}
   geometryIds.forEach(gid => scrubSegmentStoreForWizard(wizardId, gid));
+}
+
+function removeWizardProfileVariants(username, docType, wizardId, geometryIds = []){
+  const ids = new Set([...(geometryIds || []), DEFAULT_GEOMETRY_ID]);
+  ids.forEach(gid => {
+    const keyId = gid === DEFAULT_GEOMETRY_ID ? null : gid;
+    try { LS.removeProfile(username, docType, wizardId, keyId); } catch(err){}
+  });
+  if(!wizardId) return;
+  try {
+    const prefix = `wiz.profile.${username}.${docType}.${wizardId}`;
+    const keysToRemove = [];
+    for(let i=0;i<localStorage.length;i++){
+      const key = localStorage.key(i);
+      if(key && key.startsWith(prefix)) keysToRemove.push(key);
+    }
+    keysToRemove.forEach(key => localStorage.removeItem(key));
+  } catch(err){ console.warn('[wizard-delete] profile key scan failed', err); }
+}
+
+async function deleteWizardFromCloud(username, docType, wizardId){
+  const api = window.firebaseApi;
+  if(!api?.db || !api?.doc || !api?.getDoc || !api?.setDoc){
+    console.info('[wizard-delete][cloud] firebase unavailable', { wizardId, docType });
+    return false;
+  }
+  const { user, username: resolvedUsername } = await resolveAuthenticatedIdentity('wizard-delete', { usernameHint: username });
+  if(!user || !resolvedUsername){
+    console.info('[wizard-delete][cloud] no authenticated user', { wizardId, docType });
+    return false;
+  }
+  const targetUsername = resolvedUsername || username;
+  const ref = api.doc(api.db, 'Users', user.uid, 'Accounts', targetUsername, 'Backups', 'manual');
+  try{
+    const snap = await api.getDoc(ref);
+    if(!snap.exists()){
+      console.info('[wizard-delete][cloud] no backup document', { wizardId, docType, username: targetUsername });
+      return false;
+    }
+    const data = snap.data() || {};
+    const payload = data?.payload;
+    if(!payload || typeof payload !== 'object'){
+      console.info('[wizard-delete][cloud] no payload to update', { wizardId, docType, username: targetUsername });
+      return false;
+    }
+    let changed = false;
+    if(Array.isArray(payload.customTemplates)){
+      const nextTemplates = payload.customTemplates.filter(t => !(t?.id === wizardId && (!docType || t?.documentTypeId === docType)));
+      if(nextTemplates.length !== payload.customTemplates.length){
+        payload.customTemplates = nextTemplates;
+        changed = true;
+      }
+    }
+    if(payload.wizards && payload.wizards[docType] && payload.wizards[docType][wizardId]){
+      delete payload.wizards[docType][wizardId];
+      if(!Object.keys(payload.wizards[docType]).length){
+        delete payload.wizards[docType];
+      }
+      changed = true;
+    }
+    if(!changed){
+      console.info('[wizard-delete][cloud] nothing to remove', { wizardId, docType, username: targetUsername });
+      return false;
+    }
+    await api.setDoc(ref, { payload, updatedAt: new Date().toISOString() }, { merge: true });
+    console.info('[wizard-delete][cloud] removed wizard data', { wizardId, docType, username: targetUsername });
+    return true;
+  } catch(err){
+    console.warn('[wizard-delete][cloud] failed to update backup', err);
+    return false;
+  }
+}
+
+async function deleteWizardEverywhere(username, docType, wizardId){
+  if(!wizardId) return;
+  const geometryIds = collectGeometryIdsForWizard(username, docType, wizardId);
+  console.info('[wizard-delete] start', { username, docType, wizardId, geometryIds });
+  removeWizardProfileVariants(username, docType, wizardId, geometryIds);
+  try { localStorage.removeItem(LS.geometryMetaKey(username, docType, wizardId)); } catch(err){}
+  try { localStorage.removeItem(LS.dbKey(username, docType, wizardId)); } catch(err){}
+  try { localStorage.removeItem(LS.rowsKey(username, docType, wizardId)); } catch(err){}
+  try {
+    geometryIds.forEach(gid => {
+      const patternKey = patternStoreKey(docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
+      localStorage.removeItem(patternKey);
+    });
+    localStorage.removeItem(patternStoreKey(docType, wizardId));
+  } catch(err){ console.warn('[wizard-delete] pattern cleanup failed', err); }
+  scrubSegmentStoreForWizard(wizardId);
+  clearExtractedWizardSelectionForWizard(username, docType, wizardId);
+  await deleteWizardFromCloud(username, docType, wizardId);
+  console.info('[wizard-delete] complete', { username, docType, wizardId });
 }
 
 function countWords(text){
@@ -5657,22 +5803,24 @@ function renderWizardManagerList(selectedId=null){
     deleteBtn.type = 'button';
     deleteBtn.className = 'btn ghost';
     deleteBtn.textContent = 'Delete';
-    deleteBtn.addEventListener('click', () => {
-      if(!confirm('Delete this wizard? This will not remove existing extraction results.')) return;
-      const remaining = getStoredTemplates().filter(w => w.id !== t.id);
+    deleteBtn.addEventListener('click', async () => {
+      if(!confirm('Delete this wizard? This will remove wizard templates, profiles, extracted data, and saved caches.')) return;
+      const docType = t.documentTypeId || state.docType;
+      const remaining = getStoredTemplates().filter(w => !(w.id === t.id && w.username === state.username));
       setStoredTemplates(remaining);
+      await deleteWizardEverywhere(state.username, docType, t.id);
       refreshWizardTemplates();
       if(selectedId === t.id){ selectedId = null; }
       if(state.activeWizardId === t.id){
         state.activeWizardId = firstCustomWizardId();
+        state.activeGeometryId = DEFAULT_GEOMETRY_ID;
         state.profile = null;
-        clearTransientStateLocal();
-        resetDocArtifacts();
-        cleanupDoc();
-        renderSavedFieldsTable();
-        renderConfirmedTables();
+        resetConfigSessionState('wizard-delete-active');
         initStepsFromActiveWizard();
       }
+      syncExtractedWizardSelector();
+      renderResultsTable();
+      renderReports();
       renderWizardManagerList(selectedId);
       populateModelSelect(state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
     });
@@ -11647,7 +11795,7 @@ function configureSelectedWizard(){
   activateConfigMode();
   els.app.style.display = 'none';
   els.wizardSection.style.display = 'block';
-  renderSavedFieldsTable();
+  clearConfigResultsUi({ preserveProfileJson: true });
 }
 
 if (els.configureBtn) {
