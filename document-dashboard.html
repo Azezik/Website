@@ -62,6 +62,7 @@
       <nav class="subtabs" id="dashTabs">
         <button class="tablink active" data-target="document-dashboard">Doc Dashboard</button>
         <button class="tablink" data-target="wizard-manager">Wizard Manager</button>
+        <button class="tablink" data-target="preconfigured-wizards">Pre-configured Wizards</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
         <button class="tablink" data-target="reports">Reports</button>
       </nav>
@@ -94,6 +95,37 @@
         </div>
         <div id="wizard-manager-empty" class="sub" style="display:none;color:var(--muted);margin-top:8px;">No saved wizards yet. Create one to get started.</div>
         <div id="wizard-manager-list" class="wizard-list"></div>
+      </section>
+
+      <section id="preconfigured-wizards" class="panel" style="display:none;">
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Pre-configured Wizards</h3>
+          <p class="sub" style="margin:0;color:var(--muted);">Browse starter templates hosted in the repository.</p>
+        </div>
+        <div id="preconfigured-wizard-empty" class="sub" style="display:none;color:var(--muted);margin-top:8px;"></div>
+        <div id="preconfigured-wizard-list" class="wizard-list"></div>
+      </section>
+
+      <section id="wizard-export" class="panel" style="display:none;">
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Export Wizard</h3>
+          <p class="sub" style="margin:0;color:var(--muted);">Add a title and description to share your wizard.</p>
+        </div>
+        <div class="field">
+          <label for="wizard-export-title">Title</label>
+          <input id="wizard-export-title" placeholder="e.g., Hospitality Invoice Wizard" />
+        </div>
+        <div class="field">
+          <label for="wizard-export-description">Description</label>
+          <textarea id="wizard-export-description" rows="6" placeholder="Describe the documents this wizard is for and any tips for using it."></textarea>
+          <div class="sub" style="display:flex;justify-content:flex-end;">
+            <span id="wizard-export-counter">0 / 250 words</span>
+          </div>
+        </div>
+        <div class="actions" style="justify-content:flex-end;gap:8px;">
+          <button id="wizard-export-cancel" class="btn ghost" type="button">Cancel</button>
+          <button id="wizard-export-confirm" class="btn primary" type="button">Export</button>
+        </div>
       </section>
 
       <section id="extracted-data" class="panel" style="display:none">
