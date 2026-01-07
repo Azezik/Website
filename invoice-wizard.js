@@ -120,6 +120,15 @@ const els = {
   tabs:            document.querySelectorAll('#dashTabs button'),
   docDashboard:    document.getElementById('document-dashboard'),
   wizardManager:   document.getElementById('wizard-manager'),
+  preconfiguredWizards: document.getElementById('preconfigured-wizards'),
+  preconfiguredWizardList: document.getElementById('preconfigured-wizard-list'),
+  preconfiguredWizardEmpty: document.getElementById('preconfigured-wizard-empty'),
+  wizardExportPanel: document.getElementById('wizard-export'),
+  wizardExportTitle: document.getElementById('wizard-export-title'),
+  wizardExportDescription: document.getElementById('wizard-export-description'),
+  wizardExportCounter: document.getElementById('wizard-export-counter'),
+  wizardExportCancelBtn: document.getElementById('wizard-export-cancel'),
+  wizardExportConfirmBtn: document.getElementById('wizard-export-confirm'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
@@ -334,12 +343,21 @@ function showTab(id){
   if(isSkinV2 && els.wizardManager){
     sections.push(els.wizardManager);
   }
+  if(els.preconfiguredWizards){
+    sections.push(els.preconfiguredWizards);
+  }
+  if(els.wizardExportPanel){
+    sections.push(els.wizardExportPanel);
+  }
   sections.forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
   });
   els.tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.target === id));
   if(id === 'wizard-manager'){
     renderWizardManagerList(state.activeWizardId);
+  } else if(id === 'preconfigured-wizards'){
+    renderPreconfiguredWizardList();
+    loadPreconfiguredWizards();
   } else if(id === 'extracted-data'){
     syncExtractedWizardSelector();
     renderResultsTable();
@@ -355,6 +373,9 @@ let state = {
   activeWizardId: isSkinV2 ? (envWizardBootstrap?.wizardId || sessionBootstrap?.wizardId || '') : DEFAULT_WIZARD_ID,
   activeGeometryId: DEFAULT_GEOMETRY_ID,
   wizardTemplates: [],
+  preconfiguredWizards: [],
+  preconfiguredStatus: 'idle',
+  preconfiguredError: null,
   extractedWizardId: '',
   extractedWizardDocType: '',
   mode: ModeEnum.CONFIG,
@@ -1348,21 +1369,46 @@ function clearWizardArtifacts(username, docType, wizardId){
   geometryIds.forEach(gid => scrubSegmentStoreForWizard(wizardId, gid));
 }
 
-function exportWizardDefinition(docType, wizardId){
+function countWords(text){
+  return (String(text || '').trim().match(/\S+/g) || []).length;
+}
+
+function normalizeWizardDescription(text){
+  return String(text || '').trim();
+}
+
+function buildExportMetadata({ title, description, existing } = {}){
+  const nowIso = new Date().toISOString();
+  const createdAt = existing?.createdAt || nowIso;
+  const cleanedTitle = String(title || existing?.title || '').trim();
+  const cleanedDescription = String(description ?? existing?.description ?? '').trim();
+  return {
+    title: cleanedTitle,
+    description: cleanedDescription,
+    createdAt,
+    updatedAt: existing?.createdAt ? nowIso : undefined
+  };
+}
+
+function exportWizardDefinition(docType, wizardId, exportMetadataOverride = null){
   const templates = getStoredTemplates();
   const template = templates.find(t => t.id === wizardId && t.documentTypeId === docType);
   if(!template){
     alert('Wizard definition not found.');
     return;
   }
+  const exportMetadata = exportMetadataOverride
+    ? buildExportMetadata({ ...exportMetadataOverride, existing: template.exportMetadata })
+    : buildExportMetadata({ title: template.exportMetadata?.title || template.wizardName || template.id, description: template.exportMetadata?.description || '', existing: template.exportMetadata });
   const payload = {
     kind: 'wizard-definition',
     version: PROFILE_VERSION,
     wizardId: wizardId,
     docType,
-    wizardName: template.wizardName || template.id,
+    wizardName: template.wizardName || exportMetadata?.title || template.id,
     fields: template.fields || [],
     masterDbConfig: template.masterDbConfig || null,
+    exportMetadata,
     source: { exportedAt: new Date().toISOString(), exportedBy: state.username || null }
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
@@ -1374,7 +1420,7 @@ function exportWizardDefinition(docType, wizardId){
   URL.revokeObjectURL(url);
 }
 
-function importWizardDefinition(defJson){
+function importWizardDefinition(defJson, options = {}){
   if(!defJson || typeof defJson !== 'object'){
     alert('Invalid wizard definition file.');
     return;
@@ -1384,7 +1430,10 @@ function importWizardDefinition(defJson){
     alert('Wizard definition is missing fields.');
     return;
   }
-  const name = (defJson.wizardName || defJson.name || '').trim() || 'Imported Wizard';
+  const exportMetadata = defJson.exportMetadata && typeof defJson.exportMetadata === 'object'
+    ? buildExportMetadata({ title: defJson.exportMetadata?.title, description: defJson.exportMetadata?.description, existing: defJson.exportMetadata })
+    : null;
+  const name = (exportMetadata?.title || defJson.wizardName || defJson.name || '').trim() || 'Imported Wizard';
   const docType = defJson.docType || defJson.documentTypeId || state.docType || 'invoice';
   const newWizardId = genId('wiz');
   const template = normalizeTemplate({
@@ -1393,6 +1442,7 @@ function importWizardDefinition(defJson){
     fields,
     documentTypeId: docType,
     masterDbConfig: defJson.masterDbConfig || null,
+    exportMetadata,
     sourceWizardId: defJson.wizardId || defJson.id || null,
     sourceImportMeta: defJson.source || null
   });
@@ -1402,8 +1452,13 @@ function importWizardDefinition(defJson){
   state.activeWizardId = newWizardId;
   refreshWizardTemplates();
   populateModelSelect(`custom:${newWizardId}`);
-  openBuilder(template);
-  alert('Wizard imported. Review and save to continue configuration.');
+  if(options.postImport === 'wizard-manager'){
+    showWizardManagerTab(newWizardId);
+  } else {
+    openBuilder(template);
+    alert('Wizard imported. Review and save to continue configuration.');
+  }
+  return newWizardId;
 }
 
 function cloneJsonSafe(obj){
@@ -5450,6 +5505,82 @@ function openBuilder(template=null){
   if(els.builderSection) els.builderSection.style.display = 'block';
 }
 
+function getWizardDisplayTitle(template){
+  const title = template?.exportMetadata?.title || template?.wizardName || template?.id;
+  return String(title || '').trim() || 'Untitled Wizard';
+}
+
+function getWizardDescription(template){
+  const description = template?.exportMetadata?.description || '';
+  return normalizeWizardDescription(description);
+}
+
+function createWizardDescriptionElement(description){
+  const desc = document.createElement('div');
+  desc.className = 'wizard-description';
+  desc.textContent = description || 'No description provided.';
+  desc.addEventListener('click', () => {
+    desc.classList.toggle('expanded');
+  });
+  return desc;
+}
+
+function updateWizardExportCounter(){
+  if(!els.wizardExportDescription || !els.wizardExportCounter) return;
+  const words = countWords(els.wizardExportDescription.value);
+  els.wizardExportCounter.textContent = `${words} / 250 words`;
+}
+
+function enforceWizardExportWordLimit(){
+  if(!els.wizardExportDescription) return;
+  const words = (els.wizardExportDescription.value.match(/\S+/g) || []);
+  if(words.length <= 250){
+    updateWizardExportCounter();
+    return;
+  }
+  const trimmed = words.slice(0, 250).join(' ');
+  els.wizardExportDescription.value = trimmed;
+  updateWizardExportCounter();
+}
+
+function openWizardExportPanel(template){
+  if(!template) return;
+  const title = template.exportMetadata?.title || template.wizardName || template.id || '';
+  const description = template.exportMetadata?.description || '';
+  if(els.wizardExportTitle) els.wizardExportTitle.value = title;
+  if(els.wizardExportDescription) els.wizardExportDescription.value = description;
+  updateWizardExportCounter();
+  showTab('wizard-export');
+  state.activeWizardId = template.id || state.activeWizardId;
+  state.docType = template.documentTypeId || state.docType;
+}
+
+function confirmWizardExport(){
+  const template = getWizardTemplateById(state.activeWizardId);
+  if(!template){
+    alert('Wizard definition not found.');
+    return;
+  }
+  enforceWizardExportWordLimit();
+  const titleInput = (els.wizardExportTitle?.value || '').trim();
+  const descriptionInput = normalizeWizardDescription(els.wizardExportDescription?.value || '');
+  const title = titleInput || template.wizardName || template.id || 'Untitled Wizard';
+  const exportMetadata = buildExportMetadata({
+    title,
+    description: descriptionInput,
+    existing: template.exportMetadata
+  });
+  const updatedTemplate = normalizeTemplate({
+    ...template,
+    wizardName: template.wizardName || title,
+    exportMetadata
+  });
+  persistTemplate(state.username, template.documentTypeId || state.docType, updatedTemplate);
+  refreshWizardTemplates();
+  exportWizardDefinition(template.documentTypeId || state.docType, template.id, exportMetadata);
+  showWizardManagerTab(template.id);
+}
+
 function renderWizardManagerList(selectedId=null){
   if(!els.wizardManagerList) return;
   const templates = refreshWizardTemplates();
@@ -5461,14 +5592,22 @@ function renderWizardManagerList(selectedId=null){
   if(empty) return;
   const list = document.createElement('div');
   list.className = 'wizard-table';
+  let selectedRow = null;
   templates.forEach(t => {
     const geometryIds = collectGeometryIdsForWizard(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID);
     const geometryMeta = getGeometryIndex(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, geometryIds);
     const row = document.createElement('div');
     row.className = 'wizard-row';
+    if(selectedId && t.id === selectedId){
+      row.classList.add('selected');
+      selectedRow = row;
+    }
+    const info = document.createElement('div');
+    info.className = 'wizard-info';
     const name = document.createElement('div');
     name.className = 'wizard-name';
-    name.textContent = t.wizardName || t.id;
+    name.textContent = getWizardDisplayTitle(t);
+    const description = createWizardDescriptionElement(getWizardDescription(t));
     const meta = document.createElement('div');
     meta.className = 'wizard-meta';
     meta.textContent = `ID: ${t.id || ''} • ${geometryMeta.length} layout${geometryMeta.length === 1 ? '' : 's'}`;
@@ -5511,7 +5650,7 @@ function renderWizardManagerList(selectedId=null){
     exportBtn.className = 'btn';
     exportBtn.textContent = 'Export';
     exportBtn.addEventListener('click', () => {
-      exportWizardDefinition(t.documentTypeId || state.docType, t.id);
+      openWizardExportPanel(t);
     });
     actions.appendChild(exportBtn);
     const deleteBtn = document.createElement('button');
@@ -5538,17 +5677,125 @@ function renderWizardManagerList(selectedId=null){
       populateModelSelect(state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
     });
     actions.appendChild(deleteBtn);
-    row.appendChild(name);
-    row.appendChild(meta);
+    info.appendChild(name);
+    info.appendChild(description);
+    info.appendChild(meta);
+    row.appendChild(info);
     row.appendChild(actions);
     list.appendChild(row);
   });
   els.wizardManagerList.appendChild(list);
+  if(selectedRow){
+    requestAnimationFrame(() => {
+      selectedRow.scrollIntoView({ block: 'nearest' });
+    });
+  }
 }
 
-function showWizardManagerTab(){
+function showWizardManagerTab(selectedId = state.activeWizardId){
   showTab('wizard-manager');
-  renderWizardManagerList(state.activeWizardId);
+  renderWizardManagerList(selectedId);
+}
+
+function renderPreconfiguredWizardList(){
+  if(!els.preconfiguredWizardList || !els.preconfiguredWizardEmpty) return;
+  els.preconfiguredWizardList.innerHTML = '';
+  const isLoading = state.preconfiguredStatus === 'loading';
+  const isError = state.preconfiguredStatus === 'error';
+  const isReady = state.preconfiguredStatus === 'ready';
+  const empty = isReady && !state.preconfiguredWizards.length;
+  els.preconfiguredWizardEmpty.style.display = (isLoading || isError || empty) ? 'block' : 'none';
+  if(isLoading){
+    els.preconfiguredWizardEmpty.textContent = 'Loading pre-configured wizards...';
+    return;
+  }
+  if(isError){
+    els.preconfiguredWizardEmpty.textContent = state.preconfiguredError || 'Failed to load pre-configured wizards.';
+    return;
+  }
+  if(empty){
+    els.preconfiguredWizardEmpty.textContent = 'No pre-configured wizards available.';
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'wizard-table';
+  state.preconfiguredWizards.forEach(entry => {
+    const row = document.createElement('div');
+    row.className = 'wizard-row';
+    const info = document.createElement('div');
+    info.className = 'wizard-info';
+    const name = document.createElement('div');
+    name.className = 'wizard-name';
+    name.textContent = entry.title || 'Untitled Wizard';
+    const description = createWizardDescriptionElement(entry.description || '');
+    const meta = document.createElement('div');
+    meta.className = 'wizard-meta';
+    meta.textContent = entry.id ? `Catalog ID: ${entry.id}` : 'Catalog wizard';
+    const actions = document.createElement('div');
+    actions.className = 'wizard-actions';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn primary';
+    addBtn.textContent = 'Add to Wizard Manager';
+    addBtn.addEventListener('click', async () => {
+      if(!entry.definition){
+        alert('Unable to import this wizard right now.');
+        return;
+      }
+      const newWizardId = importWizardDefinition(entry.definition, { postImport: 'wizard-manager' });
+      if(newWizardId){
+        showWizardManagerTab(newWizardId);
+      }
+    });
+    actions.appendChild(addBtn);
+    info.appendChild(name);
+    info.appendChild(description);
+    info.appendChild(meta);
+    row.appendChild(info);
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+  els.preconfiguredWizardList.appendChild(list);
+}
+
+async function loadPreconfiguredWizards(){
+  if(state.preconfiguredStatus === 'loading' || state.preconfiguredStatus === 'ready') return;
+  state.preconfiguredStatus = 'loading';
+  state.preconfiguredError = null;
+  renderPreconfiguredWizardList();
+  try{
+    const manifestResp = await fetch('preconfigured_wizards/manifest.json', { cache: 'no-store' });
+    if(!manifestResp.ok) throw new Error(`Manifest fetch failed (${manifestResp.status})`);
+    const manifest = await manifestResp.json();
+    if(!Array.isArray(manifest)) throw new Error('Manifest is not an array.');
+    const entries = await Promise.all(manifest.map(async (entry) => {
+      try{
+        const path = entry?.path || '';
+        if(!path) return null;
+        const wizardResp = await fetch(path, { cache: 'no-store' });
+        if(!wizardResp.ok) throw new Error(`Wizard fetch failed (${wizardResp.status})`);
+        const definition = await wizardResp.json();
+        const exportMetadata = definition?.exportMetadata || {};
+        return {
+          id: entry?.id || definition?.wizardId || null,
+          path,
+          title: entry?.title || exportMetadata?.title || definition?.wizardName || '',
+          description: entry?.description || exportMetadata?.description || '',
+          definition
+        };
+      } catch(err){
+        console.warn('[preconfigured] wizard load failed', err);
+        return null;
+      }
+    }));
+    state.preconfiguredWizards = entries.filter(Boolean);
+    state.preconfiguredStatus = 'ready';
+  } catch(err){
+    console.error('[preconfigured] load failed', err);
+    state.preconfiguredStatus = 'error';
+    state.preconfiguredError = err?.message || 'Failed to load pre-configured wizards.';
+  }
+  renderPreconfiguredWizardList();
 }
 
 function closeBuilder(){
@@ -11468,6 +11715,9 @@ els.builderSaveBtn?.addEventListener('click', saveBuilderTemplate);
 els.builderCancelBtn?.addEventListener('click', ()=>{ resetBuilderErrors(); closeBuilder(); });
 els.wizardManagerNewBtn?.addEventListener('click', ()=>{ state.activeWizardId = ''; openBuilder(null); });
 els.wizardManagerImportBtn?.addEventListener('click', ()=>{ els.wizardDefinitionImportInput?.click(); });
+els.wizardExportDescription?.addEventListener('input', enforceWizardExportWordLimit);
+els.wizardExportCancelBtn?.addEventListener('click', ()=>{ showTab('document-dashboard'); });
+els.wizardExportConfirmBtn?.addEventListener('click', confirmWizardExport);
 els.wizardDefinitionImportInput?.addEventListener('change', async (e)=>{
   const file = e.target.files?.[0];
   if(!file) return;

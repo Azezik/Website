@@ -1,0 +1,59 @@
+{
+  "kind": "wizard-definition",
+  "version": 3,
+  "wizardId": "hospitality-invoice-starter",
+  "docType": "invoice",
+  "wizardName": "Hospitality Invoice Starter",
+  "exportMetadata": {
+    "title": "Hospitality Invoice Starter",
+    "description": "A starter wizard for hospitality invoices with common header fields and totals. Use it as a base and add line item columns as needed.",
+    "createdAt": "2024-06-01T12:00:00.000Z"
+  },
+  "fields": [
+    {
+      "id": "field_store_name",
+      "name": "Store Name",
+      "fieldKey": "store_name",
+      "fieldType": "static",
+      "order": 1,
+      "magicDataType": "any",
+      "magicType": "any",
+      "isGlobal": false
+    },
+    {
+      "id": "field_invoice_number",
+      "name": "Invoice Number",
+      "fieldKey": "invoice_number",
+      "fieldType": "static",
+      "order": 2,
+      "magicDataType": "any",
+      "magicType": "any",
+      "isGlobal": false
+    },
+    {
+      "id": "field_invoice_date",
+      "name": "Invoice Date",
+      "fieldKey": "invoice_date",
+      "fieldType": "static",
+      "order": 3,
+      "magicDataType": "any",
+      "magicType": "any",
+      "isGlobal": false
+    },
+    {
+      "id": "field_invoice_total",
+      "name": "Invoice Total",
+      "fieldKey": "invoice_total",
+      "fieldType": "static",
+      "order": 4,
+      "magicDataType": "any",
+      "magicType": "any",
+      "isGlobal": false
+    }
+  ],
+  "masterDbConfig": null,
+  "source": {
+    "exportedAt": "2024-06-01T12:00:00.000Z",
+    "exportedBy": "repo"
+  }
+}
