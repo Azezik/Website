@@ -1,0 +1,241 @@
+{
+  "kind": "wizard-definition",
+  "version": 8,
+  "wizardId": "238ad7cd-68fe-4253-93eb-c9a99e90ca33",
+  "docType": "invoice",
+  "wizardName": "Paystubs",
+  "fields": [
+    {
+      "id": "4be4624f-fce9-42e5-9b4c-b1adeff32152",
+      "name": "Payable Date",
+      "fieldType": "static",
+      "order": 1,
+      "fieldKey": "payable_date",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "be2d4b4c-b4b6-4ec9-b8ae-109c5b2741c7",
+      "name": "Vacation Account Accumulated",
+      "fieldType": "static",
+      "order": 2,
+      "fieldKey": "vacation_account_accumulated",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "fc801c37-06d9-454e-9103-44f42f9125c1",
+      "name": "Regular Hours QTY",
+      "fieldType": "static",
+      "order": 3,
+      "fieldKey": "regular_hours_qty",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "cdca77e1-dced-4858-9d52-588aee3ad53c",
+      "name": "Regular Hours Earnings",
+      "fieldType": "static",
+      "order": 4,
+      "fieldKey": "regular_hours_earnings",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "d93514e4-95cd-4e07-bd37-2feda1192364",
+      "name": "Commission",
+      "fieldType": "static",
+      "order": 5,
+      "fieldKey": "commission",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "b2421334-ef34-4056-b7a9-0e2645a14731",
+      "name": "Earnings",
+      "fieldType": "static",
+      "order": 6,
+      "fieldKey": "earnings",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "d14c4269-a592-4c70-9da8-26d6ff0ba4a1",
+      "name": "Earnings YTD",
+      "fieldType": "static",
+      "order": 7,
+      "fieldKey": "earnings_ytd",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "bef04708-68c8-4caf-bed2-d92c1c67f651",
+      "name": "Cur Deductions",
+      "fieldType": "static",
+      "order": 8,
+      "fieldKey": "cur_deductions",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "408ac0a1-5dfc-4b25-b541-e317da031004",
+      "name": "Deductions YTD",
+      "fieldType": "static",
+      "order": 9,
+      "fieldKey": "deductions_ytd",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    },
+    {
+      "id": "8006779b-b51f-4235-ad5a-b1573859704f",
+      "name": "Net Pay",
+      "fieldType": "static",
+      "order": 10,
+      "fieldKey": "net_pay",
+      "isArea": false,
+      "isSubordinate": false,
+      "isGlobal": false,
+      "magicDataType": "numeric",
+      "magicType": "numeric"
+    }
+  ],
+  "masterDbConfig": {
+    "isCustomMasterDb": true,
+    "staticFields": [
+      {
+        "fieldKey": "payable_date",
+        "label": "Payable Date",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "vacation_account_accumulated",
+        "label": "Vacation Account Accumulated",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "regular_hours_qty",
+        "label": "Regular Hours QTY",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "regular_hours_earnings",
+        "label": "Regular Hours Earnings",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "commission",
+        "label": "Commission",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "earnings",
+        "label": "Earnings",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "earnings_ytd",
+        "label": "Earnings YTD",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "cur_deductions",
+        "label": "Cur Deductions",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "deductions_ytd",
+        "label": "Deductions YTD",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      },
+      {
+        "fieldKey": "net_pay",
+        "label": "Net Pay",
+        "isArea": false,
+        "isSubordinate": false,
+        "nonExtractable": false,
+        "isGlobal": false
+      }
+    ],
+    "includeLineItems": false,
+    "lineItemFields": [],
+    "globalFields": [],
+    "areaFieldKeys": [],
+    "documentFieldKeys": [
+      "payable_date",
+      "vacation_account_accumulated",
+      "regular_hours_qty",
+      "regular_hours_earnings",
+      "commission",
+      "earnings",
+      "earnings_ytd",
+      "cur_deductions",
+      "deductions_ytd",
+      "net_pay"
+    ],
+    "areas": []
+  },
+  "exportMetadata": {
+    "title": "Paystubs",
+    "description": "A Wizard for extracting Paystub Information",
+    "createdAt": "2026-01-07T19:05:44.459Z",
+    "updatedAt": "2026-01-07T19:05:44.461Z"
+  },
+  "source": {
+    "exportedAt": "2026-01-07T19:05:44.461Z",
+    "exportedBy": "test4"
+  }
+}
