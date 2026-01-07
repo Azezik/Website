@@ -12446,8 +12446,11 @@ function hasFieldGeometry(field){
 
 function ensureConfiguredFlag(profile){
   if(!profile || typeof profile !== 'object') return profile;
+  const hasGeom = Array.isArray(profile.fields) ? profile.fields.some(hasFieldGeometry) : false;
   if(profile.isConfigured === undefined){
-    profile.isConfigured = Array.isArray(profile.fields) ? profile.fields.some(hasFieldGeometry) : false;
+    profile.isConfigured = hasGeom;
+  } else if(hasGeom && !profile.isConfigured){
+    profile.isConfigured = true;
   }
   return profile;
 }
