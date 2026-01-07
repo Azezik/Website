@@ -568,8 +568,27 @@ function clearConfigResultsUi({ preserveProfileJson = true } = {}){
   if(liDiv) liDiv.innerHTML = '<p class="sub">No line items.</p>';
 }
 
+function resetWizardFileInput(){
+  if(!els.wizardFile) return { beforeLength: 0, afterLength: 0 };
+  const beforeLength = (els.wizardFile.value || '').length;
+  try { els.wizardFile.value = ''; } catch(err){}
+  let afterLength = (els.wizardFile.value || '').length;
+  if(afterLength){
+    const clone = els.wizardFile.cloneNode(true);
+    els.wizardFile.parentNode?.replaceChild(clone, els.wizardFile);
+    els.wizardFile = clone;
+    els.wizardFile.addEventListener('change', handleWizardFileChange);
+    afterLength = (els.wizardFile.value || '').length;
+  }
+  return { beforeLength, afterLength };
+}
+
 function resetConfigSessionState(reason = 'config-entry'){
+  const preStepIdx = state.stepIdx;
+  const preWizardComplete = state.wizardComplete;
+  const fileInputLengths = resetWizardFileInput();
   clearTransientStateLocal();
+  state.wizardComplete = false;
   resetDocArtifacts();
   if(els.imgCanvas){
     els.imgCanvas.src = '';
@@ -587,7 +606,15 @@ function resetConfigSessionState(reason = 'config-entry'){
     reason,
     username: state.username,
     docType: state.docType,
-    wizardId: currentWizardId()
+    wizardId: currentWizardId(),
+    activeWizardId: state.activeWizardId,
+    activeGeometryId: state.activeGeometryId,
+    stepIdxBefore: preStepIdx,
+    stepIdxAfter: state.stepIdx,
+    wizardCompleteBefore: preWizardComplete,
+    wizardCompleteAfter: state.wizardComplete,
+    fileInputLengthBefore: fileInputLengths.beforeLength,
+    fileInputLengthAfter: fileInputLengths.afterLength
   });
 }
 
@@ -671,6 +698,11 @@ function activateConfigMode(){
   resetConfigSessionState('activate-config-mode');
   setWizardMode(ModeEnum.CONFIG);
   initStepsFromActiveWizard();
+  if(state.steps && state.steps.length){
+    goToStep(0);
+  } else {
+    setWizardCompletionMode(false);
+  }
 }
 
 function notifyRunIssue(message){
@@ -12006,8 +12038,7 @@ els.viewSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(false); }
 els.regenerateSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(true); });
 els.closeSnapshotBtn?.addEventListener('click', closeSnapshotPanel);
 
-// Single-file open (wizard)
-els.wizardFile?.addEventListener('change', async e=>{
+async function handleWizardFileChange(e){
   const f = e.target.files?.[0]; if(!f) return;
   if(isRunMode()){
     let runCtx;
@@ -12031,7 +12062,10 @@ els.wizardFile?.addEventListener('change', async e=>{
     return;
   }
   await openFile(f);
-});
+}
+
+// Single-file open (wizard)
+els.wizardFile?.addEventListener('change', handleWizardFileChange);
 
 // Paging
 els.prevPageBtn?.addEventListener('click', ()=>{
