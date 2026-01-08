@@ -13321,6 +13321,17 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       notes: lineItems.length ? 'line items captured' : 'no line items found'
     });
     const compiled = compileDocument(state.currentFileId, lineItems);
+    const processedAtISO = new Date().toISOString();
+    const batchEntry = {
+      fileName: file?.name || compiled?.fileName || null,
+      processedAtISO,
+      status: 'accepted'
+    };
+    if(wizardId){ batchEntry.wizardId = wizardId; }
+    if(geometryId){ batchEntry.geometryId = geometryId; }
+    const batchLog = LS.getBatchLog(state.username, state.docType, wizardId);
+    batchLog.push(batchEntry);
+    LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardId);
     if(state.snapshotMode){
       const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
       if(manifest){ compiled.snapshotManifestId = manifest.id; }
