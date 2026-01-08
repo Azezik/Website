@@ -375,6 +375,7 @@ function showTab(id){
 function showWizardDetailsTab(wizardId){
   state.activeWizardId = wizardId || '';
   showTab('wizard-details');
+  renderWizardDetailsActions();
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
@@ -5780,6 +5781,41 @@ function confirmWizardExport(){
   showWizardManagerTab(template.id);
 }
 
+function getWizardConfigurationStatus(template){
+  const docType = template?.documentTypeId || state.docType;
+  const wizardId = template?.id || DEFAULT_WIZARD_ID;
+  const geometryIds = collectGeometryIdsForWizard(state.username, docType, wizardId);
+  const hasConfiguredProfile = geometryIds.some(gid => {
+    const profile = loadProfile(state.username, docType, wizardId, gid);
+    const hasGeom = Array.isArray(profile?.fields) && profile.fields.some(hasFieldGeometry);
+    return profile?.isConfigured && hasGeom;
+  });
+  return { docType, wizardId, geometryIds, hasConfiguredProfile };
+}
+
+function createWizardSettingsButton({ wizardId, hasConfiguredProfile }){
+  const settingsBtn = document.createElement('button');
+  settingsBtn.type = 'button';
+  settingsBtn.className = 'btn';
+  settingsBtn.textContent = hasConfiguredProfile ? 'Settings' : 'Configure';
+  settingsBtn.addEventListener('click', () => {
+    showWizardDetailsTab(wizardId);
+  });
+  return settingsBtn;
+}
+
+function renderWizardDetailsActions(){
+  if(!els.wizardDetailsActions) return;
+  els.wizardDetailsActions.innerHTML = '';
+  const template = getWizardTemplateById(state.activeWizardId);
+  if(!template) return;
+  const { wizardId, hasConfiguredProfile } = getWizardConfigurationStatus(template);
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.appendChild(createWizardSettingsButton({ wizardId, hasConfiguredProfile }));
+  els.wizardDetailsActions.appendChild(actions);
+}
+
 function renderWizardManagerList(selectedId=null){
   if(!els.wizardManagerList) return;
   const templates = refreshWizardTemplates();
@@ -5793,13 +5829,8 @@ function renderWizardManagerList(selectedId=null){
   list.className = 'wizard-table';
   let selectedRow = null;
   templates.forEach(t => {
-    const geometryIds = collectGeometryIdsForWizard(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID);
-    const geometryMeta = getGeometryIndex(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, geometryIds);
-    const hasConfiguredProfile = geometryIds.some(gid => {
-      const profile = loadProfile(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, gid);
-      const hasGeom = Array.isArray(profile?.fields) && profile.fields.some(hasFieldGeometry);
-      return profile?.isConfigured && hasGeom;
-    });
+    const { docType, wizardId, geometryIds, hasConfiguredProfile } = getWizardConfigurationStatus(t);
+    const geometryMeta = getGeometryIndex(state.username, docType, wizardId, geometryIds);
     const row = document.createElement('div');
     row.className = 'wizard-row';
     if(selectedId && t.id === selectedId){
@@ -5817,14 +5848,7 @@ function renderWizardManagerList(selectedId=null){
     meta.textContent = `ID: ${t.id || ''} • ${geometryMeta.length} layout${geometryMeta.length === 1 ? '' : 's'}`;
     const actions = document.createElement('div');
     actions.className = 'wizard-actions';
-    const settingsBtn = document.createElement('button');
-    settingsBtn.type = 'button';
-    settingsBtn.className = 'btn';
-    settingsBtn.textContent = hasConfiguredProfile ? 'Settings' : 'Configure';
-    settingsBtn.addEventListener('click', () => {
-      showWizardDetailsTab(t.id);
-    });
-    actions.appendChild(settingsBtn);
+    actions.appendChild(createWizardSettingsButton({ wizardId, hasConfiguredProfile }));
     info.appendChild(name);
     info.appendChild(description);
     info.appendChild(meta);
