@@ -376,6 +376,7 @@ function showWizardDetailsTab(wizardId){
   state.activeWizardId = wizardId || '';
   showTab('wizard-details');
   renderWizardDetailsActions();
+  renderWizardBatchLog(state.activeWizardId);
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
@@ -5814,6 +5815,59 @@ function renderWizardDetailsActions(){
   actions.className = 'actions';
   actions.appendChild(createWizardSettingsButton({ wizardId, hasConfiguredProfile }));
   els.wizardDetailsActions.appendChild(actions);
+}
+
+function renderWizardBatchLog(wizardId){
+  if(!els.wizardDetailsLog) return;
+  const resolvedWizardId = wizardId || state.activeWizardId || DEFAULT_WIZARD_ID;
+  const entries = LS.getBatchLog(state.username, state.docType, resolvedWizardId);
+  els.wizardDetailsLog.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'sub';
+  header.style.marginBottom = '8px';
+  header.textContent = `Batch log (${entries.length})`;
+  els.wizardDetailsLog.appendChild(header);
+  if(!entries.length){
+    const empty = document.createElement('div');
+    empty.className = 'sub';
+    empty.textContent = 'No batch runs recorded yet.';
+    els.wizardDetailsLog.appendChild(empty);
+    return;
+  }
+  const wrapper = document.createElement('div');
+  wrapper.className = 'results-table-scroll';
+  const table = document.createElement('table');
+  table.className = 'line-items-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  ['Processed', 'File', 'Status', 'Reason', 'Geometry'].forEach(label => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  entries.slice().reverse().forEach(entry => {
+    const row = document.createElement('tr');
+    const processed = entry?.processedAtISO ? new Date(entry.processedAtISO).toLocaleString() : '';
+    const cells = [
+      processed || '-',
+      entry?.fileName || '-',
+      entry?.status || '-',
+      entry?.reason || '-',
+      entry?.geometryId || '-'
+    ];
+    cells.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      row.appendChild(td);
+    });
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  wrapper.appendChild(table);
+  els.wizardDetailsLog.appendChild(wrapper);
 }
 
 function renderWizardManagerList(selectedId=null){
