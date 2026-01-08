@@ -12644,7 +12644,6 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     console.warn('Duplicate run detected; skipping auto extraction for', guardKey);
     return;
   }
-  const shouldNotify = !runContext.isBatch;
   if(runDiagnostics && guardStarted){
     runDiagnostics.startExtraction(guardKey);
   }
@@ -12680,7 +12679,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         profileWizardId: profile?.wizardId || state.profile?.wizardId || null
       };
       console.error('[wizard-run][error]', payload);
-      if(shouldNotify){ notifyRunIssue('Please select a wizard before running extraction.'); }
+      if(!runContext.isBatch){ notifyRunIssue('Please select a wizard before running extraction.'); }
       logBatchRejection({ reason: 'wizard_missing' });
       return;
     }
@@ -12706,7 +12705,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
     const hasGeom = Array.isArray(storedProfile?.fields) && storedProfile.fields.some(hasFieldGeometry);
     if(!storedProfile?.isConfigured || !hasGeom){
-      if(shouldNotify){ notifyRunIssue('Please configure this wizard before running extraction.'); }
+      if(!runContext.isBatch){ notifyRunIssue('Please configure this wizard before running extraction.'); }
       activateConfigMode({ clearDoc: true });
       state.profile = storedProfile || state.profile;
       state.activeWizardId = wizardId;
@@ -12963,7 +12962,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           activeProfile = state.profile;
         }
       } else if(selection && !selection.probePassed){
-        if(shouldNotify){ notifyRunIssue('No matching template matched this document. Please configure or select a template.'); }
+        if(!runContext.isBatch){ notifyRunIssue('No matching template matched this document. Please configure or select a template.'); }
         logBatchRejection({ reason: 'no_matching_template', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
         return;
       }
@@ -13362,7 +13361,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     });
   } catch(err){
     console.error('Run mode extraction failed', err);
-    if(shouldNotify){ notifyRunIssue(err?.message || 'Extraction failed. Please try again.'); }
+    if(!runContext.isBatch){ notifyRunIssue(err?.message || 'Extraction failed. Please try again.'); }
   } finally {
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
