@@ -124,6 +124,10 @@ const els = {
   preconfiguredWizardList: document.getElementById('preconfigured-wizard-list'),
   preconfiguredWizardEmpty: document.getElementById('preconfigured-wizard-empty'),
   wizardExportPanel: document.getElementById('wizard-export'),
+  wizardDetailsPanel: document.getElementById('wizard-details'),
+  wizardDetailsBackBtn: document.getElementById('wizard-details-back'),
+  wizardDetailsActions: document.getElementById('wizard-details-actions'),
+  wizardDetailsLog: document.getElementById('wizard-details-log'),
   wizardExportTitle: document.getElementById('wizard-export-title'),
   wizardExportDescription: document.getElementById('wizard-export-description'),
   wizardExportCounter: document.getElementById('wizard-export-counter'),
@@ -349,6 +353,9 @@ function showTab(id){
   if(els.wizardExportPanel){
     sections.push(els.wizardExportPanel);
   }
+  if(els.wizardDetailsPanel){
+    sections.push(els.wizardDetailsPanel);
+  }
   sections.forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
   });
@@ -363,6 +370,11 @@ function showTab(id){
     renderResultsTable();
     renderReports();
   }
+}
+
+function showWizardDetailsTab(wizardId){
+  state.activeWizardId = wizardId || '';
+  showTab('wizard-details');
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
 if(els.showOcrBoxesToggle){ els.showOcrBoxesToggle.checked = /debug/i.test(location.search); }
