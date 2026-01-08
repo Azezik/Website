@@ -13466,6 +13466,35 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       counts:{ lineItems: lineItems.length },
       notes: lineItems.length ? 'line items captured' : 'no line items found'
     });
+    const isSingleGeometry = geometryIds.length === 1;
+    if(isSingleGeometry){
+      const staticFieldKeys = new Set(
+        (activeProfile.fields || [])
+          .filter(f => f.type === 'static' && !(f.isArea || f.fieldType === 'areabox'))
+          .map(f => f.fieldKey)
+          .filter(Boolean)
+      );
+      if(staticFieldKeys.size){
+        const staticEntries = (rawStore.get(state.currentFileId) || []).filter(entry => staticFieldKeys.has(entry.fieldKey));
+        const nonEmptyCount = staticEntries.filter(entry => String(entry.value || '').trim()).length;
+        const averageConfidence = staticEntries.length
+          ? staticEntries.reduce((sum, entry) => sum + (Number.isFinite(entry.confidence) ? entry.confidence : 0), 0) / staticEntries.length
+          : 0;
+        const minNonEmpty = 2;
+        const minAverageConfidence = 0.2;
+        if(nonEmptyCount < minNonEmpty || averageConfidence < minAverageConfidence){
+          console.warn('[run-mode][postcheck] rejecting document', {
+            reason: 'postcheck_too_empty',
+            nonEmptyCount,
+            averageConfidence,
+            minNonEmpty,
+            minAverageConfidence
+          });
+          logBatchRejection({ reason: 'postcheck_too_empty', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+          return;
+        }
+      }
+    }
     const compiled = compileDocument(state.currentFileId, lineItems);
     const processedAtISO = new Date().toISOString();
     const batchEntry = {
