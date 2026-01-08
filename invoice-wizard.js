@@ -5805,15 +5805,69 @@ function createWizardSettingsButton({ wizardId, hasConfiguredProfile }){
   return settingsBtn;
 }
 
+function createWizardEditButton(template){
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'btn';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', () => {
+    openBuilder(template);
+  });
+  return editBtn;
+}
+
+function createWizardExportButton(template){
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.className = 'btn';
+  exportBtn.textContent = 'Add Template';
+  exportBtn.addEventListener('click', () => {
+    openWizardExportPanel(template);
+  });
+  return exportBtn;
+}
+
+function removeWizardTemplateLocal(wizardId, docType){
+  if(!wizardId) return false;
+  const templates = getStoredTemplates();
+  const nextTemplates = templates.filter(t => !(t?.id === wizardId && (!docType || (t?.documentTypeId || state.docType) === docType)));
+  if(nextTemplates.length === templates.length) return false;
+  setStoredTemplates(nextTemplates);
+  return true;
+}
+
+function createWizardDeleteButton(template){
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'btn';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    if(!template?.id) return;
+    const wizardTitle = getWizardDisplayTitle(template);
+    const docType = template.documentTypeId || state.docType;
+    const msg = `Delete "${wizardTitle}"? This will remove the wizard and its saved configurations.`;
+    if(!confirm(msg)) return;
+    removeWizardTemplateLocal(template.id, docType);
+    refreshWizardTemplates();
+    if(state.activeWizardId === template.id){
+      state.activeWizardId = '';
+    }
+    showWizardManagerTab();
+    await deleteWizardEverywhere(state.username, docType, template.id);
+  });
+  return deleteBtn;
+}
+
 function renderWizardDetailsActions(){
   if(!els.wizardDetailsActions) return;
   els.wizardDetailsActions.innerHTML = '';
   const template = getWizardTemplateById(state.activeWizardId);
   if(!template) return;
-  const { wizardId, hasConfiguredProfile } = getWizardConfigurationStatus(template);
   const actions = document.createElement('div');
   actions.className = 'actions';
-  actions.appendChild(createWizardSettingsButton({ wizardId, hasConfiguredProfile }));
+  actions.appendChild(createWizardEditButton(template));
+  actions.appendChild(createWizardExportButton(template));
+  actions.appendChild(createWizardDeleteButton(template));
   els.wizardDetailsActions.appendChild(actions);
 }
 
