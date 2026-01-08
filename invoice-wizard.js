@@ -13459,13 +13459,6 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       }
     }
     if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
-    const lineItems = await extractLineItems(activeProfile);
-    if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
-    traceEvent(runSpanKey,'columns:merge',{
-      stageLabel:'Line items extracted',
-      counts:{ lineItems: lineItems.length },
-      notes: lineItems.length ? 'line items captured' : 'no line items found'
-    });
     const isSingleGeometry = geometryIds.length === 1;
     if(isSingleGeometry){
       const staticFieldKeys = new Set(
@@ -13475,26 +13468,33 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           .filter(Boolean)
       );
       if(staticFieldKeys.size){
-        const staticEntries = (rawStore.get(state.currentFileId) || []).filter(entry => staticFieldKeys.has(entry.fieldKey));
-        const nonEmptyCount = staticEntries.filter(entry => String(entry.value || '').trim()).length;
-        const averageConfidence = staticEntries.length
-          ? staticEntries.reduce((sum, entry) => sum + (Number.isFinite(entry.confidence) ? entry.confidence : 0), 0) / staticEntries.length
-          : 0;
-        const minNonEmpty = 2;
-        const minAverageConfidence = 0.2;
-        if(nonEmptyCount < minNonEmpty || averageConfidence < minAverageConfidence){
+        const staticEntries = (rawStore.get(state.currentFileId) || []).filter(entry => staticFieldKeys.has(entry.fieldKey) && String(entry.value || '').trim());
+        const extractedStaticCount = staticEntries.length;
+        const totalStaticCount = staticFieldKeys.size;
+        const coverage = totalStaticCount ? extractedStaticCount / totalStaticCount : 0;
+        const minCoverage = 0.3;
+        const minExtracted = 4;
+        if(coverage < minCoverage || extractedStaticCount < minExtracted){
           console.warn('[run-mode][postcheck] rejecting document', {
-            reason: 'postcheck_too_empty',
-            nonEmptyCount,
-            averageConfidence,
-            minNonEmpty,
-            minAverageConfidence
+            reason: 'quality_gate_failed_low_coverage',
+            extractedStaticCount,
+            totalStaticCount,
+            coverage,
+            minCoverage,
+            minExtracted
           });
-          logBatchRejection({ reason: 'postcheck_too_empty', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+          logBatchRejection({ reason: 'quality_gate_failed_low_coverage', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
           return;
         }
       }
     }
+    const lineItems = await extractLineItems(activeProfile);
+    if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
+    traceEvent(runSpanKey,'columns:merge',{
+      stageLabel:'Line items extracted',
+      counts:{ lineItems: lineItems.length },
+      notes: lineItems.length ? 'line items captured' : 'no line items found'
+    });
     const compiled = compileDocument(state.currentFileId, lineItems);
     const processedAtISO = new Date().toISOString();
     const batchEntry = {
