@@ -194,6 +194,7 @@ const els = {
   wizardSubhead:   document.querySelector('#wizard-section > p.sub'),
   viewer:          document.getElementById('viewer'),
   promptBar:       document.getElementById('promptBar'),
+  wizardRunOverlay: document.getElementById('wizard-run-overlay'),
 
   pageControls:    document.getElementById('pageControls'),
   prevPageBtn:     document.getElementById('prevPageBtn'),
@@ -438,6 +439,7 @@ let state = {
   snapshotPanels: { activePage: null },
   overlayPinned: false,
   overlayMetrics: null,
+  isExtracting: false,
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
@@ -450,6 +452,16 @@ let state = {
 };
 
 let loginHydrated = false;
+
+let extractionOverlayCount = 0;
+function setExtractionLoading(isLoading){
+  if(!els.wizardRunOverlay) return;
+  extractionOverlayCount = Math.max(0, extractionOverlayCount + (isLoading ? 1 : -1));
+  const shouldShow = extractionOverlayCount > 0;
+  state.isExtracting = shouldShow;
+  els.wizardRunOverlay.classList.toggle('is-active', shouldShow);
+  els.wizardRunOverlay.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+}
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
   return logs.map(entry => {
@@ -12776,6 +12788,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   if(runDiagnostics && guardStarted){
     runDiagnostics.startExtraction(guardKey);
   }
+  setExtractionLoading(true);
   try {
     activateRunMode({ clearDoc: true });
     const wizardId = runContext.wizardId || profile?.wizardId || currentWizardId();
@@ -13531,6 +13544,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     console.error('Run mode extraction failed', err);
     if(!runContext.isBatch){ notifyRunIssue(err?.message || 'Extraction failed. Please try again.'); }
   } finally {
+    setExtractionLoading(false);
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
     }
@@ -13559,6 +13573,7 @@ async function processBatch(files){
   ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
   logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
 
+  setExtractionLoading(true);
   try {
     for(const f of files){
       await runModeExtractFileWithProfile(f, state.profile, runCtx);
@@ -13567,6 +13582,7 @@ async function processBatch(files){
     console.error('Batch extraction failed', err);
     alert(err?.message || 'Batch extraction failed. Please try again.');
   } finally {
+    setExtractionLoading(false);
     els.wizardSection.style.display = 'none';
     els.app.style.display = 'block';
     showTab('extracted-data');

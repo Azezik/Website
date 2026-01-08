@@ -68,6 +68,38 @@ input, select{ background:#0e1516; color:var(--text); border:1px solid var(--bor
 
 canvas.debug-crop, #pdfCanvas{ background:none !important; }
 
+/* Extraction loading overlay */
+.loading-overlay{
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-direction: column;
+  background: rgba(6, 10, 10, 0.75);
+  z-index: 1100;
+  pointer-events: auto;
+  text-align: center;
+}
+.loading-overlay.is-active{ display: flex; }
+.loading-overlay__content{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.loading-overlay__content img{
+  width: 140px;
+  height: auto;
+  image-rendering: auto;
+}
+.loading-overlay__text{
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
 /* Extraction / results */
 .confidence{ font-size:10px; color:var(--muted); margin-left:4px; }
 .warn{ color:var(--accent); font-size:12px; margin-left:2px; }
