@@ -13486,6 +13486,16 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           logBatchRejection({ reason: 'quality_gate_failed_low_coverage', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
           return;
         }
+        const lowConfidenceEntries = staticEntries.filter(entry => Number.isFinite(entry.confidence) && entry.confidence < 0.9);
+        if(lowConfidenceEntries.length >= 2){
+          console.warn('[run-mode][postcheck] rejecting document', {
+            reason: 'quality_gate_low_confidence_2plus',
+            lowConfidenceCount: lowConfidenceEntries.length,
+            lowConfidenceFields: lowConfidenceEntries.map(entry => entry.fieldKey)
+          });
+          logBatchRejection({ reason: 'quality_gate_low_confidence_2plus', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+          return;
+        }
       }
     }
     const lineItems = await extractLineItems(activeProfile);
