@@ -5795,6 +5795,11 @@ function renderWizardManagerList(selectedId=null){
   templates.forEach(t => {
     const geometryIds = collectGeometryIdsForWizard(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID);
     const geometryMeta = getGeometryIndex(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, geometryIds);
+    const hasConfiguredProfile = geometryIds.some(gid => {
+      const profile = loadProfile(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, gid);
+      const hasGeom = Array.isArray(profile?.fields) && profile.fields.some(hasFieldGeometry);
+      return profile?.isConfigured && hasGeom;
+    });
     const row = document.createElement('div');
     row.className = 'wizard-row';
     if(selectedId && t.id === selectedId){
@@ -5812,72 +5817,14 @@ function renderWizardManagerList(selectedId=null){
     meta.textContent = `ID: ${t.id || ''} • ${geometryMeta.length} layout${geometryMeta.length === 1 ? '' : 's'}`;
     const actions = document.createElement('div');
     actions.className = 'wizard-actions';
-    const editBtn = document.createElement('button');
-    editBtn.type = 'button';
-    editBtn.className = 'btn';
-    editBtn.textContent = 'Edit';
-    editBtn.addEventListener('click', () => {
-      state.activeWizardId = t.id || state.activeWizardId;
-      openBuilder(t);
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.className = 'btn';
+    settingsBtn.textContent = hasConfiguredProfile ? 'Settings' : 'Configure';
+    settingsBtn.addEventListener('click', () => {
+      showWizardDetailsTab(t.id);
     });
-    actions.appendChild(editBtn);
-    const addGeomBtn = document.createElement('button');
-    addGeomBtn.type = 'button';
-    addGeomBtn.className = 'btn secondary';
-    addGeomBtn.textContent = 'Add Template';
-    addGeomBtn.addEventListener('click', () => {
-      state.activeWizardId = t.id || state.activeWizardId;
-      const geometryId = genId('geom');
-      const displayName = `Layout ${geometryMeta.length + 1}`;
-      const createdAt = new Date().toISOString();
-      upsertGeometryMeta(state.username, t.documentTypeId || state.docType, t.id || DEFAULT_WIZARD_ID, { geometryId, displayName, createdAt });
-      state.activeGeometryId = geometryId;
-      state.docType = t.documentTypeId || state.docType;
-      state.profile = null;
-      console.info('[geom-add-template]', { wizardId: state.activeWizardId, geometryId, displayName, createdAt });
-      activateConfigMode();
-      ensureProfile(t.id, geometryId);
-      if(els.wizardSection) els.wizardSection.style.display = 'block';
-      if(els.builderSection) els.builderSection.style.display = 'none';
-      if(els.app) els.app.style.display = 'none';
-      initStepsFromActiveWizard();
-      goToStep(0);
-    });
-    actions.appendChild(addGeomBtn);
-    const exportBtn = document.createElement('button');
-    exportBtn.type = 'button';
-    exportBtn.className = 'btn';
-    exportBtn.textContent = 'Export';
-    exportBtn.addEventListener('click', () => {
-      openWizardExportPanel(t);
-    });
-    actions.appendChild(exportBtn);
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'btn ghost';
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.addEventListener('click', async () => {
-      if(!confirm('Delete this wizard? This will remove wizard templates, profiles, extracted data, and saved caches.')) return;
-      const docType = t.documentTypeId || state.docType;
-      const remaining = getStoredTemplates().filter(w => !(w.id === t.id && w.username === state.username));
-      setStoredTemplates(remaining);
-      await deleteWizardEverywhere(state.username, docType, t.id);
-      refreshWizardTemplates();
-      if(selectedId === t.id){ selectedId = null; }
-      if(state.activeWizardId === t.id){
-        state.activeWizardId = firstCustomWizardId();
-        state.activeGeometryId = DEFAULT_GEOMETRY_ID;
-        state.profile = null;
-        resetConfigSessionState('wizard-delete-active');
-        initStepsFromActiveWizard();
-      }
-      syncExtractedWizardSelector();
-      renderResultsTable();
-      renderReports();
-      renderWizardManagerList(selectedId);
-      populateModelSelect(state.activeWizardId ? `custom:${state.activeWizardId}` : undefined);
-    });
-    actions.appendChild(deleteBtn);
+    actions.appendChild(settingsBtn);
     info.appendChild(name);
     info.appendChild(description);
     info.appendChild(meta);
