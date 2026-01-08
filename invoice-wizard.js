@@ -12654,6 +12654,20 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     const selectionValue = runContext.selectionValue || runContext.value || null;
     const selectionSource = runContext.selectionSource || runContext.source || null;
     const displayName = runContext.displayName || runContext.selectionLabel || null;
+    const logBatchRejection = ({ reason, wizardIdOverride = wizardId, geometryIdOverride = geometryId } = {}) => {
+      const processedAtISO = new Date().toISOString();
+      const batchEntry = {
+        fileName: file?.name || null,
+        processedAtISO,
+        status: 'rejected',
+        reason
+      };
+      if(wizardIdOverride){ batchEntry.wizardId = wizardIdOverride; }
+      if(geometryIdOverride){ batchEntry.geometryId = geometryIdOverride; }
+      const batchLog = LS.getBatchLog(state.username, state.docType, wizardIdOverride);
+      batchLog.push(batchEntry);
+      LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardIdOverride);
+    };
     if(!wizardId){
       const payload = {
         fileName: file?.name || null,
@@ -12666,6 +12680,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       };
       console.error('[wizard-run][error]', payload);
       notifyRunIssue('Please select a wizard before running extraction.');
+      logBatchRejection({ reason: 'wizard_missing' });
       return;
     }
     logWizardSelection('run.resolve', { wizardId, displayName, value: selectionValue, source: selectionSource, modelId: runContext.modelId || null });
@@ -12694,6 +12709,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       activateConfigMode({ clearDoc: true });
       state.profile = storedProfile || state.profile;
       state.activeWizardId = wizardId;
+      logBatchRejection({ reason: 'wizard_unconfigured', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
       return;
     }
     const runStartInput = {
@@ -12947,6 +12963,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         }
       } else if(selection && !selection.probePassed){
         notifyRunIssue('No matching template matched this document. Please configure or select a template.');
+        logBatchRejection({ reason: 'no_matching_template', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
         return;
       }
     }
