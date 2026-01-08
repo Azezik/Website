@@ -5816,11 +5816,48 @@ function createWizardEditButton(template){
   return editBtn;
 }
 
+function nextWizardGeometryId(docType, wizardId){
+  const geometryIds = collectGeometryIdsForWizard(state.username, docType, wizardId);
+  const existing = new Set(geometryIds.length ? geometryIds : [DEFAULT_GEOMETRY_ID]);
+  if(!existing.has(DEFAULT_GEOMETRY_ID)){
+    return DEFAULT_GEOMETRY_ID;
+  }
+  let idx = 1;
+  let candidate = `${DEFAULT_GEOMETRY_ID}_${idx}`;
+  while(existing.has(candidate)){
+    idx += 1;
+    candidate = `${DEFAULT_GEOMETRY_ID}_${idx}`;
+  }
+  return candidate;
+}
+
+function createWizardAddTemplateButton(template){
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'btn';
+  addBtn.textContent = 'Add Template';
+  addBtn.addEventListener('click', () => {
+    if(!template?.id) return;
+    const docType = template.documentTypeId || state.docType;
+    const wizardId = template.id;
+    const geometryId = nextWizardGeometryId(docType, wizardId);
+    state.docType = docType;
+    state.activeWizardId = wizardId;
+    state.activeGeometryId = geometryId;
+    ensureProfile(wizardId, geometryId);
+    activateConfigMode();
+    if(els.app) els.app.style.display = 'none';
+    if(els.wizardSection) els.wizardSection.style.display = 'block';
+    clearConfigResultsUi({ preserveProfileJson: true });
+  });
+  return addBtn;
+}
+
 function createWizardExportButton(template){
   const exportBtn = document.createElement('button');
   exportBtn.type = 'button';
   exportBtn.className = 'btn';
-  exportBtn.textContent = 'Add Template';
+  exportBtn.textContent = 'Export Wizard';
   exportBtn.addEventListener('click', () => {
     openWizardExportPanel(template);
   });
@@ -5866,6 +5903,7 @@ function renderWizardDetailsActions(){
   const actions = document.createElement('div');
   actions.className = 'actions';
   actions.appendChild(createWizardEditButton(template));
+  actions.appendChild(createWizardAddTemplateButton(template));
   actions.appendChild(createWizardExportButton(template));
   actions.appendChild(createWizardDeleteButton(template));
   els.wizardDetailsActions.appendChild(actions);
