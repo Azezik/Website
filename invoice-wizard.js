@@ -1275,6 +1275,7 @@ const LS = {
   geometryMetaKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `wiz.geometries.${u}.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}`,
   dbKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb`,
   rowsKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb_rows`,
+  batchLogKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.batch_log`,
   getDb(u, d, wizardId = DEFAULT_WIZARD_ID) {
     const raw = localStorage.getItem(this.dbKey(u, d, wizardId));
     return raw ? JSON.parse(raw) : [];
@@ -1288,6 +1289,14 @@ const LS = {
   setRows(u, d, rows, wizardId = DEFAULT_WIZARD_ID){
     const payload = normalizeRowsPayload(rows);
     localStorage.setItem(this.rowsKey(u, d, wizardId), JSON.stringify(payload));
+  },
+  getBatchLog(u, d, wizardId = DEFAULT_WIZARD_ID){
+    const raw = localStorage.getItem(this.batchLogKey(u, d, wizardId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  },
+  setBatchLog(u, d, entries, wizardId = DEFAULT_WIZARD_ID){
+    localStorage.setItem(this.batchLogKey(u, d, wizardId), JSON.stringify(Array.isArray(entries) ? entries : []));
   },
   getProfile(u,d,wizardId = DEFAULT_WIZARD_ID, geometryId = null){
     const keys = [];
