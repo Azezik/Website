@@ -440,7 +440,7 @@ let state = {
   overlayPinned: false,
   overlayMetrics: null,
   isExtracting: false,
-  extractionOverlayAllowed: false,
+  extractionTrigger: null,
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
@@ -457,21 +457,15 @@ let loginHydrated = false;
 let extractionOverlayCount = 0;
 function setExtractionLoading(isLoading){
   if(!els.wizardRunOverlay) return;
-  const allowOverlay = state.extractionOverlayAllowed && isRunMode();
-  if(!allowOverlay){
-    if(!isLoading){
-      extractionOverlayCount = 0;
-      state.isExtracting = false;
-      els.wizardRunOverlay.classList.remove('is-active');
-      els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
-    }
-    return;
-  }
+  const allowOverlay = state.extractionTrigger === 'drop' && isRunMode();
   extractionOverlayCount = Math.max(0, extractionOverlayCount + (isLoading ? 1 : -1));
   const shouldShow = extractionOverlayCount > 0;
   state.isExtracting = shouldShow;
-  els.wizardRunOverlay.classList.toggle('is-active', shouldShow);
-  els.wizardRunOverlay.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+  els.wizardRunOverlay.classList.toggle('is-active', shouldShow && allowOverlay);
+  els.wizardRunOverlay.setAttribute('aria-hidden', shouldShow && allowOverlay ? 'false' : 'true');
+  if(!shouldShow){
+    state.extractionTrigger = null;
+  }
 }
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
@@ -712,7 +706,7 @@ function setWizardMode(nextMode){
   if(normalized !== ModeEnum.RUN){
     extractionOverlayCount = 0;
     state.isExtracting = false;
-    state.extractionOverlayAllowed = false;
+    state.extractionTrigger = null;
     if(els.wizardRunOverlay){
       els.wizardRunOverlay.classList.remove('is-active');
       els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
@@ -12189,10 +12183,8 @@ function toFilesList(evt) {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
       if (files.length){
-        state.extractionOverlayAllowed = true;
-        processBatch(files).finally(() => {
-          state.extractionOverlayAllowed = false;
-        });
+        state.extractionTrigger = 'drop';
+        processBatch(files);
       }
     }
   });
@@ -12201,7 +12193,10 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length) processBatch(files);
+  if (files.length){
+    state.extractionTrigger = 'file';
+    processBatch(files);
+  }
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
