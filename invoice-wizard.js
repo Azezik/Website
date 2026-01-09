@@ -440,6 +440,7 @@ let state = {
   overlayPinned: false,
   overlayMetrics: null,
   isExtracting: false,
+  extractionOverlayAllowed: false,
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
@@ -456,6 +457,16 @@ let loginHydrated = false;
 let extractionOverlayCount = 0;
 function setExtractionLoading(isLoading){
   if(!els.wizardRunOverlay) return;
+  const allowOverlay = state.extractionOverlayAllowed && isRunMode();
+  if(!allowOverlay){
+    if(!isLoading){
+      extractionOverlayCount = 0;
+      state.isExtracting = false;
+      els.wizardRunOverlay.classList.remove('is-active');
+      els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
+    }
+    return;
+  }
   extractionOverlayCount = Math.max(0, extractionOverlayCount + (isLoading ? 1 : -1));
   const shouldShow = extractionOverlayCount > 0;
   state.isExtracting = shouldShow;
@@ -698,6 +709,15 @@ function syncModeUi(){
 function setWizardMode(nextMode){
   const normalized = nextMode === ModeEnum.RUN ? ModeEnum.RUN : ModeEnum.CONFIG;
   state.mode = normalized;
+  if(normalized !== ModeEnum.RUN){
+    extractionOverlayCount = 0;
+    state.isExtracting = false;
+    state.extractionOverlayAllowed = false;
+    if(els.wizardRunOverlay){
+      els.wizardRunOverlay.classList.remove('is-active');
+      els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
+    }
+  }
   modeController?.setMode?.(normalized);
   syncModeUi();
 }
@@ -12168,7 +12188,12 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length) processBatch(files);
+      if (files.length){
+        state.extractionOverlayAllowed = true;
+        processBatch(files).finally(() => {
+          state.extractionOverlayAllowed = false;
+        });
+      }
     }
   });
 });
