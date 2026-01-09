@@ -12168,7 +12168,7 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length) processBatch(files, { showOverlay: true });
+      if (files.length) processBatch(files);
     }
   });
 });
@@ -12176,7 +12176,7 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length) processBatch(files, { showOverlay: false });
+  if (files.length) processBatch(files);
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
@@ -13554,7 +13554,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   }
 }
 
-async function processBatch(files, { showOverlay = false } = {}){
+async function processBatch(files){
   if(!files.length) return;
   let runCtx;
   try{
@@ -13573,7 +13573,7 @@ async function processBatch(files, { showOverlay = false } = {}){
   ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
   logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
 
-  if(showOverlay){ setExtractionLoading(true); }
+  setExtractionLoading(true);
   try {
     for(const f of files){
       await runModeExtractFileWithProfile(f, state.profile, runCtx);
@@ -13582,7 +13582,7 @@ async function processBatch(files, { showOverlay = false } = {}){
     console.error('Batch extraction failed', err);
     alert(err?.message || 'Batch extraction failed. Please try again.');
   } finally {
-    if(showOverlay){ setExtractionLoading(false); }
+    setExtractionLoading(false);
     els.wizardSection.style.display = 'none';
     els.app.style.display = 'block';
     showTab('extracted-data');
