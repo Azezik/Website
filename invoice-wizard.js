@@ -194,6 +194,7 @@ const els = {
   wizardSubhead:   document.querySelector('#wizard-section > p.sub'),
   viewer:          document.getElementById('viewer'),
   promptBar:       document.getElementById('promptBar'),
+  wizardRunOverlay: document.getElementById('wizard-run-overlay'),
 
   pageControls:    document.getElementById('pageControls'),
   prevPageBtn:     document.getElementById('prevPageBtn'),
@@ -438,6 +439,7 @@ let state = {
   snapshotPanels: { activePage: null },
   overlayPinned: false,
   overlayMetrics: null,
+  isExtracting: false,
   pendingSelection: null,
   lastOcrCropCss: null,
   lineLayout: null,
@@ -450,6 +452,16 @@ let state = {
 };
 
 let loginHydrated = false;
+
+let extractionOverlayCount = 0;
+function setExtractionLoading(isLoading){
+  if(!els.wizardRunOverlay) return;
+  extractionOverlayCount = Math.max(0, extractionOverlayCount + (isLoading ? 1 : -1));
+  const shouldShow = extractionOverlayCount > 0;
+  state.isExtracting = shouldShow;
+  els.wizardRunOverlay.classList.toggle('is-active', shouldShow);
+  els.wizardRunOverlay.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+}
 
 function normalizeStaticDebugLogs(logs = staticDebugLogs){
   return logs.map(entry => {
@@ -12156,7 +12168,7 @@ function toFilesList(evt) {
     if (evtName==='drop') {
       els.dropzone.classList.remove('dragover');
       const files = toFilesList(e);
-      if (files.length) processBatch(files);
+      if (files.length) processBatch(files, { showOverlay: true });
     }
   });
 });
@@ -12164,7 +12176,7 @@ function toFilesList(evt) {
 // File input
 els.fileInput?.addEventListener('change', e=>{
   const files = Array.from(e.target.files || []);
-  if (files.length) processBatch(files);
+  if (files.length) processBatch(files, { showOverlay: false });
 });
 
 els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
@@ -13540,7 +13552,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   }
 }
 
-async function processBatch(files){
+async function processBatch(files, { showOverlay = false } = {}){
   if(!files.length) return;
   let runCtx;
   try{
@@ -13559,6 +13571,7 @@ async function processBatch(files){
   ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
   logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
 
+  if(showOverlay){ setExtractionLoading(true); }
   try {
     for(const f of files){
       await runModeExtractFileWithProfile(f, state.profile, runCtx);
@@ -13567,6 +13580,7 @@ async function processBatch(files){
     console.error('Batch extraction failed', err);
     alert(err?.message || 'Batch extraction failed. Please try again.');
   } finally {
+    if(showOverlay){ setExtractionLoading(false); }
     els.wizardSection.style.display = 'none';
     els.app.style.display = 'block';
     showTab('extracted-data');
