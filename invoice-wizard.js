@@ -12788,6 +12788,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   if(runDiagnostics && guardStarted){
     runDiagnostics.startExtraction(guardKey);
   }
+  setExtractionLoading(true);
   try {
     activateRunMode({ clearDoc: true });
     const wizardId = runContext.wizardId || profile?.wizardId || currentWizardId();
@@ -13543,6 +13544,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     console.error('Run mode extraction failed', err);
     if(!runContext.isBatch){ notifyRunIssue(err?.message || 'Extraction failed. Please try again.'); }
   } finally {
+    setExtractionLoading(false);
     if(runDiagnostics && guardStarted){
       runDiagnostics.finishExtraction(guardKey);
     }
