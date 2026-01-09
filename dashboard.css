@@ -753,3 +753,38 @@ textarea.code {
     flex-direction: column;
   }
 }
+
+/* Extraction loading overlay */
+.loading-overlay{
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-direction: column;
+  background: rgba(6, 10, 10, 0.75);
+  z-index: 1100;
+  pointer-events: auto;
+  text-align: center;
+}
+.loading-overlay.is-active{ display: flex; }
+.loading-overlay__content{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.loading-overlay__content img{
+  width: auto;
+  height: auto;
+  image-rendering: auto;
+}
+.loading-overlay__text{
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
