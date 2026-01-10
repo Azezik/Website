@@ -428,6 +428,7 @@ let state = {
   savedFieldsRecord: null,
   lastOcrCropPx: null,
   cropAudits: [],
+  tessCropCache: {},
   cropHashes: {},        // per page hash map for duplicate detection
   pageSnapshots: {},     // tracks saved full-page debug PNGs
   pageRenderPromises: [],
@@ -9570,8 +9571,23 @@ async function readImageTokensForPage(pageNum, canvasEl=null){
   }
 }
 
+function getTessCropCacheKey(bboxPx, pageNumOverride){
+  if(!bboxPx) return { pageNum: '', bboxHash: '' };
+  const pageNum = Number.isFinite(pageNumOverride) ? pageNumOverride : (bboxPx.page || 1);
+  const x = Math.round(bboxPx.x || 0);
+  const y = Math.round(bboxPx.y || 0);
+  const w = Math.round(bboxPx.w || 0);
+  const h = Math.round(bboxPx.h || 0);
+  return { pageNum: String(pageNum), bboxHash: `${x}:${y}:${w}:${h}` };
+}
+
 async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
+  const { pageNum, bboxHash } = getTessCropCacheKey(bboxPx, bboxPx.page);
+  if(pageNum && bboxHash){
+    const cached = state.tessCropCache?.[pageNum]?.[bboxHash];
+    if(cached) return { text: cached.text || '', confidence: cached.confidence || 0 };
+  }
   const sx = Math.max(0, Math.floor(bboxPx.x || 0));
   const sy = Math.max(0, Math.floor(bboxPx.y || 0));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil(bboxPx.w || 0)));
@@ -9591,6 +9607,10 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   const confidence = confSource.length
     ? confSource.reduce((sum, item) => sum + (item.confidence || 0), 0) / (confSource.length * 100)
     : 0;
+  if(pageNum && bboxHash){
+    state.tessCropCache[pageNum] = state.tessCropCache[pageNum] || {};
+    state.tessCropCache[pageNum][bboxHash] = { text, confidence };
+  }
   return { text, confidence };
 }
 
