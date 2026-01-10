@@ -9570,6 +9570,30 @@ async function readImageTokensForPage(pageNum, canvasEl=null){
   }
 }
 
+async function ocrTextFromBBox({ pageCanvas, bboxPx }){
+  if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
+  const sx = Math.max(0, Math.floor(bboxPx.x || 0));
+  const sy = Math.max(0, Math.floor(bboxPx.y || 0));
+  const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil(bboxPx.w || 0)));
+  const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil(bboxPx.h || 0)));
+  if(!sw || !sh) return { text:'', confidence:0 };
+  const crop = document.createElement('canvas');
+  crop.width = sw;
+  crop.height = sh;
+  const ctx = crop.getContext('2d');
+  ctx.drawImage(pageCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  const opts = { tessedit_pageseg_mode: 6, oem: 1 };
+  const { data } = await TesseractRef.recognize(crop, 'eng', opts);
+  const text = (data?.text || '').trim();
+  const symbols = data?.symbols || [];
+  const words = data?.words || [];
+  const confSource = symbols.length ? symbols : words;
+  const confidence = confSource.length
+    ? confSource.reduce((sum, item) => sum + (item.confidence || 0), 0) / (confSource.length * 100)
+    : 0;
+  return { text, confidence };
+}
+
 /* ----------------------- Text Extraction ------------------------- */
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
