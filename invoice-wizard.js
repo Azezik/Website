@@ -7271,6 +7271,15 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
     }
     if(!cleaned){
+      if(text && usedBox){
+        text = await maybePatchAnyFieldText({
+          text,
+          fieldKey: fieldSpec.fieldKey,
+          boxPx: usedBox,
+          pageNum: usedBox.page,
+          pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1).canvas
+        });
+      }
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
     cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
@@ -7371,6 +7380,15 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       return null;
     }
     if(multilineValue){
+      if(multilineValue && searchBox){
+        multilineValue = await maybePatchAnyFieldText({
+          text: multilineValue,
+          fieldKey: fieldSpec.fieldKey,
+          boxPx: searchBox,
+          pageNum: searchBox.page,
+          pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
+        });
+      }
       let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
@@ -7455,8 +7473,21 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       }
       return attemptResult;
     }
-    const sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
-    const cleaned = sel.cleaned || {};
+    let sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
+    let cleaned = sel.cleaned || {};
+    if(sel?.raw && searchBox){
+      const patched = await maybePatchAnyFieldText({
+        text: sel.raw,
+        fieldKey: fieldSpec.fieldKey,
+        boxPx: searchBox,
+        pageNum: searchBox.page,
+        pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
+      });
+      if(patched && patched !== sel.raw){
+        cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', patched, state.mode, spanKey);
+        sel = { ...sel, raw: patched, value: cleaned.value || cleaned.raw || patched, cleaned, cleanedOk: !!(cleaned.value || cleaned.raw) };
+      }
+    }
     const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
       ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
       : null;
@@ -9612,6 +9643,82 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
     state.tessCropCache[pageNum][bboxHash] = { text, confidence };
   }
   return { text, confidence };
+}
+
+const ANY_FIELD_TESS_CONFIDENCE_MIN = 0.75;
+const ANY_FIELD_TESS_MAX_NON_CONFUSION = 1;
+const ANY_FIELD_CONFUSION_MAP = new Map([
+  ['O', '0'], ['0', 'O'],
+  ['o', '0'], ['I', '1'], ['1', 'I'],
+  ['l', '1'], ['1', 'l'],
+  ['T', '7'], ['7', 'T'],
+  ['S', '5'], ['5', 'S'],
+  ['B', '8'], ['8', 'B']
+]);
+
+function alignIgnoringSpaces(pdfStr='', tessStr=''){
+  const pdf = String(pdfStr ?? '');
+  const tess = String(tessStr ?? '');
+  const pdfChars = [];
+  const tessChars = [];
+  const pdfMap = [];
+  for(let i=0;i<pdf.length;i++){
+    const ch = pdf[i];
+    if(/\s/.test(ch)) continue;
+    pdfChars.push(ch);
+    pdfMap.push(i);
+  }
+  for(let i=0;i<tess.length;i++){
+    const ch = tess[i];
+    if(/\s/.test(ch)) continue;
+    tessChars.push(ch);
+  }
+  return { pdfChars, tessChars, pdfMap, pdfNorm: pdfChars.join(''), tessNorm: tessChars.join('') };
+}
+
+function isConfusionPair(a, b){
+  return ANY_FIELD_CONFUSION_MAP.get(a) === b;
+}
+
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, pageNum } = {}){
+  const pdfText = String(pdfStr ?? '');
+  if(!pdfText.trim() || !pageCanvas || !bboxPx) return pdfStr;
+  const normalizedMagic = normalizeMagicDataType(magicType);
+  if(normalizedMagic && normalizedMagic !== MAGIC_DATA_TYPE.ANY) return pdfStr;
+  const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
+  const bbox = { ...bboxPx, page };
+  const { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
+  if(!tessStr) return pdfStr;
+  const { pdfChars, tessChars, pdfMap } = alignIgnoringSpaces(pdfText, tessStr);
+  if(!pdfChars.length || pdfChars.length !== tessChars.length) return pdfStr;
+  let nonConfusionMismatches = 0;
+  for(let i=0;i<pdfChars.length;i++){
+    if(pdfChars[i] === tessChars[i]) continue;
+    if(!isConfusionPair(pdfChars[i], tessChars[i])){
+      nonConfusionMismatches += 1;
+      if(nonConfusionMismatches > ANY_FIELD_TESS_MAX_NON_CONFUSION) return pdfStr;
+    }
+  }
+  if(confidence < ANY_FIELD_TESS_CONFIDENCE_MIN) return pdfStr;
+  const chars = pdfText.split('');
+  for(let i=0;i<pdfChars.length;i++){
+    if(pdfChars[i] === tessChars[i]) continue;
+    if(isConfusionPair(pdfChars[i], tessChars[i])){
+      const idx = pdfMap[i];
+      if(Number.isFinite(idx)) chars[idx] = tessChars[i];
+    }
+  }
+  return chars.join('');
+}
+
+async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas } = {}){
+  if(!text || !boxPx) return text;
+  const magicType = resolveMagicDataType(fieldKey).magicType;
+  if(magicType !== MAGIC_DATA_TYPE.ANY) return text;
+  const page = Number.isFinite(pageNum) ? pageNum : (boxPx.page || state.pageNum || 1);
+  const canvas = pageCanvas || getPdfBitmapCanvas(page - 1).canvas;
+  if(!canvas) return text;
+  return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, magicType, pageNum: page });
 }
 
 /* ----------------------- Text Extraction ------------------------- */
