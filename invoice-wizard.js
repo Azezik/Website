@@ -7058,6 +7058,32 @@ function labelValueHeuristic(fieldSpec, tokens){
   return { value, usedBox, confidence };
 }
 
+function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = {}){
+  if(!cleaned) return cleaned;
+  const verifier = window.FieldValueVerifier || window.fieldValueVerifier;
+  if(!verifier || typeof verifier.verify !== 'function') return cleaned;
+  const bboxPx = boxPx || null;
+  let page = Number.isFinite(pageNum) ? pageNum : (Number.isFinite(bboxPx?.page) ? bboxPx.page : null);
+  if(!page){ page = state.pageNum || 1; }
+  const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1).canvas : null);
+  try{
+    const verdict = verifier.verify({
+      fieldKey: fieldKey || '',
+      bboxPx,
+      pageNum: page,
+      pageCanvas: canvas,
+      value: cleaned.value || '',
+      raw: cleaned.raw || '',
+      cleaned
+    });
+    if(!verdict || typeof verdict !== 'object') return cleaned;
+    return { ...cleaned, ...verdict };
+  } catch(err){
+    console.warn('FieldValueVerifier.verify failed', err);
+    return cleaned;
+  }
+}
+
   async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
@@ -7246,6 +7272,7 @@ function labelValueHeuristic(fieldSpec, tokens){
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
+    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
     const cleanedValue = cleaned.value || cleaned.raw || text || state.snappedText || '';
     const rawOriginal = text || state.snappedText || cleaned.rawOriginal || cleaned.raw || '';
     if(isConfigStatic && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
@@ -7343,7 +7370,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       return null;
     }
     if(multilineValue){
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
         : null;
@@ -7554,7 +7582,8 @@ function labelValueHeuristic(fieldSpec, tokens){
       const hintPenalty = farFromHint ? 0.6 : 1;
       const distanceScore = Math.max(0, 1 - (distNorm / maxRadius)) * baseBias * hintPenalty;
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
-      const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+      cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
       const anchorRes = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
       const anchorOk = anchorRes.ok || anchorRes.softOk;
@@ -7772,7 +7801,8 @@ function labelValueHeuristic(fieldSpec, tokens){
         const rawText = textLines.join('\n');
         const box = mergeTokenBounds(ordered) || { ...anchorBox };
         if(box && !box.page){ box.page = anchorBox.page; }
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+        let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+        cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
         const fpDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
           ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
           : null;
@@ -7953,7 +7983,8 @@ function labelValueHeuristic(fieldSpec, tokens){
   if(!result){
     const lv = labelValueHeuristic(fieldSpec, tokens);
       if(lv.value){
-        const cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
+        let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
+        cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: lv.usedBox });
         let candidateTokens = [];
         if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
         const anchorRes = lv.usedBox ? anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height) : null;
@@ -7972,15 +8003,17 @@ function labelValueHeuristic(fieldSpec, tokens){
       inputsSnapshot:{ selectionText: state.snappedText || null }
     });
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
+    const fbBox = state.snappedPx || basePx || null;
+    const verifiedFb = verifyCleanedValue(fb, { fieldKey: fieldSpec.fieldKey, boxPx: fbBox });
     traceEvent(spanKey,'fallback.pick',{
-      value: fb.value || fb.raw,
+      value: verifiedFb.value || verifiedFb.raw,
       stageLabel:'Fallback pick',
       stepNumber:7,
-      bbox:{ pixel: state.snappedPx || basePx || null },
-      confidence:{ score: fb.value ? 0.3 : 0 },
+      bbox:{ pixel: fbBox },
+      confidence:{ score: verifiedFb.value ? 0.3 : 0 },
       notes:'Fallback value chosen after heuristics'
     });
-    result = { value: fb.value || fb.raw, raw: selectionRaw || fb.raw, corrected: fb.corrected, code: fb.code, shape: fb.shape, score: fb.score, correctionsApplied: fb.correctionsApplied, corrections: fb.correctionsApplied, boxPx: state.snappedPx || basePx || null, confidence: fb.value ? 0.3 : 0, method: method||'fallback', score };
+    result = { value: verifiedFb.value || verifiedFb.raw, raw: selectionRaw || verifiedFb.raw, corrected: verifiedFb.corrected, code: verifiedFb.code, shape: verifiedFb.shape, score: verifiedFb.score, correctionsApplied: verifiedFb.correctionsApplied, corrections: verifiedFb.correctionsApplied, boxPx: fbBox, confidence: verifiedFb.value ? 0.3 : 0, method: method||'fallback', score };
   }
   if(!result.value && selectionRaw){
     bumpDebugBlank();
