@@ -559,11 +559,14 @@ function isOcrTraceEnabled(){
 }
 
 function buildOcrTraceMeta(extra = {}){
+  const wizardName = (typeof getActiveWizardName === 'function')
+    ? getActiveWizardName()
+    : null;
   return {
     enabled: true,
     docType: state.docType,
     wizardId: currentWizardId(),
-    wizardName: getActiveWizardName?.() || null,
+    wizardName,
     geometryId: state.activeGeometryId || null,
     profileVersion: state.profile?.version || null,
     username: state.username || null,
