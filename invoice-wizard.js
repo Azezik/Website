@@ -49,7 +49,7 @@ const STATIC_LINE_DIFF_WEIGHTS = { 0: 1.0, 1: 0.75, 2: 0.35, default: 0.10 };
 const STATIC_FP_SCORES = { ok: 1.3, fail: 0.5 };
 
 function staticDebugEnabled(){ return true; }
-function ocrMagicDebugEnabled(){ return true; }
+function ocrMagicDebugEnabled(){ return !!DEBUG_OCRMAGIC; }
 function mirrorDebugLog(line, details=null, level='log'){
   const logger = console[level] ? console[level].bind(console) : console.log.bind(console);
   if(staticDebugEnabled()){
@@ -7271,19 +7271,23 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       text = lines.map(L => L.tokens.map(t=>t.text).join(' ').trim()).filter(Boolean).join('\n');
     }
     if(!cleaned){
-      if(text && usedBox){
-        text = await maybePatchAnyFieldText({
-          text,
-          fieldKey: fieldSpec.fieldKey,
-          boxPx: usedBox,
-          pageNum: usedBox.page,
-          pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1).canvas
-        });
-      }
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
+    const baseText = cleaned.value || cleaned.raw || text || state.snappedText || '';
+    if(baseText && usedBox){
+      const patched = await maybePatchAnyFieldText({
+        text: baseText,
+        fieldKey: fieldSpec.fieldKey,
+        boxPx: usedBox,
+        pageNum: usedBox.page,
+        pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1).canvas
+      });
+      if(patched && patched !== baseText){
+        cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
+      }
+    }
     cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
-    const cleanedValue = cleaned.value || cleaned.raw || text || state.snappedText || '';
+    const cleanedValue = cleaned.value || cleaned.raw || baseText;
     const rawOriginal = text || state.snappedText || cleaned.rawOriginal || cleaned.raw || '';
     if(isConfigStatic && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
       const expectedCode = getDominantFingerprintCode(fieldSpec.fieldKey, spanKey?.fieldKey || fieldSpec.fieldKey);
@@ -7380,16 +7384,21 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       return null;
     }
     if(multilineValue){
-      if(multilineValue && searchBox){
-        multilineValue = await maybePatchAnyFieldText({
-          text: multilineValue,
+      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      const baseText = cleaned.value || cleaned.raw || multilineValue || '';
+      if(baseText && searchBox){
+        const patched = await maybePatchAnyFieldText({
+          text: baseText,
           fieldKey: fieldSpec.fieldKey,
           boxPx: searchBox,
           pageNum: searchBox.page,
           pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
         });
+        if(patched && patched !== baseText){
+          multilineValue = patched;
+          cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
+        }
       }
-      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
@@ -7475,17 +7484,18 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     }
     let sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     let cleaned = sel.cleaned || {};
-    if(sel?.raw && searchBox){
+    const baseText = cleaned.value || cleaned.raw || sel.raw || '';
+    if(baseText && searchBox){
       const patched = await maybePatchAnyFieldText({
-        text: sel.raw,
+        text: baseText,
         fieldKey: fieldSpec.fieldKey,
         boxPx: searchBox,
         pageNum: searchBox.page,
         pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
       });
-      if(patched && patched !== sel.raw){
-        cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', patched, state.mode, spanKey);
-        sel = { ...sel, raw: patched, value: cleaned.value || cleaned.raw || patched, cleaned, cleanedOk: !!(cleaned.value || cleaned.raw) };
+      if(patched && patched !== baseText){
+        cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
+        sel = { ...sel, raw: patched, value: patched, cleaned, cleanedOk: !!patched };
       }
     }
     const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
@@ -9617,13 +9627,35 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   const { pageNum, bboxHash } = getTessCropCacheKey(bboxPx, bboxPx.page);
   if(pageNum && bboxHash){
     const cached = state.tessCropCache?.[pageNum]?.[bboxHash];
-    if(cached) return { text: cached.text || '', confidence: cached.confidence || 0 };
+    if(cached){
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.cache_hit',
+          pageNum,
+          bboxHash,
+          textLen: (cached.text || '').length,
+          confidence: cached.confidence || 0
+        });
+      }
+      return { text: cached.text || '', confidence: cached.confidence || 0 };
+    }
   }
   const sx = Math.max(0, Math.floor(bboxPx.x || 0));
   const sy = Math.max(0, Math.floor(bboxPx.y || 0));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil(bboxPx.w || 0)));
   const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil(bboxPx.h || 0)));
-  if(!sw || !sh) return { text:'', confidence:0 };
+  if(!sw || !sh){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.tess.crop.empty',
+        pageNum,
+        bboxHash,
+        width: sw,
+        height: sh
+      });
+    }
+    return { text:'', confidence:0 };
+  }
   const crop = document.createElement('canvas');
   crop.width = sw;
   crop.height = sh;
@@ -9641,6 +9673,17 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   if(pageNum && bboxHash){
     state.tessCropCache[pageNum] = state.tessCropCache[pageNum] || {};
     state.tessCropCache[pageNum][bboxHash] = { text, confidence };
+  }
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.tess.crop.run',
+      pageNum,
+      bboxHash,
+      width: sw,
+      height: sh,
+      textLen: text.length,
+      confidence
+    });
   }
   return { text, confidence };
 }
@@ -9682,24 +9725,82 @@ function isConfusionPair(a, b){
 
 async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, pageNum } = {}){
   const pdfText = String(pdfStr ?? '');
-  if(!pdfText.trim() || !pageCanvas || !bboxPx) return pdfStr;
+  if(!pdfText.trim() || !pageCanvas || !bboxPx){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: !pdfText.trim() ? 'empty' : (!pageCanvas ? 'noCanvas' : 'noBbox'),
+        pdfLen: pdfText.length
+      });
+    }
+    return pdfStr;
+  }
   const normalizedMagic = normalizeMagicDataType(magicType);
-  if(normalizedMagic && normalizedMagic !== MAGIC_DATA_TYPE.ANY) return pdfStr;
+  if(normalizedMagic && normalizedMagic !== MAGIC_DATA_TYPE.ANY){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'notAny',
+        magicType: normalizedMagic
+      });
+    }
+    return pdfStr;
+  }
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
   const { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
-  if(!tessStr) return pdfStr;
+  if(!tessStr){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'noTessText',
+        pdfLen: pdfText.length,
+        confidence
+      });
+    }
+    return pdfStr;
+  }
   const { pdfChars, tessChars, pdfMap } = alignIgnoringSpaces(pdfText, tessStr);
-  if(!pdfChars.length || pdfChars.length !== tessChars.length) return pdfStr;
+  if(!pdfChars.length || pdfChars.length !== tessChars.length){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'alignFail',
+        pdfLen: pdfText.length,
+        tessLen: tessStr.length,
+        pdfNormLen: pdfChars.length,
+        tessNormLen: tessChars.length
+      });
+    }
+    return pdfStr;
+  }
   let nonConfusionMismatches = 0;
   for(let i=0;i<pdfChars.length;i++){
     if(pdfChars[i] === tessChars[i]) continue;
     if(!isConfusionPair(pdfChars[i], tessChars[i])){
       nonConfusionMismatches += 1;
-      if(nonConfusionMismatches > ANY_FIELD_TESS_MAX_NON_CONFUSION) return pdfStr;
+      if(nonConfusionMismatches > ANY_FIELD_TESS_MAX_NON_CONFUSION){
+        if(ocrMagicDebugEnabled()){
+          ocrMagicDebug({
+            event: 'ocrmagic.anyfield.verify.skip',
+            reason: 'unsafeMismatch',
+            nonConfusionMismatches
+          });
+        }
+        return pdfStr;
+      }
     }
   }
-  if(confidence < ANY_FIELD_TESS_CONFIDENCE_MIN) return pdfStr;
+  if(confidence < ANY_FIELD_TESS_CONFIDENCE_MIN){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'lowConf',
+        confidence
+      });
+    }
+    return pdfStr;
+  }
   const chars = pdfText.split('');
   for(let i=0;i<pdfChars.length;i++){
     if(pdfChars[i] === tessChars[i]) continue;
@@ -9708,17 +9809,71 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, 
       if(Number.isFinite(idx)) chars[idx] = tessChars[i];
     }
   }
-  return chars.join('');
+  const next = chars.join('');
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.verify.done',
+      changed: next !== pdfText,
+      pdfLen: pdfText.length,
+      outputLen: next.length,
+      confidence
+    });
+  }
+  return next;
 }
 
 async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas } = {}){
-  if(!text || !boxPx) return text;
+  if(!text || !boxPx){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.patch.skip',
+        reason: !text ? 'empty' : 'noBbox',
+        textLen: (text || '').length
+      });
+    }
+    return text;
+  }
   const magicType = resolveMagicDataType(fieldKey).magicType;
-  if(magicType !== MAGIC_DATA_TYPE.ANY) return text;
+  if(magicType !== MAGIC_DATA_TYPE.ANY){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.patch.skip',
+        reason: 'notAny',
+        magicType
+      });
+    }
+    return text;
+  }
   const page = Number.isFinite(pageNum) ? pageNum : (boxPx.page || state.pageNum || 1);
   const canvas = pageCanvas || getPdfBitmapCanvas(page - 1).canvas;
-  if(!canvas) return text;
-  return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, magicType, pageNum: page });
+  if(!canvas){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.patch.skip',
+        reason: 'noCanvas',
+        pageNum: page
+      });
+    }
+    return text;
+  }
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.patch.start',
+      textLen: text.length,
+      pageNum: page
+    });
+  }
+  const patched = await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, magicType, pageNum: page });
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.patch.done',
+      changed: patched !== text,
+      textLen: text.length,
+      outputLen: (patched || '').length,
+      pageNum: page
+    });
+  }
+  return patched;
 }
 
 /* ----------------------- Text Extraction ------------------------- */
