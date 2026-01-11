@@ -9734,10 +9734,16 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
       return { text: cached.text || '', confidence: cached.confidence || 0 };
     }
   }
-  const sx = Math.max(0, Math.floor(bboxPx.x || 0));
-  const sy = Math.max(0, Math.floor(bboxPx.y || 0));
-  const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil(bboxPx.w || 0)));
-  const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil(bboxPx.h || 0)));
+  const page = bboxPx.page || Number(pageNum) || 1;
+  const vp = state.pageViewports[(page || 1) - 1] || state.viewport || { width: pageCanvas.width, height: pageCanvas.height };
+  const logicalW = Math.max(1, Number(vp.width ?? vp.w ?? pageCanvas.width));
+  const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? pageCanvas.height));
+  const renderScaleX = pageCanvas.width / logicalW;
+  const renderScaleY = pageCanvas.height / logicalH;
+  const sx = Math.max(0, Math.floor((bboxPx.x || 0) * renderScaleX));
+  const sy = Math.max(0, Math.floor((bboxPx.y || 0) * renderScaleY));
+  const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil((bboxPx.w || 0) * renderScaleX)));
+  const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil((bboxPx.h || 0) * renderScaleY)));
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.tess.crop.cacheMiss',
@@ -9819,6 +9825,22 @@ function isConfusionPair(a, b){
   return ANY_FIELD_CONFUSION_MAP.get(a) === b;
 }
 
+function alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = {}){
+  if(!pdfChars?.length || !tessChars?.length || !pdfNorm || !tessNorm) return null;
+  if(tessChars.length >= pdfChars.length) return null;
+  const start = pdfNorm.indexOf(tessNorm);
+  if(start < 0) return null;
+  const end = start + tessChars.length;
+  return {
+    pdfChars: pdfChars.slice(start, end),
+    tessChars,
+    pdfMap: pdfMap.slice(start, end),
+    pdfNorm,
+    tessNorm,
+    alignMode: 'substring'
+  };
+}
+
 async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
@@ -9835,7 +9857,15 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
     }
     return pdfStr;
   }
-  const { pdfChars, tessChars, pdfMap } = alignIgnoringSpaces(pdfText, tessStr);
+  let { pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = alignIgnoringSpaces(pdfText, tessStr);
+  let alignMode = 'exact';
+  if(pdfChars.length && tessChars.length && pdfChars.length !== tessChars.length){
+    const subAligned = alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm });
+    if(subAligned){
+      ({ pdfChars, tessChars, pdfMap } = subAligned);
+      alignMode = subAligned.alignMode;
+    }
+  }
   if(!pdfChars.length || pdfChars.length !== tessChars.length){
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
@@ -9844,7 +9874,8 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
         pdfLen: pdfText.length,
         tessLen: tessStr.length,
         pdfNormLen: pdfChars.length,
-        tessNormLen: tessChars.length
+        tessNormLen: tessChars.length,
+        alignMode
       });
     }
     return pdfStr;
