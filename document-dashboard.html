@@ -210,10 +210,15 @@
               <input type="checkbox" id="show-raw-toggle" />
               <span>Show raw values</span>
             </label>
+            <label class="toggle-option">
+              <input type="checkbox" id="ocr-trace-toggle" />
+              <span>Enable OCR trace</span>
+            </label>
           </div>
         </details>
         <div class="actions" style="justify-content:flex-end;">
           <button id="static-debug-btn" class="btn" type="button">Static Debug Logs</button>
+          <button id="download-ocr-trace-btn" class="btn" type="button">Download OCR Trace Report</button>
         </div>
       </section>
 
@@ -355,6 +360,7 @@
   <script src="snapshot-store.js"></script>
   <script src="builder-field-row.js"></script>
   <script src="common-subs.js"></script>
+  <script src="js/ocr-trace.js"></script>
   <script src="ocrmagic-layer1.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
