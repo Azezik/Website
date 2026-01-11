@@ -4221,14 +4221,19 @@ const FieldDataEngine = (() => {
   function clean(ftype, input, mode='RUN', spanKey){
     const arr = Array.isArray(input) ? input : [{text:String(input||'')}];
     const lineStrs = Array.isArray(input) ? groupIntoLines(arr).map(L=>L.tokens.map(t=>t.text).join(' ').trim()) : [String(input||'')];
-    const raw = lineStrs.join(' ').trim();
+    const rawTokenLines = Array.isArray(input)
+      ? groupIntoLines(arr).map(L=>L.tokens.map(t => (t.raw ?? t.text ?? '')).join(' ').trim())
+      : null;
+    const preOcrMagicRaw = lineStrs.join(' ').trim();
+    const rawTokenText = rawTokenLines?.length ? rawTokenLines.join(' ').trim() : preOcrMagicRaw;
+    const raw = preOcrMagicRaw;
     const tokenCount = lineStrs.join(' ').split(/\s+/g).filter(Boolean).length;
     if(spanKey) traceEvent(spanKey,'clean.start',{
       raw,
       stageLabel:'Clean start',
       stepNumber:2,
       counts:{ lines: lineStrs.length, tokens: tokenCount },
-      inputsSnapshot:{ raw }
+      inputsSnapshot:{ raw, preOcrMagicRaw, rawTokenText }
     });
     const baseResult = runBaseOcrMagic(raw);
     const baseCleaned = typeof baseResult === 'string' ? baseResult : (baseResult?.cleaned ?? String(raw ?? ''));
@@ -4341,6 +4346,8 @@ const FieldDataEngine = (() => {
       value: hardInvalid ? '' : txt,
       raw: hardInvalid ? '' : raw,
       rawOriginal: raw,
+      preOcrMagicRaw,
+      rawTokenText,
       corrected: txt,
       conf,
       code,
@@ -4352,7 +4359,9 @@ const FieldDataEngine = (() => {
       isValid: isValidValue,
       invalidReason,
       validity,
-      warnings
+      warnings,
+      magicType,
+      magicTypeSource: magicTypeInfo.source
     };
   }
 
@@ -7066,7 +7075,7 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
   const bboxPx = boxPx || null;
   let page = Number.isFinite(pageNum) ? pageNum : (Number.isFinite(bboxPx?.page) ? bboxPx.page : null);
   if(!page){ page = state.pageNum || 1; }
-  const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1).canvas : null);
+  const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
   try{
     const verdict = verifier.verify({
       fieldKey: fieldKey || '',
@@ -7085,11 +7094,44 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
   }
 }
 
+async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCanvas, sourceBranch } = {}){
+  if(!cleaned) return { cleaned, patchedText: null };
+  const baseText = cleaned.value || cleaned.raw || '';
+  if(!baseText) return { cleaned, patchedText: null };
+  const patched = await maybePatchAnyFieldText({
+    text: baseText,
+    fieldKey,
+    boxPx,
+    pageNum,
+    pageCanvas,
+    sourceBranch,
+    magicType: cleaned.magicType,
+    magicTypeSource: cleaned.magicTypeSource
+  });
+  if(patched && patched !== baseText){
+    return {
+      cleaned: { ...cleaned, value: patched, raw: patched, corrected: patched },
+      patchedText: patched
+    };
+  }
+  return { cleaned, patchedText: null };
+}
+
   async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
+  const magicTypeResolution = resolveMagicDataType(fieldSpec.fieldKey || '');
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.magicType.processed',
+      fieldKey: fieldSpec.fieldKey || '',
+      testedKey: fieldSpec.fieldKey || '',
+      magicTypeResolved: magicTypeResolution.magicType || 'UNSET',
+      source: magicTypeResolution.source || 'inferred'
+    });
+  }
   const configMask = normalizeConfigMask(fieldSpec);
   const staticMinOverlap = staticRun ? 0.5 : (isConfigMode() ? 0.5 : 0.7);
   const stageUsed = { value: null };
@@ -7273,20 +7315,21 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
+    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
     const baseText = cleaned.value || cleaned.raw || text || state.snappedText || '';
     if(baseText && usedBox){
-      const patched = await maybePatchAnyFieldText({
-        text: baseText,
+      const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
         fieldKey: fieldSpec.fieldKey,
         boxPx: usedBox,
         pageNum: usedBox.page,
-        pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1).canvas
+        pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1)?.canvas,
+        sourceBranch: 'config-static'
       });
-      if(patched && patched !== baseText){
-        cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
+      cleaned = patchedCleaned;
+      if(patchedText){
+        text = patchedText;
       }
     }
-    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
     const cleanedValue = cleaned.value || cleaned.raw || baseText;
     const rawOriginal = text || state.snappedText || cleaned.rawOriginal || cleaned.raw || '';
     if(isConfigStatic && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
@@ -7385,21 +7428,21 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     }
     if(multilineValue){
       let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const baseText = cleaned.value || cleaned.raw || multilineValue || '';
       if(baseText && searchBox){
-        const patched = await maybePatchAnyFieldText({
-          text: baseText,
+        const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
           fieldKey: fieldSpec.fieldKey,
           boxPx: searchBox,
           pageNum: searchBox.page,
-          pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
+          pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1)?.canvas,
+          sourceBranch: 'attempt-multiline'
         });
-        if(patched && patched !== baseText){
-          multilineValue = patched;
-          cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
+        cleaned = patchedCleaned;
+        if(patchedText){
+          multilineValue = patchedText;
         }
       }
-      cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
         ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
         : null;
@@ -7484,18 +7527,19 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     }
     let sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
     let cleaned = sel.cleaned || {};
+    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
     const baseText = cleaned.value || cleaned.raw || sel.raw || '';
     if(baseText && searchBox){
-      const patched = await maybePatchAnyFieldText({
-        text: baseText,
+      const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
         fieldKey: fieldSpec.fieldKey,
         boxPx: searchBox,
         pageNum: searchBox.page,
-        pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1).canvas
+        pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1)?.canvas,
+        sourceBranch: 'attempt-selection'
       });
-      if(patched && patched !== baseText){
-        cleaned = { ...cleaned, value: patched, raw: patched, corrected: patched };
-        sel = { ...sel, raw: patched, value: patched, cleaned, cleanedOk: !!patched };
+      cleaned = patchedCleaned;
+      if(patchedText){
+        sel = { ...sel, raw: patchedText, value: patchedText, cleaned, cleanedOk: !!patchedText };
       }
     }
     const fpDebugCtx = (runMode && ftype==='static' && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey))
@@ -7840,11 +7884,24 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
         const ordered = boxLockedTokens.slice().sort((a,b)=> (a.y - b.y) || (a.x - b.x));
         const lines = groupIntoLines(ordered);
         const textLines = lines.map(L => (L.tokens||[]).map(t=>t.text).join(' ').trim()).filter(Boolean);
-        const rawText = textLines.join('\n');
+        let rawText = textLines.join('\n');
         const box = mergeTokenBounds(ordered) || { ...anchorBox };
         if(box && !box.page){ box.page = anchorBox.page; }
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
         cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
+        if(rawText && box){
+          const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
+            fieldKey: fieldSpec.fieldKey,
+            boxPx: box,
+            pageNum: box.page,
+            pageCanvas: getPdfBitmapCanvas((box.page || 1) - 1)?.canvas,
+            sourceBranch: 'box-locked'
+          });
+          cleaned = patchedCleaned;
+          if(patchedText){
+            rawText = patchedText;
+          }
+        }
         const fpDebugCtx = staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)
           ? { enabled:true, fieldKey: fieldSpec.fieldKey, cleanedValue: cleaned.value || cleaned.raw }
           : null;
@@ -8027,6 +8084,16 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       if(lv.value){
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
         cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: lv.usedBox });
+        if(lv.value && lv.usedBox){
+          const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(cleaned, {
+            fieldKey: fieldSpec.fieldKey,
+            boxPx: lv.usedBox,
+            pageNum: lv.usedBox.page,
+            pageCanvas: getPdfBitmapCanvas((lv.usedBox.page || 1) - 1)?.canvas,
+            sourceBranch: 'label-heuristic'
+          });
+          cleaned = patchedCleaned;
+        }
         let candidateTokens = [];
         if(lv.usedBox){ candidateTokens = tokensInBox(tokens, lv.usedBox, { minOverlap: staticMinOverlap }); }
         const anchorRes = lv.usedBox ? anchorMatchForBox(fieldSpec.anchorMetrics, lv.usedBox, candidateTokens, viewportDims.width, viewportDims.height) : null;
@@ -8046,7 +8113,17 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     });
     const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
     const fbBox = state.snappedPx || basePx || null;
-    const verifiedFb = verifyCleanedValue(fb, { fieldKey: fieldSpec.fieldKey, boxPx: fbBox });
+    let verifiedFb = verifyCleanedValue(fb, { fieldKey: fieldSpec.fieldKey, boxPx: fbBox });
+    if(fbBox){
+      const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(verifiedFb, {
+        fieldKey: fieldSpec.fieldKey,
+        boxPx: fbBox,
+        pageNum: fbBox.page,
+        pageCanvas: getPdfBitmapCanvas((fbBox.page || 1) - 1)?.canvas,
+        sourceBranch: 'fallback'
+      });
+      verifiedFb = patchedCleaned;
+    }
     traceEvent(spanKey,'fallback.pick',{
       value: verifiedFb.value || verifiedFb.raw,
       stageLabel:'Fallback pick',
@@ -8103,19 +8180,34 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
     if(scored){
       const { best, current, preferBest, candidates } = scored;
       if(preferBest && best){
+        let bestText = best.text;
+        let bestCleaned = best.cleaned || null;
+        if(bestCleaned && best.box){
+          const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(bestCleaned, {
+            fieldKey: fieldSpec.fieldKey,
+            boxPx: best.box,
+            pageNum: best.box.page,
+            pageCanvas: getPdfBitmapCanvas((best.box.page || 1) - 1)?.canvas,
+            sourceBranch: 'keyword-triangulation'
+          });
+          bestCleaned = patchedCleaned;
+          if(patchedText){
+            bestText = patchedText;
+          }
+        }
         result = {
-          value: best.text,
-          raw: best.rawText,
-          corrected: best.cleaned?.corrected,
-          code: best.cleaned?.code,
-          shape: best.cleaned?.shape,
-          score: best.cleaned?.score,
-          correctionsApplied: best.cleaned?.correctionsApplied,
-          corrections: best.cleaned?.correctionsApplied,
+          value: bestText,
+          raw: bestText !== best.rawText ? bestText : best.rawText,
+          corrected: bestCleaned?.corrected,
+          code: bestCleaned?.code,
+          shape: bestCleaned?.shape,
+          score: bestCleaned?.score,
+          correctionsApplied: bestCleaned?.correctionsApplied,
+          corrections: bestCleaned?.correctionsApplied,
           boxPx: best.box,
           confidence: best.confidence,
           tokens: best.tokens,
-          cleanedOk: !!(best.cleaned?.value || best.cleaned?.raw),
+          cleanedOk: !!(bestCleaned?.value || bestCleaned?.raw),
           fingerprintOk: best.fpOk,
           lineDiff: best.lineDiff,
           lineScore: best.lineScore,
@@ -9630,9 +9722,11 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
     if(cached){
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
-          event: 'ocrmagic.anyfield.tess.crop.cache_hit',
+          event: 'ocrmagic.anyfield.tess.crop.cacheHit',
           pageNum,
           bboxHash,
+          cropW: cached.cropW || Math.round(bboxPx.w || 0),
+          cropH: cached.cropH || Math.round(bboxPx.h || 0),
           textLen: (cached.text || '').length,
           confidence: cached.confidence || 0
         });
@@ -9644,16 +9738,18 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   const sy = Math.max(0, Math.floor(bboxPx.y || 0));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil(bboxPx.w || 0)));
   const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil(bboxPx.h || 0)));
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.tess.crop.cacheMiss',
+      pageNum,
+      bboxHash,
+      cropW: sw,
+      cropH: sh,
+      textLen: 0,
+      confidence: 0
+    });
+  }
   if(!sw || !sh){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.tess.crop.empty',
-        pageNum,
-        bboxHash,
-        width: sw,
-        height: sh
-      });
-    }
     return { text:'', confidence:0 };
   }
   const crop = document.createElement('canvas');
@@ -9672,15 +9768,15 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
     : 0;
   if(pageNum && bboxHash){
     state.tessCropCache[pageNum] = state.tessCropCache[pageNum] || {};
-    state.tessCropCache[pageNum][bboxHash] = { text, confidence };
+    state.tessCropCache[pageNum][bboxHash] = { text, confidence, cropW: sw, cropH: sh };
   }
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.tess.crop.run',
       pageNum,
       bboxHash,
-      width: sw,
-      height: sh,
+      cropW: sw,
+      cropH: sh,
       textLen: text.length,
       confidence
     });
@@ -9723,29 +9819,8 @@ function isConfusionPair(a, b){
   return ANY_FIELD_CONFUSION_MAP.get(a) === b;
 }
 
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, pageNum } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } = {}){
   const pdfText = String(pdfStr ?? '');
-  if(!pdfText.trim() || !pageCanvas || !bboxPx){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.verify.skip',
-        reason: !pdfText.trim() ? 'empty' : (!pageCanvas ? 'noCanvas' : 'noBbox'),
-        pdfLen: pdfText.length
-      });
-    }
-    return pdfStr;
-  }
-  const normalizedMagic = normalizeMagicDataType(magicType);
-  if(normalizedMagic && normalizedMagic !== MAGIC_DATA_TYPE.ANY){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.verify.skip',
-        reason: 'notAny',
-        magicType: normalizedMagic
-      });
-    }
-    return pdfStr;
-  }
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
   const { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
@@ -9753,7 +9828,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, 
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
-        reason: 'noTessText',
+        reason: 'tessEmpty',
         pdfLen: pdfText.length,
         confidence
       });
@@ -9784,7 +9859,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, 
           ocrMagicDebug({
             event: 'ocrmagic.anyfield.verify.skip',
             reason: 'unsafeMismatch',
-            nonConfusionMismatches
+            nonConfusionMismatchCount: nonConfusionMismatches
           });
         }
         return pdfStr;
@@ -9795,7 +9870,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, 
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
-        reason: 'lowConf',
+        reason: 'lowConfidence',
         confidence
       });
     }
@@ -9814,66 +9889,80 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, magicType, 
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.verify.done',
       changed: next !== pdfText,
-      pdfLen: pdfText.length,
-      outputLen: next.length,
-      confidence
+      confidence,
+      nonConfusionMismatchCount: nonConfusionMismatches
     });
   }
   return next;
 }
 
-async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas } = {}){
-  if(!text || !boxPx){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.patch.skip',
-        reason: !text ? 'empty' : 'noBbox',
-        textLen: (text || '').length
-      });
-    }
-    return text;
-  }
-  const magicType = resolveMagicDataType(fieldKey).magicType;
-  if(magicType !== MAGIC_DATA_TYPE.ANY){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.patch.skip',
-        reason: 'notAny',
-        magicType
-      });
-    }
-    return text;
-  }
-  const page = Number.isFinite(pageNum) ? pageNum : (boxPx.page || state.pageNum || 1);
-  const canvas = pageCanvas || getPdfBitmapCanvas(page - 1).canvas;
-  if(!canvas){
-    if(ocrMagicDebugEnabled()){
-      ocrMagicDebug({
-        event: 'ocrmagic.anyfield.patch.skip',
-        reason: 'noCanvas',
-        pageNum: page
-      });
-    }
-    return text;
-  }
+async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, magicType, magicTypeSource } = {}){
+  const hasBbox = !!boxPx;
+  const page = Number.isFinite(pageNum) ? pageNum : (boxPx?.page || state.pageNum || 1);
+  const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
+  const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...boxPx, page }, page) : { bboxHash: '' };
+  const resolvedInfo = magicType
+    ? { magicType: normalizeMagicDataType(magicType), source: magicTypeSource }
+    : resolveMagicDataType(fieldKey);
+  const resolvedMagic = resolvedInfo.magicType;
+  const resolvedSource = resolvedInfo.source;
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.patch.start',
-      textLen: text.length,
-      pageNum: page
+      fieldKey: fieldKey || '',
+      page,
+      bboxHash,
+      hasCanvas: !!canvas,
+      hasBbox,
+      sourceBranch: sourceBranch || null,
+      magicTypeResolved: resolvedMagic || 'UNSET',
+      magicTypeSource: resolvedSource || 'unknown'
     });
   }
-  const patched = await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, magicType, pageNum: page });
-  if(ocrMagicDebugEnabled()){
-    ocrMagicDebug({
-      event: 'ocrmagic.anyfield.patch.done',
-      changed: patched !== text,
-      textLen: text.length,
-      outputLen: (patched || '').length,
-      pageNum: page
-    });
+  if(!hasBbox){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'noBbox',
+        fieldKey: fieldKey || ''
+      });
+    }
+    return text;
   }
-  return patched;
+  if(!canvas){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'noCanvas',
+        fieldKey: fieldKey || ''
+      });
+    }
+    return text;
+  }
+  if(resolvedMagic !== MAGIC_DATA_TYPE.ANY){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'notAny',
+        fieldKey: fieldKey || '',
+        magicType: resolvedMagic || 'UNSET'
+      });
+    }
+    return text;
+  }
+  try{
+    return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, pageNum: page });
+  } catch(err){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'exception',
+        fieldKey: fieldKey || '',
+        message: err?.message || String(err)
+      });
+    }
+    return text;
+  }
 }
 
 /* ----------------------- Text Extraction ------------------------- */
