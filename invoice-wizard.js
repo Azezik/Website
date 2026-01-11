@@ -3452,6 +3452,18 @@ function applyTransform(boxPx, transform=state.pageTransform, opts={}){
   return { x: x2 - w/2, y: y2 - h/2, w, h, page: boxPx.page };
 }
 
+function unionBoxes(a, b){
+  if(!a && !b) return null;
+  if(a && !b) return { ...a };
+  if(b && !a) return { ...b };
+  if(a.page && b.page && a.page !== b.page) return { ...a };
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.w, b.x + b.w);
+  const bottom = Math.max(a.y + a.h, b.y + b.h);
+  return { x: left, y: top, w: right - left, h: bottom - top, page: a.page || b.page };
+}
+
 function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 function bboxOfTokens(tokens){
   const x1 = Math.min(...tokens.map(t=>t.x)), y1 = Math.min(...tokens.map(t=>t.y));
@@ -7094,7 +7106,7 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
   }
 }
 
-async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCanvas, sourceBranch } = {}){
+async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, cropBoxPx, cropBoxSource } = {}){
   if(!cleaned) return { cleaned, patchedText: null };
   const baseText = cleaned.value || cleaned.raw || '';
   if(!baseText) return { cleaned, patchedText: null };
@@ -7102,6 +7114,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     text: baseText,
     fieldKey,
     boxPx,
+    cropBoxPx,
+    cropBoxSource,
     pageNum,
     pageCanvas,
     sourceBranch,
@@ -7199,6 +7213,14 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     const pageW = (vp.width ?? vp.w ?? viewportDims.width ?? 1) || 1;
     const pageH = (vp.height ?? vp.h ?? viewportDims.height ?? 1) || 1;
     return { pageW, pageH };
+  };
+  const resolveVerifierCropBox = (usedBox) => {
+    if(basePx && usedBox && basePx.page === usedBox.page){
+      return { box: unionBoxes(basePx, usedBox), source: 'union' };
+    }
+    if(basePx) return { box: basePx, source: 'basePx' };
+    if(usedBox) return { box: usedBox, source: 'usedBox' };
+    return { box: null, source: 'none' };
   };
 
     if(state.modes.rawData){
@@ -7318,9 +7340,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
     const baseText = cleaned.value || cleaned.raw || text || state.snappedText || '';
     if(baseText && usedBox){
+      const verifierCrop = resolveVerifierCropBox(usedBox);
       const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
         fieldKey: fieldSpec.fieldKey,
         boxPx: usedBox,
+        cropBoxPx: verifierCrop.box,
+        cropBoxSource: verifierCrop.source,
         pageNum: usedBox.page,
         pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1)?.canvas,
         sourceBranch: 'config-static'
@@ -7431,9 +7456,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const baseText = cleaned.value || cleaned.raw || multilineValue || '';
       if(baseText && searchBox){
+        const verifierCrop = resolveVerifierCropBox(searchBox);
         const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
           fieldKey: fieldSpec.fieldKey,
           boxPx: searchBox,
+          cropBoxPx: verifierCrop.box,
+          cropBoxSource: verifierCrop.source,
           pageNum: searchBox.page,
           pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1)?.canvas,
           sourceBranch: 'attempt-multiline'
@@ -7530,9 +7558,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
     const baseText = cleaned.value || cleaned.raw || sel.raw || '';
     if(baseText && searchBox){
+      const verifierCrop = resolveVerifierCropBox(searchBox);
       const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
         fieldKey: fieldSpec.fieldKey,
         boxPx: searchBox,
+        cropBoxPx: verifierCrop.box,
+        cropBoxSource: verifierCrop.source,
         pageNum: searchBox.page,
         pageCanvas: getPdfBitmapCanvas((searchBox.page || 1) - 1)?.canvas,
         sourceBranch: 'attempt-selection'
@@ -7890,9 +7921,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
         cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
         if(rawText && box){
+          const verifierCrop = resolveVerifierCropBox(box);
           const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
             fieldKey: fieldSpec.fieldKey,
             boxPx: box,
+            cropBoxPx: verifierCrop.box,
+            cropBoxSource: verifierCrop.source,
             pageNum: box.page,
             pageCanvas: getPdfBitmapCanvas((box.page || 1) - 1)?.canvas,
             sourceBranch: 'box-locked'
@@ -8085,9 +8119,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
         cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: lv.usedBox });
         if(lv.value && lv.usedBox){
+          const verifierCrop = resolveVerifierCropBox(lv.usedBox);
           const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(cleaned, {
             fieldKey: fieldSpec.fieldKey,
             boxPx: lv.usedBox,
+            cropBoxPx: verifierCrop.box,
+            cropBoxSource: verifierCrop.source,
             pageNum: lv.usedBox.page,
             pageCanvas: getPdfBitmapCanvas((lv.usedBox.page || 1) - 1)?.canvas,
             sourceBranch: 'label-heuristic'
@@ -8115,9 +8152,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     const fbBox = state.snappedPx || basePx || null;
     let verifiedFb = verifyCleanedValue(fb, { fieldKey: fieldSpec.fieldKey, boxPx: fbBox });
     if(fbBox){
+      const verifierCrop = resolveVerifierCropBox(fbBox);
       const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(verifiedFb, {
         fieldKey: fieldSpec.fieldKey,
         boxPx: fbBox,
+        cropBoxPx: verifierCrop.box,
+        cropBoxSource: verifierCrop.source,
         pageNum: fbBox.page,
         pageCanvas: getPdfBitmapCanvas((fbBox.page || 1) - 1)?.canvas,
         sourceBranch: 'fallback'
@@ -8183,9 +8223,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         let bestText = best.text;
         let bestCleaned = best.cleaned || null;
         if(bestCleaned && best.box){
+          const verifierCrop = resolveVerifierCropBox(best.box);
           const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(bestCleaned, {
             fieldKey: fieldSpec.fieldKey,
             boxPx: best.box,
+            cropBoxPx: verifierCrop.box,
+            cropBoxSource: verifierCrop.source,
             pageNum: best.box.page,
             pageCanvas: getPdfBitmapCanvas((best.box.page || 1) - 1)?.canvas,
             sourceBranch: 'keyword-triangulation'
@@ -9717,6 +9760,8 @@ function getTessCropCacheKey(bboxPx, pageNumOverride){
 async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
   const { pageNum, bboxHash } = getTessCropCacheKey(bboxPx, bboxPx.page);
+  const page = bboxPx.page || Number(pageNum) || 1;
+  const pageOffsetY = (state.pageOffsets?.[(page || 1) - 1] || 0);
   if(pageNum && bboxHash){
     const cached = state.tessCropCache?.[pageNum]?.[bboxHash];
     if(cached){
@@ -9727,6 +9772,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
           bboxHash,
           cropW: cached.cropW || Math.round(bboxPx.w || 0),
           cropH: cached.cropH || Math.round(bboxPx.h || 0),
+          pageOffsetY,
           textLen: (cached.text || '').length,
           confidence: cached.confidence || 0
         });
@@ -9734,14 +9780,13 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
       return { text: cached.text || '', confidence: cached.confidence || 0 };
     }
   }
-  const page = bboxPx.page || Number(pageNum) || 1;
   const vp = state.pageViewports[(page || 1) - 1] || state.viewport || { width: pageCanvas.width, height: pageCanvas.height };
   const logicalW = Math.max(1, Number(vp.width ?? vp.w ?? pageCanvas.width));
   const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? pageCanvas.height));
-  const renderScaleX = pageCanvas.width / logicalW;
-  const renderScaleY = pageCanvas.height / logicalH;
+  const renderScaleX = Math.max(1, Number(vp.width ?? vp.w ?? logicalW)) / logicalW;
+  const renderScaleY = Math.max(1, Number(vp.height ?? vp.h ?? logicalH)) / logicalH;
   const sx = Math.max(0, Math.floor((bboxPx.x || 0) * renderScaleX));
-  const sy = Math.max(0, Math.floor((bboxPx.y || 0) * renderScaleY));
+  const sy = Math.max(0, Math.floor(((bboxPx.y || 0) + pageOffsetY) * renderScaleY));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil((bboxPx.w || 0) * renderScaleX)));
   const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil((bboxPx.h || 0) * renderScaleY)));
   if(ocrMagicDebugEnabled()){
@@ -9751,6 +9796,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
       bboxHash,
       cropW: sw,
       cropH: sh,
+      pageOffsetY,
       textLen: 0,
       confidence: 0
     });
@@ -9783,6 +9829,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
       bboxHash,
       cropW: sw,
       cropH: sh,
+      pageOffsetY,
       textLen: text.length,
       confidence
     });
@@ -9927,11 +9974,12 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
   return next;
 }
 
-async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, magicType, magicTypeSource } = {}){
-  const hasBbox = !!boxPx;
+async function maybePatchAnyFieldText({ text, fieldKey, boxPx, cropBoxPx, cropBoxSource, pageNum, pageCanvas, sourceBranch, magicType, magicTypeSource } = {}){
+  const hasBbox = !!(cropBoxPx || boxPx);
   const page = Number.isFinite(pageNum) ? pageNum : (boxPx?.page || state.pageNum || 1);
   const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
-  const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...boxPx, page }, page) : { bboxHash: '' };
+  const verifierBox = cropBoxPx || boxPx;
+  const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...verifierBox, page }, page) : { bboxHash: '' };
   const resolvedInfo = magicType
     ? { magicType: normalizeMagicDataType(magicType), source: magicTypeSource }
     : resolveMagicDataType(fieldKey);
@@ -9946,6 +9994,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       hasCanvas: !!canvas,
       hasBbox,
       sourceBranch: sourceBranch || null,
+      cropBoxSource: cropBoxSource || (cropBoxPx ? 'custom' : 'boxPx'),
       magicTypeResolved: resolvedMagic || 'UNSET',
       magicTypeSource: resolvedSource || 'unknown'
     });
@@ -9982,7 +10031,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
     return text;
   }
   try{
-    return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: boxPx, pageNum: page });
+    return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: verifierBox, pageNum: page });
   } catch(err){
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
