@@ -563,7 +563,7 @@ function buildOcrTraceMeta(extra = {}){
     ? getActiveWizardName()
     : null;
   return {
-    enabled: true,
+    enabled: !!state.ocrTrace?.enabled,
     docType: state.docType,
     wizardId: currentWizardId(),
     wizardName,
@@ -12962,6 +12962,9 @@ els.ocrTraceToggle?.addEventListener('change', ()=>{
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
+  if(els.ocrTraceToggle){
+    state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+  }
   let session = state.ocrTrace.session;
   if(!session){
     const meta = buildOcrTraceMeta({ trigger: 'manual-download', note: 'no_session' });
@@ -12992,6 +12995,9 @@ async function handleWizardFileChange(e){
     state.activeWizardId = runCtx.wizardId;
     state.profile = runCtx.profile || state.profile;
     activateRunMode({ clearDoc: true });
+    if(els.ocrTraceToggle){
+      state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+    }
     els.app.style.display = 'none';
     els.wizardSection.style.display = 'block';
     ensureProfile(runCtx.wizardId);
@@ -14365,6 +14371,9 @@ async function processBatch(files){
   els.wizardSection.style.display = 'block';
   ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
   logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
+  if(els.ocrTraceToggle){
+    state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+  }
   if(isOcrTraceEnabled()){
     startOcrTraceSession({ trigger: 'run', runType: 'batch', fileCount: files.length });
   }
