@@ -3715,7 +3715,7 @@ function normalizeMagicDataType(val){
 function inferMagicDataTypeFromFieldKey(fieldKey=''){
   const key = String(fieldKey || '').toLowerCase();
   if(/amount|total|tax|balance|subtotal|deposit|price|qty|quantity|unit|number/.test(key)) return MAGIC_DATA_TYPE.NUMERIC;
-  if(/name|address|store|description|salesperson|department|rep/.test(key)) return MAGIC_DATA_TYPE.TEXT;
+  if(/name|store|description|salesperson|department|rep/.test(key)) return MAGIC_DATA_TYPE.TEXT;
   return MAGIC_DATA_TYPE.ANY;
 }
 
