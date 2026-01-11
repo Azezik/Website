@@ -12959,10 +12959,13 @@ els.ocrTraceToggle?.addEventListener('change', ()=>{
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
-  const session = state.ocrTrace.session;
+  let session = state.ocrTrace.session;
   if(!session){
-    alert('No OCR trace session available.');
-    return;
+    const meta = buildOcrTraceMeta({ trigger: 'manual-download', note: 'no_session' });
+    session = window.OCRTrace.createTraceSession(meta);
+    if(state.ocrTrace?.enabled){
+      state.ocrTrace.session = session;
+    }
   }
   const report = window.OCRTrace.finalizeTrace(session);
   window.OCRTrace.downloadTrace(report, `ocr-trace-${Date.now()}.json`);
