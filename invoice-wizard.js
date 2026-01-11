@@ -149,6 +149,8 @@ const els = {
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
   rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
+  ocrTraceToggle: document.getElementById('ocr-trace-toggle'),
+  ocrTraceDownloadBtn: document.getElementById('download-ocr-trace-btn'),
   viewSnapshotBtn: document.getElementById('view-snapshot-btn'),
   exportMasterDbDataBtn: document.getElementById('export-master-db-data-btn'),
   snapshotStatus: document.getElementById('snapshotStatus'),
@@ -451,6 +453,7 @@ let state = {
   builderEditingId: null,
   currentAreaRows: [],
   wizardComplete: false,
+  ocrTrace: { enabled: false, session: null },
 };
 
 let loginHydrated = false;
@@ -548,6 +551,55 @@ function downloadStaticDebugLogs(){
 function syncStaticDebugToggleUI(){
   if(els.staticDebugToggle){
     els.staticDebugToggle.checked = !!window.DEBUG_STATIC_FIELDS;
+  }
+}
+
+function isOcrTraceEnabled(){
+  return !!(state.ocrTrace?.enabled && window.OCRTrace && typeof window.OCRTrace.traceEvent === 'function');
+}
+
+function buildOcrTraceMeta(extra = {}){
+  const wizardName = (typeof getActiveWizardName === 'function')
+    ? getActiveWizardName()
+    : null;
+  return {
+    enabled: !!state.ocrTrace?.enabled,
+    docType: state.docType,
+    wizardId: currentWizardId(),
+    wizardName,
+    geometryId: state.activeGeometryId || null,
+    profileVersion: state.profile?.version || null,
+    username: state.username || null,
+    mode: state.mode || ModeEnum.CONFIG,
+    app: 'skinv2',
+    ...extra
+  };
+}
+
+function startOcrTraceSession(extra = {}){
+  if(!isOcrTraceEnabled()) return null;
+  const meta = buildOcrTraceMeta(extra);
+  state.ocrTrace.session = window.OCRTrace.createTraceSession(meta);
+  return state.ocrTrace.session;
+}
+
+function getOcrTraceSession(extra = {}){
+  if(!isOcrTraceEnabled()) return null;
+  if(!state.ocrTrace.session){
+    return startOcrTraceSession(extra);
+  }
+  return state.ocrTrace.session;
+}
+
+function traceOcrEvent(event){
+  if(!isOcrTraceEnabled()) return false;
+  const session = getOcrTraceSession();
+  return window.OCRTrace.traceEvent(session, event);
+}
+
+function syncOcrTraceToggleUI(){
+  if(els.ocrTraceToggle){
+    els.ocrTraceToggle.checked = !!state.ocrTrace?.enabled;
   }
 }
 
@@ -3661,6 +3713,25 @@ function applyOcrCorrections(txt, fieldKey=''){
   return { text: out, corrections };
 }
 
+function traceTokenCorrection({ raw, corrected, corrections, source = 'unknown', pageIndex = null, box = null, fieldKey = '' } = {}){
+  if(!isOcrTraceEnabled()) return;
+  if(raw === corrected) return;
+  const rule = corrections && corrections.length
+    ? `applyOcrCorrections:${corrections.join(',')}`
+    : 'applyOcrCorrections';
+  traceOcrEvent({
+    docId: state.currentFileId || state.currentFileName || null,
+    pageIndex,
+    fieldKey: fieldKey || null,
+    stage: 'token_correction',
+    rule,
+    before: raw,
+    after: corrected,
+    source,
+    tokenContext: box ? { raw, text: corrected, bbox: box } : { raw, text: corrected }
+  });
+}
+
 function codeOf(str){
   const text = String(str ?? '');
   const hasLetters = /[A-Za-z]/.test(text);
@@ -4228,6 +4299,17 @@ const FieldDataEngine = (() => {
     const rawTokenText = rawTokenLines?.length ? rawTokenLines.join(' ').trim() : preOcrMagicRaw;
     const raw = preOcrMagicRaw;
     const tokenCount = lineStrs.join(' ').split(/\s+/g).filter(Boolean).length;
+    const traceSession = isOcrTraceEnabled() ? getOcrTraceSession({ trigger: 'clean' }) : null;
+    const traceContext = traceSession ? {
+      docId: spanKey?.docId || state.currentFileId || state.currentFileName || null,
+      pageIndex: Number.isFinite(spanKey?.pageIndex) ? spanKey.pageIndex : null,
+      fieldKey: spanKey?.fieldKey || ftype || null
+    } : null;
+    // OCR trace hook: field-level mutations during cleaning/normalization.
+    const traceMutation = (payload) => {
+      if(!traceSession) return;
+      traceOcrEvent({ ...traceContext, ...payload });
+    };
     if(spanKey) traceEvent(spanKey,'clean.start',{
       raw,
       stageLabel:'Clean start',
@@ -4238,13 +4320,40 @@ const FieldDataEngine = (() => {
     const baseResult = runBaseOcrMagic(raw);
     const baseCleaned = typeof baseResult === 'string' ? baseResult : (baseResult?.cleaned ?? String(raw ?? ''));
     const layer1RulesApplied = Array.isArray(baseResult?.rulesApplied) ? baseResult.rulesApplied : [];
+    if(traceSession && baseCleaned !== raw){
+      traceMutation({
+        stage: 'ocrmagic_layer1',
+        rule: layer1RulesApplied.length ? `layer1:${layer1RulesApplied.join('|')}` : 'layer1',
+        before: raw,
+        after: baseCleaned,
+        source: 'unknown'
+      });
+    }
     let txt = baseCleaned.replace(/\s+/g,' ').trim().replace(/[#:—•]*$/, '');
+    if(traceSession && txt !== baseCleaned){
+      traceMutation({
+        stage: 'field_normalize',
+        rule: 'trimCollapseSpaces',
+        before: baseCleaned,
+        after: txt,
+        source: 'unknown'
+      });
+    }
     const magicTypeInfo = resolveMagicDataType(ftype);
     const magicType = magicTypeInfo.magicType;
     const profileEntry = getProfileFieldEntry(ftype);
     const archetype = profileEntry?.archetype || profileEntry?.kind || profileEntry?.type || null;
     const profileType = getActiveProfileType();
     const magic = applyOcrMagic(txt, { fieldKey: ftype, magicType, spanKey, mode, profileType, archetype, learningEnabled: magicTypeInfo.isExplicit, magicTypeSource: magicTypeInfo.source, layer1RulesApplied });
+    if(traceSession && magic?.value && magic.value !== txt){
+      traceMutation({
+        stage: 'ocrmagic_apply',
+        rule: Array.isArray(magic.rulesApplied) && magic.rulesApplied.length ? magic.rulesApplied.join('|') : 'applyOcrMagic',
+        before: txt,
+        after: magic.value,
+        source: 'unknown'
+      });
+    }
     txt = magic.value || txt;
     let correctionsApplied = magic.corrections || [];
     const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
@@ -4271,12 +4380,49 @@ const FieldDataEngine = (() => {
       hardInvalid = true;
     };
     const isLikelyDateText = (text) => /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(text) || /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/.test(text);
-    if(/date/i.test(ftype)){ const n=normalizeDate(txt); if(n) txt=n; }
+    if(/date/i.test(ftype)){
+      const beforeDate = txt;
+      const n=normalizeDate(txt);
+      if(n) txt=n;
+      if(traceSession && beforeDate !== txt){
+        traceMutation({
+          stage: 'field_normalize',
+          rule: 'normalizeDate',
+          before: beforeDate,
+          after: txt,
+          source: 'unknown'
+        });
+      }
+    }
     else if(/total|subtotal|tax|amount|price|balance|deposit|discount|unit|grand|quantity|qty/.test(ftype)){
       // Normalize common OCR digit confusions (e.g., $I3999 -> 13999.00) before stripping non-numeric chars.
       const digitSafe = normalizeOcrDigits(numericCandidate, { fieldKey: ftype, magicType, learningEnabled: magicTypeInfo.isExplicit });
-      const n=digitSafe.replace(/[^0-9.-]/g,''); const num=parseFloat(n); if(!isNaN(num)) txt=num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
+      if(traceSession && digitSafe !== numericCandidate){
+        traceMutation({
+          stage: 'field_normalize',
+          rule: 'normalizeOcrDigits',
+          before: numericCandidate,
+          after: digitSafe,
+          source: 'unknown'
+        });
+      }
+      const n=digitSafe.replace(/[^0-9.-]/g,'');
+      const num=parseFloat(n);
+      if(!isNaN(num)){
+        const formatted = num.toFixed(/unit|price|amount|total|tax|subtotal|grand/.test(ftype)?2:0);
+        if(traceSession && formatted !== txt){
+          traceMutation({
+            stage: 'field_normalize',
+            rule: 'formatNumeric',
+            before: txt,
+            after: formatted,
+            source: 'unknown'
+          });
+        }
+        txt = formatted;
+      }
     } else if(/sku|product_code/.test(ftype)){
+      const beforeSku = txt;
       txt = txt.replace(/\s+/g,'').toUpperCase();
       const sanitized = txt.replace(/[^A-Z0-9\-_.\/]/g,'');
       const upperRaw = raw.toUpperCase();
@@ -4296,6 +4442,15 @@ const FieldDataEngine = (() => {
         flagWarning('looks_like_date');
       }
       txt = sanitized;
+      if(traceSession && beforeSku !== txt){
+        traceMutation({
+          stage: 'field_normalize',
+          rule: 'sanitizeSku',
+          before: beforeSku,
+          after: txt,
+          source: 'unknown'
+        });
+      }
     }
     if(magicType === MAGIC_DATA_TYPE.NUMERIC && isLikelyDateText(raw || '')){
       flagWarning('type_mismatch_date_like');
@@ -6879,6 +7034,22 @@ async function ocrBox(boxPx, fieldKey){
         const raw = w.text.trim();
         if(!raw) return null;
         const { text: corrected, corrections } = applyOcrCorrections(raw, fieldKey);
+        // OCR trace hook: token-time corrections from Tesseract crop OCR.
+        traceTokenCorrection({
+          raw,
+          corrected,
+          corrections,
+          source: 'tesseract_crop',
+          pageIndex: (subBox.page || 1) - 1,
+          fieldKey,
+          box: {
+            x: subBox.x - pad + w.bbox.x / scale,
+            y: subBox.y - pad + w.bbox.y / scale,
+            w: w.bbox.width / scale,
+            h: w.bbox.height / scale,
+            page: subBox.page
+          }
+        });
         return {
           raw,
           corrected,
@@ -7076,6 +7247,8 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
   let page = Number.isFinite(pageNum) ? pageNum : (Number.isFinite(bboxPx?.page) ? bboxPx.page : null);
   if(!page){ page = state.pageNum || 1; }
   const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
+  const beforeText = cleaned.value || cleaned.raw || '';
+  const beforeConf = cleaned.conf ?? null;
   try{
     const verdict = verifier.verify({
       fieldKey: fieldKey || '',
@@ -7087,7 +7260,23 @@ function verifyCleanedValue(cleaned, { fieldKey, boxPx, pageNum, pageCanvas } = 
       cleaned
     });
     if(!verdict || typeof verdict !== 'object') return cleaned;
-    return { ...cleaned, ...verdict };
+    const merged = { ...cleaned, ...verdict };
+    const afterText = merged.value || merged.raw || '';
+    if(isOcrTraceEnabled() && beforeText !== afterText){
+      traceOcrEvent({
+        docId: state.currentFileId || state.currentFileName || null,
+        pageIndex: page - 1,
+        fieldKey: fieldKey || null,
+        stage: 'external_verifier',
+        rule: 'FieldValueVerifier',
+        before: beforeText,
+        after: afterText,
+        confidenceBefore: beforeConf,
+        confidenceAfter: merged.conf ?? null,
+        source: 'unknown'
+      });
+    }
+    return merged;
   } catch(err){
     console.warn('FieldValueVerifier.verify failed', err);
     return cleaned;
@@ -9671,6 +9860,15 @@ async function readTokensForPage(pageObj, vp){
       const x = tx[4], yTop = tx[5], w = item.width, h = item.height;
       const raw = item.str;
       const { text: corrected, corrections } = applyOcrCorrections(raw);
+      // OCR trace hook: token-time corrections from pdf.js text layer.
+      traceTokenCorrection({
+        raw,
+        corrected,
+        corrections,
+        source: 'pdfjs',
+        pageIndex: (pageObj.pageNumber || 1) - 1,
+        box: { x, y: yTop - h, w, h, page: pageObj.pageNumber }
+      });
       tokens.push({ raw, corrected, text: corrected, correctionsApplied: corrections, confidence: 1, x, y: yTop - h, w, h, page: pageObj.pageNumber });
     }
   } catch(err){
@@ -9689,6 +9887,15 @@ async function readImageTokensForPage(pageNum, canvasEl=null){
       const raw = w.text.trim();
       if(!raw) return null;
       const { text: corrected, corrections } = applyOcrCorrections(raw);
+      // OCR trace hook: token-time corrections from full-page Tesseract.
+      traceTokenCorrection({
+        raw,
+        corrected,
+        corrections,
+        source: 'tesseract_fullpage',
+        pageIndex: pageNum - 1,
+        box: { x: w.bbox?.x || 0, y: w.bbox?.y || 0, w: w.bbox?.width || 0, h: w.bbox?.height || 0, page: pageNum }
+      });
       return {
         raw,
         corrected,
@@ -9850,12 +10057,32 @@ function alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = {
   };
 }
 
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
+  const traceBase = traceSession ? {
+    docId: docId || state.currentFileId || state.currentFileName || null,
+    pageIndex: page - 1,
+    fieldKey: fieldKey || null,
+    stage: 'any_field_tesseract_patch',
+    source: 'tesseract_crop'
+  } : null;
+  // OCR trace hook: any-field Tesseract verifier decisions.
+  const traceAnyField = (payload) => {
+    if(!traceSession) return;
+    window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
+  };
   const { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
   if(!tessStr){
+    traceAnyField({
+      rule: 'tess.verify.skip:tessEmpty',
+      before: pdfText,
+      after: pdfText,
+      confidenceAfter: confidence,
+      patched: false,
+      meta: { reason: 'tessEmpty', sourceBranch }
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -9876,6 +10103,14 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
     }
   }
   if(!pdfChars.length || pdfChars.length !== tessChars.length){
+    traceAnyField({
+      rule: 'tess.verify.skip:alignFail',
+      before: pdfText,
+      after: pdfText,
+      confidenceAfter: confidence,
+      patched: false,
+      meta: { reason: 'alignFail', alignMode, pdfLen: pdfText.length, tessLen: tessStr.length, sourceBranch }
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -9895,6 +10130,14 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
     if(!isConfusionPair(pdfChars[i], tessChars[i])){
       nonConfusionMismatches += 1;
       if(nonConfusionMismatches > ANY_FIELD_TESS_MAX_NON_CONFUSION){
+        traceAnyField({
+          rule: 'tess.verify.skip:unsafeMismatch',
+          before: pdfText,
+          after: pdfText,
+          confidenceAfter: confidence,
+          patched: false,
+          meta: { reason: 'unsafeMismatch', nonConfusionMismatchCount: nonConfusionMismatches, sourceBranch }
+        });
         if(ocrMagicDebugEnabled()){
           ocrMagicDebug({
             event: 'ocrmagic.anyfield.verify.skip',
@@ -9907,6 +10150,14 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
     }
   }
   if(confidence < ANY_FIELD_TESS_CONFIDENCE_MIN){
+    traceAnyField({
+      rule: 'tess.verify.skip:lowConfidence',
+      before: pdfText,
+      after: pdfText,
+      confidenceAfter: confidence,
+      patched: false,
+      meta: { reason: 'lowConfidence', sourceBranch }
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -9925,6 +10176,14 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum } =
     }
   }
   const next = chars.join('');
+  traceAnyField({
+    rule: next === pdfText ? 'tess.verify.noChange' : 'tess.verify.patch',
+    before: pdfText,
+    after: next,
+    confidenceAfter: confidence,
+    patched: next !== pdfText,
+    meta: { nonConfusionMismatchCount: nonConfusionMismatches, sourceBranch }
+  });
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.verify.done',
@@ -10005,7 +10264,17 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
         sourceBranch: sourceBranch || null
       });
     }
-    return await runAnyFieldTessVerifier({ pdfStr: text, pageCanvas: canvas, bboxPx: verifierBox, pageNum: page });
+    const traceSession = isOcrTraceEnabled() ? getOcrTraceSession({ trigger: 'any-field' }) : null;
+    return await runAnyFieldTessVerifier({
+      pdfStr: text,
+      pageCanvas: canvas,
+      bboxPx: verifierBox,
+      pageNum: page,
+      fieldKey,
+      traceSession,
+      docId: state.currentFileId || state.currentFileName || null,
+      sourceBranch
+    });
   } catch(err){
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
@@ -12685,6 +12954,28 @@ els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); draw
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.ocrTraceToggle?.addEventListener('change', ()=>{
+  state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+  if(state.ocrTrace.enabled){
+    startOcrTraceSession({ trigger: 'toggle' });
+  }
+});
+els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
+  if(!window.OCRTrace) return;
+  if(els.ocrTraceToggle){
+    state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+  }
+  let session = state.ocrTrace.session;
+  if(!session){
+    const meta = buildOcrTraceMeta({ trigger: 'manual-download', note: 'no_session' });
+    session = window.OCRTrace.createTraceSession(meta);
+    if(state.ocrTrace?.enabled){
+      state.ocrTrace.session = session;
+    }
+  }
+  const report = window.OCRTrace.finalizeTrace(session);
+  window.OCRTrace.downloadTrace(report, `ocr-trace-${Date.now()}.json`);
+});
 els.snapshotModeToggle?.addEventListener('change', ()=>{ setSnapshotMode(!!els.snapshotModeToggle.checked); });
 els.viewSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(false); });
 els.regenerateSnapshotBtn?.addEventListener('click', ()=>{ openSnapshotPanel(true); });
@@ -12704,10 +12995,16 @@ async function handleWizardFileChange(e){
     state.activeWizardId = runCtx.wizardId;
     state.profile = runCtx.profile || state.profile;
     activateRunMode({ clearDoc: true });
+    if(els.ocrTraceToggle){
+      state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+    }
     els.app.style.display = 'none';
     els.wizardSection.style.display = 'block';
     ensureProfile(runCtx.wizardId);
     logWizardSelection('run.start.single', { ...runCtx, value: runCtx.selectionValue });
+    if(isOcrTraceEnabled()){
+      startOcrTraceSession({ trigger: 'run', runType: 'single', fileCount: 1 });
+    }
     await runModeExtractFileWithProfile(f, state.profile, runCtx);
     renderSavedFieldsTable();
     renderConfirmedTables();
@@ -14074,6 +14371,12 @@ async function processBatch(files){
   els.wizardSection.style.display = 'block';
   ensureProfile(runCtx.wizardId); renderSavedFieldsTable();
   logWizardSelection('run.start.batch', { ...runCtx, value: runCtx.selectionValue });
+  if(els.ocrTraceToggle){
+    state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
+  }
+  if(isOcrTraceEnabled()){
+    startOcrTraceSession({ trigger: 'run', runType: 'batch', fileCount: files.length });
+  }
 
   setExtractionLoading(true);
   try {
@@ -14099,3 +14402,4 @@ syncRawModeUI();
 initSnapshotMode();
 syncModeUi();
 syncStaticDebugToggleUI();
+syncOcrTraceToggleUI();
