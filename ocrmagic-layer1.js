@@ -104,7 +104,8 @@
     const result = station1_layer1Adjacency(raw);
     return {
       cleaned: result.cleaned,
-      rulesApplied: result.rulesApplied
+      rulesApplied: result.rulesApplied,
+      layer1Edits: result.layer1Edits
     };
   }
 
