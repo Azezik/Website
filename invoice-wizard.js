@@ -10236,7 +10236,11 @@ const ANY_FIELD_CONFUSION_MAP = new Map([
   ['B', '8'], ['8', 'B']
 ]);
 
-function alignIgnoringSpaces(pdfStr='', tessStr=''){
+function isMinorPunctuation(ch){
+  return /[.,:;'"`~!@#$%^&*()_+\-=[\]{}<>/?\\|]/.test(ch);
+}
+
+function alignIgnoringSpaces(pdfStr='', tessStr='', { ignorePunctuation = false } = {}){
   const pdf = String(pdfStr ?? '');
   const tess = String(tessStr ?? '');
   const pdfChars = [];
@@ -10245,12 +10249,14 @@ function alignIgnoringSpaces(pdfStr='', tessStr=''){
   for(let i=0;i<pdf.length;i++){
     const ch = pdf[i];
     if(/\s/.test(ch)) continue;
+    if(ignorePunctuation && isMinorPunctuation(ch)) continue;
     pdfChars.push(ch);
     pdfMap.push(i);
   }
   for(let i=0;i<tess.length;i++){
     const ch = tess[i];
     if(/\s/.test(ch)) continue;
+    if(ignorePunctuation && isMinorPunctuation(ch)) continue;
     tessChars.push(ch);
   }
   return { pdfChars, tessChars, pdfMap, pdfNorm: pdfChars.join(''), tessNorm: tessChars.join('') };
@@ -10276,6 +10282,54 @@ function alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = {
   };
 }
 
+function alignBySingleEdit({ pdfChars, tessChars, pdfMap } = {}){
+  if(!pdfChars?.length || !tessChars?.length || !pdfMap?.length) return null;
+  const diff = pdfChars.length - tessChars.length;
+  if(Math.abs(diff) !== 1) return null;
+  let i = 0;
+  let j = 0;
+  let usedSkip = false;
+  const alignedPdf = [];
+  const alignedTess = [];
+  const alignedMap = [];
+  while(i < pdfChars.length && j < tessChars.length){
+    if(pdfChars[i] === tessChars[j]){
+      alignedPdf.push(pdfChars[i]);
+      alignedTess.push(tessChars[j]);
+      alignedMap.push(pdfMap[i]);
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if(!usedSkip){
+      usedSkip = true;
+      if(diff > 0){
+        i += 1;
+        continue;
+      }
+      j += 1;
+      continue;
+    }
+    return null;
+  }
+  if(i < pdfChars.length || j < tessChars.length){
+    if(usedSkip) return null;
+    if(diff > 0 && i + 1 === pdfChars.length && j === tessChars.length){
+      // Skip trailing PDF char
+    } else if(diff < 0 && j + 1 === tessChars.length && i === pdfChars.length){
+      // Skip trailing Tesseract char
+    } else {
+      return null;
+    }
+  }
+  return {
+    pdfChars: alignedPdf,
+    tessChars: alignedTess,
+    pdfMap: alignedMap,
+    alignMode: 'single-edit'
+  };
+}
+
 function expandBBoxByPx(bboxPx, paddingPx){
   const pad = Math.max(0, Number(paddingPx) || 0);
   return {
@@ -10296,7 +10350,7 @@ function getAnyFieldExpansionSteps(bboxPx){
   return Array.from({ length: ANY_FIELD_TESS_EXPANSION_STEPS }, (_, i) => Math.min(capped * (i + 1), ANY_FIELD_TESS_EXPANSION_PX_MAX));
 }
 
-function alignAnyFieldText(pdfText, tessStr){
+function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } = {}){
   let { pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = alignIgnoringSpaces(pdfText, tessStr);
   let alignMode = 'exact';
   if(pdfChars.length && tessChars.length && pdfChars.length !== tessChars.length){
@@ -10306,7 +10360,26 @@ function alignAnyFieldText(pdfText, tessStr){
       alignMode = subAligned.alignMode;
     }
   }
-  const alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
+  let alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
+  if(!alignOk && allowRelaxedAlignment){
+    let relaxed = alignIgnoringSpaces(pdfText, tessStr, { ignorePunctuation: true });
+    ({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = relaxed);
+    alignMode = 'punctuation';
+    if(pdfChars.length && tessChars.length && pdfChars.length !== tessChars.length){
+      const subAligned = alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm });
+      if(subAligned){
+        ({ pdfChars, tessChars, pdfMap } = subAligned);
+        alignMode = 'punctuation-substring';
+      } else {
+        const editAligned = alignBySingleEdit({ pdfChars, tessChars, pdfMap });
+        if(editAligned){
+          ({ pdfChars, tessChars, pdfMap } = editAligned);
+          alignMode = `punctuation-${editAligned.alignMode}`;
+        }
+      }
+    }
+    alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
+  }
   return { pdfChars, tessChars, pdfMap, alignMode, alignOk };
 }
 
@@ -10327,7 +10400,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
   };
   let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
-  let alignment = alignAnyFieldText(pdfText, tessStr);
+  let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
   const shouldRetryExpansion = () => (
     !!allowBBoxExpansion
       && !!bboxPx
@@ -10340,7 +10413,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       const expandedBox = expandBBoxByPx(bbox, pad);
       const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: expandedBox });
       if(!attempt.text) continue;
-      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text);
+      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       if(!attemptAlignment.alignOk) continue;
       if(!best.alignment.alignOk || attemptAlignment.tessChars.length > best.alignment.tessChars.length){
         best = { tessStr: attempt.text, confidence: attempt.confidence, alignment: attemptAlignment, bbox: expandedBox };
