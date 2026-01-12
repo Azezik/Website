@@ -10243,6 +10243,7 @@ const ANY_FIELD_TESS_INSET_PX_MAX = 4;
 const ANY_FIELD_TESS_EXPANSION_STEPS = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MIN = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MAX = 8;
+const ANY_FIELD_TESS_TRIM_MAX = 2;
 const ANY_FIELD_CONFUSION_MAP = new Map([
   ['O', '0'], ['0', 'O'],
   ['o', '0'], ['I', '1'], ['1', 'I'],
@@ -10295,6 +10296,25 @@ function alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = {
     pdfNorm,
     tessNorm,
     alignMode: 'substring'
+  };
+}
+
+function alignByTessTrim({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm, maxTrim = 0 } = {}){
+  if(!pdfChars?.length || !tessChars?.length || !pdfNorm || !tessNorm) return null;
+  if(tessChars.length <= pdfChars.length) return null;
+  const start = tessNorm.indexOf(pdfNorm);
+  if(start < 0) return null;
+  const end = start + pdfNorm.length;
+  const prefixTrim = start;
+  const suffixTrim = tessNorm.length - end;
+  if(prefixTrim + suffixTrim > maxTrim) return null;
+  return {
+    pdfChars,
+    tessChars: tessChars.slice(start, end),
+    pdfMap,
+    pdfNorm,
+    tessNorm,
+    alignMode: 'tess-trim'
   };
 }
 
@@ -10396,6 +10416,19 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
     if(subAligned){
       ({ pdfChars, tessChars, pdfMap } = subAligned);
       alignMode = subAligned.alignMode;
+    } else {
+      const trimAligned = alignByTessTrim({
+        pdfChars,
+        tessChars,
+        pdfMap,
+        pdfNorm,
+        tessNorm,
+        maxTrim: ANY_FIELD_TESS_TRIM_MAX
+      });
+      if(trimAligned){
+        ({ pdfChars, tessChars, pdfMap } = trimAligned);
+        alignMode = trimAligned.alignMode;
+      }
     }
   }
   let alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
@@ -10409,10 +10442,23 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
         ({ pdfChars, tessChars, pdfMap } = subAligned);
         alignMode = 'punctuation-substring';
       } else {
-        const editAligned = alignBySingleEdit({ pdfChars, tessChars, pdfMap });
-        if(editAligned){
-          ({ pdfChars, tessChars, pdfMap } = editAligned);
-          alignMode = `punctuation-${editAligned.alignMode}`;
+        const trimAligned = alignByTessTrim({
+          pdfChars,
+          tessChars,
+          pdfMap,
+          pdfNorm,
+          tessNorm,
+          maxTrim: ANY_FIELD_TESS_TRIM_MAX
+        });
+        if(trimAligned){
+          ({ pdfChars, tessChars, pdfMap } = trimAligned);
+          alignMode = 'punctuation-tess-trim';
+        } else {
+          const editAligned = alignBySingleEdit({ pdfChars, tessChars, pdfMap });
+          if(editAligned){
+            ({ pdfChars, tessChars, pdfMap } = editAligned);
+            alignMode = `punctuation-${editAligned.alignMode}`;
+          }
         }
       }
     }
