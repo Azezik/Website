@@ -7470,7 +7470,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   const baseText = cleaned.value || cleaned.raw || '';
   if(!baseText) return { cleaned, patchedText: null };
   const commonSubstitutions = cleaned.commonSubstitutions ?? cleaned.commonSubstitutionsApplied ?? null;
-  const hasCommonSubs = Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions;
+  const commonSubDetected = cleaned.commonSubstitutionsDetected ?? cleaned.commonSubDetected ?? null;
+  const hasCommonSubs = (Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions)
+    || !!commonSubDetected;
   if(!hasCommonSubs){
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
@@ -7490,6 +7492,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     pageCanvas,
     sourceBranch,
     commonSubstitutions,
+    commonSubDetected,
     magicType: cleaned.magicType,
     magicTypeSource: cleaned.magicTypeSource,
     baseBox
@@ -10558,7 +10561,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
   return next;
 }
 
-async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, commonSubstitutions, magicType, magicTypeSource, baseBox } = {}){
+async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, commonSubstitutions, commonSubDetected, magicType, magicTypeSource, baseBox } = {}){
   const hasBbox = !!boxPx;
   const page = Number.isFinite(pageNum) ? pageNum : (boxPx?.page || state.pageNum || 1);
   const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
@@ -10581,11 +10584,13 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       hasBbox,
       sourceBranch: sourceBranch || null,
       commonSubstitutionsApplied: Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions,
+      commonSubDetected: !!commonSubDetected,
       magicTypeResolved: resolvedMagic || 'UNSET',
       magicTypeSource: resolvedSource || 'unknown'
     });
   }
-  const hasCommonSubs = Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions;
+  const hasCommonSubs = (Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions)
+    || !!commonSubDetected;
   if(!hasCommonSubs){
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
