@@ -605,6 +605,25 @@ function traceOcrEvent(event){
   return window.OCRTrace.traceEvent(session, event);
 }
 
+function traceOcrFinalValue({ fieldKey = null, boxPx = null, raw = '', value = '', confidence = null, stage = 'value_finalized', rule = 'value.finalized', source = 'pipeline', meta = null } = {}){
+  if(!isOcrTraceEnabled()) return false;
+  const pageIndex = Number.isFinite(boxPx?.page) ? boxPx.page - 1 : null;
+  return traceOcrEvent({
+    docId: state.currentFileId || state.currentFileName || null,
+    pageIndex,
+    fieldKey,
+    stage,
+    rule,
+    before: raw,
+    after: value,
+    confidenceBefore: null,
+    confidenceAfter: confidence,
+    source,
+    tokenContext: boxPx ? { bbox: boxPx } : null,
+    meta
+  });
+}
+
 function syncOcrTraceToggleUI(){
   if(els.ocrTraceToggle){
     els.ocrTraceToggle.checked = !!state.ocrTrace?.enabled;
@@ -7471,6 +7490,16 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       confidenceDetails:{ method:'raw', score: result.confidence },
       notes:'Raw OCR path finalized value'
     });
+    traceOcrFinalValue({
+      fieldKey: fieldSpec.fieldKey || spanKey?.fieldKey || null,
+      boxPx,
+      raw: rawText,
+      value: result.value,
+      confidence: result.confidence,
+      stage: 'raw_ocr_value',
+      rule: 'ocr.raw.finalized',
+      source: 'raw'
+    });
     return result;
   }
 
@@ -7563,6 +7592,16 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       bbox:{ pixel: usedBox },
       confidenceDetails:{ mode:'CONFIG', score: result.confidence },
       notes:'Config extraction finalized value'
+    });
+    traceOcrFinalValue({
+      fieldKey: fieldSpec.fieldKey || spanKey?.fieldKey || null,
+      boxPx: usedBox,
+      raw: rawOriginal,
+      value: result.value,
+      confidence: result.confidence,
+      stage: 'config_value',
+      rule: 'config.finalized',
+      source: 'config'
     });
     return result;
   }
@@ -8536,6 +8575,16 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     confidence:{ score: result.confidence, comparator: result.comparator, method: result.method },
     timing:{ stageUsed: stageUsed.value },
     notes:'Final output after extraction pipeline'
+  });
+  traceOcrFinalValue({
+    fieldKey: fieldSpec.fieldKey || spanKey?.fieldKey || null,
+    boxPx: result.boxPx || basePx || null,
+    raw: result.rawBeforeClean || result.raw || '',
+    value: result.value,
+    confidence: result.confidence,
+    stage: 'final_value',
+    rule: 'pipeline.finalized',
+    source: 'pipeline'
   });
   result.tokens = result.tokens || [];
   return result;
