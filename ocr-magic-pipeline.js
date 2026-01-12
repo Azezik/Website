@@ -162,9 +162,13 @@
     }
 
     getChunkRecord(chunkKey, chunkCount = 0) {
-      const rec = this.chunkRecords[chunkKey] || { chunkScores: [] };
+      const rec = this.chunkRecords[chunkKey] || { chunkScores: [], chunkSlotScores: [] };
       while (rec.chunkScores.length < chunkCount) {
         rec.chunkScores.push({ Lscore: 0, Nscore: 0 });
+      }
+      if (!Array.isArray(rec.chunkSlotScores)) rec.chunkSlotScores = [];
+      while (rec.chunkSlotScores.length < chunkCount) {
+        rec.chunkSlotScores.push({ letterScore: [], numberScore: [] });
       }
       this.chunkRecords[chunkKey] = rec;
       return rec;
@@ -178,6 +182,16 @@
           Lscore: (existing.Lscore || 0) + (score.Lscore || 0),
           Nscore: (existing.Nscore || 0) + (score.Nscore || 0)
         };
+        const slotExisting = rec.chunkSlotScores[idx] || { letterScore: [], numberScore: [] };
+        const nextLetterScore = ensureLength(slotExisting.letterScore, (score.letterScore || []).length);
+        const nextNumberScore = ensureLength(slotExisting.numberScore, (score.numberScore || []).length);
+        (score.letterScore || []).forEach((value, pos) => {
+          nextLetterScore[pos] = (nextLetterScore[pos] || 0) + (value || 0);
+        });
+        (score.numberScore || []).forEach((value, pos) => {
+          nextNumberScore[pos] = (nextNumberScore[pos] || 0) + (value || 0);
+        });
+        rec.chunkSlotScores[idx] = { letterScore: nextLetterScore, numberScore: nextNumberScore };
       });
       this.chunkRecords[chunkKey] = rec;
       this.save();
@@ -350,8 +364,24 @@
         }
         return { Lscore, Nscore };
       });
+      const chunkSlotScores = chunkAlnums.map((chunk) => {
+        const letterScore = [];
+        const numberScore = [];
+        for (let i = 0; i < chunk.length; i++) {
+          const ch = chunk[i];
+          if (!COMMON_SUBS.isAmbiguous(ch)) {
+            if (/[0-9]/.test(ch)) numberScore[i] = (numberScore[i] || 0) + 5;
+            else if (/[A-Za-z]/.test(ch)) letterScore[i] = (letterScore[i] || 0) + 5;
+          }
+        }
+        return { letterScore, numberScore };
+      });
       const chunkKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunks::${chunkScores.length}::${toChunkSignature(chunkAlnums.map(c => c.length))}`;
-      const chunkRecord = store.updateChunkScores(chunkKey, chunkScores);
+      const chunkRecord = store.updateChunkScores(chunkKey, chunkScores.map((score, idx) => ({
+        ...score,
+        letterScore: chunkSlotScores[idx]?.letterScore || [],
+        numberScore: chunkSlotScores[idx]?.numberScore || []
+      })));
       const learnedChunkTypes = (chunkRecord.chunkScores || []).map((score) => {
         const total = (score.Lscore || 0) + (score.Nscore || 0);
         const dominance = Math.abs((score.Lscore || 0) - (score.Nscore || 0));
@@ -361,6 +391,11 @@
         }
         return '?';
       }).join('');
+      const learnedChunkLayouts = (chunkRecord.chunkSlotScores || []).map((score, idx) => {
+        const length = (chunkAlnums[idx] || '').length;
+        const derived = deriveLearnedLayout(score || {}, length);
+        return derived.learnedLayout || ''.padStart(length, '?');
+      });
       return {
         ...seg,
         segmentKey,
@@ -378,10 +413,12 @@
           rawChunk,
           chunkAlnum: chunkAlnums[idx] || '',
           chunkType: learnedChunkTypes[idx] || '?',
+          chunkLearnedLayout: learnedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
           Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
           Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0
         })),
-        learnedChunkTypes
+        learnedChunkTypes,
+        learnedChunkLayouts
       };
     });
     return { segments: results };
@@ -409,11 +446,13 @@
       const corrected = [];
       const slotString = seg.slotString || '';
       const posToChunkIndex = [];
+      const posToChunkOffset = [];
       const chunkAlnumLengths = (seg.chunks || []).map((c) => (c.chunkAlnum || '').length);
       let chunkCursor = 0;
       chunkAlnumLengths.forEach((len, idx) => {
         for (let i = 0; i < len; i++) {
           posToChunkIndex[chunkCursor + i] = idx;
+          posToChunkOffset[chunkCursor + i] = i;
         }
         chunkCursor += len;
       });
@@ -443,26 +482,28 @@
         let next = ch;
         const learned = layoutArr[i];
         const chunkIndex = posToChunkIndex[i] ?? null;
-        const learnedChunkType = (seg.learnedChunkTypes || '')[chunkIndex] || '?';
+        const chunkOffset = posToChunkOffset[i] ?? null;
+        const learnedChunkLayout = seg.chunks?.[chunkIndex]?.chunkLearnedLayout || '';
+        const chunkExpected = learnedChunkLayout[chunkOffset] || '?';
         const expectedType = learned;
         if (learned === '?') {
-          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned, chunkIndex, learnedChunkType });
+          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned, chunkIndex, chunkOffset, learnedChunkLayout, chunkExpected });
         } else if (learned === 'N' && COMMON_SUBS.isAmbiguousLetter(ch)) {
-          if (learnedChunkType === 'L' || (learnedChunkType === 'N' && !COMMON_SUBS.isAmbiguousLetter(ch))) {
-            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, learnedChunkType, blocked: true, reason: `blocked by chunkType=${learnedChunkType}` });
+          if (chunkExpected === 'L') {
+            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, chunkOffset, learnedChunkLayout, chunkExpected, blocked: true, reason: `blocked by chunkLayout=${chunkExpected}` });
           } else {
             next = COMMON_SUBS.letterToDigit(ch);
           }
         } else if (learned === 'L' && COMMON_SUBS.isAmbiguousDigit(ch)) {
-          if (learnedChunkType === 'N') {
-            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, learnedChunkType, blocked: true, reason: `blocked by chunkType=${learnedChunkType}` });
+          if (chunkExpected === 'N') {
+            fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: ch, learned, chunkIndex, chunkOffset, learnedChunkLayout, chunkExpected, blocked: true, reason: `blocked by chunkLayout=${chunkExpected}` });
           } else {
             const left = corrected[i - 1] || '';
             next = COMMON_SUBS.digitToLetter(ch, left);
           }
         }
         if (next !== ch) {
-          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: next, learned, chunkIndex, learnedChunkType, expectedType });
+          fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, from: ch, to: next, learned, chunkIndex, chunkOffset, learnedChunkLayout, chunkExpected, expectedType });
         }
         corrected.push(next);
       }
