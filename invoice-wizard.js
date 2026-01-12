@@ -10749,14 +10749,49 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
     return text;
   }
   try{
-    const verifierBox = boxPx ? { ...boxPx } : (baseBox ? { ...baseBox } : null);
+    const intersectBox = (a, b) => {
+      if(!a || !b) return null;
+      const x = Math.max(a.x, b.x);
+      const y = Math.max(a.y, b.y);
+      const right = Math.min(a.x + a.w, b.x + b.w);
+      const bottom = Math.min(a.y + a.h, b.y + b.h);
+      const w = right - x;
+      const h = bottom - y;
+      if(w <= 0 || h <= 0) return null;
+      return { x, y, w, h, page: a.page ?? b.page };
+    };
+    let verifierBox = null;
+    let verifierConstraintApplied = false;
+    let verifierConstraintSkipped = false;
+    if(boxPx){
+      verifierBox = { ...boxPx };
+      if(baseBox){
+        const samePage = !Number.isFinite(baseBox.page) || !Number.isFinite(verifierBox.page) || baseBox.page === verifierBox.page;
+        if(samePage){
+          const constrained = intersectBox(verifierBox, baseBox);
+          if(constrained){
+            verifierBox = constrained;
+            verifierConstraintApplied = true;
+          } else {
+            verifierConstraintSkipped = true;
+          }
+        } else {
+          verifierConstraintSkipped = true;
+        }
+      }
+    } else if(baseBox){
+      verifierBox = { ...baseBox };
+    }
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.box',
         fieldKey: fieldKey || '',
         page,
         usedBox: boxPx ? { ...boxPx } : null,
+        baseBox: baseBox ? { ...baseBox } : null,
         verifierBox,
+        verifierConstraintApplied,
+        verifierConstraintSkipped,
         sourceBranch: sourceBranch || null
       });
     }
