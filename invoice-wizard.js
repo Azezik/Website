@@ -4486,6 +4486,7 @@ const FieldDataEngine = (() => {
     const baseCleaned = typeof baseResult === 'string' ? baseResult : (baseResult?.cleaned ?? String(raw ?? ''));
     const layer1RulesApplied = Array.isArray(baseResult?.rulesApplied) ? baseResult.rulesApplied : [];
     const layer1Edits = Array.isArray(baseResult?.layer1Edits) ? baseResult.layer1Edits : [];
+    const layer1CommonSubDetected = Boolean(baseResult?.commonSubDetected);
     if(traceSession && baseCleaned !== raw){
       traceMutation({
         stage: 'ocrmagic_layer1',
@@ -4688,6 +4689,7 @@ const FieldDataEngine = (() => {
       score,
       correctionsApplied,
       commonSubstitutions: uniqueCommonSubs,
+      commonSubstitutionsDetected: layer1CommonSubDetected,
       commonSubstitutionsApplied: uniqueCommonSubs.length > 0,
       digit,
       fingerprintMatch,
