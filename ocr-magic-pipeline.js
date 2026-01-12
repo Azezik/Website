@@ -101,6 +101,7 @@
       this.persist = persist && typeof localStorage !== 'undefined';
       this.records = this.persist ? this.loadFromStorage() : {};
       this.chunkRecords = this.persist ? this.loadChunksFromStorage() : {};
+      this.chunkIndexRecords = this.persist ? this.loadChunkIndexFromStorage() : {};
     }
 
     loadFromStorage() {
@@ -123,11 +124,22 @@
       }
     }
 
+    loadChunkIndexFromStorage() {
+      try {
+        const raw = localStorage.getItem(`${this.storageKey}.chunkIndexes`);
+        if (!raw) return {};
+        return JSON.parse(raw) || {};
+      } catch (err) {
+        return {};
+      }
+    }
+
     save() {
       if (!this.persist || typeof localStorage === 'undefined') return;
       try {
         localStorage.setItem(this.storageKey, JSON.stringify(this.records));
         localStorage.setItem(`${this.storageKey}.chunks`, JSON.stringify(this.chunkRecords || {}));
+        localStorage.setItem(`${this.storageKey}.chunkIndexes`, JSON.stringify(this.chunkIndexRecords || {}));
       } catch (err) {
         /* ignore persistence errors in sandbox */
       }
@@ -198,6 +210,31 @@
       return rec;
     }
 
+    getChunkIndexRecord(chunkIndexKey, slotLength = 0) {
+      const rec = this.chunkIndexRecords[chunkIndexKey] || { letterScore: [], numberScore: [] };
+      rec.letterScore = ensureLength(rec.letterScore, slotLength);
+      rec.numberScore = ensureLength(rec.numberScore, slotLength);
+      this.chunkIndexRecords[chunkIndexKey] = rec;
+      return rec;
+    }
+
+    updateChunkIndexScores(chunkIndexKey, { letterScore = [], numberScore = [] } = {}) {
+      const slotLength = Math.max(letterScore.length, numberScore.length);
+      const rec = this.getChunkIndexRecord(chunkIndexKey, slotLength);
+      const nextLetterScore = ensureLength(rec.letterScore, slotLength);
+      const nextNumberScore = ensureLength(rec.numberScore, slotLength);
+      (letterScore || []).forEach((value, pos) => {
+        nextLetterScore[pos] = (nextLetterScore[pos] || 0) + (value || 0);
+      });
+      (numberScore || []).forEach((value, pos) => {
+        nextNumberScore[pos] = (nextNumberScore[pos] || 0) + (value || 0);
+      });
+      const updated = { letterScore: nextLetterScore, numberScore: nextNumberScore };
+      this.chunkIndexRecords[chunkIndexKey] = updated;
+      this.save();
+      return updated;
+    }
+
     updateDvStats(segmentKey, { dvEligible = 0, dvContradictions = 0 } = {}) {
       const rec = this.getRecord(segmentKey);
       rec.dvEligible += dvEligible;
@@ -219,6 +256,12 @@
       Object.keys(this.chunkRecords || {}).forEach((key) => {
         if (prefix.trim() && key.startsWith(prefix)) {
           delete this.chunkRecords[key];
+          removed = true;
+        }
+      });
+      Object.keys(this.chunkIndexRecords || {}).forEach((key) => {
+        if (prefix.trim() && key.startsWith(prefix)) {
+          delete this.chunkIndexRecords[key];
           removed = true;
         }
       });
@@ -396,6 +439,25 @@
         const derived = deriveLearnedLayout(score || {}, length);
         return derived.learnedLayout || ''.padStart(length, '?');
       });
+      const pooledChunkLayouts = chunkSlotScores.map((score, idx) => {
+        const length = (chunkAlnums[idx] || '').length;
+        const chunkIndexKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunkIndex::${idx}`;
+        const pooledRecord = store.updateChunkIndexScores(chunkIndexKey, score || {});
+        const derived = deriveLearnedLayout(pooledRecord || {}, length);
+        return derived.learnedLayout || ''.padStart(length, '?');
+      });
+      const combinedChunkLayouts = learnedChunkLayouts.map((layout, idx) => {
+        const length = (chunkAlnums[idx] || '').length;
+        const pooledLayout = pooledChunkLayouts[idx] || ''.padStart(length, '?');
+        const baseLayout = layout || ''.padStart(length, '?');
+        const combined = [];
+        for (let i = 0; i < length; i++) {
+          const base = baseLayout[i] || '?';
+          const pooled = pooledLayout[i] || '?';
+          combined.push(base === '?' ? pooled : base);
+        }
+        return combined.join('');
+      });
       return {
         ...seg,
         segmentKey,
@@ -413,12 +475,16 @@
           rawChunk,
           chunkAlnum: chunkAlnums[idx] || '',
           chunkType: learnedChunkTypes[idx] || '?',
-          chunkLearnedLayout: learnedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
+          chunkLearnedLayout: combinedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
+          chunkLearnedLayoutLength: learnedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
+          chunkLearnedLayoutPooled: pooledChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
           Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
           Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0
         })),
         learnedChunkTypes,
-        learnedChunkLayouts
+        learnedChunkLayouts: combinedChunkLayouts,
+        learnedChunkLayoutsLength: learnedChunkLayouts,
+        learnedChunkLayoutsPooled: pooledChunkLayouts
       };
     });
     return { segments: results };

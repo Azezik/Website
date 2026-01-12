@@ -275,11 +275,15 @@
     card.className = 'segment-card';
     const layout = seg.learnedLayout || ''.padStart(seg.slotLength, '?');
     const chunkLayouts = Array.isArray(seg.learnedChunkLayouts) ? seg.learnedChunkLayouts.join(' ') : '';
+    const chunkLayoutsLength = Array.isArray(seg.learnedChunkLayoutsLength) ? seg.learnedChunkLayoutsLength.join(' ') : '';
+    const chunkLayoutsPooled = Array.isArray(seg.learnedChunkLayoutsPooled) ? seg.learnedChunkLayoutsPooled.join(' ') : '';
     const chunkLines = (seg.chunks || []).map((c) => {
       const parts = [
         `[#${c.index}] ${escapeHtml(c.rawChunk || '')}`,
         `alnum:${escapeHtml(c.chunkAlnum || '')}`,
         `layout:${escapeHtml(c.chunkLearnedLayout || '')}`,
+        `len:${escapeHtml(c.chunkLearnedLayoutLength || '')}`,
+        `pool:${escapeHtml(c.chunkLearnedLayoutPooled || '')}`,
         `L:${c.Lscore || 0} N:${c.Nscore || 0}`
       ];
       return parts.join(' | ');
@@ -291,7 +295,9 @@
       <div><strong>Learned Layout:</strong> ${escapeHtml(layout)}</div>
       <div><strong>DV:</strong> ${seg.deliberateViolation ? 'TRUE' : 'false'} (eligible ${seg.dvEligible || 0}, contradictions ${seg.dvContradictions || 0})</div>
       <div><strong>Scores:</strong> L[${(seg.slotScores?.letterScore || []).join(', ')}] N[${(seg.slotScores?.numberScore || []).join(', ')}]</div>
-      <div><strong>Learned Chunk Layouts:</strong> ${escapeHtml(chunkLayouts)}</div>
+      <div><strong>Chunk Layouts (Combined):</strong> ${escapeHtml(chunkLayouts)}</div>
+      <div><strong>Chunk Layouts (Length):</strong> ${escapeHtml(chunkLayoutsLength)}</div>
+      <div><strong>Chunk Layouts (Pooled):</strong> ${escapeHtml(chunkLayoutsPooled)}</div>
       <div><strong>Chunks:</strong><br>${chunkLines.join('<br>') || 'None'}</div>
     `;
     return card;
