@@ -188,6 +188,12 @@ const els = {
   staticDebugClear: document.getElementById('clearStaticDebug'),
   staticDebugToggle: document.getElementById('staticDebugToggle'),
   staticDebugDownload: document.getElementById('downloadStaticDebug'),
+  ocrAccuracyBtn: document.getElementById('getOcrAccuracyData'),
+  ocrAccuracySummary: document.getElementById('ocrAccuracySummary'),
+  ocrAccuracyRows: document.getElementById('ocrAccuracyRows'),
+  ocrAccuracyCopy: document.getElementById('copyOcrAccuracy'),
+  ocrAccuracyDownloadJson: document.getElementById('downloadOcrAccuracyJson'),
+  ocrAccuracyDownloadCsv: document.getElementById('downloadOcrAccuracyCsv'),
 
   // wizard
   wizardSection:   document.getElementById('wizard-section'),
@@ -454,6 +460,7 @@ let state = {
   currentAreaRows: [],
   wizardComplete: false,
   ocrTrace: { enabled: false, session: null },
+  ocrAccuracyReport: null,
 };
 
 let loginHydrated = false;
@@ -551,6 +558,132 @@ function downloadStaticDebugLogs(){
 function syncStaticDebugToggleUI(){
   if(els.staticDebugToggle){
     els.staticDebugToggle.checked = !!window.DEBUG_STATIC_FIELDS;
+  }
+}
+
+function formatOcrAccuracySummary(stats){
+  if(!stats){
+    return 'No OCR accuracy data found yet.';
+  }
+  const lines = [];
+  lines.push(`Total any occurrences: ${stats.totalAnyOccurrences}`);
+  lines.push(`Total changes: ${stats.totalChanges}`);
+  lines.push(`Changes by corrector: none=${stats.changesByCorrector.none}, ocrmagic=${stats.changesByCorrector.ocrmagic}, tesseract=${stats.changesByCorrector.tesseract}, upstream/pdf.js=${stats.changesByCorrector['upstream/pdf.js']}`);
+  lines.push('Per field:');
+  ['date', 'address', 'model'].forEach(fieldKey => {
+    const fieldStats = stats.perField?.[fieldKey];
+    if(!fieldStats) return;
+    lines.push(`- ${fieldKey}: total=${fieldStats.total}, changed=${fieldStats.changed}, byCorrector(none=${fieldStats.byCorrector.none}, ocrmagic=${fieldStats.byCorrector.ocrmagic}, tesseract=${fieldStats.byCorrector.tesseract}, upstream/pdf.js=${fieldStats.byCorrector['upstream/pdf.js']})`);
+  });
+  lines.push(`introducedErrors: ${stats.introducedErrors}`);
+  lines.push(`tesseractSkippedAlignFail: ${stats.tesseractSkippedAlignFail}`);
+  return lines.join('\n');
+}
+
+function formatOcrAccuracyRows(rows = []){
+  if(!rows.length){
+    return 'No OCR accuracy rows found.';
+  }
+  return rows.map(row => [
+    `Field: ${row.fieldKey}`,
+    `Mode: ${row.mode || 'null'}`,
+    `Raw: "${row.raw ?? ''}"`,
+    `Cleaned: "${row.cleaned ?? ''}"`,
+    `Changed: ${row.changed ? 'true' : 'false'}`,
+    `CorrectedBy: ${row.correctedBy}`,
+    `RulesApplied: ${Array.isArray(row.rulesApplied) ? JSON.stringify(row.rulesApplied) : '[]'}`,
+    `Confidence: ${row.confidence === null || row.confidence === undefined ? 'null' : row.confidence}`,
+    '---'
+  ].join('\n')).join('\n');
+}
+
+function runOcrAccuracyReport(){
+  if(!window.parseOcrAccuracyReport){
+    alert('OCR accuracy parser is not available.');
+    return;
+  }
+  const logs = window.getStaticDebugLogs ? window.getStaticDebugLogs() : staticDebugLogs;
+  const text = normalizeStaticDebugLogs(logs).join('\n');
+  const report = window.parseOcrAccuracyReport(text);
+  state.ocrAccuracyReport = report;
+  if(els.ocrAccuracySummary){
+    els.ocrAccuracySummary.textContent = formatOcrAccuracySummary(report.stats);
+  }
+  if(els.ocrAccuracyRows){
+    els.ocrAccuracyRows.value = formatOcrAccuracyRows(report.rows);
+  }
+}
+
+function ensureOcrAccuracyReport(){
+  if(!state.ocrAccuracyReport){
+    runOcrAccuracyReport();
+  }
+  return state.ocrAccuracyReport;
+}
+
+function copyOcrAccuracyReport(){
+  if(!els.ocrAccuracyRows) return;
+  const reportText = els.ocrAccuracyRows.value || '';
+  if(!reportText.trim()){
+    alert('No OCR accuracy report to copy.');
+    return;
+  }
+  navigator.clipboard?.writeText(reportText).then(()=>{
+    alert('OCR accuracy report copied.');
+  }).catch(()=>{
+    alert('Failed to copy OCR accuracy report.');
+  });
+}
+
+function downloadOcrAccuracyReport(kind){
+  const report = ensureOcrAccuracyReport();
+  if(!report){
+    alert('No OCR accuracy report available.');
+    return;
+  }
+  try {
+    let filename = '';
+    let contents = '';
+    let type = 'text/plain';
+    if(kind === 'json'){
+      filename = `ocr-accuracy-${Date.now()}.json`;
+      contents = JSON.stringify(report, null, 2);
+      type = 'application/json';
+    } else if(kind === 'csv'){
+      filename = `ocr-accuracy-${Date.now()}.csv`;
+      const header = ['fieldKey','mode','raw','cleaned','changed','correctedBy','rulesApplied','confidence'];
+      const rows = report.rows.map(row => ([
+        row.fieldKey,
+        row.mode || '',
+        row.raw || '',
+        row.cleaned || '',
+        row.changed ? 'true' : 'false',
+        row.correctedBy,
+        JSON.stringify(row.rulesApplied || []),
+        row.confidence === null || row.confidence === undefined ? '' : row.confidence
+      ]));
+      const csvLines = [header, ...rows].map(values => values.map(value => {
+        const text = String(value ?? '');
+        const escaped = text.replace(/\"/g, '""');
+        return `"${escaped}"`;
+      }).join(','));
+      contents = csvLines.join('\n');
+      type = 'text/csv';
+    } else {
+      return;
+    }
+    const blob = new Blob([contents], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  } catch(err){
+    console.error('OCR accuracy download failed', err);
+    alert('Failed to download OCR accuracy report.');
   }
 }
 
@@ -12836,6 +12969,10 @@ els.staticDebugToggle?.addEventListener('change', ()=>{
   persistStaticDebugPref(enabled);
 });
 els.staticDebugDownload?.addEventListener('click', downloadStaticDebugLogs);
+els.ocrAccuracyBtn?.addEventListener('click', runOcrAccuracyReport);
+els.ocrAccuracyCopy?.addEventListener('click', copyOcrAccuracyReport);
+els.ocrAccuracyDownloadJson?.addEventListener('click', ()=>downloadOcrAccuracyReport('json'));
+els.ocrAccuracyDownloadCsv?.addEventListener('click', ()=>downloadOcrAccuracyReport('csv'));
 syncStaticDebugToggleUI();
 
 els.docType?.addEventListener('change', ()=>{
