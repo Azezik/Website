@@ -10236,7 +10236,9 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
 }
 
 const ANY_FIELD_TESS_CONFIDENCE_MIN = 0.75;
+const ANY_FIELD_TESS_CONFIDENCE_HIGH = 0.9;
 const ANY_FIELD_TESS_MAX_NON_CONFUSION = 1;
+const ANY_FIELD_TESS_MAX_NON_CONFUSION_HIGH_CONF = 2;
 const ANY_FIELD_TESS_INSET_STEPS = 2;
 const ANY_FIELD_TESS_INSET_PX_MIN = 1;
 const ANY_FIELD_TESS_INSET_PX_MAX = 4;
@@ -10595,25 +10597,34 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     }
     return pdfStr;
   }
+  const allowedNonConfusion = confidence >= ANY_FIELD_TESS_CONFIDENCE_HIGH
+    ? ANY_FIELD_TESS_MAX_NON_CONFUSION_HIGH_CONF
+    : ANY_FIELD_TESS_MAX_NON_CONFUSION;
   let nonConfusionMismatches = 0;
   for(let i=0;i<pdfChars.length;i++){
     if(pdfChars[i] === tessChars[i]) continue;
     if(!isConfusionPair(pdfChars[i], tessChars[i])){
       nonConfusionMismatches += 1;
-      if(nonConfusionMismatches > ANY_FIELD_TESS_MAX_NON_CONFUSION){
+      if(nonConfusionMismatches > allowedNonConfusion){
         traceAnyField({
           rule: 'tess.verify.skip:unsafeMismatch',
           before: pdfText,
           after: pdfText,
           confidenceAfter: confidence,
           patched: false,
-          meta: { reason: 'unsafeMismatch', nonConfusionMismatchCount: nonConfusionMismatches, sourceBranch }
+          meta: {
+            reason: 'unsafeMismatch',
+            nonConfusionMismatchCount: nonConfusionMismatches,
+            nonConfusionMismatchAllowed: allowedNonConfusion,
+            sourceBranch
+          }
         });
         if(ocrMagicDebugEnabled()){
           ocrMagicDebug({
             event: 'ocrmagic.anyfield.verify.skip',
             reason: 'unsafeMismatch',
-            nonConfusionMismatchCount: nonConfusionMismatches
+            nonConfusionMismatchCount: nonConfusionMismatches,
+            nonConfusionMismatchAllowed: allowedNonConfusion
           });
         }
         return pdfStr;
