@@ -11,9 +11,25 @@
   }
 
   const isAlnum = (ch) => /[A-Za-z0-9]/.test(ch);
+  const CONFUSION_PAIRS = new Set(['O0', '0O', 'I1', '1I', 'l1', '1l', 'S5', '5S', 'T7', '7T']);
 
   function station1_layer1Adjacency(raw = '') {
     const source = String(raw ?? '');
+    const commonSubMatches = [];
+    const commonSubPairs = [];
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      if (COMMON_SUBS.isAmbiguous(ch)) {
+        commonSubMatches.push({ index: i, char: ch });
+      }
+      if (i < source.length - 1) {
+        const pair = ch + source[i + 1];
+        if (CONFUSION_PAIRS.has(pair)) {
+          commonSubPairs.push({ index: i, pair });
+        }
+      }
+    }
+    const commonSubDetected = commonSubMatches.length > 0 || commonSubPairs.length > 0;
     const chars = Array.from(source).map((ch) => ({ char: ch, reliable: false }));
     const layer1Flags = [];
     const layer1Edits = [];
@@ -96,6 +112,9 @@
       cleaned: l1Text,
       layer1Flags: Array.from(new Set(layer1Flags)),
       layer1Edits,
+      commonSubDetected,
+      commonSubMatches,
+      commonSubPairs,
       rulesApplied
     };
   }
@@ -105,7 +124,10 @@
     return {
       cleaned: result.cleaned,
       rulesApplied: result.rulesApplied,
-      layer1Edits: result.layer1Edits
+      layer1Edits: result.layer1Edits,
+      commonSubDetected: result.commonSubDetected,
+      commonSubMatches: result.commonSubMatches,
+      commonSubPairs: result.commonSubPairs
     };
   }
 
