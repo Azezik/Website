@@ -10237,6 +10237,9 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
 
 const ANY_FIELD_TESS_CONFIDENCE_MIN = 0.75;
 const ANY_FIELD_TESS_MAX_NON_CONFUSION = 1;
+const ANY_FIELD_TESS_INSET_STEPS = 2;
+const ANY_FIELD_TESS_INSET_PX_MIN = 1;
+const ANY_FIELD_TESS_INSET_PX_MAX = 4;
 const ANY_FIELD_TESS_EXPANSION_STEPS = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MIN = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MAX = 8;
@@ -10354,6 +10357,28 @@ function expandBBoxByPx(bboxPx, paddingPx){
   };
 }
 
+function shrinkBBoxByPx(bboxPx, paddingPx){
+  const pad = Math.max(0, Number(paddingPx) || 0);
+  const nextW = Math.max(1, (bboxPx.w || 0) - pad * 2);
+  const nextH = Math.max(1, (bboxPx.h || 0) - pad * 2);
+  return {
+    ...bboxPx,
+    x: Math.max(0, (bboxPx.x || 0) + pad),
+    y: Math.max(0, (bboxPx.y || 0) + pad),
+    w: nextW,
+    h: nextH
+  };
+}
+
+function getAnyFieldInsetSteps(bboxPx){
+  const base = Math.max(
+    ANY_FIELD_TESS_INSET_PX_MIN,
+    Math.round(Math.min(bboxPx.w || 0, bboxPx.h || 0) * 0.01)
+  );
+  const capped = Math.min(base, ANY_FIELD_TESS_INSET_PX_MAX);
+  return Array.from({ length: ANY_FIELD_TESS_INSET_STEPS }, (_, i) => Math.min(capped * (i + 1), ANY_FIELD_TESS_INSET_PX_MAX));
+}
+
 function getAnyFieldExpansionSteps(bboxPx){
   const base = Math.max(
     ANY_FIELD_TESS_EXPANSION_PX_MIN,
@@ -10414,6 +10439,40 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
   };
   let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
   let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
+  const shouldRetryInset = () => (
+    !!bboxPx
+      && !alignment.alignOk
+      && alignment.tessChars.length > alignment.pdfChars.length
+  );
+  if(tessStr && shouldRetryInset()){
+    const insets = getAnyFieldInsetSteps(bbox);
+    let best = { tessStr, confidence, alignment, bbox };
+    for(const pad of insets){
+      const insetBox = shrinkBBoxByPx(bbox, pad);
+      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: insetBox });
+      if(!attempt.text) continue;
+      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
+      if(!attemptAlignment.alignOk) continue;
+      if(!best.alignment.alignOk || attemptAlignment.tessChars.length >= best.alignment.tessChars.length){
+        best = { tessStr: attempt.text, confidence: attempt.confidence, alignment: attemptAlignment, bbox: insetBox };
+      }
+    }
+    if(best.tessStr !== tessStr){
+      tessStr = best.tessStr;
+      confidence = best.confidence;
+      alignment = best.alignment;
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.inset',
+          pageNum: page,
+          originalBox: bbox,
+          insetBox: best.bbox,
+          textLen: tessStr.length,
+          confidence
+        });
+      }
+    }
+  }
   const shouldRetryExpansion = () => (
     !!allowBBoxExpansion
       && !!bboxPx
