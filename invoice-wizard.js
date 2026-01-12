@@ -570,11 +570,16 @@ function formatOcrAccuracySummary(stats){
   lines.push(`Total changes: ${stats.totalChanges}`);
   lines.push(`Changes by corrector: none=${stats.changesByCorrector.none}, ocrmagic=${stats.changesByCorrector.ocrmagic}, tesseract=${stats.changesByCorrector.tesseract}, upstream/pdf.js=${stats.changesByCorrector['upstream/pdf.js']}`);
   lines.push('Per field:');
-  ['date', 'address', 'model'].forEach(fieldKey => {
-    const fieldStats = stats.perField?.[fieldKey];
-    if(!fieldStats) return;
-    lines.push(`- ${fieldKey}: total=${fieldStats.total}, changed=${fieldStats.changed}, byCorrector(none=${fieldStats.byCorrector.none}, ocrmagic=${fieldStats.byCorrector.ocrmagic}, tesseract=${fieldStats.byCorrector.tesseract}, upstream/pdf.js=${fieldStats.byCorrector['upstream/pdf.js']})`);
-  });
+  const perFieldEntries = Object.entries(stats.perField || {});
+  if(!perFieldEntries.length){
+    lines.push('- (none)');
+  } else {
+    perFieldEntries
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([fieldKey, fieldStats]) => {
+        lines.push(`- ${fieldKey}: total=${fieldStats.total}, changed=${fieldStats.changed}, byCorrector(none=${fieldStats.byCorrector.none}, ocrmagic=${fieldStats.byCorrector.ocrmagic}, tesseract=${fieldStats.byCorrector.tesseract}, upstream/pdf.js=${fieldStats.byCorrector['upstream/pdf.js']})`);
+      });
+  }
   lines.push(`introducedErrors: ${stats.introducedErrors}`);
   lines.push(`tesseractSkippedAlignFail: ${stats.tesseractSkippedAlignFail}`);
   return lines.join('\n');
