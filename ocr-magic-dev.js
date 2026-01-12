@@ -274,11 +274,12 @@
     const card = document.createElement('div');
     card.className = 'segment-card';
     const layout = seg.learnedLayout || ''.padStart(seg.slotLength, '?');
+    const chunkLayouts = Array.isArray(seg.learnedChunkLayouts) ? seg.learnedChunkLayouts.join(' ') : '';
     const chunkLines = (seg.chunks || []).map((c) => {
       const parts = [
         `[#${c.index}] ${escapeHtml(c.rawChunk || '')}`,
         `alnum:${escapeHtml(c.chunkAlnum || '')}`,
-        `type:${escapeHtml(c.chunkType || '?')}`,
+        `layout:${escapeHtml(c.chunkLearnedLayout || '')}`,
         `L:${c.Lscore || 0} N:${c.Nscore || 0}`
       ];
       return parts.join(' | ');
@@ -290,7 +291,7 @@
       <div><strong>Learned Layout:</strong> ${escapeHtml(layout)}</div>
       <div><strong>DV:</strong> ${seg.deliberateViolation ? 'TRUE' : 'false'} (eligible ${seg.dvEligible || 0}, contradictions ${seg.dvContradictions || 0})</div>
       <div><strong>Scores:</strong> L[${(seg.slotScores?.letterScore || []).join(', ')}] N[${(seg.slotScores?.numberScore || []).join(', ')}]</div>
-      <div><strong>Learned Chunk Types:</strong> ${escapeHtml(seg.learnedChunkTypes || '')}</div>
+      <div><strong>Learned Chunk Layouts:</strong> ${escapeHtml(chunkLayouts)}</div>
       <div><strong>Chunks:</strong><br>${chunkLines.join('<br>') || 'None'}</div>
     `;
     return card;
@@ -355,9 +356,9 @@
 
     els.traceSteps.appendChild(buildDiffBlock('Station 4 (Layout Corrections)', station2Text, station4Text, (debug.station4?.fingerprintEdits || []).map((e) => {
       if (e.blocked) {
-        return `${e.reason || 'blocked'} @${e.slotIndex} [chunk ${e.chunkIndex ?? '-'} ${e.learnedChunkType || '?'}]`;
+        return `${e.reason || 'blocked'} @${e.slotIndex} [chunk ${e.chunkIndex ?? '-'} ${e.chunkExpected || '?'}]`;
       }
-      return `${e.from}->${e.to} @${e.slotIndex} (${e.learned}) [chunk ${e.chunkIndex ?? '-'} ${e.learnedChunkType || '?'}]`;
+      return `${e.from}->${e.to} @${e.slotIndex} (${e.learned}) [chunk ${e.chunkIndex ?? '-'} ${e.chunkExpected || '?'}]`;
     })));
     els.traceSteps.appendChild(buildDiffBlock('FINAL', rawText, station4Text));
   }
