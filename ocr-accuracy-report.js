@@ -1,5 +1,4 @@
 (function initOcrAccuracyReport(global){
-  const TARGET_FIELDS = new Set(['date', 'address', 'model']);
   const ANY_TOKEN = 'any';
   const VERIFY_DONE_EVENT = 'ocrmagic.anyfield.verify.done';
   const VERIFY_SKIP_EVENT = 'ocrmagic.anyfield.verify.skip';
@@ -101,6 +100,17 @@
     };
   }
 
+  function ensureFieldStats(stats, fieldKey){
+    if(!fieldKey) return;
+    if(!stats.perField[fieldKey]){
+      stats.perField[fieldKey] = {
+        total: 0,
+        changed: 0,
+        byCorrector: { none: 0, ocrmagic: 0, tesseract: 0, 'upstream/pdf.js': 0 }
+      };
+    }
+  }
+
   function finalizeRows(rows){
     const stats = {
       totalAnyOccurrences: rows.length,
@@ -111,11 +121,7 @@
         tesseract: 0,
         'upstream/pdf.js': 0
       },
-      perField: {
-        date: { total: 0, changed: 0, byCorrector: { none: 0, ocrmagic: 0, tesseract: 0, 'upstream/pdf.js': 0 } },
-        address: { total: 0, changed: 0, byCorrector: { none: 0, ocrmagic: 0, tesseract: 0, 'upstream/pdf.js': 0 } },
-        model: { total: 0, changed: 0, byCorrector: { none: 0, ocrmagic: 0, tesseract: 0, 'upstream/pdf.js': 0 } }
-      },
+      perField: {},
       introducedErrors: 0,
       tesseractSkippedAlignFail: 0
     };
@@ -128,8 +134,9 @@
       if(stats.changesByCorrector[corrector] !== undefined){
         stats.changesByCorrector[corrector] += 1;
       }
-      if(stats.perField[row.fieldKey]){
-        const fieldStats = stats.perField[row.fieldKey];
+      ensureFieldStats(stats, row.fieldKey);
+      const fieldStats = stats.perField[row.fieldKey];
+      if(fieldStats){
         fieldStats.total += 1;
         if(row.changed){
           fieldStats.changed += 1;
@@ -172,9 +179,7 @@
         const match = parsed.line.match(/static-debug resolve\s+([^:]+):\s*preview=\"([^\"]*)\"/i);
         if(match){
           const fieldKey = normalizeFieldKey(match[1]);
-          if(TARGET_FIELDS.has(fieldKey)){
-            lastPreviewByField[fieldKey] = match[2];
-          }
+          lastPreviewByField[fieldKey] = match[2];
         }
       }
 
@@ -187,7 +192,6 @@
 
       if(labelLower.includes(APPLY_EVENT)){
         const fieldKey = extractFieldKey(details);
-        if(!TARGET_FIELDS.has(fieldKey)) return;
         const magicTypeResolved = details?.magicDataType ?? lastMagicTypeByField[fieldKey];
         if(!isAny(magicTypeResolved)) return;
         const raw = details?.raw ?? '';
@@ -210,7 +214,6 @@
 
       if(labelLower.includes(VERIFY_DONE_EVENT)){
         const fieldKey = extractFieldKey(details);
-        if(!TARGET_FIELDS.has(fieldKey)) return;
         const magicTypeResolved = details?.magicTypeResolved ?? lastMagicTypeByField[fieldKey];
         if(!isAny(magicTypeResolved)) return;
         const row = lastRowByField[fieldKey];
@@ -235,7 +238,6 @@
 
       if(labelLower.includes(VERIFY_SKIP_EVENT)){
         const fieldKey = extractFieldKey(details);
-        if(!TARGET_FIELDS.has(fieldKey)) return;
         const magicTypeResolved = details?.magicTypeResolved ?? lastMagicTypeByField[fieldKey];
         if(!isAny(magicTypeResolved)) return;
         if(details?.reason === 'alignFail'){
