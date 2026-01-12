@@ -10381,6 +10381,28 @@ function expandBBoxByPx(bboxPx, paddingPx){
   };
 }
 
+function intersectBBox(a, b){
+  if(!a || !b) return null;
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  const w = right - x;
+  const h = bottom - y;
+  if(w <= 0 || h <= 0) return null;
+  return { x, y, w, h, page: a.page ?? b.page };
+}
+
+function bboxContains(outer, inner){
+  if(!outer || !inner) return false;
+  return (
+    inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.w <= outer.x + outer.w
+    && inner.y + inner.h <= outer.y + outer.h
+  );
+}
+
 function shrinkBBoxByPx(bboxPx, paddingPx){
   const pad = Math.max(0, Number(paddingPx) || 0);
   const nextW = Math.max(1, (bboxPx.w || 0) - pad * 2);
@@ -10471,10 +10493,23 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
   return { pdfChars, tessChars, pdfMap, alignMode, alignOk };
 }
 
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
+  const expansionBase = usedBox ? { ...usedBox, page: usedBox.page ?? page } : bbox;
+  const allowConstraint = (() => {
+    if(!baseBox || !expansionBase) return false;
+    const samePage = !Number.isFinite(baseBox.page)
+      || !Number.isFinite(expansionBase.page)
+      || baseBox.page === expansionBase.page;
+    return samePage && bboxContains(baseBox, expansionBase);
+  })();
+  const constrainExpansion = (candidate) => {
+    if(!allowConstraint) return candidate;
+    const constrained = intersectBBox(candidate, baseBox);
+    return constrained || candidate;
+  };
   const traceBase = traceSession ? {
     docId: docId || state.currentFileId || state.currentFileName || null,
     pageIndex: page - 1,
@@ -10529,10 +10564,10 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       && (!alignment.alignOk || alignment.tessChars.length < alignment.pdfChars.length)
   );
   if((!tessStr || shouldRetryExpansion()) && allowBBoxExpansion){
-    const expansions = getAnyFieldExpansionSteps(bbox);
+    const expansions = getAnyFieldExpansionSteps(expansionBase);
     let best = { tessStr, confidence, alignment, bbox };
     for(const pad of expansions){
-      const expandedBox = expandBBoxByPx(bbox, pad);
+      const expandedBox = constrainExpansion(expandBBoxByPx(expansionBase, pad));
       const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: expandedBox });
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
@@ -10751,17 +10786,6 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
     return text;
   }
   try{
-    const intersectBox = (a, b) => {
-      if(!a || !b) return null;
-      const x = Math.max(a.x, b.x);
-      const y = Math.max(a.y, b.y);
-      const right = Math.min(a.x + a.w, b.x + b.w);
-      const bottom = Math.min(a.y + a.h, b.y + b.h);
-      const w = right - x;
-      const h = bottom - y;
-      if(w <= 0 || h <= 0) return null;
-      return { x, y, w, h, page: a.page ?? b.page };
-    };
     let verifierBox = null;
     let verifierConstraintApplied = false;
     let verifierConstraintSkipped = false;
@@ -10769,14 +10793,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       verifierBox = { ...boxPx };
       if(baseBox){
         const samePage = !Number.isFinite(baseBox.page) || !Number.isFinite(verifierBox.page) || baseBox.page === verifierBox.page;
-        if(samePage){
-          const constrained = intersectBox(verifierBox, baseBox);
-          if(constrained){
-            verifierBox = constrained;
-            verifierConstraintApplied = true;
-          } else {
-            verifierConstraintSkipped = true;
-          }
+        if(samePage && bboxContains(baseBox, verifierBox)){
+          verifierConstraintApplied = true;
         } else {
           verifierConstraintSkipped = true;
         }
@@ -10802,6 +10820,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       pdfStr: text,
       pageCanvas: canvas,
       bboxPx: verifierBox,
+      usedBox: boxPx,
+      baseBox,
       pageNum: page,
       fieldKey,
       traceSession,
