@@ -10224,6 +10224,9 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
 
 const ANY_FIELD_TESS_CONFIDENCE_MIN = 0.75;
 const ANY_FIELD_TESS_MAX_NON_CONFUSION = 1;
+const ANY_FIELD_TESS_EXPANSION_STEPS = 2;
+const ANY_FIELD_TESS_EXPANSION_PX_MIN = 2;
+const ANY_FIELD_TESS_EXPANSION_PX_MAX = 8;
 const ANY_FIELD_CONFUSION_MAP = new Map([
   ['O', '0'], ['0', 'O'],
   ['o', '0'], ['I', '1'], ['1', 'I'],
@@ -10273,7 +10276,41 @@ function alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = {
   };
 }
 
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch } = {}){
+function expandBBoxByPx(bboxPx, paddingPx){
+  const pad = Math.max(0, Number(paddingPx) || 0);
+  return {
+    ...bboxPx,
+    x: Math.max(0, (bboxPx.x || 0) - pad),
+    y: Math.max(0, (bboxPx.y || 0) - pad),
+    w: Math.max(1, (bboxPx.w || 0) + pad * 2),
+    h: Math.max(1, (bboxPx.h || 0) + pad * 2)
+  };
+}
+
+function getAnyFieldExpansionSteps(bboxPx){
+  const base = Math.max(
+    ANY_FIELD_TESS_EXPANSION_PX_MIN,
+    Math.round(Math.min(bboxPx.w || 0, bboxPx.h || 0) * 0.02)
+  );
+  const capped = Math.min(base, ANY_FIELD_TESS_EXPANSION_PX_MAX);
+  return Array.from({ length: ANY_FIELD_TESS_EXPANSION_STEPS }, (_, i) => Math.min(capped * (i + 1), ANY_FIELD_TESS_EXPANSION_PX_MAX));
+}
+
+function alignAnyFieldText(pdfText, tessStr){
+  let { pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = alignIgnoringSpaces(pdfText, tessStr);
+  let alignMode = 'exact';
+  if(pdfChars.length && tessChars.length && pdfChars.length !== tessChars.length){
+    const subAligned = alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm });
+    if(subAligned){
+      ({ pdfChars, tessChars, pdfMap } = subAligned);
+      alignMode = subAligned.alignMode;
+    }
+  }
+  const alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
+  return { pdfChars, tessChars, pdfMap, alignMode, alignOk };
+}
+
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
@@ -10289,7 +10326,42 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!traceSession) return;
     window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
   };
-  const { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
+  let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
+  let alignment = alignAnyFieldText(pdfText, tessStr);
+  const shouldRetryExpansion = () => (
+    !!allowBBoxExpansion
+      && !!bboxPx
+      && (!alignment.alignOk || alignment.tessChars.length < alignment.pdfChars.length)
+  );
+  if((!tessStr || shouldRetryExpansion()) && allowBBoxExpansion){
+    const expansions = getAnyFieldExpansionSteps(bbox);
+    let best = { tessStr, confidence, alignment, bbox };
+    for(const pad of expansions){
+      const expandedBox = expandBBoxByPx(bbox, pad);
+      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: expandedBox });
+      if(!attempt.text) continue;
+      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text);
+      if(!attemptAlignment.alignOk) continue;
+      if(!best.alignment.alignOk || attemptAlignment.tessChars.length > best.alignment.tessChars.length){
+        best = { tessStr: attempt.text, confidence: attempt.confidence, alignment: attemptAlignment, bbox: expandedBox };
+      }
+    }
+    if(best.tessStr !== tessStr){
+      tessStr = best.tessStr;
+      confidence = best.confidence;
+      alignment = best.alignment;
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.expanded',
+          pageNum: page,
+          originalBox: bbox,
+          expandedBox: best.bbox,
+          textLen: tessStr.length,
+          confidence
+        });
+      }
+    }
+  }
   if(!tessStr){
     traceAnyField({
       rule: 'tess.verify.skip:tessEmpty',
@@ -10309,16 +10381,8 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     }
     return pdfStr;
   }
-  let { pdfChars, tessChars, pdfMap, pdfNorm, tessNorm } = alignIgnoringSpaces(pdfText, tessStr);
-  let alignMode = 'exact';
-  if(pdfChars.length && tessChars.length && pdfChars.length !== tessChars.length){
-    const subAligned = alignBySubstring({ pdfChars, tessChars, pdfMap, pdfNorm, tessNorm });
-    if(subAligned){
-      ({ pdfChars, tessChars, pdfMap } = subAligned);
-      alignMode = subAligned.alignMode;
-    }
-  }
-  if(!pdfChars.length || pdfChars.length !== tessChars.length){
+  const { pdfChars, tessChars, pdfMap, alignMode, alignOk } = alignment;
+  if(!alignOk){
     traceAnyField({
       rule: 'tess.verify.skip:alignFail',
       before: pdfText,
@@ -10501,7 +10565,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       fieldKey,
       traceSession,
       docId: state.currentFileId || state.currentFileName || null,
-      sourceBranch
+      sourceBranch,
+      allowBBoxExpansion: hasCommonSubs
     });
   } catch(err){
     if(ocrMagicDebugEnabled()){
