@@ -4485,6 +4485,7 @@ const FieldDataEngine = (() => {
     const baseResult = runBaseOcrMagic(raw);
     const baseCleaned = typeof baseResult === 'string' ? baseResult : (baseResult?.cleaned ?? String(raw ?? ''));
     const layer1RulesApplied = Array.isArray(baseResult?.rulesApplied) ? baseResult.rulesApplied : [];
+    const layer1Edits = Array.isArray(baseResult?.layer1Edits) ? baseResult.layer1Edits : [];
     if(traceSession && baseCleaned !== raw){
       traceMutation({
         stage: 'ocrmagic_layer1',
@@ -4521,6 +4522,18 @@ const FieldDataEngine = (() => {
     }
     txt = magic.value || txt;
     let correctionsApplied = magic.corrections || [];
+    const commonSubstitutions = [];
+    if(layer1Edits.length){
+      layer1Edits.forEach(edit => {
+        if(edit?.from && edit?.to) commonSubstitutions.push(`${edit.from}->${edit.to}`);
+      });
+    }
+    if(correctionsApplied.length){
+      correctionsApplied.forEach(correction => {
+        if(correction?.pair) commonSubstitutions.push(correction.pair);
+      });
+    }
+    const uniqueCommonSubs = Array.from(new Set(commonSubstitutions));
     const magicTokens = magic.tokens || txt.split(/\s+/g).filter(Boolean);
     const numericCandidate = magic.numericCandidate || txt;
     let invalidReason = null;
@@ -4674,6 +4687,8 @@ const FieldDataEngine = (() => {
       shape,
       score,
       correctionsApplied,
+      commonSubstitutions: uniqueCommonSubs,
+      commonSubstitutionsApplied: uniqueCommonSubs.length > 0,
       digit,
       fingerprintMatch,
       isValid: isValidValue,
@@ -7452,6 +7467,11 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   if(!cleaned) return { cleaned, patchedText: null };
   const baseText = cleaned.value || cleaned.raw || '';
   if(!baseText) return { cleaned, patchedText: null };
+  const commonSubstitutions = cleaned.commonSubstitutions ?? cleaned.commonSubstitutionsApplied ?? null;
+  const hasCommonSubs = Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions;
+  if(!hasCommonSubs){
+    return { cleaned, patchedText: null };
+  }
   const patched = await maybePatchAnyFieldText({
     text: baseText,
     fieldKey,
@@ -7459,6 +7479,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     pageNum,
     pageCanvas,
     sourceBranch,
+    commonSubstitutions,
     magicType: cleaned.magicType,
     magicTypeSource: cleaned.magicTypeSource,
     baseBox
@@ -10390,7 +10411,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
   return next;
 }
 
-async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, magicType, magicTypeSource, baseBox } = {}){
+async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanvas, sourceBranch, commonSubstitutions, magicType, magicTypeSource, baseBox } = {}){
   const hasBbox = !!boxPx;
   const page = Number.isFinite(pageNum) ? pageNum : (boxPx?.page || state.pageNum || 1);
   const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
@@ -10412,9 +10433,21 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
       hasCanvas: !!canvas,
       hasBbox,
       sourceBranch: sourceBranch || null,
+      commonSubstitutionsApplied: Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions,
       magicTypeResolved: resolvedMagic || 'UNSET',
       magicTypeSource: resolvedSource || 'unknown'
     });
+  }
+  const hasCommonSubs = Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions;
+  if(!hasCommonSubs){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'noCommonSubs',
+        fieldKey: fieldKey || ''
+      });
+    }
+    return text;
   }
   if(!hasBbox){
     if(ocrMagicDebugEnabled()){
