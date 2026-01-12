@@ -362,30 +362,6 @@
     return { learnedLayout: layout.join(''), learnedCount, hasL, hasN };
   }
 
-  function summarizeLayout(layout = '') {
-    const source = String(layout || '');
-    let learnedCount = 0;
-    let hasL = false;
-    let hasN = false;
-    let hasMixedAdjacency = false;
-    for (let i = 0; i < source.length; i++) {
-      const ch = source[i];
-      if (ch === 'L') hasL = true;
-      if (ch === 'N') hasN = true;
-      if (ch === 'L' || ch === 'N') {
-        learnedCount += 1;
-        if (i > 0) {
-          const prev = source[i - 1];
-          if ((prev === 'L' || prev === 'N') && prev !== ch) {
-            hasMixedAdjacency = true;
-          }
-        }
-      }
-    }
-    const coverage = source.length ? learnedCount / source.length : 0;
-    return { learnedCount, coverage, hasL, hasN, hasMixedAdjacency };
-  }
-
   function station3_fingerprintAndScore(typedText = '', fieldCtx = {}, store = defaultSegmentStore) {
     const wizardId = fieldCtx.wizardId || 'sandbox-wizard';
     const fieldName = fieldCtx.fieldName || 'Field';
@@ -395,8 +371,16 @@
       const record = store.updateScores(segmentKey, seg.slotString);
       const { learnedLayout, learnedCount, hasL, hasN } = deriveLearnedLayout(record, seg.slotLength);
       const coverage = seg.slotLength ? learnedCount / seg.slotLength : 0;
-      const layoutSummary = summarizeLayout(learnedLayout);
-      const hasMixedAdjacency = layoutSummary.hasMixedAdjacency;
+      const layoutArr = learnedLayout.split('');
+      let hasMixedAdjacency = false;
+      for (let i = 0; i < layoutArr.length - 1; i++) {
+        const a = layoutArr[i];
+        const b = layoutArr[i + 1];
+        if ((a === 'L' || a === 'N') && (b === 'L' || b === 'N') && a !== b) {
+          hasMixedAdjacency = true;
+          break;
+        }
+      }
       const hasAnyMixed = hasL && hasN;
       const dvTrigger = coverage >= 0.6 && hasAnyMixed && hasMixedAdjacency;
       const deliberateViolation = (store.records?.[segmentKey]?.deliberateViolation) || dvTrigger;
@@ -450,12 +434,11 @@
         }
         return '?';
       }).join('');
-      const learnedChunkLayoutDetails = (chunkRecord.chunkSlotScores || []).map((score, idx) => {
+      const learnedChunkLayouts = (chunkRecord.chunkSlotScores || []).map((score, idx) => {
         const length = (chunkAlnums[idx] || '').length;
         const derived = deriveLearnedLayout(score || {}, length);
-        return derived || { learnedLayout: ''.padStart(length, '?'), learnedCount: 0, hasL: false, hasN: false };
+        return derived.learnedLayout || ''.padStart(length, '?');
       });
-      const learnedChunkLayouts = learnedChunkLayoutDetails.map((derived) => derived.learnedLayout || '');
       const pooledChunkLayouts = chunkSlotScores.map((score, idx) => {
         const length = (chunkAlnums[idx] || '').length;
         const chunkIndexKey = `${wizardId}::${fieldName}::${seg.segmentId}::chunkIndex::${idx}`;
@@ -474,17 +457,6 @@
           combined.push(base === '?' ? pooled : base);
         }
         return combined.join('');
-      });
-      const chunkDvStats = combinedChunkLayouts.map((layout) => {
-        const summary = summarizeLayout(layout);
-        const hasAny = summary.hasL && summary.hasN;
-        const dvTrigger = summary.coverage >= 0.6 && hasAny && summary.hasMixedAdjacency;
-        return {
-          learnedCoverage: summary.coverage,
-          hasAnyMixed: hasAny,
-          hasMixedAdjacency: summary.hasMixedAdjacency,
-          deliberateViolation: dvTrigger
-        };
       });
       return {
         ...seg,
@@ -506,10 +478,6 @@
           chunkLearnedLayout: combinedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
           chunkLearnedLayoutLength: learnedChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
           chunkLearnedLayoutPooled: pooledChunkLayouts[idx] || ''.padStart((chunkAlnums[idx] || '').length, '?'),
-          chunkDeliberateViolation: chunkDvStats[idx]?.deliberateViolation || false,
-          chunkLearnedCoverage: chunkDvStats[idx]?.learnedCoverage || 0,
-          chunkHasAnyMixed: chunkDvStats[idx]?.hasAnyMixed || false,
-          chunkHasMixedAdjacency: chunkDvStats[idx]?.hasMixedAdjacency || false,
           Lscore: (chunkRecord.chunkScores[idx] || {}).Lscore || 0,
           Nscore: (chunkRecord.chunkScores[idx] || {}).Nscore || 0
         })),
@@ -525,15 +493,14 @@
   function station4_applyFingerprintFixes(typedText = '', stage3Result = {}, fieldCtx = {}) {
     const source = String(typedText ?? '');
     const segments = stage3Result?.segments || [];
-    const dvSegments = segments.filter((s) => s.deliberateViolation || (s.chunks || []).some((c) => c.chunkDeliberateViolation));
-    if (!dvSegments.length) return { finalText: source, fingerprintEdits: [], pcsEvaluations: [], chunkPcsEvaluations: [] };
+    const dvSegments = segments.filter((s) => s.deliberateViolation);
+    if (!dvSegments.length) return { finalText: source, fingerprintEdits: [], pcsEvaluations: [] };
 
     const sorted = dvSegments.slice().sort((a, b) => (a.start || 0) - (b.start || 0));
     let cursor = 0;
     const parts = [];
     const fingerprintEdits = [];
     const pcsEvaluations = [];
-    const chunkPcsEvaluations = [];
 
     sorted.forEach((seg) => {
       const start = typeof seg.start === 'number' && seg.start >= 0
@@ -557,8 +524,6 @@
       });
       const layoutArr = (seg.learnedLayout || '').split('');
       const pcs = pcsEvaluate(slotString, seg.learnedLayout || '');
-      const chunkEligibility = (seg.chunks || []).map((c) => Boolean(seg.deliberateViolation || c.chunkDeliberateViolation));
-      const chunkPcsByIndex = (seg.chunks || []).map((c) => pcsEvaluate(c.chunkAlnum || '', c.chunkLearnedLayout || ''));
       pcsEvaluations.push({
         segmentId: seg.segmentId,
         segmentKey: seg.segmentKey,
@@ -570,23 +535,14 @@
         considered: pcs.considered,
         learnedLayout: seg.learnedLayout,
         slotLength: slotString.length,
-        note: pcs.okToCorrect ? 'Stage4: segment PCS ok' : 'Stage4: segment PCS weak'
+        note: pcs.okToCorrect ? 'Stage4: PCS ok' : 'Stage4: skipped (PCS not met)',
+        skipReason: pcs.okToCorrect ? undefined : 'PCS_SKIP'
       });
-      chunkPcsByIndex.forEach((chunkEval, idx) => {
-        chunkPcsEvaluations.push({
-          segmentId: seg.segmentId,
-          segmentKey: seg.segmentKey,
-          chunkIndex: idx,
-          okToCorrect: chunkEval.okToCorrect,
-          support: chunkEval.support,
-          conflicts: chunkEval.conflicts,
-          unknowns: chunkEval.unknowns,
-          score: chunkEval.score,
-          considered: chunkEval.considered,
-          learnedLayout: seg.chunks?.[idx]?.chunkLearnedLayout || '',
-          slotLength: (seg.chunks?.[idx]?.chunkAlnum || '').length
-        });
-      });
+      if (!pcs.okToCorrect) {
+        cursor = start + seg.rawSegmentText.length;
+        parts.push(seg.rawSegmentText);
+        return;
+      }
       for (let i = 0; i < slotString.length; i++) {
         const ch = slotString[i];
         let next = ch;
@@ -596,26 +552,6 @@
         const learnedChunkLayout = seg.chunks?.[chunkIndex]?.chunkLearnedLayout || '';
         const chunkExpected = learnedChunkLayout[chunkOffset] || '?';
         const expectedType = learned;
-        const chunkEligible = chunkEligibility[chunkIndex] ?? false;
-        const chunkPcs = chunkPcsByIndex[chunkIndex];
-        const okToCorrect = pcs.okToCorrect || (chunkPcs && chunkPcs.okToCorrect);
-        if (!chunkEligible || !okToCorrect) {
-          if (learned !== '?') {
-            fingerprintEdits.push({
-              segmentId: seg.segmentId,
-              slotIndex: i,
-              skipped: true,
-              learned,
-              chunkIndex,
-              chunkOffset,
-              learnedChunkLayout,
-              chunkExpected,
-              reason: !chunkEligible ? 'chunkDV_SKIP' : 'PCS_SKIP'
-            });
-          }
-          corrected.push(ch);
-          continue;
-        }
         if (learned === '?') {
           fingerprintEdits.push({ segmentId: seg.segmentId, slotIndex: i, skipped: true, learned, chunkIndex, chunkOffset, learnedChunkLayout, chunkExpected });
         } else if (learned === 'N' && COMMON_SUBS.isAmbiguousLetter(ch)) {
@@ -643,7 +579,7 @@
       cursor = start + seg.rawSegmentText.length;
     });
     parts.push(source.slice(cursor));
-    return { finalText: parts.join(''), fingerprintEdits, pcsEvaluations, chunkPcsEvaluations };
+    return { finalText: parts.join(''), fingerprintEdits, pcsEvaluations };
   }
 
   function runOcrMagic(fieldCtx = {}, rawText = '', store = defaultSegmentStore) {
