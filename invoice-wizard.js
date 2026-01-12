@@ -10749,7 +10749,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
     return text;
   }
   try{
-    const verifierBox = baseBox ? { ...baseBox } : boxPx;
+    const verifierBox = boxPx ? { ...boxPx } : (baseBox ? { ...baseBox } : null);
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.box',
