@@ -588,6 +588,14 @@ function getOcrTraceSession(extra = {}){
   if(!state.ocrTrace.session){
     return startOcrTraceSession(extra);
   }
+  if(state.ocrTrace.session && !state.ocrTrace.session.enabled && state.ocrTrace.enabled){
+    state.ocrTrace.session.enabled = true;
+    state.ocrTrace.session.meta = {
+      ...(state.ocrTrace.session.meta || {}),
+      ...buildOcrTraceMeta(extra),
+      enabled: true
+    };
+  }
   return state.ocrTrace.session;
 }
 
