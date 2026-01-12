@@ -153,6 +153,9 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 .modal-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
 .modal-controls{ margin-bottom:8px; }
 .log-viewer{ width:100%; min-height:260px; max-height:55vh; background:#0b1111; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:12px; white-space:pre-wrap; overflow:auto; font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ocr-accuracy-panel{ margin-top:12px; display:flex; flex-direction:column; gap:10px; }
+.ocr-accuracy-summary{ padding:10px; border-radius:10px; border:1px solid var(--border); background:#0b1111; white-space:pre-wrap; font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:var(--text); min-height:80px; }
+.ocr-accuracy-rows{ min-height:220px; max-height:40vh; }
 
 /* Custom Wizard Builder */
 #builder-section .builder-header{ display:flex; align-items:center; gap:12px; }

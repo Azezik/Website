@@ -269,6 +269,16 @@
           </label>
         </div>
         <textarea id="staticDebugText" class="code log-viewer" readonly style="width:100%;min-height:260px;"></textarea>
+        <div class="ocr-accuracy-panel">
+          <div class="actions" style="flex-wrap:wrap;">
+            <button id="getOcrAccuracyData" class="btn" type="button">Get OCR Accuracy Data</button>
+            <button id="copyOcrAccuracy" class="btn" type="button">Copy report</button>
+            <button id="downloadOcrAccuracyJson" class="btn" type="button">Download JSON</button>
+            <button id="downloadOcrAccuracyCsv" class="btn" type="button">Download CSV</button>
+          </div>
+          <div id="ocrAccuracySummary" class="code ocr-accuracy-summary" aria-live="polite"></div>
+          <textarea id="ocrAccuracyRows" class="code log-viewer ocr-accuracy-rows" readonly></textarea>
+        </div>
       </div>
     </div>
 
@@ -361,6 +371,7 @@
   <script src="builder-field-row.js"></script>
   <script src="common-subs.js"></script>
   <script src="js/ocr-trace.js"></script>
+  <script src="ocr-accuracy-report.js"></script>
   <script src="ocrmagic-layer1.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
