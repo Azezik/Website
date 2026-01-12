@@ -7470,6 +7470,14 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   const commonSubstitutions = cleaned.commonSubstitutions ?? cleaned.commonSubstitutionsApplied ?? null;
   const hasCommonSubs = Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions;
   if(!hasCommonSubs){
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'noCommonSubs',
+        fieldKey: fieldKey || '',
+        sourceBranch: sourceBranch || null
+      });
+    }
     return { cleaned, patchedText: null };
   }
   const patched = await maybePatchAnyFieldText({
