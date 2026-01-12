@@ -10553,7 +10553,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
   const page = Number.isFinite(pageNum) ? pageNum : (boxPx?.page || state.pageNum || 1);
   const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
   const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...boxPx, page }, page) : { bboxHash: '' };
-  if(state.mode !== 'run'){
+  if(!isRunMode()){
     return text;
   }
   const resolvedInfo = magicType
