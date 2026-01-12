@@ -7714,14 +7714,15 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     if(!cleaned){
       cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', text || state.snappedText || '', state.mode, spanKey);
     }
-    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: usedBox });
+    const verifierBox = usedBox || boxPx || null;
+    cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: verifierBox });
     const baseText = cleaned.value || cleaned.raw || text || state.snappedText || '';
-    if(baseText && usedBox){
+    if(baseText && verifierBox){
       const { cleaned: patchedCleaned, patchedText } = await applyAnyFieldVerifier(cleaned, {
         fieldKey: fieldSpec.fieldKey,
-        boxPx: usedBox,
-        pageNum: usedBox.page,
-        pageCanvas: getPdfBitmapCanvas((usedBox.page || 1) - 1)?.canvas,
+        boxPx: verifierBox,
+        pageNum: verifierBox.page,
+        pageCanvas: getPdfBitmapCanvas((verifierBox.page || 1) - 1)?.canvas,
         sourceBranch: 'config-static'
       });
       cleaned = patchedCleaned;
@@ -8495,13 +8496,14 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     const lv = labelValueHeuristic(fieldSpec, tokens);
       if(lv.value){
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
-        cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: lv.usedBox });
-        if(lv.value && lv.usedBox){
+        const verifierBox = lv.usedBox || basePx || null;
+        cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: verifierBox });
+        if(lv.value && verifierBox){
           const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(cleaned, {
             fieldKey: fieldSpec.fieldKey,
-            boxPx: lv.usedBox,
-            pageNum: lv.usedBox.page,
-            pageCanvas: getPdfBitmapCanvas((lv.usedBox.page || 1) - 1)?.canvas,
+            boxPx: verifierBox,
+            pageNum: verifierBox.page,
+            pageCanvas: getPdfBitmapCanvas((verifierBox.page || 1) - 1)?.canvas,
             sourceBranch: 'label-heuristic',
             baseBox: basePx
           });
