@@ -284,6 +284,7 @@
         `layout:${escapeHtml(c.chunkLearnedLayout || '')}`,
         `len:${escapeHtml(c.chunkLearnedLayoutLength || '')}`,
         `pool:${escapeHtml(c.chunkLearnedLayoutPooled || '')}`,
+        `dv:${c.chunkDeliberateViolation ? 'TRUE' : 'false'}`,
         `L:${c.Lscore || 0} N:${c.Nscore || 0}`
       ];
       return parts.join(' | ');
@@ -359,6 +360,25 @@
       station3Block.appendChild(none);
     }
     els.traceSteps.appendChild(station3Block);
+
+    const pcsBlock = document.createElement('div');
+    pcsBlock.className = 'trace-block';
+    const pcsTitle = document.createElement('div');
+    pcsTitle.className = 'trace-title';
+    pcsTitle.textContent = 'Station 4 (PCS Checks)';
+    pcsBlock.appendChild(pcsTitle);
+    const pcsBody = document.createElement('div');
+    pcsBody.className = 'diff-note';
+    const pcsLines = [];
+    (debug.station4?.pcsEvaluations || []).forEach((pcsEval) => {
+      pcsLines.push(`Segment ${pcsEval.segmentId || 'segment'}: ${pcsEval.okToCorrect ? 'OK' : 'weak'} (score ${Number(pcsEval.score || 0).toFixed(2)})`);
+    });
+    (debug.station4?.chunkPcsEvaluations || []).forEach((chunkEval) => {
+      pcsLines.push(`Chunk ${chunkEval.chunkIndex ?? '-'} (${chunkEval.segmentId || 'segment'}): ${chunkEval.okToCorrect ? 'OK' : 'weak'} (score ${Number(chunkEval.score || 0).toFixed(2)})`);
+    });
+    pcsBody.textContent = pcsLines.length ? pcsLines.join(' | ') : 'No PCS evaluations.';
+    pcsBlock.appendChild(pcsBody);
+    els.traceSteps.appendChild(pcsBlock);
 
     els.traceSteps.appendChild(buildDiffBlock('Station 4 (Layout Corrections)', station2Text, station4Text, (debug.station4?.fingerprintEdits || []).map((e) => {
       if (e.blocked) {
