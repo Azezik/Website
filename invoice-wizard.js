@@ -10162,14 +10162,25 @@ async function readImageTokensForPage(pageNum, canvasEl=null){
   }
 }
 
-function getTessCropCacheKey(bboxPx, pageNumOverride){
-  if(!bboxPx) return { pageNum: '', bboxHash: '' };
+function getTessCropCacheKey(bboxPx, pageNumOverride, renderContext = null){
+  if(!bboxPx) return { pageNum: '', bboxHash: '', contextKey: '' };
   const pageNum = Number.isFinite(pageNumOverride) ? pageNumOverride : (bboxPx.page || 1);
   const x = Math.round(bboxPx.x || 0);
   const y = Math.round(bboxPx.y || 0);
   const w = Math.round(bboxPx.w || 0);
   const h = Math.round(bboxPx.h || 0);
-  return { pageNum: String(pageNum), bboxHash: `${x}:${y}:${w}:${h}` };
+  const ctx = renderContext || {};
+  const contextKey = [
+    ctx.canvasW,
+    ctx.canvasH,
+    Number.isFinite(ctx.logicalW) ? Math.round(ctx.logicalW) : null,
+    Number.isFinite(ctx.logicalH) ? Math.round(ctx.logicalH) : null,
+    Number.isFinite(ctx.pageOffset) ? Math.round(ctx.pageOffset) : null,
+    Number.isFinite(ctx.renderScaleX) ? ctx.renderScaleX.toFixed(3) : null,
+    Number.isFinite(ctx.renderScaleY) ? ctx.renderScaleY.toFixed(3) : null
+  ].filter(v => v !== null && v !== undefined).join('x');
+  const bboxHash = contextKey ? `${x}:${y}:${w}:${h}@${contextKey}` : `${x}:${y}:${w}:${h}`;
+  return { pageNum: String(pageNum), bboxHash, contextKey };
 }
 
 async function getVerifierPageCanvas(pageNum){
@@ -10189,6 +10200,22 @@ async function getVerifierPageCanvas(pageNum){
   const widthRatio = logicalW ? src.width / logicalW : 0;
   const heightRatio = logicalH ? src.height / logicalH : 0;
   const useDirect = hasCanvas && widthRatio >= 0.9 && heightRatio >= 0.9;
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.verifier.canvas',
+      pageNum: page,
+      hasCanvas,
+      srcW: src?.width || 0,
+      srcH: src?.height || 0,
+      logicalW,
+      logicalH,
+      widthRatio,
+      heightRatio,
+      useDirect,
+      combined: !!combined,
+      pageOffset: combined ? pageOffset : 0
+    });
+  }
   if(useDirect){
     const result = {
       canvas: src,
@@ -10221,35 +10248,28 @@ async function getVerifierPageCanvas(pageNum){
 
 async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
   if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
-  const { pageNum, bboxHash } = getTessCropCacheKey(bboxPx, bboxPx.page);
-  if(pageNum && bboxHash){
-    const cached = state.tessCropCache?.[pageNum]?.[bboxHash];
-    if(cached){
-      if(ocrMagicDebugEnabled()){
-        ocrMagicDebug({
-          event: 'ocrmagic.anyfield.tess.crop.cacheHit',
-          pageNum,
-          bboxHash,
-          cropW: cached.cropW || Math.round(bboxPx.w || 0),
-          cropH: cached.cropH || Math.round(bboxPx.h || 0),
-          textLen: (cached.text || '').length,
-          confidence: cached.confidence || 0
-        });
-      }
-      return { text: cached.text || '', confidence: cached.confidence || 0 };
-    }
-  }
-  const page = bboxPx.page || Number(pageNum) || 1;
+  const page = bboxPx.page || 1;
   const vp = state.pageViewports[(page || 1) - 1] || state.viewport || { width: pageCanvas.width, height: pageCanvas.height };
   const logicalW = Math.max(1, Number(vp.width ?? vp.w ?? pageCanvas.width));
   const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? pageCanvas.height));
   const renderScaleX = pageCanvas.width / logicalW;
   const renderScaleY = pageCanvas.height / logicalH;
   const pageOffset = Number.isFinite(pageOffsetPx) ? pageOffsetPx : (state.pageOffsets?.[(page || 1) - 1] || 0);
+  const renderContext = {
+    canvasW: pageCanvas.width,
+    canvasH: pageCanvas.height,
+    logicalW,
+    logicalH,
+    pageOffset,
+    renderScaleX,
+    renderScaleY
+  };
   let bbox = { ...bboxPx };
+  let normalizedOffset = false;
   if(pageOffset && (bbox.y || 0) > logicalH){
     const adjusted = (bbox.y || 0) - pageOffset;
     if(adjusted >= 0 && adjusted <= logicalH){
+      normalizedOffset = true;
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
           event: 'ocrmagic.anyfield.tess.crop.normalize',
@@ -10262,6 +10282,25 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
       bbox = { ...bbox, y: adjusted };
     }
   }
+  const { pageNum, bboxHash, contextKey } = getTessCropCacheKey(bbox, page, renderContext);
+  if(pageNum && bboxHash){
+    const cached = state.tessCropCache?.[pageNum]?.[bboxHash];
+    if(cached){
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.cacheHit',
+          pageNum,
+          bboxHash,
+          contextKey,
+          cropW: cached.cropW || Math.round(bbox.w || 0),
+          cropH: cached.cropH || Math.round(bbox.h || 0),
+          textLen: (cached.text || '').length,
+          confidence: cached.confidence || 0
+        });
+      }
+      return { text: cached.text || '', confidence: cached.confidence || 0 };
+    }
+  }
   const cropY = (bbox.y || 0) + pageOffset;
   const sx = Math.max(0, Math.floor((bbox.x || 0) * renderScaleX));
   const sy = Math.max(0, Math.floor(cropY * renderScaleY));
@@ -10269,9 +10308,31 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
   const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil((bbox.h || 0) * renderScaleY)));
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
+      event: 'ocrmagic.anyfield.tess.crop.context',
+      pageNum: page,
+      bboxHash,
+      contextKey,
+      bbox: { ...bbox },
+      normalizedOffset,
+      pageOffset,
+      logicalW,
+      logicalH,
+      renderScaleX,
+      renderScaleY,
+      canvasW: pageCanvas.width,
+      canvasH: pageCanvas.height,
+      cropX: sx,
+      cropY: sy,
+      cropW: sw,
+      cropH: sh
+    });
+  }
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
       event: 'ocrmagic.anyfield.tess.crop.cacheMiss',
       pageNum,
       bboxHash,
+      contextKey,
       cropW: sw,
       cropH: sh,
       textLen: 0,
