@@ -10493,6 +10493,10 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
   return { pdfChars, tessChars, pdfMap, alignMode, alignOk };
 }
 
+// Verifier parity contract:
+// - Crop ONLY the PDF.js usedBox (the same logical bbox that produced the PDF.js value).
+// - baseBox may constrain (intersect/clamp) usedBox, but must never replace it.
+// - Never expand beyond usedBox; inset-only retries are allowed to trim noise.
 async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
@@ -10564,32 +10568,13 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       && (!alignment.alignOk || alignment.tessChars.length < alignment.pdfChars.length)
   );
   if((!tessStr || shouldRetryExpansion()) && allowBBoxExpansion){
-    const expansions = getAnyFieldExpansionSteps(expansionBase);
-    let best = { tessStr, confidence, alignment, bbox };
-    for(const pad of expansions){
-      const expandedBox = constrainExpansion(expandBBoxByPx(expansionBase, pad));
-      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: expandedBox });
-      if(!attempt.text) continue;
-      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
-      if(!attemptAlignment.alignOk) continue;
-      if(!best.alignment.alignOk || attemptAlignment.tessChars.length > best.alignment.tessChars.length){
-        best = { tessStr: attempt.text, confidence: attempt.confidence, alignment: attemptAlignment, bbox: expandedBox };
-      }
-    }
-    if(best.tessStr !== tessStr){
-      tessStr = best.tessStr;
-      confidence = best.confidence;
-      alignment = best.alignment;
-      if(ocrMagicDebugEnabled()){
-        ocrMagicDebug({
-          event: 'ocrmagic.anyfield.tess.crop.expanded',
-          pageNum: page,
-          originalBox: bbox,
-          expandedBox: best.bbox,
-          textLen: tessStr.length,
-          confidence
-        });
-      }
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.tess.crop.expansion.skipped',
+        pageNum: page,
+        reason: 'parity_inset_only',
+        originalBox: bbox
+      });
     }
   }
   if(!tessStr){
@@ -10789,18 +10774,34 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
     let verifierBox = null;
     let verifierConstraintApplied = false;
     let verifierConstraintSkipped = false;
-    if(boxPx){
-      verifierBox = { ...boxPx };
-      if(baseBox){
-        const samePage = !Number.isFinite(baseBox.page) || !Number.isFinite(verifierBox.page) || baseBox.page === verifierBox.page;
-        if(samePage && bboxContains(baseBox, verifierBox)){
-          verifierConstraintApplied = true;
+    let verifierConstraintClamped = false;
+    if(!boxPx){
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.verify.skip',
+          reason: 'noUsedBox',
+          fieldKey: fieldKey || '',
+          sourceBranch: sourceBranch || null
+        });
+      }
+      return text;
+    }
+    verifierBox = { ...boxPx };
+    if(baseBox){
+      const samePage = !Number.isFinite(baseBox.page) || !Number.isFinite(verifierBox.page) || baseBox.page === verifierBox.page;
+      if(samePage && bboxContains(baseBox, verifierBox)){
+        verifierConstraintApplied = true;
+      } else if(samePage){
+        const clamped = intersectBBox(verifierBox, baseBox);
+        if(clamped){
+          verifierBox = { ...clamped, page: verifierBox.page ?? clamped.page };
+          verifierConstraintClamped = true;
         } else {
           verifierConstraintSkipped = true;
         }
+      } else {
+        verifierConstraintSkipped = true;
       }
-    } else if(baseBox){
-      verifierBox = { ...baseBox };
     }
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
@@ -10811,6 +10812,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
         baseBox: baseBox ? { ...baseBox } : null,
         verifierBox,
         verifierConstraintApplied,
+        verifierConstraintClamped,
         verifierConstraintSkipped,
         sourceBranch: sourceBranch || null
       });
