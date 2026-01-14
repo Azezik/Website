@@ -437,6 +437,7 @@ let state = {
   lastOcrCropPx: null,
   cropAudits: [],
   tessCropCache: {},
+  tessVerifierPageCache: {},
   cropHashes: {},        // per page hash map for duplicate detection
   pageSnapshots: {},     // tracks saved full-page debug PNGs
   pageRenderPromises: [],
@@ -900,6 +901,8 @@ function resetDocArtifacts(){
   state.lastOcrCropCss = null;
   state.cropAudits = [];
   state.cropHashes = {};
+  state.tessCropCache = {};
+  state.tessVerifierPageCache = {};
   state.pdf = null;
   state.isImage = false;
   state.viewport = { w:0, h:0, scale:1 };
@@ -10169,7 +10172,54 @@ function getTessCropCacheKey(bboxPx, pageNumOverride){
   return { pageNum: String(pageNum), bboxHash: `${x}:${y}:${w}:${h}` };
 }
 
-async function ocrTextFromBBox({ pageCanvas, bboxPx }){
+async function getVerifierPageCanvas(pageNum){
+  const page = Number.isFinite(pageNum) ? pageNum : (state.pageNum || 1);
+  const pageIdx = Math.max(0, page - 1);
+  state.tessVerifierPageCache = state.tessVerifierPageCache || {};
+  const cached = state.tessVerifierPageCache[pageIdx];
+  if(cached?.canvas){
+    return cached;
+  }
+  const render = await getSnapshotPageBitmap(pageIdx);
+  const { canvas: src, viewport: snapshotVp, pageOffset, combined } = render || {};
+  const vp = snapshotVp || state.pageViewports[pageIdx] || state.viewport || {};
+  const logicalW = Number(vp.width ?? vp.w ?? 0);
+  const logicalH = Number(vp.height ?? vp.h ?? 0);
+  const hasCanvas = !!(src && src.width && src.height);
+  const widthRatio = logicalW ? src.width / logicalW : 0;
+  const heightRatio = logicalH ? src.height / logicalH : 0;
+  const useDirect = hasCanvas && widthRatio >= 0.9 && heightRatio >= 0.9;
+  if(useDirect){
+    const result = {
+      canvas: src,
+      viewport: vp,
+      pageOffset: combined ? pageOffset : 0,
+      combined: !!combined
+    };
+    state.tessVerifierPageCache[pageIdx] = result;
+    return result;
+  }
+  if(state.pdf){
+    try{
+      const pageObj = await state.pdf.getPage(page);
+      const renderVp = state.pageViewports[pageIdx] || pageObj.getViewport({ scale: BASE_PDF_SCALE });
+      const canvas = document.createElement('canvas');
+      canvas.width = renderVp.width;
+      canvas.height = renderVp.height;
+      await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport: renderVp }).promise;
+      const result = { canvas, viewport: renderVp, pageOffset: 0, combined: false };
+      state.tessVerifierPageCache[pageIdx] = result;
+      return result;
+    } catch(err){
+      // fall through to combined canvas if render fails
+    }
+  }
+  const fallback = { canvas: src || null, viewport: vp, pageOffset: combined ? pageOffset : 0, combined: !!combined };
+  state.tessVerifierPageCache[pageIdx] = fallback;
+  return fallback;
+}
+
+async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
   if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
   const { pageNum, bboxHash } = getTessCropCacheKey(bboxPx, bboxPx.page);
   if(pageNum && bboxHash){
@@ -10195,10 +10245,10 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
   const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? pageCanvas.height));
   const renderScaleX = pageCanvas.width / logicalW;
   const renderScaleY = pageCanvas.height / logicalH;
-  const pageOffsetPx = state.pageOffsets?.[(page || 1) - 1] || 0;
+  const pageOffset = Number.isFinite(pageOffsetPx) ? pageOffsetPx : (state.pageOffsets?.[(page || 1) - 1] || 0);
   let bbox = { ...bboxPx };
-  if(pageOffsetPx && (bbox.y || 0) > logicalH){
-    const adjusted = (bbox.y || 0) - pageOffsetPx;
+  if(pageOffset && (bbox.y || 0) > logicalH){
+    const adjusted = (bbox.y || 0) - pageOffset;
     if(adjusted >= 0 && adjusted <= logicalH){
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
@@ -10212,7 +10262,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx }){
       bbox = { ...bbox, y: adjusted };
     }
   }
-  const cropY = (bbox.y || 0) + pageOffsetPx;
+  const cropY = (bbox.y || 0) + pageOffset;
   const sx = Math.max(0, Math.floor((bbox.x || 0) * renderScaleX));
   const sy = Math.max(0, Math.floor(cropY * renderScaleY));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil((bbox.w || 0) * renderScaleX)));
@@ -10523,7 +10573,7 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
 // - Crop ONLY the PDF.js usedBox (the same logical bbox that produced the PDF.js value).
 // - baseBox may constrain (intersect/clamp) usedBox, but must never replace it.
 // - Never expand beyond usedBox; inset-only retries are allowed to trim noise.
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const bbox = { ...bboxPx, page };
@@ -10552,7 +10602,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!traceSession) return;
     window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
   };
-  let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox });
+  let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox, pageOffsetPx });
   let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
   const shouldRetryInset = () => (
     !!bboxPx
@@ -10564,7 +10614,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     let best = { tessStr, confidence, alignment, bbox };
     for(const pad of insets){
       const insetBox = shrinkBBoxByPx(bbox, pad);
-      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: insetBox });
+      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: insetBox, pageOffsetPx });
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       if(!attemptAlignment.alignOk) continue;
@@ -10729,7 +10779,9 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
   const primaryBox = usedBox || boxPx || null;
   const hasBbox = !!primaryBox;
   const page = Number.isFinite(pageNum) ? pageNum : (primaryBox?.page || state.pageNum || 1);
-  const canvas = pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
+  const verifierRender = await getVerifierPageCanvas(page);
+  const canvas = verifierRender?.canvas || pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
+  const verifierPageOffset = Number.isFinite(verifierRender?.pageOffset) ? verifierRender.pageOffset : null;
   const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...primaryBox, page }, page) : { bboxHash: '' };
   if(!isRunMode()){
     return text;
@@ -10865,6 +10917,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       bboxPx: verifierBox,
       usedBox: primaryBox,
       baseBox,
+      pageOffsetPx: verifierPageOffset,
       pageNum: page,
       fieldKey,
       traceSession,
