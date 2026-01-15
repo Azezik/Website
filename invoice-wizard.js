@@ -10183,13 +10183,71 @@ function getTessCropCacheKey(bboxPx, pageNumOverride, renderContext = null){
   return { pageNum: String(pageNum), bboxHash, contextKey };
 }
 
-async function getVerifierPageCanvas(pageNum){
-  const page = Number.isFinite(pageNum) ? pageNum : (state.pageNum || 1);
-  const pageIdx = Math.max(0, page - 1);
+function getVerifierCacheEntry(pageIdx){
   state.tessVerifierPageCache = state.tessVerifierPageCache || {};
   const cached = state.tessVerifierPageCache[pageIdx];
   if(cached?.canvas){
-    return cached;
+    const wrapped = { default: cached };
+    state.tessVerifierPageCache[pageIdx] = wrapped;
+    return wrapped;
+  }
+  if(!cached){
+    state.tessVerifierPageCache[pageIdx] = {};
+    return state.tessVerifierPageCache[pageIdx];
+  }
+  return cached;
+}
+
+async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
+  const page = Number.isFinite(pageNum) ? pageNum : (state.pageNum || 1);
+  const pageIdx = Math.max(0, page - 1);
+  const scale = Math.max(1, Number(scaleMultiplier) || 1);
+  const cacheKey = scale > 1 ? `hires:${scale}` : 'default';
+  const cacheEntry = getVerifierCacheEntry(pageIdx);
+  if(cacheEntry?.[cacheKey]?.canvas){
+    return cacheEntry[cacheKey];
+  }
+  const baseViewport = state.pageViewports[pageIdx] || state.viewport || {};
+  if(scale > 1){
+    if(state.pdf){
+      try{
+        const pageObj = await state.pdf.getPage(page);
+        const baseScale = Number(baseViewport.scale) || BASE_PDF_SCALE;
+        const renderVp = pageObj.getViewport({ scale: baseScale * scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = renderVp.width;
+        canvas.height = renderVp.height;
+        await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport: renderVp }).promise;
+        const result = { canvas, viewport: baseViewport, pageOffset: 0, combined: false, scaleMultiplier: scale };
+        cacheEntry[cacheKey] = result;
+        return result;
+      } catch(err){
+        // fall through to snapshot-based upscale if render fails
+      }
+    }
+    const render = await getSnapshotPageBitmap(pageIdx);
+    const { canvas: src, viewport: snapshotVp, pageOffset, combined } = render || {};
+    if(src && src.width && src.height){
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(src.width * scale));
+      canvas.height = Math.max(1, Math.round(src.height * scale));
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+      const result = {
+        canvas,
+        viewport: snapshotVp || baseViewport,
+        pageOffset: combined ? (pageOffset || 0) * scale : 0,
+        combined: !!combined,
+        scaleMultiplier: scale,
+        scaledFrom: 'snapshot'
+      };
+      cacheEntry[cacheKey] = result;
+      return result;
+    }
+    const fallback = cacheEntry.default || null;
+    if(fallback){
+      return fallback;
+    }
   }
   const render = await getSnapshotPageBitmap(pageIdx);
   const { canvas: src, viewport: snapshotVp, pageOffset, combined } = render || {};
@@ -10223,7 +10281,7 @@ async function getVerifierPageCanvas(pageNum){
       pageOffset: combined ? pageOffset : 0,
       combined: !!combined
     };
-    state.tessVerifierPageCache[pageIdx] = result;
+    cacheEntry[cacheKey] = result;
     return result;
   }
   if(state.pdf){
@@ -10235,14 +10293,14 @@ async function getVerifierPageCanvas(pageNum){
       canvas.height = renderVp.height;
       await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport: renderVp }).promise;
       const result = { canvas, viewport: renderVp, pageOffset: 0, combined: false };
-      state.tessVerifierPageCache[pageIdx] = result;
+      cacheEntry[cacheKey] = result;
       return result;
     } catch(err){
       // fall through to combined canvas if render fails
     }
   }
   const fallback = { canvas: src || null, viewport: vp, pageOffset: combined ? pageOffset : 0, combined: !!combined };
-  state.tessVerifierPageCache[pageIdx] = fallback;
+  cacheEntry[cacheKey] = fallback;
   return fallback;
 }
 
@@ -10387,6 +10445,8 @@ const ANY_FIELD_TESS_EXPANSION_STEPS = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MIN = 2;
 const ANY_FIELD_TESS_EXPANSION_PX_MAX = 8;
 const ANY_FIELD_TESS_TRIM_MAX = 2;
+const OCR_MIN_CROP_PX = 16;
+const VERIFIER_HIRES_SCALE_MULTIPLIER = 2;
 const ANY_FIELD_CONFUSION_MAP = new Map([
   ['O', '0'], ['0', 'O'],
   ['o', '0'], ['I', '1'], ['1', 'I'],
@@ -10650,6 +10710,24 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
     alignOk = !!pdfChars.length && pdfChars.length === tessChars.length;
   }
   return { pdfChars, tessChars, pdfMap, alignMode, alignOk };
+}
+
+function getVerifierCropMetrics({ bboxPx, pageCanvas, verifierViewport, page } = {}){
+  if(!bboxPx || !pageCanvas) return { cropH: 0, renderScaleY: 0, logicalH: 0 };
+  const pageIndex = Math.max(0, (page || bboxPx.page || 1) - 1);
+  const logicalH = Number(
+    verifierViewport?.height
+    ?? verifierViewport?.h
+    ?? state.pageViewports[pageIndex]?.height
+    ?? state.pageViewports[pageIndex]?.h
+    ?? state.viewport?.height
+    ?? state.viewport?.h
+    ?? 0
+  );
+  const normalizedLogicalH = Math.max(1, logicalH || pageCanvas.height || 1);
+  const renderScaleY = pageCanvas.height / normalizedLogicalH;
+  const cropH = Math.max(0, (bboxPx.h || 0) * renderScaleY);
+  return { cropH, renderScaleY, logicalH: normalizedLogicalH };
 }
 
 // Verifier parity contract:
@@ -11023,6 +11101,36 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       });
     }
     return text;
+  }
+  if(VERIFIER_HIRES_SCALE_MULTIPLIER > 1 && hasBbox && canvas){
+    const { cropH, renderScaleY } = getVerifierCropMetrics({
+      bboxPx: primaryBox,
+      pageCanvas: canvas,
+      verifierViewport,
+      page
+    });
+    if(cropH > 0 && cropH < OCR_MIN_CROP_PX){
+      const hiresRender = await getVerifierPageCanvas(page, { scaleMultiplier: VERIFIER_HIRES_SCALE_MULTIPLIER });
+      if(hiresRender?.canvas){
+        canvas = hiresRender.canvas;
+        verifierPageOffset = Number.isFinite(hiresRender?.pageOffset) ? hiresRender.pageOffset : verifierPageOffset;
+        verifierCombined = !!hiresRender?.combined;
+        verifierViewport = hiresRender?.viewport || verifierViewport;
+      }
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.verifier.hires',
+          fieldKey: fieldKey || '',
+          page,
+          cropH,
+          cropThreshold: OCR_MIN_CROP_PX,
+          baseRenderScaleY: renderScaleY,
+          hiresRequested: true,
+          hiresUsed: !!hiresRender?.canvas,
+          scaleMultiplier: VERIFIER_HIRES_SCALE_MULTIPLIER
+        });
+      }
+    }
   }
   try{
     let verifierBox = null;
