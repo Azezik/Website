@@ -10179,7 +10179,7 @@ function getTessCropCacheKey(bboxPx, pageNumOverride, renderContext = null){
     Number.isFinite(ctx.renderScaleX) ? ctx.renderScaleX.toFixed(3) : null,
     Number.isFinite(ctx.renderScaleY) ? ctx.renderScaleY.toFixed(3) : null
   ].filter(v => v !== null && v !== undefined).join('x');
-  const bboxHash = contextKey ? `${x}:${y}:${w}:${h}@${contextKey}` : `${x}:${y}:${w}:${h}`;
+  const bboxHash = contextKey ? `v2:${x}:${y}:${w}:${h}@${contextKey}` : `${x}:${y}:${w}:${h}`;
   return { pageNum: String(pageNum), bboxHash, contextKey };
 }
 
