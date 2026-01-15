@@ -10633,7 +10633,8 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
 // Verifier parity contract:
 // - Crop ONLY the PDF.js usedBox (the same logical bbox that produced the PDF.js value).
 // - baseBox may constrain (intersect/clamp) usedBox, but must never replace it.
-// - Never expand beyond usedBox; inset-only retries are allowed to trim noise.
+// - Never expand beyond usedBox horizontally; inset-only retries trim noise.
+// - Vertical-only padding retries are allowed when OCR is empty/short and alignment fails.
 async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
@@ -10650,6 +10651,14 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!allowConstraint) return candidate;
     const constrained = intersectBBox(candidate, baseBox);
     return constrained || candidate;
+  };
+  const constrainVerticalExpansion = (candidate) => {
+    if(!baseBox) return candidate;
+    const samePage = !Number.isFinite(baseBox.page)
+      || !Number.isFinite(candidate.page)
+      || baseBox.page === candidate.page;
+    if(!samePage) return candidate;
+    return intersectBBox(candidate, baseBox);
   };
   const traceBase = traceSession ? {
     docId: docId || state.currentFileId || state.currentFileName || null,
@@ -10693,6 +10702,63 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
           pageNum: page,
           originalBox: bbox,
           insetBox: best.bbox,
+          textLen: tessStr.length,
+          confidence
+        });
+      }
+    }
+  }
+  const shouldRetryVerticalPad = () => (
+    !!expansionBase
+      && (!tessStr || (!alignment.alignOk && alignment.tessChars.length < alignment.pdfChars.length))
+  );
+  if(shouldRetryVerticalPad()){
+    const pads = getAnyFieldExpansionSteps(expansionBase);
+    let best = { tessStr, confidence, alignment, bbox };
+    for(const pad of pads){
+      const verticalBox = {
+        ...expansionBase,
+        x: expansionBase.x,
+        w: expansionBase.w,
+        y: Math.max(0, (expansionBase.y || 0) - pad),
+        h: Math.max(1, (expansionBase.h || 0) + pad * 2),
+        page
+      };
+      const constrained = constrainVerticalExpansion(verticalBox);
+      if(!constrained) continue;
+      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: constrained, pageOffsetPx });
+      if(!attempt.text) continue;
+      const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
+      const lengthImproved = attemptAlignment.tessChars.length > best.alignment.tessChars.length;
+      if(attemptAlignment.alignOk || lengthImproved){
+        if(!best.alignment.alignOk || attemptAlignment.tessChars.length >= best.alignment.tessChars.length){
+          best = { tessStr: attempt.text, confidence: attempt.confidence, alignment: attemptAlignment, bbox: constrained };
+        }
+      }
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.verticalExpansion.attempt',
+          pageNum: page,
+          usedBox: expansionBase,
+          attemptBox: constrained,
+          pad,
+          textLen: attempt.text.length,
+          alignOk: attemptAlignment.alignOk,
+          tessNormLen: attemptAlignment.tessChars.length
+        });
+      }
+      if(best.alignment.alignOk) break;
+    }
+    if(best.tessStr && best.tessStr !== tessStr){
+      tessStr = best.tessStr;
+      confidence = best.confidence;
+      alignment = best.alignment;
+      if(ocrMagicDebugEnabled()){
+        ocrMagicDebug({
+          event: 'ocrmagic.anyfield.tess.crop.verticalExpansion',
+          pageNum: page,
+          originalBox: bbox,
+          expandedBox: best.bbox,
           textLen: tessStr.length,
           confidence
         });
