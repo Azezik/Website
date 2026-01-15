@@ -10183,6 +10183,22 @@ function getTessCropCacheKey(bboxPx, pageNumOverride, renderContext = null){
   return { pageNum: String(pageNum), bboxHash, contextKey };
 }
 
+function logTessVerifierEvent(payload = {}){
+  if(!ocrMagicDebugEnabled()) return;
+  const now = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  const entry = {
+    tag: 'tess_verifier',
+    ts: new Date().toISOString(),
+    t: Math.round(now),
+    ...payload
+  };
+  try{
+    console.log(JSON.stringify(entry));
+  } catch(err){
+    console.log('[tess_verifier]', entry);
+  }
+}
+
 function getVerifierCacheEntry(pageIdx){
   state.tessVerifierPageCache = state.tessVerifierPageCache || {};
   const cached = state.tessVerifierPageCache[pageIdx];
@@ -10204,7 +10220,17 @@ async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
   const scale = Math.max(1, Number(scaleMultiplier) || 1);
   const cacheKey = scale > 1 ? `hires:${scale}` : 'default';
   const cacheEntry = getVerifierCacheEntry(pageIdx);
+  const renderStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   if(cacheEntry?.[cacheKey]?.canvas){
+    logTessVerifierEvent({
+      event: 'verifier_canvas.cache_hit',
+      page,
+      pageIdx,
+      cacheKey,
+      scaleMultiplier: scale,
+      canvasW: cacheEntry[cacheKey]?.canvas?.width || 0,
+      canvasH: cacheEntry[cacheKey]?.canvas?.height || 0
+    });
     return cacheEntry[cacheKey];
   }
   const baseViewport = state.pageViewports[pageIdx] || state.viewport || {};
@@ -10220,8 +10246,29 @@ async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
         await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport: renderVp }).promise;
         const result = { canvas, viewport: baseViewport, pageOffset: 0, combined: false, scaleMultiplier: scale };
         cacheEntry[cacheKey] = result;
+        logTessVerifierEvent({
+          event: 'verifier_canvas.render_pdf',
+          page,
+          pageIdx,
+          cacheKey,
+          scaleMultiplier: scale,
+          canvasW: canvas.width,
+          canvasH: canvas.height,
+          logicalW: baseViewport?.width ?? baseViewport?.w ?? null,
+          logicalH: baseViewport?.height ?? baseViewport?.h ?? null,
+          rotation: baseViewport?.rotation ?? state.pageTransform?.rotation ?? 0,
+          renderMs: Math.round((performance.now ? performance.now() : Date.now()) - renderStart)
+        });
         return result;
       } catch(err){
+        logTessVerifierEvent({
+          event: 'verifier_canvas.render_pdf_failed',
+          page,
+          pageIdx,
+          cacheKey,
+          scaleMultiplier: scale,
+          message: err?.message || String(err)
+        });
         // fall through to snapshot-based upscale if render fails
       }
     }
@@ -10242,10 +10289,33 @@ async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
         scaledFrom: 'snapshot'
       };
       cacheEntry[cacheKey] = result;
+      logTessVerifierEvent({
+        event: 'verifier_canvas.render_snapshot',
+        page,
+        pageIdx,
+        cacheKey,
+        scaleMultiplier: scale,
+        canvasW: canvas.width,
+        canvasH: canvas.height,
+        logicalW: snapshotVp?.width ?? snapshotVp?.w ?? baseViewport?.width ?? baseViewport?.w ?? null,
+        logicalH: snapshotVp?.height ?? snapshotVp?.h ?? baseViewport?.height ?? baseViewport?.h ?? null,
+        combined: !!combined,
+        pageOffset: combined ? (pageOffset || 0) * scale : 0,
+        renderMs: Math.round((performance.now ? performance.now() : Date.now()) - renderStart)
+      });
       return result;
     }
     const fallback = cacheEntry.default || null;
     if(fallback){
+      logTessVerifierEvent({
+        event: 'verifier_canvas.fallback_default',
+        page,
+        pageIdx,
+        cacheKey,
+        scaleMultiplier: scale,
+        canvasW: fallback?.canvas?.width || 0,
+        canvasH: fallback?.canvas?.height || 0
+      });
       return fallback;
     }
   }
@@ -10282,6 +10352,19 @@ async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
       combined: !!combined
     };
     cacheEntry[cacheKey] = result;
+    logTessVerifierEvent({
+      event: 'verifier_canvas.use_direct_snapshot',
+      page,
+      pageIdx,
+      cacheKey,
+      canvasW: src?.width || 0,
+      canvasH: src?.height || 0,
+      logicalW,
+      logicalH,
+      combined: !!combined,
+      pageOffset: combined ? pageOffset : 0,
+      renderMs: Math.round((performance.now ? performance.now() : Date.now()) - renderStart)
+    });
     return result;
   }
   if(state.pdf){
@@ -10294,13 +10377,45 @@ async function getVerifierPageCanvas(pageNum, { scaleMultiplier = 1 } = {}){
       await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport: renderVp }).promise;
       const result = { canvas, viewport: renderVp, pageOffset: 0, combined: false };
       cacheEntry[cacheKey] = result;
+      logTessVerifierEvent({
+        event: 'verifier_canvas.render_pdf_fallback',
+        page,
+        pageIdx,
+        cacheKey,
+        canvasW: canvas.width,
+        canvasH: canvas.height,
+        logicalW: renderVp?.width ?? null,
+        logicalH: renderVp?.height ?? null,
+        rotation: renderVp?.rotation ?? state.pageTransform?.rotation ?? 0,
+        renderMs: Math.round((performance.now ? performance.now() : Date.now()) - renderStart)
+      });
       return result;
     } catch(err){
+      logTessVerifierEvent({
+        event: 'verifier_canvas.render_pdf_fallback_failed',
+        page,
+        pageIdx,
+        cacheKey,
+        message: err?.message || String(err)
+      });
       // fall through to combined canvas if render fails
     }
   }
   const fallback = { canvas: src || null, viewport: vp, pageOffset: combined ? pageOffset : 0, combined: !!combined };
   cacheEntry[cacheKey] = fallback;
+  logTessVerifierEvent({
+    event: 'verifier_canvas.fallback_snapshot',
+    page,
+    pageIdx,
+    cacheKey,
+    canvasW: src?.width || 0,
+    canvasH: src?.height || 0,
+    logicalW,
+    logicalH,
+    combined: !!combined,
+    pageOffset: combined ? pageOffset : 0,
+    renderMs: Math.round((performance.now ? performance.now() : Date.now()) - renderStart)
+  });
   return fallback;
 }
 
@@ -10366,6 +10481,21 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
   const sy = Math.max(0, Math.floor(cropY * renderScaleY));
   const sw = Math.max(0, Math.min(pageCanvas.width - sx, Math.ceil((bbox.w || 0) * renderScaleX)));
   const sh = Math.max(0, Math.min(pageCanvas.height - sy, Math.ceil((bbox.h || 0) * renderScaleY)));
+  logTessVerifierEvent({
+    event: 'verifier_crop.context',
+    pageNum: page,
+    bboxHash,
+    bboxPx: { ...bbox },
+    cropPx: { x: sx, y: sy, w: sw, h: sh },
+    pageOffset,
+    logicalW,
+    logicalH,
+    renderScaleX,
+    renderScaleY,
+    canvasW: pageCanvas.width,
+    canvasH: pageCanvas.height,
+    normalizedOffset
+  });
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.tess.crop.context',
@@ -10400,6 +10530,13 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
     });
   }
   if(!sw || !sh){
+    logTessVerifierEvent({
+      event: 'verifier_crop.skip',
+      pageNum: page,
+      bboxHash,
+      reason: 'empty_crop',
+      cropPx: { x: sx, y: sy, w: sw, h: sh }
+    });
     return { text:'', confidence:0 };
   }
   const crop = document.createElement('canvas');
@@ -10408,7 +10545,19 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
   const ctx = crop.getContext('2d');
   ctx.drawImage(pageCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   const opts = { tessedit_pageseg_mode: 6, oem: 1 };
-  const { data } = await TesseractRef.recognize(crop, 'eng', opts);
+  const ocrStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  let data;
+  try{
+    ({ data } = await TesseractRef.recognize(crop, 'eng', opts));
+  } catch(err){
+    logTessVerifierEvent({
+      event: 'verifier_ocr.error',
+      pageNum: page,
+      bboxHash,
+      message: err?.message || String(err)
+    });
+    throw err;
+  }
   const text = (data?.text || '').trim();
   const symbols = data?.symbols || [];
   const words = data?.words || [];
@@ -10416,6 +10565,15 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
   const confidence = confSource.length
     ? confSource.reduce((sum, item) => sum + (item.confidence || 0), 0) / (confSource.length * 100)
     : 0;
+  logTessVerifierEvent({
+    event: 'verifier_ocr.done',
+    pageNum: page,
+    bboxHash,
+    cropPx: { x: sx, y: sy, w: sw, h: sh },
+    textLen: text.length,
+    confidence,
+    ocrMs: Math.round((performance.now ? performance.now() : Date.now()) - ocrStart)
+  });
   if(pageNum && bboxHash){
     state.tessCropCache[pageNum] = state.tessCropCache[pageNum] || {};
     state.tessCropCache[pageNum][bboxHash] = { text, confidence, cropW: sw, cropH: sh };
@@ -10778,6 +10936,22 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!traceSession) return;
     window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
   };
+  logTessVerifierEvent({
+    event: 'verifier.begin',
+    docId: docId || state.currentFileId || state.currentFileName || null,
+    fieldKey: fieldKey || null,
+    page,
+    sourceBranch: sourceBranch || null,
+    pdfText,
+    bboxPx: bbox ? { ...bbox } : null,
+    usedBox: normalizedUsedBox ? { ...normalizedUsedBox } : null,
+    baseBox: normalizedBaseBox ? { ...normalizedBaseBox } : null,
+    combined,
+    pageOffset: verifierPageOffset,
+    logicalH,
+    rotation: verifierViewport?.rotation ?? state.pageTransform?.rotation ?? 0,
+    dpr: window.devicePixelRatio || 1
+  });
   let { text: tessStr, confidence } = await ocrTextFromBBox({
     pageCanvas,
     bboxPx: bbox,
@@ -10786,6 +10960,20 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     allowHeuristicNormalization: false
   });
   let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
+  logTessVerifierEvent({
+    event: 'verifier.align',
+    docId: docId || state.currentFileId || state.currentFileName || null,
+    fieldKey: fieldKey || null,
+    page,
+    pdfText,
+    tessText: tessStr,
+    pdfNorm: alignment.pdfChars?.join('') || '',
+    tessNorm: alignment.tessChars?.join('') || '',
+    alignMode: alignment.alignMode,
+    alignOk: alignment.alignOk,
+    confidence,
+    bboxPx: bbox ? { ...bbox } : null
+  });
   const shouldRetryInset = () => (
     !!bboxPx
       && !alignment.alignOk
@@ -10814,6 +11002,16 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       tessStr = best.tessStr;
       confidence = best.confidence;
       alignment = best.alignment;
+      logTessVerifierEvent({
+        event: 'verifier.inset.selected',
+        docId: docId || state.currentFileId || state.currentFileName || null,
+        fieldKey: fieldKey || null,
+        page,
+        tessText: tessStr,
+        confidence,
+        alignOk: alignment.alignOk,
+        bboxPx: best.bbox ? { ...best.bbox } : null
+      });
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
           event: 'ocrmagic.anyfield.tess.crop.inset',
@@ -10877,6 +11075,16 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       tessStr = best.tessStr;
       confidence = best.confidence;
       alignment = best.alignment;
+      logTessVerifierEvent({
+        event: 'verifier.vertical_expansion.selected',
+        docId: docId || state.currentFileId || state.currentFileName || null,
+        fieldKey: fieldKey || null,
+        page,
+        tessText: tessStr,
+        confidence,
+        alignOk: alignment.alignOk,
+        bboxPx: best.bbox ? { ...best.bbox } : null
+      });
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
           event: 'ocrmagic.anyfield.tess.crop.verticalExpansion',
@@ -10905,6 +11113,16 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     }
   }
   if(!tessStr){
+    logTessVerifierEvent({
+      event: 'verifier.decision',
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      fieldKey: fieldKey || null,
+      page,
+      outcome: 'skip',
+      reason: 'tessEmpty',
+      pdfText,
+      confidence
+    });
     traceAnyField({
       rule: 'tess.verify.skip:tessEmpty',
       before: pdfText,
@@ -10925,6 +11143,20 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
   }
   const { pdfChars, tessChars, pdfMap, alignMode, alignOk } = alignment;
   if(!alignOk){
+    logTessVerifierEvent({
+      event: 'verifier.decision',
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      fieldKey: fieldKey || null,
+      page,
+      outcome: 'skip',
+      reason: 'alignFail',
+      pdfText,
+      tessText: tessStr,
+      pdfNorm: pdfChars?.join('') || '',
+      tessNorm: tessChars?.join('') || '',
+      alignMode,
+      confidence
+    });
     traceAnyField({
       rule: 'tess.verify.skip:alignFail',
       before: pdfText,
@@ -10955,6 +11187,19 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!isConfusionPair(pdfChars[i], tessChars[i])){
       nonConfusionMismatches += 1;
       if(nonConfusionMismatches > allowedNonConfusion){
+        logTessVerifierEvent({
+          event: 'verifier.decision',
+          docId: docId || state.currentFileId || state.currentFileName || null,
+          fieldKey: fieldKey || null,
+          page,
+          outcome: 'skip',
+          reason: 'unsafeMismatch',
+          nonConfusionMismatchCount: nonConfusionMismatches,
+          nonConfusionMismatchAllowed: allowedNonConfusion,
+          confidence,
+          pdfText,
+          tessText: tessStr
+        });
         traceAnyField({
           rule: 'tess.verify.skip:unsafeMismatch',
           before: pdfText,
@@ -10981,6 +11226,17 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     }
   }
   if(confidence < ANY_FIELD_TESS_CONFIDENCE_MIN){
+    logTessVerifierEvent({
+      event: 'verifier.decision',
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      fieldKey: fieldKey || null,
+      page,
+      outcome: 'skip',
+      reason: 'lowConfidence',
+      confidence,
+      pdfText,
+      tessText: tessStr
+    });
     traceAnyField({
       rule: 'tess.verify.skip:lowConfidence',
       before: pdfText,
@@ -11007,6 +11263,18 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     }
   }
   const next = chars.join('');
+  logTessVerifierEvent({
+    event: 'verifier.decision',
+    docId: docId || state.currentFileId || state.currentFileName || null,
+    fieldKey: fieldKey || null,
+    page,
+    outcome: next === pdfText ? 'no_change' : 'patched',
+    confidence,
+    nonConfusionMismatchCount: nonConfusionMismatches,
+    pdfText,
+    tessText: tessStr,
+    patchedText: next
+  });
   traceAnyField({
     rule: next === pdfText ? 'tess.verify.noChange' : 'tess.verify.patch',
     before: pdfText,
@@ -11044,6 +11312,18 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
     : resolveMagicDataType(fieldKey);
   const resolvedMagic = resolvedInfo.magicType;
   const resolvedSource = resolvedInfo.source;
+  logTessVerifierEvent({
+    event: 'verifier.trigger.evaluate',
+    fieldKey: fieldKey || '',
+    page,
+    hasBbox,
+    hasCanvas: !!canvas,
+    sourceBranch: sourceBranch || null,
+    commonSubstitutions: Array.isArray(commonSubstitutions) ? commonSubstitutions : null,
+    commonSubDetected: !!commonSubDetected,
+    magicTypeResolved: resolvedMagic || 'UNSET',
+    magicTypeSource: resolvedSource || 'unknown'
+  });
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
       event: 'ocrmagic.anyfield.patch.start',
@@ -11062,6 +11342,12 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
   const hasCommonSubs = (Array.isArray(commonSubstitutions) ? commonSubstitutions.length > 0 : !!commonSubstitutions)
     || !!commonSubDetected;
   if(!hasCommonSubs){
+    logTessVerifierEvent({
+      event: 'verifier.trigger.skip',
+      fieldKey: fieldKey || '',
+      page,
+      reason: 'noCommonSubs'
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -11072,6 +11358,12 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
     return text;
   }
   if(!hasBbox){
+    logTessVerifierEvent({
+      event: 'verifier.trigger.skip',
+      fieldKey: fieldKey || '',
+      page,
+      reason: 'noBbox'
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -11082,6 +11374,12 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
     return text;
   }
   if(!canvas){
+    logTessVerifierEvent({
+      event: 'verifier.trigger.skip',
+      fieldKey: fieldKey || '',
+      page,
+      reason: 'noCanvas'
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -11092,6 +11390,13 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
     return text;
   }
   if(resolvedMagic !== MAGIC_DATA_TYPE.ANY){
+    logTessVerifierEvent({
+      event: 'verifier.trigger.skip',
+      fieldKey: fieldKey || '',
+      page,
+      reason: 'notAny',
+      magicTypeResolved: resolvedMagic || 'UNSET'
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
@@ -11130,6 +11435,17 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
           scaleMultiplier: VERIFIER_HIRES_SCALE_MULTIPLIER
         });
       }
+      logTessVerifierEvent({
+        event: 'verifier.hires.check',
+        fieldKey: fieldKey || '',
+        page,
+        cropH,
+        cropThreshold: OCR_MIN_CROP_PX,
+        baseRenderScaleY: renderScaleY,
+        hiresRequested: true,
+        hiresUsed: !!hiresRender?.canvas,
+        scaleMultiplier: VERIFIER_HIRES_SCALE_MULTIPLIER
+      });
     }
   }
   try{
@@ -11138,6 +11454,12 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
     let verifierConstraintSkipped = false;
     let verifierConstraintClamped = false;
     if(!primaryBox){
+      logTessVerifierEvent({
+        event: 'verifier.trigger.skip',
+        fieldKey: fieldKey || '',
+        page,
+        reason: 'noUsedBox'
+      });
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
           event: 'ocrmagic.anyfield.verify.skip',
@@ -11179,6 +11501,17 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         sourceBranch: sourceBranch || null
       });
     }
+    logTessVerifierEvent({
+      event: 'verifier.box',
+      fieldKey: fieldKey || '',
+      page,
+      usedBox: primaryBox ? { ...primaryBox } : null,
+      baseBox: baseBox ? { ...baseBox } : null,
+      verifierBox: verifierBox ? { ...verifierBox } : null,
+      verifierConstraintApplied,
+      verifierConstraintClamped,
+      verifierConstraintSkipped
+    });
     if(ocrMagicDebugEnabled() && primaryBox){
       const diff = ['x','y','w','h'].some(k => Number(primaryBox[k] || 0) !== Number(verifierBox?.[k] || 0));
       if(diff){
@@ -11211,6 +11544,13 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       allowBBoxExpansion: hasCommonSubs
     });
   } catch(err){
+    logTessVerifierEvent({
+      event: 'verifier.trigger.skip',
+      fieldKey: fieldKey || '',
+      page,
+      reason: 'exception',
+      message: err?.message || String(err)
+    });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
