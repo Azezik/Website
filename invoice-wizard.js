@@ -10246,7 +10246,7 @@ async function getVerifierPageCanvas(pageNum){
   return fallback;
 }
 
-async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
+async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = false, allowHeuristicNormalization = false }){
   if(!pageCanvas || !bboxPx) return { text:'', confidence:0 };
   const page = bboxPx.page || 1;
   const vp = state.pageViewports[(page || 1) - 1] || state.viewport || { width: pageCanvas.width, height: pageCanvas.height };
@@ -10254,7 +10254,9 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
   const logicalH = Math.max(1, Number(vp.height ?? vp.h ?? pageCanvas.height));
   const renderScaleX = pageCanvas.width / logicalW;
   const renderScaleY = pageCanvas.height / logicalH;
-  const pageOffset = Number.isFinite(pageOffsetPx) ? pageOffsetPx : (state.pageOffsets?.[(page || 1) - 1] || 0);
+  const pageOffset = combined
+    ? (Number.isFinite(pageOffsetPx) ? pageOffsetPx : (state.pageOffsets?.[(page || 1) - 1] || 0))
+    : 0;
   const renderContext = {
     canvasW: pageCanvas.width,
     canvasH: pageCanvas.height,
@@ -10266,7 +10268,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx }){
   };
   let bbox = { ...bboxPx };
   let normalizedOffset = false;
-  if(pageOffset && (bbox.y || 0) > logicalH){
+  if(allowHeuristicNormalization && pageOffset && (bbox.y || 0) > logicalH){
     const adjusted = (bbox.y || 0) - pageOffset;
     if(adjusted >= 0 && adjusted <= logicalH){
       normalizedOffset = true;
@@ -10393,6 +10395,26 @@ const ANY_FIELD_CONFUSION_MAP = new Map([
   ['S', '5'], ['5', 'S'],
   ['B', '8'], ['8', 'B']
 ]);
+
+function normalizeVerifierBBox(bboxPx, { combined, pageOffset, logicalH } = {}){
+  if(!bboxPx) return bboxPx;
+  if(!combined || !Number.isFinite(pageOffset) || !Number.isFinite(logicalH) || logicalH <= 0) return bboxPx;
+  const y = Number(bboxPx.y || 0);
+  if(y <= logicalH) return bboxPx;
+  const adjustedY = y - pageOffset;
+  if(adjustedY < 0 || adjustedY > logicalH) return bboxPx;
+  const adjusted = { ...bboxPx, y: adjustedY };
+  if(ocrMagicDebugEnabled()){
+    ocrMagicDebug({
+      event: 'ocrmagic.anyfield.tess.crop.normalize',
+      pageNum: bboxPx.page || null,
+      originalBox: { ...bboxPx },
+      adjustedBox: adjusted,
+      reason: 'verifier-combined-offset'
+    });
+  }
+  return adjusted;
+}
 
 function isMinorPunctuation(ch){
   return /[.,:;'"`~!@#$%^&*()_+\-=[\]{}<>/?\\|\u00B7\u2010-\u2015\u2018\u2019\u201C\u201D\u2026]/.test(ch);
@@ -10635,30 +10657,36 @@ function alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment = false } =
 // - baseBox may constrain (intersect/clamp) usedBox, but must never replace it.
 // - Never expand beyond usedBox horizontally; inset-only retries trim noise.
 // - Vertical-only padding retries are allowed when OCR is empty/short and alignment fails.
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx, combined = false, verifierViewport = null } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
-  const bbox = { ...bboxPx, page };
-  const expansionBase = usedBox ? { ...usedBox, page: usedBox.page ?? page } : bbox;
+  const logicalH = Number(verifierViewport?.height ?? verifierViewport?.h ?? state.pageViewports[page - 1]?.height ?? state.pageViewports[page - 1]?.h ?? state.viewport?.height ?? state.viewport?.h ?? 0);
+  const verifierPageOffset = combined ? (Number.isFinite(pageOffsetPx) ? pageOffsetPx : 0) : 0;
+  const normalizationContext = { combined, pageOffset: verifierPageOffset, logicalH };
+  const normalizedBaseBox = normalizeVerifierBBox(baseBox, normalizationContext);
+  const normalizedUsedBox = normalizeVerifierBBox(usedBox, normalizationContext);
+  const normalizedBBox = normalizeVerifierBBox({ ...bboxPx, page }, normalizationContext);
+  const bbox = { ...normalizedBBox, page };
+  const expansionBase = normalizedUsedBox ? { ...normalizedUsedBox, page: normalizedUsedBox.page ?? page } : bbox;
   const allowConstraint = (() => {
-    if(!baseBox || !expansionBase) return false;
-    const samePage = !Number.isFinite(baseBox.page)
+    if(!normalizedBaseBox || !expansionBase) return false;
+    const samePage = !Number.isFinite(normalizedBaseBox.page)
       || !Number.isFinite(expansionBase.page)
-      || baseBox.page === expansionBase.page;
-    return samePage && bboxContains(baseBox, expansionBase);
+      || normalizedBaseBox.page === expansionBase.page;
+    return samePage && bboxContains(normalizedBaseBox, expansionBase);
   })();
   const constrainExpansion = (candidate) => {
     if(!allowConstraint) return candidate;
-    const constrained = intersectBBox(candidate, baseBox);
+    const constrained = intersectBBox(candidate, normalizedBaseBox);
     return constrained || candidate;
   };
   const constrainVerticalExpansion = (candidate) => {
-    if(!baseBox) return candidate;
-    const samePage = !Number.isFinite(baseBox.page)
+    if(!normalizedBaseBox) return candidate;
+    const samePage = !Number.isFinite(normalizedBaseBox.page)
       || !Number.isFinite(candidate.page)
-      || baseBox.page === candidate.page;
+      || normalizedBaseBox.page === candidate.page;
     if(!samePage) return candidate;
-    return intersectBBox(candidate, baseBox);
+    return intersectBBox(candidate, normalizedBaseBox);
   };
   const traceBase = traceSession ? {
     docId: docId || state.currentFileId || state.currentFileName || null,
@@ -10672,7 +10700,13 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     if(!traceSession) return;
     window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
   };
-  let { text: tessStr, confidence } = await ocrTextFromBBox({ pageCanvas, bboxPx: bbox, pageOffsetPx });
+  let { text: tessStr, confidence } = await ocrTextFromBBox({
+    pageCanvas,
+    bboxPx: bbox,
+    pageOffsetPx: verifierPageOffset,
+    combined,
+    allowHeuristicNormalization: false
+  });
   let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
   const shouldRetryInset = () => (
     !!bboxPx
@@ -10684,7 +10718,13 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     let best = { tessStr, confidence, alignment, bbox };
     for(const pad of insets){
       const insetBox = shrinkBBoxByPx(bbox, pad);
-      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: insetBox, pageOffsetPx });
+      const attempt = await ocrTextFromBBox({
+        pageCanvas,
+        bboxPx: insetBox,
+        pageOffsetPx: verifierPageOffset,
+        combined,
+        allowHeuristicNormalization: false
+      });
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       if(!attemptAlignment.alignOk) continue;
@@ -10726,7 +10766,13 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       };
       const constrained = constrainVerticalExpansion(verticalBox);
       if(!constrained) continue;
-      const attempt = await ocrTextFromBBox({ pageCanvas, bboxPx: constrained, pageOffsetPx });
+      const attempt = await ocrTextFromBBox({
+        pageCanvas,
+        bboxPx: constrained,
+        pageOffsetPx: verifierPageOffset,
+        combined,
+        allowHeuristicNormalization: false
+      });
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       const lengthImproved = attemptAlignment.tessChars.length > best.alignment.tessChars.length;
@@ -10909,6 +10955,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
   const verifierRender = await getVerifierPageCanvas(page);
   const canvas = verifierRender?.canvas || pageCanvas || (page ? getPdfBitmapCanvas(page - 1)?.canvas : null);
   const verifierPageOffset = Number.isFinite(verifierRender?.pageOffset) ? verifierRender.pageOffset : null;
+  const verifierCombined = !!verifierRender?.combined;
+  const verifierViewport = verifierRender?.viewport || null;
   const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...primaryBox, page }, page) : { bboxHash: '' };
   if(!isRunMode()){
     return text;
@@ -11045,6 +11093,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       usedBox: primaryBox,
       baseBox,
       pageOffsetPx: verifierPageOffset,
+      combined: verifierCombined,
+      verifierViewport,
       pageNum: page,
       fieldKey,
       traceSession,
