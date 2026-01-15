@@ -10395,7 +10395,7 @@ const ANY_FIELD_CONFUSION_MAP = new Map([
 ]);
 
 function isMinorPunctuation(ch){
-  return /[.,:;'"`~!@#$%^&*()_+\-=[\]{}<>/?\\|]/.test(ch);
+  return /[.,:;'"`~!@#$%^&*()_+\-=[\]{}<>/?\\|\u00B7\u2010-\u2015\u2018\u2019\u201C\u201D\u2026]/.test(ch);
 }
 
 function alignIgnoringSpaces(pdfStr='', tessStr='', { ignorePunctuation = false } = {}){
