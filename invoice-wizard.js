@@ -10547,9 +10547,33 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
   const opts = { tessedit_pageseg_mode: 6, oem: 1 };
   const ocrStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   let data;
+  let timeoutId;
+  const timeoutMs = Number(ANY_FIELD_TESS_TIMEOUT_MS) || 0;
+  const timeoutPromise = timeoutMs > 0
+    ? new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const err = new Error(`Tesseract timeout after ${timeoutMs}ms`);
+        err.code = 'TESS_TIMEOUT';
+        reject(err);
+      }, timeoutMs);
+    })
+    : null;
   try{
-    ({ data } = await TesseractRef.recognize(crop, 'eng', opts));
+    const recognizePromise = TesseractRef.recognize(crop, 'eng', opts);
+    ({ data } = timeoutPromise
+      ? await Promise.race([recognizePromise, timeoutPromise])
+      : await recognizePromise
+    );
   } catch(err){
+    if(timeoutId) clearTimeout(timeoutId);
+    if(err?.code === 'TESS_TIMEOUT'){
+      logTessVerifierEvent({
+        event: 'verifier_ocr.timeout',
+        pageNum: page,
+        bboxHash,
+        timeoutMs
+      });
+    }
     logTessVerifierEvent({
       event: 'verifier_ocr.error',
       pageNum: page,
@@ -10558,6 +10582,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
     });
     throw err;
   }
+  if(timeoutId) clearTimeout(timeoutId);
   const text = (data?.text || '').trim();
   const symbols = data?.symbols || [];
   const words = data?.words || [];
@@ -10592,6 +10617,7 @@ async function ocrTextFromBBox({ pageCanvas, bboxPx, pageOffsetPx, combined = fa
   return { text, confidence };
 }
 
+const ANY_FIELD_TESS_TIMEOUT_MS = 10000;
 const ANY_FIELD_TESS_CONFIDENCE_MIN = 0.75;
 const ANY_FIELD_TESS_CONFIDENCE_HIGH = 0.9;
 const ANY_FIELD_TESS_MAX_NON_CONFUSION = 1;
@@ -11315,6 +11341,21 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       message: err?.message || String(err),
       stack: err?.stack || null
     });
+    logTessVerifierEvent({
+      event: 'verifier.decision',
+      ...outcomeBase,
+      outcome: 'skip',
+      reason: 'exception',
+      message: err?.message || String(err)
+    });
+    if(ocrMagicDebugEnabled()){
+      ocrMagicDebug({
+        event: 'ocrmagic.anyfield.verify.skip',
+        reason: 'exception',
+        fieldKey: fieldKey || '',
+        message: err?.message || String(err)
+      });
+    }
     logOutcome('error', { message: err?.message || String(err), stack: err?.stack || null });
     return pdfStr;
   }
@@ -11586,6 +11627,21 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       bboxHash
     });
   } catch(err){
+    logTessVerifierEvent({
+      event: 'verifier.error',
+      fieldKey: fieldKey || '',
+      page,
+      message: err?.message || String(err),
+      stack: err?.stack || null
+    });
+    logTessVerifierEvent({
+      event: 'verifier.decision',
+      fieldKey: fieldKey || '',
+      page,
+      outcome: 'skip',
+      reason: 'exception',
+      message: err?.message || String(err)
+    });
     logTessVerifierEvent({
       event: 'verifier.trigger.skip',
       fieldKey: fieldKey || '',
