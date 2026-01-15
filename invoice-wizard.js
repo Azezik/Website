@@ -10893,7 +10893,7 @@ function getVerifierCropMetrics({ bboxPx, pageCanvas, verifierViewport, page } =
 // - baseBox may constrain (intersect/clamp) usedBox, but must never replace it.
 // - Never expand beyond usedBox horizontally; inset-only retries trim noise.
 // - Vertical-only padding retries are allowed when OCR is empty/short and alignment fails.
-async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx, combined = false, verifierViewport = null } = {}){
+async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fieldKey, traceSession, docId, sourceBranch, allowBBoxExpansion, baseBox, usedBox, pageOffsetPx, combined = false, verifierViewport = null, bboxHash = '' } = {}){
   const pdfText = String(pdfStr ?? '');
   const page = Number.isFinite(pageNum) ? pageNum : (bboxPx.page || state.pageNum || 1);
   const logicalH = Number(verifierViewport?.height ?? verifierViewport?.h ?? state.pageViewports[page - 1]?.height ?? state.pageViewports[page - 1]?.h ?? state.viewport?.height ?? state.viewport?.h ?? 0);
@@ -10904,76 +10904,99 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
   const normalizedBBox = normalizeVerifierBBox({ ...bboxPx, page }, normalizationContext);
   const bbox = { ...normalizedBBox, page };
   const expansionBase = normalizedUsedBox ? { ...normalizedUsedBox, page: normalizedUsedBox.page ?? page } : bbox;
-  const allowConstraint = (() => {
-    if(!normalizedBaseBox || !expansionBase) return false;
-    const samePage = !Number.isFinite(normalizedBaseBox.page)
-      || !Number.isFinite(expansionBase.page)
-      || normalizedBaseBox.page === expansionBase.page;
-    return samePage && bboxContains(normalizedBaseBox, expansionBase);
-  })();
-  const constrainExpansion = (candidate) => {
-    if(!allowConstraint) return candidate;
-    const constrained = intersectBBox(candidate, normalizedBaseBox);
-    return constrained || candidate;
+  const outcomeBase = { fieldKey: fieldKey || '', page, bboxHash };
+  const logOutcome = (outcome, extra = {}) => {
+    logTessVerifierEvent({ event: 'verifier.outcome', outcome, ...outcomeBase, ...extra });
   };
-  const constrainVerticalExpansion = (candidate) => {
-    if(!normalizedBaseBox) return candidate;
-    const samePage = !Number.isFinite(normalizedBaseBox.page)
-      || !Number.isFinite(candidate.page)
-      || normalizedBaseBox.page === candidate.page;
-    if(!samePage) return candidate;
-    return intersectBBox(candidate, normalizedBaseBox);
-  };
-  const traceBase = traceSession ? {
-    docId: docId || state.currentFileId || state.currentFileName || null,
-    pageIndex: page - 1,
-    fieldKey: fieldKey || null,
-    stage: 'any_field_tesseract_patch',
-    source: 'tesseract_crop'
-  } : null;
-  // OCR trace hook: any-field Tesseract verifier decisions.
-  const traceAnyField = (payload) => {
-    if(!traceSession) return;
-    window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
-  };
-  logTessVerifierEvent({
-    event: 'verifier.begin',
-    docId: docId || state.currentFileId || state.currentFileName || null,
-    fieldKey: fieldKey || null,
-    page,
-    sourceBranch: sourceBranch || null,
-    pdfText,
-    bboxPx: bbox ? { ...bbox } : null,
-    usedBox: normalizedUsedBox ? { ...normalizedUsedBox } : null,
-    baseBox: normalizedBaseBox ? { ...normalizedBaseBox } : null,
-    combined,
-    pageOffset: verifierPageOffset,
-    logicalH,
-    rotation: verifierViewport?.rotation ?? state.pageTransform?.rotation ?? 0,
-    dpr: window.devicePixelRatio || 1
-  });
-  let { text: tessStr, confidence } = await ocrTextFromBBox({
-    pageCanvas,
-    bboxPx: bbox,
-    pageOffsetPx: verifierPageOffset,
-    combined,
-    allowHeuristicNormalization: false
-  });
-  let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
-  logTessVerifierEvent({
-    event: 'verifier.align',
-    docId: docId || state.currentFileId || state.currentFileName || null,
-    fieldKey: fieldKey || null,
-    page,
-    pdfText,
-    tessText: tessStr,
-    pdfNorm: alignment.pdfChars?.join('') || '',
-    tessNorm: alignment.tessChars?.join('') || '',
-    alignMode: alignment.alignMode,
-    alignOk: alignment.alignOk,
-    confidence,
-    bboxPx: bbox ? { ...bbox } : null
-  });
+  try{
+    const allowConstraint = (() => {
+      if(!normalizedBaseBox || !expansionBase) return false;
+      const samePage = !Number.isFinite(normalizedBaseBox.page)
+        || !Number.isFinite(expansionBase.page)
+        || normalizedBaseBox.page === expansionBase.page;
+      return samePage && bboxContains(normalizedBaseBox, expansionBase);
+    })();
+    const constrainExpansion = (candidate) => {
+      if(!allowConstraint) return candidate;
+      const constrained = intersectBBox(candidate, normalizedBaseBox);
+      return constrained || candidate;
+    };
+    const constrainVerticalExpansion = (candidate) => {
+      if(!normalizedBaseBox) return candidate;
+      const samePage = !Number.isFinite(normalizedBaseBox.page)
+        || !Number.isFinite(candidate.page)
+        || normalizedBaseBox.page === candidate.page;
+      if(!samePage) return candidate;
+      return intersectBBox(candidate, normalizedBaseBox);
+    };
+    const traceBase = traceSession ? {
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      pageIndex: page - 1,
+      fieldKey: fieldKey || null,
+      stage: 'any_field_tesseract_patch',
+      source: 'tesseract_crop'
+    } : null;
+    // OCR trace hook: any-field Tesseract verifier decisions.
+    const traceAnyField = (payload) => {
+      if(!traceSession) return;
+      window.OCRTrace.traceEvent(traceSession, { ...traceBase, ...payload });
+    };
+    const runVerifierOcr = async (label, targetBox) => {
+      logTessVerifierEvent({
+        event: 'verifier.ocr.start',
+        ...outcomeBase,
+        label,
+        bboxPx: targetBox ? { ...targetBox } : null
+      });
+      const result = await ocrTextFromBBox({
+        pageCanvas,
+        bboxPx: targetBox,
+        pageOffsetPx: verifierPageOffset,
+        combined,
+        allowHeuristicNormalization: false
+      });
+      logTessVerifierEvent({
+        event: 'verifier.ocr.done',
+        ...outcomeBase,
+        label,
+        bboxPx: targetBox ? { ...targetBox } : null,
+        textLen: result?.text?.length || 0,
+        confidence: result?.confidence ?? null
+      });
+      return result;
+    };
+    logTessVerifierEvent({
+      event: 'verifier.begin',
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      fieldKey: fieldKey || null,
+      page,
+      sourceBranch: sourceBranch || null,
+      pdfText,
+      bboxPx: bbox ? { ...bbox } : null,
+      usedBox: normalizedUsedBox ? { ...normalizedUsedBox } : null,
+      baseBox: normalizedBaseBox ? { ...normalizedBaseBox } : null,
+      combined,
+      pageOffset: verifierPageOffset,
+      logicalH,
+      rotation: verifierViewport?.rotation ?? state.pageTransform?.rotation ?? 0,
+      dpr: window.devicePixelRatio || 1
+    });
+    let { text: tessStr, confidence } = await runVerifierOcr('primary', bbox);
+    let alignment = alignAnyFieldText(pdfText, tessStr, { allowRelaxedAlignment: allowBBoxExpansion });
+    logTessVerifierEvent({
+      event: 'verifier.align',
+      docId: docId || state.currentFileId || state.currentFileName || null,
+      fieldKey: fieldKey || null,
+      page,
+      pdfText,
+      tessText: tessStr,
+      pdfNorm: alignment.pdfChars?.join('') || '',
+      tessNorm: alignment.tessChars?.join('') || '',
+      alignMode: alignment.alignMode,
+      alignOk: alignment.alignOk,
+      confidence,
+      bboxPx: bbox ? { ...bbox } : null
+    });
   const shouldRetryInset = () => (
     !!bboxPx
       && !alignment.alignOk
@@ -10984,13 +11007,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
     let best = { tessStr, confidence, alignment, bbox };
     for(const pad of insets){
       const insetBox = shrinkBBoxByPx(bbox, pad);
-      const attempt = await ocrTextFromBBox({
-        pageCanvas,
-        bboxPx: insetBox,
-        pageOffsetPx: verifierPageOffset,
-        combined,
-        allowHeuristicNormalization: false
-      });
+      const attempt = await runVerifierOcr('inset', insetBox);
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       if(!attemptAlignment.alignOk) continue;
@@ -11042,13 +11059,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       };
       const constrained = constrainVerticalExpansion(verticalBox);
       if(!constrained) continue;
-      const attempt = await ocrTextFromBBox({
-        pageCanvas,
-        bboxPx: constrained,
-        pageOffsetPx: verifierPageOffset,
-        combined,
-        allowHeuristicNormalization: false
-      });
+      const attempt = await runVerifierOcr('vertical', constrained);
       if(!attempt.text) continue;
       const attemptAlignment = alignAnyFieldText(pdfText, attempt.text, { allowRelaxedAlignment: allowBBoxExpansion });
       const lengthImproved = attemptAlignment.tessChars.length > best.alignment.tessChars.length;
@@ -11139,6 +11150,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
         confidence
       });
     }
+    logOutcome('skipped:tessEmpty', { reason: 'tessEmpty' });
     return pdfStr;
   }
   const { pdfChars, tessChars, pdfMap, alignMode, alignOk } = alignment;
@@ -11176,6 +11188,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
         alignMode
       });
     }
+    logOutcome('skipped:alignFail', { reason: 'alignFail', alignMode });
     return pdfStr;
   }
   const allowedNonConfusion = confidence >= ANY_FIELD_TESS_CONFIDENCE_HIGH
@@ -11221,6 +11234,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
             nonConfusionMismatchAllowed: allowedNonConfusion
           });
         }
+        logOutcome('skipped:unsafeMismatch', { reason: 'unsafeMismatch' });
         return pdfStr;
       }
     }
@@ -11252,6 +11266,7 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
         confidence
       });
     }
+    logOutcome('skipped:lowConfidence', { reason: 'lowConfidence', confidence });
     return pdfStr;
   }
   const chars = pdfText.split('');
@@ -11291,7 +11306,18 @@ async function runAnyFieldTessVerifier({ pdfStr, pageCanvas, bboxPx, pageNum, fi
       nonConfusionMismatchCount: nonConfusionMismatches
     });
   }
+  logOutcome(next === pdfText ? 'no_change' : 'patched', { confidence });
   return next;
+  } catch(err){
+    logTessVerifierEvent({
+      event: 'verifier.error',
+      ...outcomeBase,
+      message: err?.message || String(err),
+      stack: err?.stack || null
+    });
+    logOutcome('error', { message: err?.message || String(err), stack: err?.stack || null });
+    return pdfStr;
+  }
 }
 
 async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum, pageCanvas, sourceBranch, commonSubstitutions, commonSubDetected, magicType, magicTypeSource, baseBox } = {}){
@@ -11304,6 +11330,16 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
   const verifierCombined = !!verifierRender?.combined;
   const verifierViewport = verifierRender?.viewport || null;
   const { bboxHash } = hasBbox ? getTessCropCacheKey({ ...primaryBox, page }, page) : { bboxHash: '' };
+  const logOutcome = (outcome, extra = {}) => {
+    logTessVerifierEvent({
+      event: 'verifier.outcome',
+      outcome,
+      fieldKey: fieldKey || '',
+      page,
+      bboxHash,
+      ...extra
+    });
+  };
   if(!isRunMode()){
     return text;
   }
@@ -11355,6 +11391,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         fieldKey: fieldKey || ''
       });
     }
+    logOutcome('skipped:noCommonSubs', { reason: 'noCommonSubs' });
     return text;
   }
   if(!hasBbox){
@@ -11371,6 +11408,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         fieldKey: fieldKey || ''
       });
     }
+    logOutcome('skipped:noBbox', { reason: 'noBbox' });
     return text;
   }
   if(!canvas){
@@ -11387,6 +11425,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         fieldKey: fieldKey || ''
       });
     }
+    logOutcome('skipped:noCanvas', { reason: 'noCanvas' });
     return text;
   }
   if(resolvedMagic !== MAGIC_DATA_TYPE.ANY){
@@ -11405,6 +11444,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         magicType: resolvedMagic || 'UNSET'
       });
     }
+    logOutcome('skipped:notAny', { reason: 'notAny', magicTypeResolved: resolvedMagic || 'UNSET' });
     return text;
   }
   if(VERIFIER_HIRES_SCALE_MULTIPLIER > 1 && hasBbox && canvas){
@@ -11460,6 +11500,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
         page,
         reason: 'noUsedBox'
       });
+      logOutcome('skipped:noUsedBox', { reason: 'noUsedBox' });
       if(ocrMagicDebugEnabled()){
         ocrMagicDebug({
           event: 'ocrmagic.anyfield.verify.skip',
@@ -11541,7 +11582,8 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       traceSession,
       docId: state.currentFileId || state.currentFileName || null,
       sourceBranch,
-      allowBBoxExpansion: hasCommonSubs
+      allowBBoxExpansion: hasCommonSubs,
+      bboxHash
     });
   } catch(err){
     logTessVerifierEvent({
@@ -11551,6 +11593,7 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, usedBox, pageNum,
       reason: 'exception',
       message: err?.message || String(err)
     });
+    logOutcome('error', { message: err?.message || String(err), stack: err?.stack || null });
     if(ocrMagicDebugEnabled()){
       ocrMagicDebug({
         event: 'ocrmagic.anyfield.verify.skip',
