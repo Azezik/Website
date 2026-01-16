@@ -3913,6 +3913,7 @@ function getFindTextConstellationKeywordFilter(){
 function isFindTextConstellationKeyword(token){
   const normalized = normalizeKeywordText(token?.text || token?.raw || '');
   if(!normalized) return false;
+  if(!/[a-z]/i.test(normalized)) return false;
   return getFindTextConstellationKeywordFilter().has(normalized);
 }
 
@@ -10999,8 +11000,10 @@ function getFindTextQueryParts(query){
 
 function isFindTextTokenMatch(candidateNorm, partNorm){
   if(!candidateNorm || !partNorm) return false;
-  return candidateNorm === partNorm
-    || candidateNorm.includes(partNorm)
+  if(candidateNorm === partNorm) return true;
+  const minLen = Math.min(candidateNorm.length, partNorm.length);
+  if(minLen < Math.min(3, partNorm.length)) return false;
+  return candidateNorm.includes(partNorm)
     || partNorm.includes(candidateNorm);
 }
 
