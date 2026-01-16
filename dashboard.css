@@ -385,6 +385,22 @@ body.skin-v2.doc-dashboard {
   border-radius: 10px;
 }
 
+.viewer-slot {
+  margin-top: 12px;
+}
+
+.viewer-slot:empty {
+  border: 2px dashed var(--panel-border);
+  border-radius: 10px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.viewer-slot:empty::before {
+  content: 'Upload a document to preview it here.';
+}
+
 .viewer canvas,
 .viewer img,
 .viewer .overlay {
