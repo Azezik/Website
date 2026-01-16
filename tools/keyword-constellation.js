@@ -54,18 +54,29 @@
     return links;
   }
 
+  function shouldIncludeToken(normText, keywordFilter){
+    if(!keywordFilter) return true;
+    if(typeof keywordFilter === 'function') return !!keywordFilter(normText);
+    if(Array.isArray(keywordFilter)) return keywordFilter.includes(normText);
+    if(keywordFilter instanceof Set) return keywordFilter.has(normText);
+    return true;
+  }
+
   function captureConstellation(fieldKey, boxPx, normBox, page, pageW, pageH, tokens, opts={}){
     if(!boxPx || !normBox || !Array.isArray(tokens) || !tokens.length){ return null; }
     const origin = { x: normBox.x0n, y: normBox.y0n };
     const radiusPrimary = Number.isFinite(opts.radiusPrimary) ? opts.radiusPrimary : BASE_RADIUS;
     const radiusSecondary = Number.isFinite(opts.radiusSecondary) ? opts.radiusSecondary : EXPANDED_RADIUS;
     const tolerance = Number.isFinite(opts.tolerance) ? opts.tolerance : DEFAULT_TOLERANCE;
+    const keywordFilter = opts.keywordFilter || null;
     const candidates = [];
     const addCandidate = (tok) => {
       if(tok?.page && page && tok.page !== page) return;
+      const normText = normalizeKeywordText(tok.text || tok.raw || '');
+      if(!shouldIncludeToken(normText, keywordFilter)) return;
       const center = centerNorm(tok, pageW, pageH);
       const dist = Math.hypot(center.x - origin.x, center.y - origin.y);
-      candidates.push({ token: tok, center, dist, normText: normalizeKeywordText(tok.text || tok.raw || '') });
+      candidates.push({ token: tok, center, dist, normText });
     };
     tokens.forEach(addCandidate);
     candidates.sort((a,b)=> a.dist - b.dist);

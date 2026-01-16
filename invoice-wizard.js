@@ -141,6 +141,7 @@ const els = {
   findTextPdfToggle: document.getElementById('find-text-pdf-toggle'),
   findTextTessToggle: document.getElementById('find-text-tess-toggle'),
   findTextAllToggle: document.getElementById('find-text-all-toggle'),
+  findTextBestToggle: document.getElementById('find-text-best-toggle'),
   findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
@@ -3886,6 +3887,33 @@ const KEYWORD_RELATION_SCOPE = new Set([
 
 function getKeywordCatalogue(){
   return KEYWORD_CATALOGUE;
+}
+
+let FIND_TEXT_KEYWORD_FILTER = null;
+function getFindTextConstellationKeywordFilter(){
+  if(FIND_TEXT_KEYWORD_FILTER) return FIND_TEXT_KEYWORD_FILTER;
+  const catalogue = getKeywordCatalogue();
+  const filter = new Set();
+  Object.values(catalogue || {}).forEach(group => {
+    Object.values(group || {}).forEach(entries => {
+      (entries || []).forEach(entry => {
+        const normalized = normalizeKeywordText(entry);
+        if(!normalized) return;
+        normalized.split(' ').forEach(word => {
+          if(/[a-z]/i.test(word)) filter.add(word);
+        });
+        filter.add(normalized);
+      });
+    });
+  });
+  FIND_TEXT_KEYWORD_FILTER = filter;
+  return filter;
+}
+
+function isFindTextConstellationKeyword(token){
+  const normalized = normalizeKeywordText(token?.text || token?.raw || '');
+  if(!normalized) return false;
+  return getFindTextConstellationKeywordFilter().has(normalized);
 }
 
 function editDistance(a,b){
@@ -10946,63 +10974,131 @@ function normalizeFindTextInput(text){
   return String(text || '').trim().replace(/\s+/g, ' ');
 }
 
-function findTextMatchInTokens(tokens, query){
-  const normalized = normalizeFindTextInput(query).toLowerCase();
-  if(!normalized) return null;
-  const parts = normalized.split(' ').filter(Boolean);
-  if(!parts.length) return null;
-  const lines = groupIntoLines(tokens);
-  const findMatch = (matcher) => {
-    for(const line of lines){
-      const lineTokens = line.tokens || [];
-      if(!lineTokens.length) continue;
-      const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
-      for(let i=0; i<=tokenTexts.length - parts.length; i++){
-        let ok = true;
-        for(let j=0; j<parts.length; j++){
-          const candidate = tokenTexts[i+j] || '';
-          if(!matcher(candidate, parts[j])){
-            ok = false;
-            break;
-          }
-        }
-        if(ok){
-          return bboxOfTokens(lineTokens.slice(i, i + parts.length));
-        }
-      }
-    }
-    return null;
-  };
-  return findMatch((candidate, part) => candidate === part)
-    || findMatch((candidate, part) => candidate.includes(part));
+// Find Text matching rules:
+// - Match within a single line (no cross-line matching).
+// - Normalize by removing punctuation/diacritics and lowercasing.
+// - Allow substring matches within tokens to handle punctuation/spacing differences.
+function normalizeFindTextMatchText(text){
+  return String(text || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function findTextMatchesInTokens(tokens, query){
-  const normalized = normalizeFindTextInput(query).toLowerCase();
-  if(!normalized) return [];
-  const parts = normalized.split(' ').filter(Boolean);
+function normalizeFindTextMatchToken(text){
+  return normalizeFindTextMatchText(text).replace(/\s+/g, '');
+}
+
+function getFindTextQueryParts(query){
+  const normalized = normalizeFindTextMatchText(query);
+  return normalized ? normalized.split(' ').filter(Boolean) : [];
+}
+
+function isFindTextTokenMatch(candidateNorm, partNorm){
+  if(!candidateNorm || !partNorm) return false;
+  return candidateNorm === partNorm
+    || candidateNorm.includes(partNorm)
+    || partNorm.includes(candidateNorm);
+}
+
+function scoreFindTextTokenMatch(candidateNorm, partNorm){
+  if(!candidateNorm || !partNorm) return 0;
+  if(candidateNorm === partNorm) return 3;
+  if(candidateNorm.startsWith(partNorm)) return 2;
+  if(candidateNorm.includes(partNorm)) return 1;
+  if(partNorm.includes(candidateNorm)) return 0.5;
+  return 0;
+}
+
+function scoreFindTextCandidate(tokens, partNorms, querySquashed){
+  const tokenText = tokens.map(t => String(t.text || t.raw || '')).join(' ');
+  const tokenNorms = tokens.map(t => normalizeFindTextMatchToken(t.text || t.raw || ''));
+  let score = 0;
+  if(tokenNorms.length === 1 && querySquashed){
+    score += scoreFindTextTokenMatch(tokenNorms[0], querySquashed);
+  }
+  for(let i=0; i<partNorms.length && i<tokenNorms.length; i++){
+    score += scoreFindTextTokenMatch(tokenNorms[i], partNorms[i]);
+  }
+  if(/@/.test(tokenText)) score -= 2;
+  if(/\bhttps?:\/\/|www\./i.test(tokenText)) score -= 1;
+  if(/[\d]/.test(tokenText) && /[a-z]/i.test(tokenText)) score -= 0.5;
+  return score;
+}
+
+function findTextMatchCandidatesInTokens(tokens, query){
+  const parts = getFindTextQueryParts(query);
   if(!parts.length) return [];
+  const partNorms = parts.map(part => normalizeFindTextMatchToken(part)).filter(Boolean);
+  if(!partNorms.length) return [];
+  const querySquashed = partNorms.join('');
   const lines = groupIntoLines(tokens);
   const matches = [];
+  const seen = new Set();
+  let order = 0;
+  const pushCandidate = (candTokens) => {
+    if(!candTokens.length) return;
+    const box = bboxOfTokens(candTokens);
+    if(!box) return;
+    const key = `${Math.round(box.x || 0)}:${Math.round(box.y || 0)}:${Math.round(box.w || 0)}:${Math.round(box.h || 0)}:${box.page || 0}`;
+    if(seen.has(key)) return;
+    seen.add(key);
+    matches.push({
+      box,
+      tokens: candTokens,
+      order: order++,
+      score: scoreFindTextCandidate(candTokens, partNorms, querySquashed)
+    });
+  };
+
   for(const line of lines){
     const lineTokens = line.tokens || [];
     if(!lineTokens.length) continue;
-    const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
-    for(let i=0; i<=tokenTexts.length - parts.length; i++){
+    const tokenNorms = lineTokens.map(t => normalizeFindTextMatchToken(t.text || t.raw || ''));
+    if(querySquashed && parts.length > 1){
+      tokenNorms.forEach((norm, idx) => {
+        if(norm && (norm.includes(querySquashed) || querySquashed.includes(norm))){
+          pushCandidate([lineTokens[idx]]);
+        }
+      });
+    }
+    for(let i=0; i<=tokenNorms.length - partNorms.length; i++){
       let ok = true;
-      for(let j=0; j<parts.length; j++){
-        const candidate = tokenTexts[i+j] || '';
-        if(!candidate.includes(parts[j])){
+      for(let j=0; j<partNorms.length; j++){
+        const candidate = tokenNorms[i+j] || '';
+        if(!isFindTextTokenMatch(candidate, partNorms[j])){
           ok = false;
           break;
         }
       }
       if(ok){
-        matches.push(bboxOfTokens(lineTokens.slice(i, i + parts.length)));
+        pushCandidate(lineTokens.slice(i, i + partNorms.length));
       }
     }
   }
   return matches;
+}
+
+function findTextMatchInTokens(tokens, query, options = {}){
+  const { mode = 'first' } = options || {};
+  const candidates = findTextMatchCandidatesInTokens(tokens, query);
+  if(!candidates.length) return null;
+  if(mode === 'best'){
+    candidates.sort((a,b)=> {
+      if(b.score !== a.score) return b.score - a.score;
+      return a.order - b.order;
+    });
+    return candidates[0].box;
+  }
+  candidates.sort((a,b)=> a.order - b.order);
+  return candidates[0].box;
+}
+
+function findTextMatchesInTokens(tokens, query){
+  return findTextMatchCandidatesInTokens(tokens, query).map(entry => entry.box);
 }
 
 async function findTextOnPageAllOccurrences(query, options = {}){
@@ -11011,7 +11107,16 @@ async function findTextOnPageAllOccurrences(query, options = {}){
   if(!normalized) return null;
   const page = state.pageNum || 1;
   const tokens = useTesseract ? await ensureTesseractTokensForPageWithBBox(page) : await ensureTokensForPage(page);
-  if(!tokens.length) return { boxes: [], page, matchSource: null, tokens: 0 };
+  if(!tokens.length){
+    return {
+      boxes: [],
+      page,
+      matchSource: null,
+      tokens: 0,
+      tokenSource: useTesseract ? 'tesseract-bbox' : 'pdfjs',
+      hasTextLayer: useTesseract ? true : false
+    };
+  }
   let boxes = findTextMatchesInTokens(tokens, normalized);
   let matchSource = boxes.length ? 'tokens' : null;
   if(!boxes.length){
@@ -11027,17 +11132,27 @@ async function findTextOnPageAllOccurrences(query, options = {}){
     }
   }
   boxes = boxes.filter(isRenderableFindTextBox);
-  return { boxes, page, matchSource, tokens: tokens.length };
+  return {
+    boxes,
+    page,
+    matchSource,
+    tokens: tokens.length,
+    tokenSource: useTesseract ? 'tesseract-bbox' : 'pdfjs',
+    hasTextLayer: useTesseract ? true : true
+  };
 }
 
-async function findTextInDocument(query){
+async function findTextInDocument(query, options = {}){
+  const { matchMode = 'first' } = options || {};
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const totalPages = state.numPages || 1;
+  let sawTextLayer = false;
   for(let page=1; page<=totalPages; page++){
     const tokens = await ensureTokensForPage(page);
+    if(tokens.length) sawTextLayer = true;
     if(!tokens.length) continue;
-    let box = findTextMatchInTokens(tokens, normalized);
+    let box = findTextMatchInTokens(tokens, normalized, { mode: matchMode });
     let matchSource = box ? 'tokens' : null;
     if(!box){
       box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
@@ -11049,20 +11164,35 @@ async function findTextInDocument(query){
     }
     if(box){
       box.page = box.page || page;
-      return { box, page, matchSource, tokens: tokens.length };
+      return {
+        box,
+        page,
+        matchSource,
+        tokens: tokens.length,
+        tokenSource: 'pdfjs',
+        hasTextLayer: true
+      };
     }
   }
-  return null;
+  return {
+    box: null,
+    page: null,
+    matchSource: null,
+    tokens: 0,
+    tokenSource: 'pdfjs',
+    hasTextLayer: sawTextLayer
+  };
 }
 
-async function findTextInDocumentWithTesseract(query){
+async function findTextInDocumentWithTesseract(query, options = {}){
+  const { matchMode = 'first' } = options || {};
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const totalPages = state.numPages || 1;
   for(let page=1; page<=totalPages; page++){
     const tokens = await ensureTesseractTokensForPage(page);
     if(!tokens.length) continue;
-    let box = findTextMatchInTokens(tokens, normalized);
+    let box = findTextMatchInTokens(tokens, normalized, { mode: matchMode });
     let matchSource = box ? 'tokens' : null;
     if(!box){
       box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
@@ -11074,10 +11204,24 @@ async function findTextInDocumentWithTesseract(query){
     }
     if(box){
       box.page = box.page || page;
-      return { box, page, matchSource, tokens: tokens.length };
+      return {
+        box,
+        page,
+        matchSource,
+        tokens: tokens.length,
+        tokenSource: 'tesseract',
+        hasTextLayer: true
+      };
     }
   }
-  return null;
+  return {
+    box: null,
+    page: null,
+    matchSource: null,
+    tokens: 0,
+    tokenSource: 'tesseract',
+    hasTextLayer: true
+  };
 }
 
 function setFindTextStatus(message = '', tone = 'muted'){
@@ -11185,10 +11329,13 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
   const boxesPx = [];
   const debugEntries = [];
   const matches = Array.isArray(matchBoxes) ? matchBoxes : [];
+  const keywordFilter = getFindTextConstellationKeywordFilter();
   for(const matchBox of matches){
     if(!isRenderableFindTextBox(matchBox)) continue;
     const normBox = normalizeBox(matchBox, pageW, pageH);
-    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, tokens, {});
+    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, tokens, {
+      keywordFilter
+    });
     if(!constellation) continue;
     const match = KeywordConstellation.matchConstellation(constellation, tokens, {
       page,
@@ -11200,7 +11347,7 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
     if(!best) continue;
     const anchorToken = best.anchor || null;
     const supportTokens = (best.supportMatches || []).map(entry => entry?.token).filter(Boolean);
-    const allTokens = [anchorToken, ...supportTokens].filter(Boolean);
+    const allTokens = [anchorToken, ...supportTokens].filter(Boolean).filter(isFindTextConstellationKeyword);
     allTokens.forEach(token => {
       const candidate = {
         x: token.x,
@@ -11244,6 +11391,16 @@ function toFindTextConstellationCss(boxesPx, options = {}){
   }).filter(isRenderableFindTextBox);
 }
 
+async function getFindTextConstellationTokens(tokenSource, page){
+  if(tokenSource === 'tesseract-bbox'){
+    return ensureTesseractTokensForPageWithBBox(page);
+  }
+  if(tokenSource === 'tesseract'){
+    return ensureTesseractTokensForPage(page);
+  }
+  return ensureTokensForPage(page);
+}
+
 async function updateFindTextConstellations(){
   clearFindTextConstellations();
   if(!els.findTextConstellationsToggle?.checked){
@@ -11254,7 +11411,7 @@ async function updateFindTextConstellations(){
   const results = state.findTextResults || {};
   if(results.pdf?.boxes?.length){
     const page = results.pdf.page || 1;
-    const tokens = await ensureTokensForPage(page);
+    const tokens = await getFindTextConstellationTokens(results.pdf.tokenSource || 'pdfjs', page);
     const vp = state.pageViewports[page - 1] || state.viewport || {};
     const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
     const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
@@ -11268,7 +11425,7 @@ async function updateFindTextConstellations(){
   }
   if(results.tess?.boxes?.length){
     const page = results.tess.page || 1;
-    const tokens = await ensureTesseractTokensForPageWithBBox(page);
+    const tokens = await getFindTextConstellationTokens(results.tess.tokenSource || 'tesseract', page);
     const vp = state.pageViewports[page - 1] || state.viewport || {};
     const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
     const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
@@ -14035,6 +14192,7 @@ async function handleFindTextSearch(){
   const usePdf = els.findTextPdfToggle ? els.findTextPdfToggle.checked : true;
   const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
   const findAll = els.findTextAllToggle ? els.findTextAllToggle.checked : false;
+  const matchMode = els.findTextBestToggle?.checked ? 'best' : 'first';
   if(!usePdf && !useTess){
     setFindTextStatus('Select PDF.js and/or Tesseract to search.', 'error');
     return;
@@ -14063,16 +14221,20 @@ async function handleFindTextSearch(){
         state.findTextDebug.pdf = { boxesPx: pdfResult.boxes, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
         statusBits.push(`PDF.js: ${count} match${count === 1 ? '' : 'es'} (page ${pdfResult.page})`);
       } else {
-        statusBits.push('PDF.js: no match');
+        const noTextLayer = pdfResult?.hasTextLayer === false;
+        statusBits.push(`PDF.js: ${noTextLayer ? 'no text layer' : 'no match'}`);
+        state.findTextDebug.pdf = { boxesPx: [], matchSource: pdfResult?.matchSource || null, tokens: pdfResult?.tokens || 0 };
       }
     } else {
-      pdfResult = await findTextInDocument(query);
-      if(pdfResult){
+      pdfResult = await findTextInDocument(query, { matchMode });
+      if(pdfResult?.box){
         applyFindTextHighlight(pdfResult.box);
         state.findTextDebug.pdf = { boxPx: pdfResult.box, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
         statusBits.push(`PDF.js: page ${pdfResult.page}`);
       } else {
-        statusBits.push('PDF.js: no match');
+        const noTextLayer = pdfResult?.hasTextLayer === false;
+        statusBits.push(`PDF.js: ${noTextLayer ? 'no text layer' : 'no match'}`);
+        state.findTextDebug.pdf = { boxPx: null, matchSource: pdfResult?.matchSource || null, tokens: pdfResult?.tokens || 0 };
       }
     }
   }
@@ -14086,20 +14248,24 @@ async function handleFindTextSearch(){
         statusBits.push(`Tesseract: ${count} match${count === 1 ? '' : 'es'} (page ${tessResult.page})`);
       } else {
         statusBits.push('Tesseract: no match');
+        state.findTextDebug.tess = { boxesPx: [], matchSource: tessResult?.matchSource || null, tokens: tessResult?.tokens || 0 };
       }
     } else {
-      tessResult = await findTextInDocumentWithTesseract(query);
-      if(tessResult){
+      tessResult = await findTextInDocumentWithTesseract(query, { matchMode });
+      if(tessResult?.box){
         applyTesseractFindTextHighlight(tessResult.box);
         state.findTextDebug.tess = { boxPx: tessResult.box, matchSource: tessResult.matchSource, tokens: tessResult.tokens };
         statusBits.push(`Tesseract: page ${tessResult.page}`);
       } else {
         statusBits.push('Tesseract: no match');
+        state.findTextDebug.tess = { boxPx: null, matchSource: tessResult?.matchSource || null, tokens: tessResult?.tokens || 0 };
       }
     }
   }
-  const result = pdfResult || tessResult;
-  const hasMatches = findAll ? ((pdfResult?.boxes?.length || 0) + (tessResult?.boxes?.length || 0) > 0) : !!result;
+  const pdfHasMatch = findAll ? (pdfResult?.boxes?.length || 0) > 0 : !!pdfResult?.box;
+  const tessHasMatch = findAll ? (tessResult?.boxes?.length || 0) > 0 : !!tessResult?.box;
+  const hasMatches = pdfHasMatch || tessHasMatch;
+  const activeResult = (pdfHasMatch ? pdfResult : null) || (tessHasMatch ? tessResult : null);
   if(!hasMatches){
     setFindTextStatus(`No match found for "${query}". ${statusBits.join(' · ')}`, 'error');
     drawOverlay();
@@ -14107,14 +14273,15 @@ async function handleFindTextSearch(){
     return;
   }
   state.findTextResults = {
-    pdf: pdfResult
-      ? { page: pdfResult.page || 1, boxes: findAll ? (pdfResult.boxes || []) : [pdfResult.box] }
+    pdf: pdfHasMatch
+      ? { page: pdfResult.page || 1, boxes: findAll ? (pdfResult.boxes || []) : [pdfResult.box], tokenSource: pdfResult.tokenSource || 'pdfjs' }
       : null,
-    tess: tessResult
-      ? { page: tessResult.page || 1, boxes: findAll ? (tessResult.boxes || []) : [tessResult.box] }
+    tess: tessHasMatch
+      ? { page: tessResult.page || 1, boxes: findAll ? (tessResult.boxes || []) : [tessResult.box], tokenSource: tessResult.tokenSource || 'tesseract' }
       : null
   };
-  const { page } = result;
+  state.findTextActiveSources = { pdf: pdfHasMatch, tess: tessHasMatch };
+  const { page } = activeResult;
   state.pageNum = page;
   state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
   updatePageIndicator();
@@ -14210,14 +14377,15 @@ function isRenderableFindTextBox(box){
   return !!(box && Number.isFinite(box.w) && Number.isFinite(box.h) && box.w > 0 && box.h > 0);
 }
 
-async function findTextInDocumentWithTesseractBBoxFix(query){
+async function findTextInDocumentWithTesseractBBoxFix(query, options = {}){
+  const { matchMode = 'first' } = options || {};
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const totalPages = state.numPages || 1;
   for(let page=1; page<=totalPages; page++){
     const tokens = await ensureTesseractTokensForPageWithBBox(page);
     if(!tokens.length) continue;
-    let box = findTextMatchInTokens(tokens, normalized);
+    let box = findTextMatchInTokens(tokens, normalized, { mode: matchMode });
     let matchSource = box ? 'tokens' : null;
     if(!box){
       box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
@@ -14229,7 +14397,14 @@ async function findTextInDocumentWithTesseractBBoxFix(query){
     }
     if(box){
       box.page = box.page || page;
-      return { box, page, matchSource, tokens: tokens.length };
+      return {
+        box,
+        page,
+        matchSource,
+        tokens: tokens.length,
+        tokenSource: 'tesseract-bbox',
+        hasTextLayer: true
+      };
     }
   }
   return null;
@@ -14248,14 +14423,22 @@ async function applyTesseractBBoxFixForFindText(query){
   const normalized = normalizeFindTextInput(query);
   if(!normalized || !state.currentFileId) return;
   if(els.findTextAllToggle?.checked) return;
+  const matchMode = els.findTextBestToggle?.checked ? 'best' : 'first';
   await waitForFindTextSearchToSettle(normalized);
   const existingBox = state.findTextDebug?.tess?.boxPx;
   const existingBoxes = state.findTextDebug?.tess?.boxesPx || [];
   if(isRenderableFindTextBox(existingBox) || existingBoxes.some(isRenderableFindTextBox)) return;
-  const result = await findTextInDocumentWithTesseractBBoxFix(normalized);
+  const result = await findTextInDocumentWithTesseractBBoxFix(normalized, { matchMode });
   if(result && isRenderableFindTextBox(result.box)){
     applyTesseractFindTextHighlight(result.box);
     state.findTextDebug.tess = { boxPx: result.box, matchSource: `${result.matchSource || 'tokens'}-bboxfix`, tokens: result.tokens };
+    state.findTextResults = {
+      ...(state.findTextResults || {}),
+      tess: { page: result.page || 1, boxes: [result.box], tokenSource: result.tokenSource || 'tesseract-bbox' }
+    };
+    state.findTextActiveSources = { ...(state.findTextActiveSources || {}), tess: true };
+    await updateFindTextConstellations();
+    patchFindTextStatusForTesseract(normalized, result.page);
     renderFindTextDebug();
   }
 }
