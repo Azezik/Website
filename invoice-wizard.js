@@ -3910,6 +3910,12 @@ function getFindTextConstellationKeywordFilter(){
   return filter;
 }
 
+function isFindTextConstellationKeyword(token){
+  const normalized = normalizeKeywordText(token?.text || token?.raw || '');
+  if(!normalized) return false;
+  return getFindTextConstellationKeywordFilter().has(normalized);
+}
+
 function editDistance(a,b){
   const dp = Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
   for(let i=0;i<=a.length;i++) dp[i][0]=i;
@@ -11341,7 +11347,7 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
     if(!best) continue;
     const anchorToken = best.anchor || null;
     const supportTokens = (best.supportMatches || []).map(entry => entry?.token).filter(Boolean);
-    const allTokens = [anchorToken, ...supportTokens].filter(Boolean);
+    const allTokens = [anchorToken, ...supportTokens].filter(Boolean).filter(isFindTextConstellationKeyword);
     allTokens.forEach(token => {
       const candidate = {
         x: token.x,
