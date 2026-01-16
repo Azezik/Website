@@ -140,6 +140,7 @@ const els = {
   findTextStatus:  document.getElementById('find-text-status'),
   findTextPdfToggle: document.getElementById('find-text-pdf-toggle'),
   findTextTessToggle: document.getElementById('find-text-tess-toggle'),
+  findTextAllToggle: document.getElementById('find-text-all-toggle'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
   extractedData:   document.getElementById('extracted-data'),
@@ -461,6 +462,10 @@ let state = {
   selectionPx: null,         // current user-drawn selection (px, page-relative)
   findTextTessSelectionCss: null, // tesseract highlight (CSS units, page-relative)
   findTextTessSelectionPx: null,  // tesseract highlight (px, page-relative)
+  findTextPdfSelectionsCss: [],
+  findTextPdfSelectionsPx: [],
+  findTextTessSelectionsCss: [],
+  findTextTessSelectionsPx: [],
   findTextDebug: {
     pdf: null,
     tess: null,
@@ -825,6 +830,8 @@ function clearTransientStateLocal(){
   state.stepIdx = 0; state.steps = [];
   state.selectionCss = null; state.selectionPx = null;
   state.findTextTessSelectionCss = null; state.findTextTessSelectionPx = null;
+  state.findTextPdfSelectionsCss = []; state.findTextPdfSelectionsPx = [];
+  state.findTextTessSelectionsCss = []; state.findTextTessSelectionsPx = [];
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
   state.wizardComplete = false;
   state.areaSelections = {};
@@ -9936,6 +9943,8 @@ function cleanupDoc(){
   clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
   state.findTextTessSelectionPx = null; state.findTextTessSelectionCss = null;
+  state.findTextPdfSelectionsPx = []; state.findTextPdfSelectionsCss = [];
+  state.findTextTessSelectionsPx = []; state.findTextTessSelectionsCss = [];
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
 
@@ -10958,6 +10967,59 @@ function findTextMatchInTokens(tokens, query){
   return null;
 }
 
+function findTextMatchesInTokens(tokens, query){
+  const normalized = normalizeFindTextInput(query).toLowerCase();
+  if(!normalized) return [];
+  const parts = normalized.split(' ').filter(Boolean);
+  if(!parts.length) return [];
+  const lines = groupIntoLines(tokens);
+  const matches = [];
+  for(const line of lines){
+    const lineTokens = line.tokens || [];
+    if(!lineTokens.length) continue;
+    const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
+    for(let i=0; i<=tokenTexts.length - parts.length; i++){
+      let ok = true;
+      for(let j=0; j<parts.length; j++){
+        const candidate = tokenTexts[i+j] || '';
+        if(!candidate.includes(parts[j])){
+          ok = false;
+          break;
+        }
+      }
+      if(ok){
+        matches.push(bboxOfTokens(lineTokens.slice(i, i + parts.length)));
+      }
+    }
+  }
+  return matches;
+}
+
+async function findTextOnPageAllOccurrences(query, options = {}){
+  const { useTesseract = false } = options;
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized) return null;
+  const page = state.pageNum || 1;
+  const tokens = useTesseract ? await ensureTesseractTokensForPage(page) : await ensureTokensForPage(page);
+  if(!tokens.length) return { boxes: [], page, matchSource: null, tokens: 0 };
+  let boxes = findTextMatchesInTokens(tokens, normalized);
+  let matchSource = boxes.length ? 'tokens' : null;
+  if(!boxes.length){
+    let box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
+    matchSource = box ? 'landmark-exact' : matchSource;
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'fuzzy', threshold: 0.86 }, state.pageViewports[page-1] || state.viewport);
+      matchSource = box ? 'landmark-fuzzy' : matchSource;
+    }
+    if(box){
+      box.page = box.page || page;
+      boxes = [box];
+    }
+  }
+  boxes = boxes.filter(isRenderableFindTextBox);
+  return { boxes, page, matchSource, tokens: tokens.length };
+}
+
 async function findTextInDocument(query){
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
@@ -11022,6 +11084,8 @@ function applyFindTextHighlight(boxPx){
   state.snappedPx = null;
   state.snappedText = '';
   state.snappedLineMetrics = null;
+  state.findTextPdfSelectionsPx = [];
+  state.findTextPdfSelectionsCss = [];
   state.selectionCss = {
     x: boxPx.x / scaleX,
     y: boxPx.y / scaleY,
@@ -11032,6 +11096,25 @@ function applyFindTextHighlight(boxPx){
   drawOverlay();
 }
 
+function applyFindTextHighlights(boxesPx){
+  if(!boxesPx || !boxesPx.length) return;
+  const { scaleX, scaleY } = getScaleFactors();
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.snappedPx = null;
+  state.snappedText = '';
+  state.snappedLineMetrics = null;
+  state.findTextPdfSelectionsPx = boxesPx.slice();
+  state.findTextPdfSelectionsCss = boxesPx.map(boxPx => ({
+    x: boxPx.x / scaleX,
+    y: boxPx.y / scaleY,
+    w: boxPx.w / scaleX,
+    h: boxPx.h / scaleY,
+    page: boxPx.page
+  }));
+  drawOverlay();
+}
+
 function applyTesseractFindTextHighlight(boxPx){
   if(!boxPx) return;
   const { scaleX, scaleY } = getScaleFactors();
@@ -11039,6 +11122,8 @@ function applyTesseractFindTextHighlight(boxPx){
   const pageOffset = state.pageOffsets?.[page - 1] || 0;
   const adjustedPx = { ...boxPx, y: (boxPx.y || 0) - pageOffset, page };
   state.findTextTessSelectionPx = adjustedPx;
+  state.findTextTessSelectionsPx = [];
+  state.findTextTessSelectionsCss = [];
   state.findTextTessSelectionCss = {
     x: adjustedPx.x / scaleX,
     y: adjustedPx.y / scaleY,
@@ -11046,6 +11131,27 @@ function applyTesseractFindTextHighlight(boxPx){
     h: adjustedPx.h / scaleY,
     page: adjustedPx.page
   };
+  drawOverlay();
+}
+
+function applyTesseractFindTextHighlights(boxesPx){
+  if(!boxesPx || !boxesPx.length) return;
+  const { scaleX, scaleY } = getScaleFactors();
+  const adjusted = boxesPx.map(boxPx => {
+    const page = boxPx.page || 1;
+    const pageOffset = state.pageOffsets?.[page - 1] || 0;
+    return { ...boxPx, y: (boxPx.y || 0) - pageOffset, page };
+  });
+  state.findTextTessSelectionPx = null;
+  state.findTextTessSelectionCss = null;
+  state.findTextTessSelectionsPx = adjusted;
+  state.findTextTessSelectionsCss = adjusted.map(boxPx => ({
+    x: boxPx.x / scaleX,
+    y: boxPx.y / scaleY,
+    w: boxPx.w / scaleX,
+    h: boxPx.h / scaleY,
+    page: boxPx.page
+  }));
   drawOverlay();
 }
 
@@ -11082,6 +11188,18 @@ function renderFindTextDebug(){
     formatFindTextBoxDebug('PDF.js box', state.findTextDebug?.pdf?.boxPx, state.pageOffsets, false),
     formatFindTextBoxDebug('Tesseract box', state.findTextDebug?.tess?.boxPx, state.pageOffsets, true)
   ];
+  if(state.findTextDebug?.pdf?.boxesPx?.length){
+    lines.push(`PDF.js boxes: ${state.findTextDebug.pdf.boxesPx.length}`);
+    state.findTextDebug.pdf.boxesPx.forEach((box, idx) => {
+      lines.push(formatFindTextBoxDebug(`PDF.js box ${idx + 1}`, box, state.pageOffsets, false));
+    });
+  }
+  if(state.findTextDebug?.tess?.boxesPx?.length){
+    lines.push(`Tesseract boxes: ${state.findTextDebug.tess.boxesPx.length}`);
+    state.findTextDebug.tess.boxesPx.forEach((box, idx) => {
+      lines.push(formatFindTextBoxDebug(`Tesseract box ${idx + 1}`, box, state.pageOffsets, true));
+    });
+  }
   if(state.findTextDebug?.pdf?.matchSource){
     lines.push(`PDF.js match source: ${state.findTextDebug.pdf.matchSource}`);
   }
@@ -11603,10 +11721,26 @@ function paintOverlay(ctx, options = {}){
   }
 
   if(!includeSelections) return;
+  if(state.findTextPdfSelectionsCss && state.findTextPdfSelectionsCss.length){
+    ctx.strokeStyle = '#2ee6a6'; ctx.lineWidth = 1.5;
+    for(const b of state.findTextPdfSelectionsCss){
+      if(pageFilter && b.page !== pageFilter) continue;
+      const off = offsetForPage(b.page);
+      ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+    }
+  }
   if(state.selectionCss && (!pageFilter || state.selectionCss.page === pageFilter)){
     ctx.strokeStyle = '#2ee6a6'; ctx.lineWidth = 1.5;
     const b = state.selectionCss; const off = offsetForPage(b.page);
     ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+  }
+  if(state.findTextTessSelectionsCss && state.findTextTessSelectionsCss.length){
+    ctx.strokeStyle = '#e34c4c'; ctx.lineWidth = 1.5;
+    for(const b of state.findTextTessSelectionsCss){
+      if(pageFilter && b.page !== pageFilter) continue;
+      const off = offsetForPage(b.page);
+      ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+    }
   }
   if(state.findTextTessSelectionCss && (!pageFilter || state.findTextTessSelectionCss.page === pageFilter)){
     ctx.strokeStyle = '#e34c4c'; ctx.lineWidth = 1.5;
@@ -13707,6 +13841,10 @@ async function handleFindTextFileChange(e){
   state.selectionCss = null;
   state.findTextTessSelectionPx = null;
   state.findTextTessSelectionCss = null;
+  state.findTextPdfSelectionsPx = [];
+  state.findTextPdfSelectionsCss = [];
+  state.findTextTessSelectionsPx = [];
+  state.findTextTessSelectionsCss = [];
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
   setFindTextStatus('Loading document...');
@@ -13733,6 +13871,7 @@ async function handleFindTextSearch(){
   }
   const usePdf = els.findTextPdfToggle ? els.findTextPdfToggle.checked : true;
   const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
+  const findAll = els.findTextAllToggle ? els.findTextAllToggle.checked : false;
   if(!usePdf && !useTess){
     setFindTextStatus('Select PDF.js and/or Tesseract to search.', 'error');
     return;
@@ -13742,32 +13881,61 @@ async function handleFindTextSearch(){
   state.selectionCss = null;
   state.findTextTessSelectionPx = null;
   state.findTextTessSelectionCss = null;
+  state.findTextPdfSelectionsPx = [];
+  state.findTextPdfSelectionsCss = [];
+  state.findTextTessSelectionsPx = [];
+  state.findTextTessSelectionsCss = [];
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   let pdfResult = null;
   let tessResult = null;
   const statusBits = [];
   if(usePdf){
-    pdfResult = await findTextInDocument(query);
-    if(pdfResult){
-      applyFindTextHighlight(pdfResult.box);
-      state.findTextDebug.pdf = { boxPx: pdfResult.box, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
-      statusBits.push(`PDF.js: page ${pdfResult.page}`);
+    if(findAll){
+      pdfResult = await findTextOnPageAllOccurrences(query, { useTesseract: false });
+      const count = pdfResult?.boxes?.length || 0;
+      if(count){
+        applyFindTextHighlights(pdfResult.boxes);
+        state.findTextDebug.pdf = { boxesPx: pdfResult.boxes, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
+        statusBits.push(`PDF.js: ${count} match${count === 1 ? '' : 'es'} (page ${pdfResult.page})`);
+      } else {
+        statusBits.push('PDF.js: no match');
+      }
     } else {
-      statusBits.push('PDF.js: no match');
+      pdfResult = await findTextInDocument(query);
+      if(pdfResult){
+        applyFindTextHighlight(pdfResult.box);
+        state.findTextDebug.pdf = { boxPx: pdfResult.box, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
+        statusBits.push(`PDF.js: page ${pdfResult.page}`);
+      } else {
+        statusBits.push('PDF.js: no match');
+      }
     }
   }
   if(useTess){
-    tessResult = await findTextInDocumentWithTesseract(query);
-    if(tessResult){
-      applyTesseractFindTextHighlight(tessResult.box);
-      state.findTextDebug.tess = { boxPx: tessResult.box, matchSource: tessResult.matchSource, tokens: tessResult.tokens };
-      statusBits.push(`Tesseract: page ${tessResult.page}`);
+    if(findAll){
+      tessResult = await findTextOnPageAllOccurrences(query, { useTesseract: true });
+      const count = tessResult?.boxes?.length || 0;
+      if(count){
+        applyTesseractFindTextHighlights(tessResult.boxes);
+        state.findTextDebug.tess = { boxesPx: tessResult.boxes, matchSource: tessResult.matchSource, tokens: tessResult.tokens };
+        statusBits.push(`Tesseract: ${count} match${count === 1 ? '' : 'es'} (page ${tessResult.page})`);
+      } else {
+        statusBits.push('Tesseract: no match');
+      }
     } else {
-      statusBits.push('Tesseract: no match');
+      tessResult = await findTextInDocumentWithTesseract(query);
+      if(tessResult){
+        applyTesseractFindTextHighlight(tessResult.box);
+        state.findTextDebug.tess = { boxPx: tessResult.box, matchSource: tessResult.matchSource, tokens: tessResult.tokens };
+        statusBits.push(`Tesseract: page ${tessResult.page}`);
+      } else {
+        statusBits.push('Tesseract: no match');
+      }
     }
   }
   const result = pdfResult || tessResult;
-  if(!result){
+  const hasMatches = findAll ? ((pdfResult?.boxes?.length || 0) + (tessResult?.boxes?.length || 0) > 0) : !!result;
+  if(!hasMatches){
     setFindTextStatus(`No match found for "${query}". ${statusBits.join(' · ')}`, 'error');
     drawOverlay();
     renderFindTextDebug();
@@ -13902,9 +14070,11 @@ async function waitForFindTextSearchToSettle(query){
 async function applyTesseractBBoxFixForFindText(query){
   const normalized = normalizeFindTextInput(query);
   if(!normalized || !state.currentFileId) return;
+  if(els.findTextAllToggle?.checked) return;
   await waitForFindTextSearchToSettle(normalized);
   const existingBox = state.findTextDebug?.tess?.boxPx;
-  if(isRenderableFindTextBox(existingBox)) return;
+  const existingBoxes = state.findTextDebug?.tess?.boxesPx || [];
+  if(isRenderableFindTextBox(existingBox) || existingBoxes.some(isRenderableFindTextBox)) return;
   const result = await findTextInDocumentWithTesseractBBoxFix(normalized);
   if(result && isRenderableFindTextBox(result.box)){
     applyTesseractFindTextHighlight(result.box);
@@ -14011,9 +14181,11 @@ function patchFindTextStatusForTesseract(query, page){
 async function applyTesseractAlphaFixForFindText(query){
   const normalized = normalizeFindTextInput(query);
   if(!normalized || !state.currentFileId || !/[A-Za-z]/.test(normalized)) return;
+  if(els.findTextAllToggle?.checked) return;
   await waitForFindTextSearchToSettle(normalized);
   const existingBox = state.findTextDebug?.tess?.boxPx;
-  if(isRenderableFindTextBox(existingBox)) return;
+  const existingBoxes = state.findTextDebug?.tess?.boxesPx || [];
+  if(isRenderableFindTextBox(existingBox) || existingBoxes.some(isRenderableFindTextBox)) return;
   const result = await findTextInDocumentWithTesseractAlphaFix(normalized);
   if(result && isRenderableFindTextBox(result.box)){
     applyTesseractFindTextHighlight(result.box);
