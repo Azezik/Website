@@ -61,6 +61,7 @@
     <section id="app" class="grid" style="display:none">
       <nav class="subtabs" id="dashTabs">
         <button class="tablink active" data-target="document-dashboard">Doc Dashboard</button>
+        <button class="tablink" data-target="find-text">Find Text</button>
         <button class="tablink" data-target="wizard-manager">Wizard Manager</button>
         <button class="tablink" data-target="preconfigured-wizards">Pre-configured Wizards</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
@@ -81,6 +82,23 @@
 
         <div id="dropzone" class="dropzone">Drag and Drop</div>
         <input id="file-input" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+      </section>
+
+      <section id="find-text" class="panel" style="display:none;">
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Find Text</h3>
+          <label class="btn ghost">
+            Upload Document
+            <input id="find-text-file" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+          </label>
+        </div>
+        <div class="field inline" style="margin-top:12px;">
+          <label for="find-text-input">Find text</label>
+          <input id="find-text-input" placeholder="Enter a word or phrase" />
+          <button id="find-text-btn" class="btn primary" type="button">Ok</button>
+        </div>
+        <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
+        <div id="find-text-viewer-slot" class="viewer-slot"></div>
       </section>
 
       <section id="wizard-manager" class="panel" style="display:none;">

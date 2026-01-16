@@ -133,6 +133,12 @@ const els = {
   wizardExportCounter: document.getElementById('wizard-export-counter'),
   wizardExportCancelBtn: document.getElementById('wizard-export-cancel'),
   wizardExportConfirmBtn: document.getElementById('wizard-export-confirm'),
+  findTextPanel:   document.getElementById('find-text'),
+  findTextFile:    document.getElementById('find-text-file'),
+  findTextInput:   document.getElementById('find-text-input'),
+  findTextBtn:     document.getElementById('find-text-btn'),
+  findTextStatus:  document.getElementById('find-text-status'),
+  findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
@@ -352,7 +358,7 @@ const BOTTOM_ANCHOR_FIELD_KEYS = new Set([
 ]);
 
 function showTab(id){
-  const sections = [els.docDashboard, els.extractedData, els.reports];
+  const sections = [els.docDashboard, els.extractedData, els.reports, els.findTextPanel];
   if(isSkinV2 && els.wizardManager){
     sections.push(els.wizardManager);
   }
@@ -378,6 +384,35 @@ function showTab(id){
     syncExtractedWizardSelector();
     renderResultsTable();
     renderReports();
+  }
+  handleFindTextTab(id);
+}
+
+const viewerHome = {
+  parent: els.viewer?.parentElement || null,
+  nextSibling: els.viewer?.nextSibling || null
+};
+
+function moveViewerToHost(host){
+  if(!els.viewer || !host) return;
+  if(els.viewer.parentElement !== host){
+    host.appendChild(els.viewer);
+  }
+}
+
+function restoreViewerHome(){
+  if(!viewerHome.parent || !els.viewer) return;
+  if(els.viewer.parentElement !== viewerHome.parent){
+    viewerHome.parent.insertBefore(els.viewer, viewerHome.nextSibling);
+  }
+}
+
+function handleFindTextTab(activeId){
+  if(activeId === 'find-text'){
+    moveViewerToHost(els.findTextViewerSlot);
+    if(els.wizardSection) els.wizardSection.style.display = 'none';
+  } else {
+    restoreViewerHome();
   }
 }
 
@@ -10870,6 +10905,83 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   return tokens;
 }
 
+function normalizeFindTextInput(text){
+  return String(text || '').trim().replace(/\s+/g, ' ');
+}
+
+function findTextMatchInTokens(tokens, query){
+  const normalized = normalizeFindTextInput(query).toLowerCase();
+  if(!normalized) return null;
+  const parts = normalized.split(' ').filter(Boolean);
+  if(!parts.length) return null;
+  const lines = groupIntoLines(tokens);
+  for(const line of lines){
+    const lineTokens = line.tokens || [];
+    if(!lineTokens.length) continue;
+    const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
+    for(let i=0; i<=tokenTexts.length - parts.length; i++){
+      let ok = true;
+      for(let j=0; j<parts.length; j++){
+        const candidate = tokenTexts[i+j] || '';
+        if(!candidate.includes(parts[j])){
+          ok = false;
+          break;
+        }
+      }
+      if(ok){
+        return bboxOfTokens(lineTokens.slice(i, i + parts.length));
+      }
+    }
+  }
+  return null;
+}
+
+async function findTextInDocument(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized) return null;
+  const totalPages = state.numPages || 1;
+  for(let page=1; page<=totalPages; page++){
+    const tokens = await ensureTokensForPage(page);
+    if(!tokens.length) continue;
+    let box = findTextMatchInTokens(tokens, normalized);
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
+    }
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'fuzzy', threshold: 0.86 }, state.pageViewports[page-1] || state.viewport);
+    }
+    if(box){
+      box.page = box.page || page;
+      return { box, page };
+    }
+  }
+  return null;
+}
+
+function setFindTextStatus(message = '', tone = 'muted'){
+  if(!els.findTextStatus) return;
+  els.findTextStatus.textContent = message;
+  const color = tone === 'error' ? '#a75a2a' : 'var(--muted)';
+  els.findTextStatus.style.color = color;
+}
+
+function applyFindTextHighlight(boxPx){
+  if(!boxPx) return;
+  const { scaleX, scaleY } = getScaleFactors();
+  state.selectionPx = boxPx;
+  state.snappedPx = null;
+  state.snappedText = '';
+  state.snappedLineMetrics = null;
+  state.selectionCss = {
+    x: boxPx.x / scaleX,
+    y: boxPx.y / scaleY,
+    w: boxPx.w / scaleX,
+    h: boxPx.h / scaleY,
+    page: boxPx.page
+  };
+  drawOverlay();
+}
+
 function areaConfigsForPage(){
   if(!state.profile || !Array.isArray(state.profile.fields)) return [];
   return state.profile.fields.filter(f => f && (f.isArea || f.fieldType === 'areabox') && f.areaFingerprint);
@@ -13466,6 +13578,59 @@ if(modelSelect){
     }
   });
 }
+
+async function handleFindTextFileChange(e){
+  const f = e.target.files?.[0];
+  if(!f) return;
+  moveViewerToHost(els.findTextViewerSlot);
+  setFindTextStatus('Loading document...');
+  try{
+    await openFile(f);
+    setFindTextStatus('Document loaded. Enter text to highlight.');
+  } catch(err){
+    console.error('Find text load failed', err);
+    setFindTextStatus('Failed to load document. Try again.', 'error');
+  }
+}
+
+async function handleFindTextSearch(){
+  const query = normalizeFindTextInput(els.findTextInput?.value || '');
+  if(!query){
+    setFindTextStatus('Enter text to search.');
+    return;
+  }
+  if(!state.currentFileId){
+    setFindTextStatus('Upload a document first.', 'error');
+    return;
+  }
+  setFindTextStatus(`Searching for "${query}"...`);
+  state.selectionPx = null;
+  state.selectionCss = null;
+  const result = await findTextInDocument(query);
+  if(!result){
+    setFindTextStatus(`No match found for "${query}".`, 'error');
+    drawOverlay();
+    return;
+  }
+  const { box, page } = result;
+  state.pageNum = page;
+  state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
+  updatePageIndicator();
+  if(els.viewer && state.pageOffsets?.length){
+    els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
+  }
+  applyFindTextHighlight(box);
+  setFindTextStatus(`Found "${query}" on page ${page}.`);
+}
+
+els.findTextFile?.addEventListener('change', handleFindTextFileChange);
+els.findTextBtn?.addEventListener('click', handleFindTextSearch);
+els.findTextInput?.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){
+    e.preventDefault();
+    handleFindTextSearch();
+  }
+});
 
 // Batch dropzone (dashboard)
 // ===== File normalization for drag/drop and input =====
