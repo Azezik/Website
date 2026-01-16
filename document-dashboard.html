@@ -97,6 +97,16 @@
           <input id="find-text-input" placeholder="Enter a word or phrase" />
           <button id="find-text-btn" class="btn primary" type="button">Ok</button>
         </div>
+        <div class="actions" style="gap:16px;flex-wrap:wrap;margin:8px 0 12px;">
+          <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="find-text-pdf-toggle" checked />
+            Use PDF.js
+          </label>
+          <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="find-text-tess-toggle" />
+            Use Tesseract
+          </label>
+        </div>
         <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
         <div id="find-text-viewer-slot" class="viewer-slot"></div>
       </section>

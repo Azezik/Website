@@ -138,6 +138,8 @@ const els = {
   findTextInput:   document.getElementById('find-text-input'),
   findTextBtn:     document.getElementById('find-text-btn'),
   findTextStatus:  document.getElementById('find-text-status'),
+  findTextPdfToggle: document.getElementById('find-text-pdf-toggle'),
+  findTextTessToggle: document.getElementById('find-text-tess-toggle'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
@@ -449,12 +451,15 @@ let state = {
   pageViewports: [],       // viewport per page
   pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: [],          // {page:number: Token[] in px}
+  tessTokensByPage: {},      // tesseract tokens per page
   keywordIndexByPage: {},   // per-page keyword bbox cache
   areaMatchesByPage: {},    // per-page detected area occurrences
   areaOccurrencesById: {},  // area occurrences keyed by areaId
   areaExtractions: {},      // resolved subordinate values keyed by areaId
   selectionCss: null,        // current user-drawn selection (CSS units, page-relative)
   selectionPx: null,         // current user-drawn selection (px, page-relative)
+  findTextTessSelectionCss: null, // tesseract highlight (CSS units, page-relative)
+  findTextTessSelectionPx: null,  // tesseract highlight (px, page-relative)
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
   snappedText: '',           // snapped line text
@@ -813,6 +818,7 @@ function clearTransientStateLocal(){
   if(modeHelpers?.clearTransientState) return modeHelpers.clearTransientState(state);
   state.stepIdx = 0; state.steps = [];
   state.selectionCss = null; state.selectionPx = null;
+  state.findTextTessSelectionCss = null; state.findTextTessSelectionPx = null;
   state.snappedCss = null; state.snappedPx = null; state.snappedText = '';
   state.wizardComplete = false;
   state.areaSelections = {};
@@ -828,7 +834,7 @@ function clearTransientStateLocal(){
   state.telemetry = []; state.currentTraceId = null;
   state.lastOcrCropPx = null; state.lastOcrCropCss = null;
   state.cropAudits = []; state.cropHashes = {};
-  state.tokensByPage = []; state.currentLineItems = [];
+  state.tokensByPage = []; state.tessTokensByPage = {}; state.currentLineItems = [];
   state.areaMatchesByPage = {}; state.areaOccurrencesById = {}; state.areaExtractions = {}; state.currentAreaRows = [];
   state.currentFileId = ''; state.currentFileName = '';
   state.lineLayout = null;
@@ -9914,6 +9920,7 @@ async function openFile(file){
 }
 function cleanupDoc(){
   state.tokensByPage = [];
+  state.tessTokensByPage = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -9922,6 +9929,7 @@ function cleanupDoc(){
   state.lineLayout = null;
   clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
+  state.findTextTessSelectionPx = null; state.findTextTessSelectionCss = null;
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
 
@@ -10905,6 +10913,14 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
   return tokens;
 }
 
+async function ensureTesseractTokensForPage(pageNum, canvasEl=null){
+  if(state.tessTokensByPage?.[pageNum]) return state.tessTokensByPage[pageNum];
+  const tokens = await readImageTokensForPage(pageNum, canvasEl);
+  if(!state.tessTokensByPage) state.tessTokensByPage = {};
+  state.tessTokensByPage[pageNum] = tokens;
+  return tokens;
+}
+
 function normalizeFindTextInput(text){
   return String(text || '').trim().replace(/\s+/g, ' ');
 }
@@ -10958,6 +10974,28 @@ async function findTextInDocument(query){
   return null;
 }
 
+async function findTextInDocumentWithTesseract(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized) return null;
+  const totalPages = state.numPages || 1;
+  for(let page=1; page<=totalPages; page++){
+    const tokens = await ensureTesseractTokensForPage(page);
+    if(!tokens.length) continue;
+    let box = findTextMatchInTokens(tokens, normalized);
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
+    }
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'fuzzy', threshold: 0.86 }, state.pageViewports[page-1] || state.viewport);
+    }
+    if(box){
+      box.page = box.page || page;
+      return { box, page };
+    }
+  }
+  return null;
+}
+
 function setFindTextStatus(message = '', tone = 'muted'){
   if(!els.findTextStatus) return;
   els.findTextStatus.textContent = message;
@@ -10973,6 +11011,20 @@ function applyFindTextHighlight(boxPx){
   state.snappedText = '';
   state.snappedLineMetrics = null;
   state.selectionCss = {
+    x: boxPx.x / scaleX,
+    y: boxPx.y / scaleY,
+    w: boxPx.w / scaleX,
+    h: boxPx.h / scaleY,
+    page: boxPx.page
+  };
+  drawOverlay();
+}
+
+function applyTesseractFindTextHighlight(boxPx){
+  if(!boxPx) return;
+  const { scaleX, scaleY } = getScaleFactors();
+  state.findTextTessSelectionPx = boxPx;
+  state.findTextTessSelectionCss = {
     x: boxPx.x / scaleX,
     y: boxPx.y / scaleY,
     w: boxPx.w / scaleX,
@@ -11491,6 +11543,11 @@ function paintOverlay(ctx, options = {}){
   if(state.selectionCss && (!pageFilter || state.selectionCss.page === pageFilter)){
     ctx.strokeStyle = '#2ee6a6'; ctx.lineWidth = 1.5;
     const b = state.selectionCss; const off = offsetForPage(b.page);
+    ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+  }
+  if(state.findTextTessSelectionCss && (!pageFilter || state.findTextTessSelectionCss.page === pageFilter)){
+    ctx.strokeStyle = '#e34c4c'; ctx.lineWidth = 1.5;
+    const b = state.findTextTessSelectionCss; const off = offsetForPage(b.page);
     ctx.strokeRect(b.x, b.y + off, b.w, b.h);
   }
   if(state.snappedCss && (!pageFilter || state.snappedCss.page === pageFilter)){
@@ -13583,6 +13640,10 @@ async function handleFindTextFileChange(e){
   const f = e.target.files?.[0];
   if(!f) return;
   moveViewerToHost(els.findTextViewerSlot);
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.findTextTessSelectionPx = null;
+  state.findTextTessSelectionCss = null;
   setFindTextStatus('Loading document...');
   try{
     await openFile(f);
@@ -13603,24 +13664,52 @@ async function handleFindTextSearch(){
     setFindTextStatus('Upload a document first.', 'error');
     return;
   }
+  const usePdf = els.findTextPdfToggle ? els.findTextPdfToggle.checked : true;
+  const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
+  if(!usePdf && !useTess){
+    setFindTextStatus('Select PDF.js and/or Tesseract to search.', 'error');
+    return;
+  }
   setFindTextStatus(`Searching for "${query}"...`);
   state.selectionPx = null;
   state.selectionCss = null;
-  const result = await findTextInDocument(query);
+  state.findTextTessSelectionPx = null;
+  state.findTextTessSelectionCss = null;
+  let pdfResult = null;
+  let tessResult = null;
+  const statusBits = [];
+  if(usePdf){
+    pdfResult = await findTextInDocument(query);
+    if(pdfResult){
+      applyFindTextHighlight(pdfResult.box);
+      statusBits.push(`PDF.js: page ${pdfResult.page}`);
+    } else {
+      statusBits.push('PDF.js: no match');
+    }
+  }
+  if(useTess){
+    tessResult = await findTextInDocumentWithTesseract(query);
+    if(tessResult){
+      applyTesseractFindTextHighlight(tessResult.box);
+      statusBits.push(`Tesseract: page ${tessResult.page}`);
+    } else {
+      statusBits.push('Tesseract: no match');
+    }
+  }
+  const result = pdfResult || tessResult;
   if(!result){
-    setFindTextStatus(`No match found for "${query}".`, 'error');
+    setFindTextStatus(`No match found for "${query}". ${statusBits.join(' · ')}`, 'error');
     drawOverlay();
     return;
   }
-  const { box, page } = result;
+  const { page } = result;
   state.pageNum = page;
   state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
   updatePageIndicator();
   if(els.viewer && state.pageOffsets?.length){
     els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
   }
-  applyFindTextHighlight(box);
-  setFindTextStatus(`Found "${query}" on page ${page}.`);
+  setFindTextStatus(`Found "${query}". ${statusBits.join(' · ')}`);
 }
 
 els.findTextFile?.addEventListener('change', handleFindTextFileChange);
