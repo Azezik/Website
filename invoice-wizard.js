@@ -10946,25 +10946,29 @@ function findTextMatchInTokens(tokens, query){
   const parts = normalized.split(' ').filter(Boolean);
   if(!parts.length) return null;
   const lines = groupIntoLines(tokens);
-  for(const line of lines){
-    const lineTokens = line.tokens || [];
-    if(!lineTokens.length) continue;
-    const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
-    for(let i=0; i<=tokenTexts.length - parts.length; i++){
-      let ok = true;
-      for(let j=0; j<parts.length; j++){
-        const candidate = tokenTexts[i+j] || '';
-        if(!candidate.includes(parts[j])){
-          ok = false;
-          break;
+  const findMatch = (matcher) => {
+    for(const line of lines){
+      const lineTokens = line.tokens || [];
+      if(!lineTokens.length) continue;
+      const tokenTexts = lineTokens.map(t => String(t.text || t.raw || '').toLowerCase());
+      for(let i=0; i<=tokenTexts.length - parts.length; i++){
+        let ok = true;
+        for(let j=0; j<parts.length; j++){
+          const candidate = tokenTexts[i+j] || '';
+          if(!matcher(candidate, parts[j])){
+            ok = false;
+            break;
+          }
+        }
+        if(ok){
+          return bboxOfTokens(lineTokens.slice(i, i + parts.length));
         }
       }
-      if(ok){
-        return bboxOfTokens(lineTokens.slice(i, i + parts.length));
-      }
     }
-  }
-  return null;
+    return null;
+  };
+  return findMatch((candidate, part) => candidate === part)
+    || findMatch((candidate, part) => candidate.includes(part));
 }
 
 function findTextMatchesInTokens(tokens, query){
@@ -11000,7 +11004,7 @@ async function findTextOnPageAllOccurrences(query, options = {}){
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const page = state.pageNum || 1;
-  const tokens = useTesseract ? await ensureTesseractTokensForPage(page) : await ensureTokensForPage(page);
+  const tokens = useTesseract ? await ensureTesseractTokensForPageWithBBox(page) : await ensureTokensForPage(page);
   if(!tokens.length) return { boxes: [], page, matchSource: null, tokens: 0 };
   let boxes = findTextMatchesInTokens(tokens, normalized);
   let matchSource = boxes.length ? 'tokens' : null;
