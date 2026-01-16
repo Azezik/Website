@@ -141,6 +141,7 @@ const els = {
   findTextPdfToggle: document.getElementById('find-text-pdf-toggle'),
   findTextTessToggle: document.getElementById('find-text-tess-toggle'),
   findTextAllToggle: document.getElementById('find-text-all-toggle'),
+  findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
   extractedData:   document.getElementById('extracted-data'),
@@ -466,6 +467,11 @@ let state = {
   findTextPdfSelectionsPx: [],
   findTextTessSelectionsCss: [],
   findTextTessSelectionsPx: [],
+  findTextPdfConstellationsCss: [],
+  findTextPdfConstellationsPx: [],
+  findTextTessConstellationsCss: [],
+  findTextTessConstellationsPx: [],
+  findTextResults: { pdf: null, tess: null },
   findTextDebug: {
     pdf: null,
     tess: null,
@@ -11159,6 +11165,125 @@ function applyTesseractFindTextHighlights(boxesPx){
   drawOverlay();
 }
 
+function clearFindTextConstellations(){
+  state.findTextPdfConstellationsPx = [];
+  state.findTextPdfConstellationsCss = [];
+  state.findTextTessConstellationsPx = [];
+  state.findTextTessConstellationsCss = [];
+  if(state.findTextDebug?.pdf){
+    state.findTextDebug.pdf.constellations = null;
+  }
+  if(state.findTextDebug?.tess){
+    state.findTextDebug.tess.constellations = null;
+  }
+}
+
+function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH){
+  if(!KeywordConstellation?.captureConstellation || !KeywordConstellation?.matchConstellation){
+    return { boxesPx: [], debugEntries: [] };
+  }
+  const boxesPx = [];
+  const debugEntries = [];
+  const matches = Array.isArray(matchBoxes) ? matchBoxes : [];
+  for(const matchBox of matches){
+    if(!isRenderableFindTextBox(matchBox)) continue;
+    const normBox = normalizeBox(matchBox, pageW, pageH);
+    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, tokens, {});
+    if(!constellation) continue;
+    const match = KeywordConstellation.matchConstellation(constellation, tokens, {
+      page,
+      pageW,
+      pageH,
+      tolerance: constellation.tolerance
+    });
+    const best = match?.best;
+    if(!best) continue;
+    const anchorToken = best.anchor || null;
+    const supportTokens = (best.supportMatches || []).map(entry => entry?.token).filter(Boolean);
+    const allTokens = [anchorToken, ...supportTokens].filter(Boolean);
+    allTokens.forEach(token => {
+      const candidate = {
+        x: token.x,
+        y: token.y,
+        w: token.w,
+        h: token.h,
+        page
+      };
+      if(isRenderableFindTextBox(candidate)){
+        boxesPx.push(candidate);
+      }
+    });
+    const anchorText = (anchorToken?.text || anchorToken?.raw || '').trim();
+    const supports = supportTokens
+      .map(token => (token?.text || token?.raw || '').trim())
+      .filter(Boolean);
+    debugEntries.push({
+      anchor: anchorText,
+      supports,
+      matchedEdges: best.matchedEdges || 0,
+      totalEdges: best.totalEdges || 0
+    });
+  }
+  return { boxesPx, debugEntries };
+}
+
+function toFindTextConstellationCss(boxesPx, options = {}){
+  const { adjustForTesseract = false } = options;
+  const { scaleX, scaleY } = getScaleFactors();
+  return (boxesPx || []).map(boxPx => {
+    const page = boxPx.page || 1;
+    const pageOffset = adjustForTesseract ? (state.pageOffsets?.[page - 1] || 0) : 0;
+    const adjustedY = (boxPx.y || 0) - pageOffset;
+    return {
+      x: (boxPx.x || 0) / scaleX,
+      y: adjustedY / scaleY,
+      w: (boxPx.w || 0) / scaleX,
+      h: (boxPx.h || 0) / scaleY,
+      page
+    };
+  }).filter(isRenderableFindTextBox);
+}
+
+async function updateFindTextConstellations(){
+  clearFindTextConstellations();
+  if(!els.findTextConstellationsToggle?.checked){
+    drawOverlay();
+    renderFindTextDebug();
+    return;
+  }
+  const results = state.findTextResults || {};
+  if(results.pdf?.boxes?.length){
+    const page = results.pdf.page || 1;
+    const tokens = await ensureTokensForPage(page);
+    const vp = state.pageViewports[page - 1] || state.viewport || {};
+    const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+    const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+    const { boxesPx, debugEntries } = buildFindTextConstellationBoxes(results.pdf.boxes, tokens, page, pageW, pageH);
+    state.findTextPdfConstellationsPx = boxesPx;
+    state.findTextPdfConstellationsCss = toFindTextConstellationCss(boxesPx, { adjustForTesseract: false });
+    if(!state.findTextDebug) state.findTextDebug = { pdf: null, tess: null, scale: null };
+    const pdfDebug = state.findTextDebug.pdf ? { ...state.findTextDebug.pdf } : {};
+    pdfDebug.constellations = debugEntries;
+    state.findTextDebug.pdf = pdfDebug;
+  }
+  if(results.tess?.boxes?.length){
+    const page = results.tess.page || 1;
+    const tokens = await ensureTesseractTokensForPageWithBBox(page);
+    const vp = state.pageViewports[page - 1] || state.viewport || {};
+    const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+    const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+    const { boxesPx, debugEntries } = buildFindTextConstellationBoxes(results.tess.boxes, tokens, page, pageW, pageH);
+    state.findTextTessConstellationsPx = boxesPx;
+    state.findTextTessConstellationsCss = toFindTextConstellationCss(boxesPx, { adjustForTesseract: true });
+    if(!state.findTextDebug) state.findTextDebug = { pdf: null, tess: null, scale: null };
+    const tessDebug = state.findTextDebug.tess ? { ...state.findTextDebug.tess } : {};
+    tessDebug.constellations = debugEntries;
+    state.findTextDebug.tess = tessDebug;
+  }
+  drawOverlay();
+  renderFindTextDebug();
+}
+
 function getFindTextCanvasDebug(){
   const { scaleX, scaleY } = getScaleFactors();
   const baseCanvas = state.isImage ? els.imgCanvas : els.pdfCanvas;
@@ -11215,6 +11340,22 @@ function renderFindTextDebug(){
   }
   if(state.findTextDebug?.tess?.tokens){
     lines.push(`Tesseract tokens: ${state.findTextDebug.tess.tokens}`);
+  }
+  if(state.findTextDebug?.pdf?.constellations?.length){
+    lines.push(`PDF.js constellations: ${state.findTextDebug.pdf.constellations.length}`);
+    state.findTextDebug.pdf.constellations.forEach((entry, idx) => {
+      const supports = entry.supports?.length ? entry.supports.join(', ') : '<none>';
+      const anchor = entry.anchor || '<none>';
+      lines.push(`PDF.js constellation ${idx + 1}: anchor="${anchor}" supports=[${supports}] edges=${entry.matchedEdges}/${entry.totalEdges}`);
+    });
+  }
+  if(state.findTextDebug?.tess?.constellations?.length){
+    lines.push(`Tesseract constellations: ${state.findTextDebug.tess.constellations.length}`);
+    state.findTextDebug.tess.constellations.forEach((entry, idx) => {
+      const supports = entry.supports?.length ? entry.supports.join(', ') : '<none>';
+      const anchor = entry.anchor || '<none>';
+      lines.push(`Tesseract constellation ${idx + 1}: anchor="${anchor}" supports=[${supports}] edges=${entry.matchedEdges}/${entry.totalEdges}`);
+    });
   }
   els.findTextDebug.textContent = lines.join('\n');
 }
@@ -11750,6 +11891,22 @@ function paintOverlay(ctx, options = {}){
     ctx.strokeStyle = '#e34c4c'; ctx.lineWidth = 1.5;
     const b = state.findTextTessSelectionCss; const off = offsetForPage(b.page);
     ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+  }
+  if(state.findTextPdfConstellationsCss && state.findTextPdfConstellationsCss.length){
+    ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.25;
+    for(const b of state.findTextPdfConstellationsCss){
+      if(pageFilter && b.page !== pageFilter) continue;
+      const off = offsetForPage(b.page);
+      ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+    }
+  }
+  if(state.findTextTessConstellationsCss && state.findTextTessConstellationsCss.length){
+    ctx.strokeStyle = '#7c3aed'; ctx.lineWidth = 1.25;
+    for(const b of state.findTextTessConstellationsCss){
+      if(pageFilter && b.page !== pageFilter) continue;
+      const off = offsetForPage(b.page);
+      ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+    }
   }
   if(state.snappedCss && (!pageFilter || state.snappedCss.page === pageFilter)){
     ctx.strokeStyle = '#44ccff'; ctx.lineWidth = 2;
@@ -13849,6 +14006,8 @@ async function handleFindTextFileChange(e){
   state.findTextPdfSelectionsCss = [];
   state.findTextTessSelectionsPx = [];
   state.findTextTessSelectionsCss = [];
+  state.findTextResults = { pdf: null, tess: null };
+  clearFindTextConstellations();
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
   setFindTextStatus('Loading document...');
@@ -13889,6 +14048,8 @@ async function handleFindTextSearch(){
   state.findTextPdfSelectionsCss = [];
   state.findTextTessSelectionsPx = [];
   state.findTextTessSelectionsCss = [];
+  state.findTextResults = { pdf: null, tess: null };
+  clearFindTextConstellations();
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   let pdfResult = null;
   let tessResult = null;
@@ -13945,6 +14106,14 @@ async function handleFindTextSearch(){
     renderFindTextDebug();
     return;
   }
+  state.findTextResults = {
+    pdf: pdfResult
+      ? { page: pdfResult.page || 1, boxes: findAll ? (pdfResult.boxes || []) : [pdfResult.box] }
+      : null,
+    tess: tessResult
+      ? { page: tessResult.page || 1, boxes: findAll ? (tessResult.boxes || []) : [tessResult.box] }
+      : null
+  };
   const { page } = result;
   state.pageNum = page;
   state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
@@ -13952,6 +14121,7 @@ async function handleFindTextSearch(){
   if(els.viewer && state.pageOffsets?.length){
     els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
   }
+  await updateFindTextConstellations();
   setFindTextStatus(`Found "${query}". ${statusBits.join(' · ')}`);
   renderFindTextDebug();
 }
@@ -13963,6 +14133,9 @@ els.findTextInput?.addEventListener('keydown', (e) => {
     e.preventDefault();
     handleFindTextSearch();
   }
+});
+els.findTextConstellationsToggle?.addEventListener('change', () => {
+  updateFindTextConstellations();
 });
 
 function getTesseractWordBBox(word){
