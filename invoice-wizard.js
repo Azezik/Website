@@ -13928,6 +13928,116 @@ els.findTextInput?.addEventListener('keydown', (e) => {
   }
 });
 
+function normalizeFindTextLooseToken(text, preferAlpha){
+  const raw = String(text || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  const lowered = raw.toLowerCase();
+  if(!preferAlpha){
+    return lowered.replace(/[^a-z0-9]+/g, '');
+  }
+  const alphaMap = { '0':'o', '1':'l', '5':'s', '7':'t', '8':'b' };
+  const swapped = lowered.replace(/[01578]/g, ch => alphaMap[ch] || ch);
+  return swapped.replace(/[^a-z]+/g, '');
+}
+
+function isLooseTokenMatch(tokenNorm, partNorm){
+  if(!tokenNorm || !partNorm) return false;
+  if(tokenNorm.includes(partNorm) || partNorm.includes(tokenNorm)) return true;
+  const len = Math.max(tokenNorm.length, partNorm.length);
+  if(len <= 2) return tokenNorm === partNorm;
+  const dist = editDistance(tokenNorm, partNorm);
+  const threshold = len <= 4 ? 1 : 2;
+  return dist <= threshold;
+}
+
+function findTextMatchInTokensLoose(tokens, query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized) return null;
+  const parts = normalized.split(' ').filter(Boolean);
+  if(!parts.length) return null;
+  const preferAlpha = /[A-Za-z]/.test(normalized);
+  const normalizedParts = parts.map(part => normalizeFindTextLooseToken(part, preferAlpha)).filter(Boolean);
+  if(!normalizedParts.length) return null;
+  const lines = groupIntoLines(tokens);
+  for(const line of lines){
+    const lineTokens = line.tokens || [];
+    if(!lineTokens.length) continue;
+    const tokenNorms = lineTokens.map(t => normalizeFindTextLooseToken(t.text || t.raw || '', preferAlpha));
+    for(let i=0; i<=tokenNorms.length - normalizedParts.length; i++){
+      let ok = true;
+      for(let j=0; j<normalizedParts.length; j++){
+        const candidate = tokenNorms[i+j] || '';
+        if(!isLooseTokenMatch(candidate, normalizedParts[j])){
+          ok = false;
+          break;
+        }
+      }
+      if(ok){
+        return bboxOfTokens(lineTokens.slice(i, i + normalizedParts.length));
+      }
+    }
+  }
+  return null;
+}
+
+async function findTextInDocumentWithTesseractAlphaFix(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized || !/[A-Za-z]/.test(normalized)) return null;
+  const totalPages = state.numPages || 1;
+  for(let page=1; page<=totalPages; page++){
+    const tokens = await ensureTesseractTokensForPageWithBBox(page);
+    if(!tokens.length) continue;
+    const box = findTextMatchInTokensLoose(tokens, normalized);
+    if(box){
+      box.page = box.page || page;
+      return { box, page, matchSource: 'tokens-loose', tokens: tokens.length };
+    }
+  }
+  return null;
+}
+
+function patchFindTextStatusForTesseract(query, page){
+  if(!els.findTextStatus) return;
+  const status = els.findTextStatus.textContent || '';
+  if(status.includes('Tesseract: no match')){
+    els.findTextStatus.textContent = status.replace('Tesseract: no match', `Tesseract: page ${page}`);
+    els.findTextStatus.style.color = 'var(--muted)';
+    return;
+  }
+  if(status.includes('No match found')){
+    setFindTextStatus(`Found "${query}". Tesseract: page ${page}`);
+  }
+}
+
+async function applyTesseractAlphaFixForFindText(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized || !state.currentFileId || !/[A-Za-z]/.test(normalized)) return;
+  await waitForFindTextSearchToSettle(normalized);
+  const existingBox = state.findTextDebug?.tess?.boxPx;
+  if(isRenderableFindTextBox(existingBox)) return;
+  const result = await findTextInDocumentWithTesseractAlphaFix(normalized);
+  if(result && isRenderableFindTextBox(result.box)){
+    applyTesseractFindTextHighlight(result.box);
+    state.findTextDebug.tess = { boxPx: result.box, matchSource: `${result.matchSource || 'tokens'}-alphafix`, tokens: result.tokens };
+    patchFindTextStatusForTesseract(normalized, result.page);
+    renderFindTextDebug();
+  }
+}
+
+function queueTesseractAlphaFix(){
+  const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
+  if(!useTess) return;
+  const query = normalizeFindTextInput(els.findTextInput?.value || '');
+  if(!query) return;
+  applyTesseractAlphaFixForFindText(query);
+}
+
+els.findTextBtn?.addEventListener('click', queueTesseractAlphaFix);
+els.findTextInput?.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){
+    queueTesseractAlphaFix();
+  }
+});
+
 // Batch dropzone (dashboard)
 // ===== File normalization for drag/drop and input =====
 function toFilesList(evt) {
