@@ -13793,6 +13793,141 @@ els.findTextInput?.addEventListener('keydown', (e) => {
   }
 });
 
+function getTesseractWordBBox(word){
+  const bbox = word?.bbox || {};
+  const x0 = Number.isFinite(bbox.x0) ? bbox.x0 : (Number.isFinite(bbox.x) ? bbox.x : 0);
+  const y0 = Number.isFinite(bbox.y0) ? bbox.y0 : (Number.isFinite(bbox.y) ? bbox.y : 0);
+  const x1 = Number.isFinite(bbox.x1) ? bbox.x1 : null;
+  const y1 = Number.isFinite(bbox.y1) ? bbox.y1 : null;
+  const width = Number.isFinite(bbox.width) ? bbox.width : (Number.isFinite(bbox.w) ? bbox.w : null);
+  const height = Number.isFinite(bbox.height) ? bbox.height : (Number.isFinite(bbox.h) ? bbox.h : null);
+  const xMax = Number.isFinite(x1) ? x1 : (Number.isFinite(width) ? x0 + width : x0);
+  const yMax = Number.isFinite(y1) ? y1 : (Number.isFinite(height) ? y0 + height : y0);
+  return {
+    x: x0,
+    y: y0,
+    w: Math.max(0, xMax - x0),
+    h: Math.max(0, yMax - y0)
+  };
+}
+
+async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
+  const canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || els.imgCanvas;
+  if(!canvas){ return []; }
+  const opts = { tessedit_pageseg_mode: 6, oem: 1 };
+  try{
+    const { data } = await TesseractRef.recognize(canvas, 'eng', opts);
+    const tokens = (data.words || []).map(w => {
+      const raw = w.text.trim();
+      if(!raw) return null;
+      const { text: corrected, corrections } = applyOcrCorrections(raw);
+      const bbox = getTesseractWordBBox(w);
+      // OCR trace hook: token-time corrections from full-page Tesseract.
+      traceTokenCorrection({
+        raw,
+        corrected,
+        corrections,
+        source: 'tesseract_fullpage',
+        pageIndex: pageNum - 1,
+        box: { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h, page: pageNum }
+      });
+      return {
+        raw,
+        corrected,
+        text: corrected,
+        correctionsApplied: corrections,
+        confidence: (w.confidence || 0) / 100,
+        x: bbox.x,
+        y: bbox.y,
+        w: bbox.w,
+        h: bbox.h,
+        page: pageNum
+      };
+    }).filter(Boolean);
+    logStaticDebug(`full-page-ocr-bboxfix page=${pageNum}`, { tokens: tokens.length, meanConf: tokens.reduce((s,t)=>s+t.confidence,0)/(tokens.length||1) });
+    return tokens;
+  } catch(err){
+    console.warn('Full-page OCR bbox fix failed', err);
+    logStaticDebug(`full-page-ocr-bboxfix-failed page=${pageNum}`, { error: err?.message || err });
+    return [];
+  }
+}
+
+async function ensureTesseractTokensForPageWithBBox(pageNum, canvasEl=null){
+  if(state.tessTokensByPageBBox?.[pageNum]) return state.tessTokensByPageBBox[pageNum];
+  const tokens = await readImageTokensForPageWithBBox(pageNum, canvasEl);
+  if(!state.tessTokensByPageBBox) state.tessTokensByPageBBox = {};
+  state.tessTokensByPageBBox[pageNum] = tokens;
+  return tokens;
+}
+
+function isRenderableFindTextBox(box){
+  return !!(box && Number.isFinite(box.w) && Number.isFinite(box.h) && box.w > 0 && box.h > 0);
+}
+
+async function findTextInDocumentWithTesseractBBoxFix(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized) return null;
+  const totalPages = state.numPages || 1;
+  for(let page=1; page<=totalPages; page++){
+    const tokens = await ensureTesseractTokensForPageWithBBox(page);
+    if(!tokens.length) continue;
+    let box = findTextMatchInTokens(tokens, normalized);
+    let matchSource = box ? 'tokens' : null;
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
+      matchSource = box ? 'landmark-exact' : matchSource;
+    }
+    if(!box){
+      box = findLandmark(tokens, { text: normalized, strategy: 'fuzzy', threshold: 0.86 }, state.pageViewports[page-1] || state.viewport);
+      matchSource = box ? 'landmark-fuzzy' : matchSource;
+    }
+    if(box){
+      box.page = box.page || page;
+      return { box, page, matchSource, tokens: tokens.length };
+    }
+  }
+  return null;
+}
+
+async function waitForFindTextSearchToSettle(query){
+  const searchText = `Searching for "${query}"`;
+  for(let i=0; i<120; i++){
+    const status = els.findTextStatus?.textContent || '';
+    if(!status.includes(searchText)) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+async function applyTesseractBBoxFixForFindText(query){
+  const normalized = normalizeFindTextInput(query);
+  if(!normalized || !state.currentFileId) return;
+  await waitForFindTextSearchToSettle(normalized);
+  const existingBox = state.findTextDebug?.tess?.boxPx;
+  if(isRenderableFindTextBox(existingBox)) return;
+  const result = await findTextInDocumentWithTesseractBBoxFix(normalized);
+  if(result && isRenderableFindTextBox(result.box)){
+    applyTesseractFindTextHighlight(result.box);
+    state.findTextDebug.tess = { boxPx: result.box, matchSource: `${result.matchSource || 'tokens'}-bboxfix`, tokens: result.tokens };
+    renderFindTextDebug();
+  }
+}
+
+function queueTesseractBBoxFix(){
+  const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
+  if(!useTess) return;
+  const query = normalizeFindTextInput(els.findTextInput?.value || '');
+  if(!query) return;
+  applyTesseractBBoxFixForFindText(query);
+}
+
+els.findTextBtn?.addEventListener('click', queueTesseractBBoxFix);
+els.findTextInput?.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){
+    queueTesseractBBoxFix();
+  }
+});
+
 // Batch dropzone (dashboard)
 // ===== File normalization for drag/drop and input =====
 function toFilesList(evt) {
