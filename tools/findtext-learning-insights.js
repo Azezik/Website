@@ -45,7 +45,9 @@
       label: safeString(safeEntry.label, null),
       previewExtractedText: safeString(safeEntry.previewExtractedText, null),
       expectedText: safeString(safeEntry.expectedText, null),
-      geometryLabel: safeString(safeEntry.geometryLabel, null)
+      geometryLabel: safeString(safeEntry.geometryLabel, null),
+      candidateLabel: safeString(safeEntry.candidateLabel, null),
+      cropLabel: safeString(safeEntry.cropLabel, null)
     };
   }
 
@@ -85,8 +87,14 @@
     if(entry.geometryLabel && entry.geometryLabel !== 'ok'){
       return 'geometry';
     }
+    if(entry.candidateLabel && entry.candidateLabel !== 'ok'){
+      return 'candidate';
+    }
     if(entry.label === 'bad' && entry.correctedCandidateId && entry.correctedCandidateId !== entry.chosenCandidateId){
       return 'candidate';
+    }
+    if(entry.cropLabel && entry.cropLabel !== 'ok'){
+      return 'cropText';
     }
     if(hasTextPair && textMismatch){
       return 'cropText';

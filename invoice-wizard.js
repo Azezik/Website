@@ -146,6 +146,9 @@ const els = {
   findTextLearningToggle: document.getElementById('find-text-learning-toggle'),
   findTextGoodBtn: document.getElementById('find-text-good-btn'),
   findTextBadBtn: document.getElementById('find-text-bad-btn'),
+  findTextGeometryBadBtn: document.getElementById('find-text-geometry-bad-btn'),
+  findTextCandidateBadBtn: document.getElementById('find-text-candidate-bad-btn'),
+  findTextCropBadBtn: document.getElementById('find-text-crop-bad-btn'),
   findTextDownloadLogBtn: document.getElementById('find-text-download-log-btn'),
   findTextClearLogBtn: document.getElementById('find-text-clear-log-btn'),
   findTextWeightsFile: document.getElementById('find-text-weights-file'),
@@ -14670,23 +14673,50 @@ els.findTextLearningToggle?.addEventListener('change', () => {
   state.findTextLearning.enabled = isFindTextLearningEnabled();
   hideFindTextLearningPicker();
 });
-els.findTextGoodBtn?.addEventListener('click', () => {
+function recordFindTextFeedback(entries, payload){
   if(!window.FindTextRanker) return;
-  const entries = state.findTextLearning.lastRun || [];
   if(!entries.length) return;
   entries.forEach(entry => {
+    const resolvedPayload = typeof payload === 'function' ? payload(entry) : payload;
     const feedback = {
       ...entry,
-      label: 'good',
-      winnerCandidateId: entry.chosenCandidateId || null
+      ...resolvedPayload
     };
     window.FindTextRanker.appendLogEvent(feedback);
   });
+}
+els.findTextGoodBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, (entry) => ({
+    label: 'good',
+    winnerCandidateId: entry.chosenCandidateId || null
+  }));
 });
 els.findTextBadBtn?.addEventListener('click', () => {
   const entries = state.findTextLearning.lastRun || [];
   if(!entries.length) return;
   renderFindTextLearningPicker(entries);
+});
+els.findTextGeometryBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    geometryLabel: 'wrong'
+  });
+});
+els.findTextCandidateBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    candidateLabel: 'wrong'
+  });
+});
+els.findTextCropBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    cropLabel: 'wrong'
+  });
 });
 els.findTextDownloadLogBtn?.addEventListener('click', () => {
   window.FindTextRanker?.downloadLog();
