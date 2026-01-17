@@ -124,11 +124,6 @@
           </label>
         </div>
         <div class="actions find-text-learning-actions" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">
-          <button id="find-text-good-btn" class="btn">Good</button>
-          <button id="find-text-bad-btn" class="btn">Bad</button>
-          <button id="find-text-geometry-bad-btn" class="btn">Geometry wrong</button>
-          <button id="find-text-candidate-bad-btn" class="btn">Candidate wrong</button>
-          <button id="find-text-crop-bad-btn" class="btn">Crop/Text wrong</button>
           <button id="find-text-download-log-btn" class="btn">Download learning log</button>
           <button id="find-text-clear-log-btn" class="btn ghost">Clear learning log</button>
           <label class="btn ghost">
@@ -137,6 +132,32 @@
           </label>
         </div>
         <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
+        <div id="find-text-stepper" class="panel minimal" style="margin-bottom:12px;">
+          <h4 style="margin:0 0 8px;">Learning Stepper</h4>
+          <div class="sub" style="margin-bottom:8px;">Preview (current box)</div>
+          <div id="find-text-preview" class="code" style="white-space:pre-wrap;margin-bottom:8px;"></div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <span class="sub">Geometry:</span>
+            <button id="find-text-geometry-good-btn" class="btn">Good</button>
+            <button id="find-text-geometry-bad-btn" class="btn">Bad</button>
+            <button id="find-text-draw-box-btn" class="btn ghost">Draw new box?</button>
+          </div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <span class="sub">Best candidate:</span>
+            <button id="find-text-candidate-good-btn" class="btn">Good</button>
+            <button id="find-text-candidate-bad-btn" class="btn">Bad</button>
+          </div>
+          <div id="find-text-candidate-list" class="find-text-learning-picker" style="display:none;margin-bottom:8px;"></div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <span class="sub">Crop/Text:</span>
+            <button id="find-text-crop-good-btn" class="btn">Good</button>
+            <button id="find-text-crop-bad-btn" class="btn">Bad</button>
+          </div>
+          <textarea id="find-text-expected-text" class="code" style="width:100%;min-height:72px;margin-bottom:8px;" placeholder="Expected text..."></textarea>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;">
+            <button id="find-text-stepper-save-btn" class="btn primary">Save &amp; Search Again</button>
+          </div>
+        </div>
         <details class="panel minimal" id="find-text-learning-insights">
           <summary>Learning Insights</summary>
           <div class="actions" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">

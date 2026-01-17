@@ -144,11 +144,17 @@ const els = {
   findTextBestToggle: document.getElementById('find-text-best-toggle'),
   findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
   findTextLearningToggle: document.getElementById('find-text-learning-toggle'),
-  findTextGoodBtn: document.getElementById('find-text-good-btn'),
-  findTextBadBtn: document.getElementById('find-text-bad-btn'),
   findTextGeometryBadBtn: document.getElementById('find-text-geometry-bad-btn'),
+  findTextGeometryGoodBtn: document.getElementById('find-text-geometry-good-btn'),
+  findTextCandidateGoodBtn: document.getElementById('find-text-candidate-good-btn'),
   findTextCandidateBadBtn: document.getElementById('find-text-candidate-bad-btn'),
+  findTextCropGoodBtn: document.getElementById('find-text-crop-good-btn'),
   findTextCropBadBtn: document.getElementById('find-text-crop-bad-btn'),
+  findTextDrawBoxBtn: document.getElementById('find-text-draw-box-btn'),
+  findTextPreview: document.getElementById('find-text-preview'),
+  findTextCandidateList: document.getElementById('find-text-candidate-list'),
+  findTextExpectedText: document.getElementById('find-text-expected-text'),
+  findTextStepperSaveBtn: document.getElementById('find-text-stepper-save-btn'),
   findTextDownloadLogBtn: document.getElementById('find-text-download-log-btn'),
   findTextClearLogBtn: document.getElementById('find-text-clear-log-btn'),
   findTextWeightsFile: document.getElementById('find-text-weights-file'),
@@ -498,7 +504,26 @@ let state = {
     enabled: false,
     weights: null,
     lastRun: null,
-    lastLogEntries: []
+    lastLogEntries: [],
+    stepper: {
+      entry: null,
+      source: null,
+      tokenSource: null,
+      page: null,
+      boxPx: null,
+      previewText: '',
+      expectedText: '',
+      geometryLabel: null,
+      candidateLabel: null,
+      cropLabel: null,
+      correctedCandidateId: null,
+      manualBoxMode: false
+    }
+  },
+  findTextInsights: {
+    fileText: '',
+    lastReport: null,
+    lastErrors: []
   },
   findTextInsights: {
     fileText: '',
@@ -11595,6 +11620,123 @@ function renderFindTextDebug(){
   els.findTextDebug.textContent = lines.join('\n');
 }
 
+function resetFindTextStepper(){
+  const stepper = state.findTextLearning.stepper;
+  stepper.entry = null;
+  stepper.source = null;
+  stepper.tokenSource = null;
+  stepper.page = null;
+  stepper.boxPx = null;
+  stepper.previewText = '';
+  stepper.expectedText = '';
+  stepper.geometryLabel = null;
+  stepper.candidateLabel = null;
+  stepper.cropLabel = null;
+  stepper.correctedCandidateId = null;
+  stepper.manualBoxMode = false;
+  if(els.findTextPreview) els.findTextPreview.textContent = '';
+  if(els.findTextExpectedText) els.findTextExpectedText.value = '';
+  if(els.findTextCandidateList){
+    els.findTextCandidateList.style.display = 'none';
+    els.findTextCandidateList.innerHTML = '';
+  }
+}
+
+async function buildFindTextPreviewText({ boxPx, tokenSource, page } = {}){
+  if(!boxPx) return '';
+  if(!isRenderableFindTextBox(boxPx)) return '';
+  const pageNum = page || boxPx.page || state.pageNum || 1;
+  let tokens = [];
+  if(tokenSource === 'pdfjs'){
+    tokens = await ensureTokensForPage(pageNum);
+  } else {
+    tokens = await ensureTesseractTokensForPageWithBBox(pageNum);
+  }
+  const inside = tokensInBox(tokens, { ...boxPx, page: pageNum });
+  if(inside.length){
+    const lines = groupIntoLines(inside);
+    return lines.map(line => (line.tokens || [])
+      .map(t => String(t.text || t.raw || '').trim())
+      .filter(Boolean)
+      .join(' ')
+    ).filter(Boolean).join('\n').trim();
+  }
+  if(tokenSource !== 'pdfjs'){
+    const pageCanvas = state.isImage ? els.imgCanvas : els.pdfCanvas;
+    const { text } = await ocrTextFromBBox({ pageCanvas, bboxPx: { ...boxPx, page: pageNum } });
+    return String(text || '').trim();
+  }
+  return '';
+}
+
+function renderFindTextCandidateList(entry){
+  if(!els.findTextCandidateList) return;
+  if(!entry || !Array.isArray(entry.candidates) || !entry.candidates.length){
+    els.findTextCandidateList.textContent = 'No candidates available.';
+    els.findTextCandidateList.style.display = 'block';
+    return;
+  }
+  const listMarkup = entry.candidates.map(candidate => {
+    const snippet = candidate.text || '<no text>';
+    return `
+      <div class="picker-item" data-candidate-id="${candidate.id}">
+        <div>
+          <div>${snippet}</div>
+          <div class="picker-meta">order ${candidate.order} · score ${candidate.heuristicScore}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  els.findTextCandidateList.innerHTML = `
+    <h4>Select the correct candidate</h4>
+    <div class="picker-list">${listMarkup}</div>
+  `;
+  els.findTextCandidateList.style.display = 'block';
+  els.findTextCandidateList.querySelectorAll('.picker-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      const candidateId = item.dataset.candidateId;
+      const match = entry.candidates.find(c => c.id === candidateId);
+      if(!match) return;
+      const stepper = state.findTextLearning.stepper;
+      stepper.correctedCandidateId = candidateId;
+      stepper.candidateLabel = 'bad';
+      stepper.boxPx = match.box || stepper.boxPx;
+      stepper.previewText = await buildFindTextPreviewText({
+        boxPx: stepper.boxPx,
+        tokenSource: stepper.tokenSource,
+        page: stepper.page
+      });
+      if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+    });
+  });
+}
+
+function setFindTextExpectedText(value){
+  const stepper = state.findTextLearning.stepper;
+  stepper.expectedText = String(value || '');
+  if(els.findTextExpectedText && els.findTextExpectedText.value !== stepper.expectedText){
+    els.findTextExpectedText.value = stepper.expectedText;
+  }
+}
+
+async function refreshFindTextStepperFromEntry(entry, boxPx){
+  const stepper = state.findTextLearning.stepper;
+  stepper.entry = entry;
+  stepper.source = entry?.source || entry?.tokenSource || null;
+  stepper.tokenSource = entry?.tokenSource || stepper.source || null;
+  stepper.page = entry?.page || boxPx?.page || state.pageNum || 1;
+  stepper.boxPx = boxPx || null;
+  stepper.previewText = await buildFindTextPreviewText({
+    boxPx: stepper.boxPx,
+    tokenSource: stepper.tokenSource || stepper.source,
+    page: stepper.page
+  });
+  if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+  if(!stepper.expectedText){
+    setFindTextExpectedText(els.findTextInput?.value || '');
+  }
+}
+
 function clearFindTextInsights(){
   state.findTextInsights.fileText = '';
   state.findTextInsights.lastReport = null;
@@ -12466,6 +12608,22 @@ async function finalizeSelection(e) {
   }
   drawing = false;
   if (!state.selectionPx) return;
+  if(state.findTextLearning?.stepper?.manualBoxMode && !isConfigMode()){
+    const stepper = state.findTextLearning.stepper;
+    stepper.manualBoxMode = false;
+    stepper.boxPx = { ...state.selectionPx };
+    stepper.previewText = await buildFindTextPreviewText({
+      boxPx: stepper.boxPx,
+      tokenSource: stepper.tokenSource || stepper.source || 'pdfjs',
+      page: stepper.boxPx.page || state.pageNum
+    });
+    stepper.geometryLabel = 'bad';
+    if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+    if(els.findTextCandidateList){
+      els.findTextCandidateList.style.display = 'none';
+    }
+    return;
+  }
   state.pageNum = state.selectionPx.page;
   state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
@@ -14489,6 +14647,7 @@ async function handleFindTextFileChange(e){
   clearFindTextConstellations();
   hideFindTextLearningPicker();
   clearFindTextInsights();
+  resetFindTextStepper();
   state.findTextLearning.lastRun = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
@@ -14539,6 +14698,7 @@ async function handleFindTextSearch(){
   state.findTextResults = { pdf: null, tess: null };
   clearFindTextConstellations();
   hideFindTextLearningPicker();
+  resetFindTextStepper();
   state.findTextLearning.lastRun = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   let pdfResult = null;
@@ -14653,6 +14813,14 @@ async function handleFindTextSearch(){
   if(els.viewer && state.pageOffsets?.length){
     els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
   }
+  if(learningEnabled && learningEntries.length){
+    const activeSource = pdfHasMatch ? 'pdfjs' : (tessHasMatch ? 'tesseract' : null);
+    const entry = learningEntries.find(item => item.source === activeSource) || learningEntries[0];
+    const boxPx = activeSource === 'pdfjs'
+      ? (findAll ? (pdfResult?.boxes?.[0] || null) : (pdfResult?.box || null))
+      : (findAll ? (tessResult?.boxes?.[0] || null) : (tessResult?.box || null));
+    await refreshFindTextStepperFromEntry(entry, boxPx);
+  }
   await updateFindTextConstellations();
   setFindTextStatus(`Found "${query}". ${statusBits.join(' · ')}`);
   renderFindTextDebug();
@@ -14673,29 +14841,59 @@ els.findTextLearningToggle?.addEventListener('change', () => {
   state.findTextLearning.enabled = isFindTextLearningEnabled();
   hideFindTextLearningPicker();
 });
-function recordFindTextFeedback(entries, payload){
-  if(!window.FindTextRanker) return;
-  if(!entries.length) return;
-  entries.forEach(entry => {
-    const resolvedPayload = typeof payload === 'function' ? payload(entry) : payload;
-    const feedback = {
-      ...entry,
-      ...resolvedPayload
-    };
-    window.FindTextRanker.appendLogEvent(feedback);
-  });
-}
-els.findTextGoodBtn?.addEventListener('click', () => {
-  const entries = state.findTextLearning.lastRun || [];
-  recordFindTextFeedback(entries, (entry) => ({
-    label: 'good',
-    winnerCandidateId: entry.chosenCandidateId || null
-  }));
+els.findTextGeometryGoodBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.geometryLabel = 'good';
 });
-els.findTextBadBtn?.addEventListener('click', () => {
-  const entries = state.findTextLearning.lastRun || [];
-  if(!entries.length) return;
-  renderFindTextLearningPicker(entries);
+els.findTextGeometryBadBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.geometryLabel = 'bad';
+});
+els.findTextDrawBoxBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.manualBoxMode = true;
+  state.overlayPinned = true;
+  setFindTextStatus('Draw a new box on the page, then release to update preview.');
+});
+els.findTextCandidateGoodBtn?.addEventListener('click', () => {
+  const stepper = state.findTextLearning.stepper;
+  stepper.candidateLabel = 'good';
+  stepper.correctedCandidateId = null;
+  if(els.findTextCandidateList){
+    els.findTextCandidateList.style.display = 'none';
+  }
+});
+els.findTextCandidateBadBtn?.addEventListener('click', () => {
+  const stepper = state.findTextLearning.stepper;
+  stepper.candidateLabel = 'bad';
+  renderFindTextCandidateList(stepper.entry);
+});
+els.findTextCropGoodBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.cropLabel = 'good';
+});
+els.findTextCropBadBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.cropLabel = 'bad';
+});
+els.findTextExpectedText?.addEventListener('input', (e) => {
+  setFindTextExpectedText(e.target.value);
+});
+els.findTextStepperSaveBtn?.addEventListener('click', () => {
+  const stepper = state.findTextLearning.stepper;
+  if(!window.FindTextRanker || !stepper.entry) return;
+  const label = (stepper.geometryLabel === 'good' && stepper.candidateLabel === 'good' && stepper.cropLabel === 'good')
+    ? 'good'
+    : 'bad';
+  const feedback = {
+    ...stepper.entry,
+    label,
+    geometryLabel: stepper.geometryLabel,
+    candidateLabel: stepper.candidateLabel,
+    cropLabel: stepper.cropLabel,
+    correctedCandidateId: stepper.correctedCandidateId,
+    previewExtractedText: stepper.previewText,
+    expectedText: stepper.expectedText,
+    manualBoxPx: stepper.geometryLabel === 'bad' ? stepper.boxPx : null
+  };
+  window.FindTextRanker.appendLogEvent(feedback);
+  resetFindTextStepper();
+  handleFindTextSearch();
 });
 els.findTextGeometryBadBtn?.addEventListener('click', () => {
   const entries = state.findTextLearning.lastRun || [];
