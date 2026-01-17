@@ -152,6 +152,12 @@ const els = {
   findTextLearningPicker: document.getElementById('find-text-learning-picker'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
+  findTextInsightsFile: document.getElementById('find-text-insights-file'),
+  findTextInsightsAnalyze: document.getElementById('find-text-insights-analyze'),
+  findTextInsightsClear: document.getElementById('find-text-insights-clear'),
+  findTextInsightsExport: document.getElementById('find-text-insights-export'),
+  findTextInsightsSummary: document.getElementById('find-text-insights-summary'),
+  findTextInsightsReport: document.getElementById('find-text-insights-report'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
@@ -490,6 +496,11 @@ let state = {
     weights: null,
     lastRun: null,
     lastLogEntries: []
+  },
+  findTextInsights: {
+    fileText: '',
+    lastReport: null,
+    lastErrors: []
   },
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
@@ -11581,6 +11592,82 @@ function renderFindTextDebug(){
   els.findTextDebug.textContent = lines.join('\n');
 }
 
+function clearFindTextInsights(){
+  state.findTextInsights.fileText = '';
+  state.findTextInsights.lastReport = null;
+  state.findTextInsights.lastErrors = [];
+  if(els.findTextInsightsSummary){
+    els.findTextInsightsSummary.textContent = '';
+  }
+  if(els.findTextInsightsReport){
+    els.findTextInsightsReport.textContent = '';
+  }
+  if(els.findTextInsightsFile){
+    els.findTextInsightsFile.value = '';
+  }
+}
+
+function renderFindTextInsights({ insights, errors = [], totalLines = 0 } = {}){
+  if(!els.findTextInsightsSummary || !els.findTextInsightsReport) return;
+  if(!insights){
+    els.findTextInsightsSummary.textContent = 'No insights computed yet.';
+    els.findTextInsightsReport.textContent = '';
+    return;
+  }
+  const errorCount = errors.length;
+  const summaryBits = [
+    `Lines parsed: ${totalLines}`,
+    `Errors: ${errorCount}`
+  ];
+  els.findTextInsightsSummary.textContent = summaryBits.join(' · ');
+  const reportText = window.FindTextLearningInsights?.buildReportText
+    ? window.FindTextLearningInsights.buildReportText(insights)
+    : JSON.stringify(insights, null, 2);
+  const errorLines = errorCount
+    ? `\n\nParse errors:\n${errors.map(err => `line ${err.line}: ${err.message}`).join('\n')}`
+    : '';
+  els.findTextInsightsReport.textContent = reportText + errorLines;
+}
+
+function handleFindTextInsightsAnalyze(){
+  if(!window.FindTextLearningInsights) return;
+  const text = state.findTextInsights.fileText || '';
+  if(!text){
+    renderFindTextInsights({ insights: null, errors: [], totalLines: 0 });
+    return;
+  }
+  const { entries, errors } = window.FindTextLearningInsights.parseJsonl(text);
+  const insights = window.FindTextLearningInsights.computeInsights(entries);
+  insights.errors = errors;
+  state.findTextInsights.lastReport = insights;
+  state.findTextInsights.lastErrors = errors;
+  renderFindTextInsights({ insights, errors, totalLines: entries.length });
+}
+
+async function handleFindTextInsightsFileChange(e){
+  const f = e.target.files?.[0];
+  if(!f) return;
+  const text = await f.text();
+  state.findTextInsights.fileText = text || '';
+  handleFindTextInsightsAnalyze();
+}
+
+function handleFindTextInsightsExport(){
+  const report = state.findTextInsights.lastReport;
+  if(!report) return;
+  const payload = JSON.stringify(report, null, 2);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  a.href = url;
+  a.download = `findtext-learning-insights-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function isFindTextLearningEnabled(){
   return !!els.findTextLearningToggle?.checked;
 }
@@ -14398,6 +14485,7 @@ async function handleFindTextFileChange(e){
   state.findTextResults = { pdf: null, tess: null };
   clearFindTextConstellations();
   hideFindTextLearningPicker();
+  clearFindTextInsights();
   state.findTextLearning.lastRun = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
@@ -14621,6 +14709,10 @@ els.findTextWeightsFile?.addEventListener('change', async (e) => {
   state.findTextLearning.weights = parsed || null;
   window.FindTextRanker.storeWeights(parsed || {});
 });
+els.findTextInsightsFile?.addEventListener('change', handleFindTextInsightsFileChange);
+els.findTextInsightsAnalyze?.addEventListener('click', handleFindTextInsightsAnalyze);
+els.findTextInsightsClear?.addEventListener('click', clearFindTextInsights);
+els.findTextInsightsExport?.addEventListener('click', handleFindTextInsightsExport);
 
 function getTesseractWordBBox(word){
   const bbox = word?.bbox || {};
