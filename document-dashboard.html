@@ -118,9 +118,24 @@
             <input type="checkbox" id="find-text-constellations-toggle" />
             Show constellations
           </label>
+          <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="find-text-learning-toggle" />
+            Learning mode (Best match ranker)
+          </label>
+        </div>
+        <div class="actions find-text-learning-actions" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">
+          <button id="find-text-good-btn" class="btn">Good</button>
+          <button id="find-text-bad-btn" class="btn">Bad</button>
+          <button id="find-text-download-log-btn" class="btn">Download learning log</button>
+          <button id="find-text-clear-log-btn" class="btn ghost">Clear learning log</button>
+          <label class="btn ghost">
+            Load weights file
+            <input id="find-text-weights-file" type="file" accept="application/json" style="display:none" />
+          </label>
         </div>
         <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
         <div id="find-text-viewer-slot" class="viewer-slot"></div>
+        <div id="find-text-learning-picker" class="find-text-learning-picker" style="display:none;"></div>
         <pre id="find-text-debug" class="code" style="margin-top:12px;white-space:pre-wrap;"></pre>
       </section>
 
@@ -406,6 +421,7 @@
   <script src="tools/run-landmark-once.js"></script>
   <script src="tools/keyword-weighting.js"></script>
   <script src="tools/keyword-constellation.js"></script>
+  <script src="tools/findtext-ranker.js"></script>
   <script src="master-db.js"></script>
   <script src="orchestrator.js"></script>
   <script src="field-map.js"></script>
