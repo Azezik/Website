@@ -525,6 +525,11 @@ let state = {
     lastReport: null,
     lastErrors: []
   },
+  findTextInsights: {
+    fileText: '',
+    lastReport: null,
+    lastErrors: []
+  },
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
   snappedText: '',           // snapped line text
@@ -14889,6 +14894,27 @@ els.findTextStepperSaveBtn?.addEventListener('click', () => {
   window.FindTextRanker.appendLogEvent(feedback);
   resetFindTextStepper();
   handleFindTextSearch();
+});
+els.findTextGeometryBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    geometryLabel: 'wrong'
+  });
+});
+els.findTextCandidateBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    candidateLabel: 'wrong'
+  });
+});
+els.findTextCropBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  recordFindTextFeedback(entries, {
+    label: 'bad',
+    cropLabel: 'wrong'
+  });
 });
 els.findTextDownloadLogBtn?.addEventListener('click', () => {
   window.FindTextRanker?.downloadLog();
