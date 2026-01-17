@@ -135,6 +135,59 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
 /* Trace viewer page */
 #thumbs img.thumb{ width:80px; height:auto; margin:4px; border:1px solid var(--border); cursor:pointer; }
 #thumbs img.thumb.selected{ border-color:var(--accent); }
+
+.find-text-learning-actions .btn{
+  min-width: 160px;
+}
+
+.find-text-learning-picker{
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: #111;
+  color: #ddd;
+}
+
+.find-text-learning-picker h4{
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+
+.find-text-learning-picker .picker-list{
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.find-text-learning-picker .picker-item{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #1b1b1b;
+  cursor: pointer;
+}
+
+.find-text-learning-picker .picker-item:hover{
+  border-color: var(--accent);
+}
+
+.find-text-learning-picker .picker-meta{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.find-text-learning-picker .picker-tag{
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
 #overlayControls{ margin:8px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 #copyControls{ margin:8px 0 0; display:flex; flex-wrap:wrap; gap:8px; }
 

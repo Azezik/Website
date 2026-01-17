@@ -143,6 +143,13 @@ const els = {
   findTextAllToggle: document.getElementById('find-text-all-toggle'),
   findTextBestToggle: document.getElementById('find-text-best-toggle'),
   findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
+  findTextLearningToggle: document.getElementById('find-text-learning-toggle'),
+  findTextGoodBtn: document.getElementById('find-text-good-btn'),
+  findTextBadBtn: document.getElementById('find-text-bad-btn'),
+  findTextDownloadLogBtn: document.getElementById('find-text-download-log-btn'),
+  findTextClearLogBtn: document.getElementById('find-text-clear-log-btn'),
+  findTextWeightsFile: document.getElementById('find-text-weights-file'),
+  findTextLearningPicker: document.getElementById('find-text-learning-picker'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
   extractedData:   document.getElementById('extracted-data'),
@@ -477,6 +484,12 @@ let state = {
     pdf: null,
     tess: null,
     scale: null
+  },
+  findTextLearning: {
+    enabled: false,
+    weights: null,
+    lastRun: null,
+    lastLogEntries: []
   },
   snappedCss: null,          // snapped line box (CSS units, page-relative)
   snappedPx: null,           // snapped line box (px, page-relative)
@@ -11016,6 +11029,27 @@ function scoreFindTextTokenMatch(candidateNorm, partNorm){
   return 0;
 }
 
+function rankFindTextCandidates(candidates, options = {}){
+  const { mode = 'first', query = '', source = '', useRanker = false, weights = null } = options || {};
+  let ranked = candidates.slice();
+  let rankedBy = 'order';
+  if(mode === 'best'){
+    if(useRanker && weights && window.FindTextRanker?.rankCandidates){
+      ranked = window.FindTextRanker.rankCandidates(candidates, { query, source, weights, fallbackKey: 'score' });
+      rankedBy = 'learned';
+    } else {
+      ranked.sort((a,b)=> {
+        if(b.score !== a.score) return b.score - a.score;
+        return a.order - b.order;
+      });
+      rankedBy = 'heuristic';
+    }
+  } else {
+    ranked.sort((a,b)=> a.order - b.order);
+  }
+  return { ranked, chosen: ranked[0] || null, rankedBy };
+}
+
 function scoreFindTextCandidate(tokens, partNorms, querySquashed){
   const tokenText = tokens.map(t => String(t.text || t.raw || '')).join(' ');
   const tokenNorms = tokens.map(t => normalizeFindTextMatchToken(t.text || t.raw || ''));
@@ -11086,15 +11120,18 @@ function findTextMatchCandidatesInTokens(tokens, query){
 }
 
 function findTextMatchInTokens(tokens, query, options = {}){
-  const { mode = 'first' } = options || {};
+  const { mode = 'first', rankerContext = null } = options || {};
   const candidates = findTextMatchCandidatesInTokens(tokens, query);
   if(!candidates.length) return null;
   if(mode === 'best'){
-    candidates.sort((a,b)=> {
-      if(b.score !== a.score) return b.score - a.score;
-      return a.order - b.order;
+    const { chosen } = rankFindTextCandidates(candidates, {
+      mode,
+      query,
+      source: rankerContext?.source || '',
+      useRanker: !!rankerContext?.useRanker,
+      weights: rankerContext?.weights || null
     });
-    return candidates[0].box;
+    return chosen?.box || null;
   }
   candidates.sort((a,b)=> a.order - b.order);
   return candidates[0].box;
@@ -11105,7 +11142,7 @@ function findTextMatchesInTokens(tokens, query){
 }
 
 async function findTextOnPageAllOccurrences(query, options = {}){
-  const { useTesseract = false } = options;
+  const { useTesseract = false, includeCandidates = false, rankerContext = null } = options;
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const page = state.pageNum || 1;
@@ -11122,6 +11159,7 @@ async function findTextOnPageAllOccurrences(query, options = {}){
   }
   let boxes = findTextMatchesInTokens(tokens, normalized);
   let matchSource = boxes.length ? 'tokens' : null;
+  const candidates = includeCandidates ? findTextMatchCandidatesInTokens(tokens, normalized) : [];
   if(!boxes.length){
     let box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
     matchSource = box ? 'landmark-exact' : matchSource;
@@ -11134,6 +11172,16 @@ async function findTextOnPageAllOccurrences(query, options = {}){
       boxes = [box];
     }
   }
+  if(includeCandidates && rankerContext?.useRanker && rankerContext?.weights && rankerContext?.mode === 'best'){
+    const ranked = rankFindTextCandidates(candidates, {
+      mode: rankerContext?.mode,
+      query: normalized,
+      source: rankerContext?.source || '',
+      useRanker: true,
+      weights: rankerContext?.weights
+    }).ranked;
+    candidates.splice(0, candidates.length, ...ranked);
+  }
   boxes = boxes.filter(isRenderableFindTextBox);
   return {
     boxes,
@@ -11141,12 +11189,13 @@ async function findTextOnPageAllOccurrences(query, options = {}){
     matchSource,
     tokens: tokens.length,
     tokenSource: useTesseract ? 'tesseract-bbox' : 'pdfjs',
-    hasTextLayer: useTesseract ? true : true
+    hasTextLayer: useTesseract ? true : true,
+    candidates
   };
 }
 
 async function findTextInDocument(query, options = {}){
-  const { matchMode = 'first' } = options || {};
+  const { matchMode = 'first', includeCandidates = false, rankerContext = null } = options || {};
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const totalPages = state.numPages || 1;
@@ -11155,8 +11204,12 @@ async function findTextInDocument(query, options = {}){
     const tokens = await ensureTokensForPage(page);
     if(tokens.length) sawTextLayer = true;
     if(!tokens.length) continue;
-    let box = findTextMatchInTokens(tokens, normalized, { mode: matchMode });
+    let box = findTextMatchInTokens(tokens, normalized, {
+      mode: matchMode,
+      rankerContext: rankerContext ? { ...rankerContext, source: 'pdfjs' } : null
+    });
     let matchSource = box ? 'tokens' : null;
+    const candidates = includeCandidates ? findTextMatchCandidatesInTokens(tokens, normalized) : [];
     if(!box){
       box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
       matchSource = box ? 'landmark-exact' : matchSource;
@@ -11173,7 +11226,8 @@ async function findTextInDocument(query, options = {}){
         matchSource,
         tokens: tokens.length,
         tokenSource: 'pdfjs',
-        hasTextLayer: true
+        hasTextLayer: true,
+        candidates
       };
     }
   }
@@ -11183,20 +11237,25 @@ async function findTextInDocument(query, options = {}){
     matchSource: null,
     tokens: 0,
     tokenSource: 'pdfjs',
-    hasTextLayer: sawTextLayer
+    hasTextLayer: sawTextLayer,
+    candidates: []
   };
 }
 
 async function findTextInDocumentWithTesseract(query, options = {}){
-  const { matchMode = 'first' } = options || {};
+  const { matchMode = 'first', includeCandidates = false, rankerContext = null } = options || {};
   const normalized = normalizeFindTextInput(query);
   if(!normalized) return null;
   const totalPages = state.numPages || 1;
   for(let page=1; page<=totalPages; page++){
     const tokens = await ensureTesseractTokensForPage(page);
     if(!tokens.length) continue;
-    let box = findTextMatchInTokens(tokens, normalized, { mode: matchMode });
+    let box = findTextMatchInTokens(tokens, normalized, {
+      mode: matchMode,
+      rankerContext: rankerContext ? { ...rankerContext, source: 'tesseract' } : null
+    });
     let matchSource = box ? 'tokens' : null;
+    const candidates = includeCandidates ? findTextMatchCandidatesInTokens(tokens, normalized) : [];
     if(!box){
       box = findLandmark(tokens, { text: normalized, strategy: 'exact' }, state.pageViewports[page-1] || state.viewport);
       matchSource = box ? 'landmark-exact' : matchSource;
@@ -11213,7 +11272,8 @@ async function findTextInDocumentWithTesseract(query, options = {}){
         matchSource,
         tokens: tokens.length,
         tokenSource: 'tesseract',
-        hasTextLayer: true
+        hasTextLayer: true,
+        candidates
       };
     }
   }
@@ -11223,7 +11283,8 @@ async function findTextInDocumentWithTesseract(query, options = {}){
     matchSource: null,
     tokens: 0,
     tokenSource: 'tesseract',
-    hasTextLayer: true
+    hasTextLayer: true,
+    candidates: []
   };
 }
 
@@ -11518,6 +11579,174 @@ function renderFindTextDebug(){
     });
   }
   els.findTextDebug.textContent = lines.join('\n');
+}
+
+function isFindTextLearningEnabled(){
+  return !!els.findTextLearningToggle?.checked;
+}
+
+function getFindTextRankerWeights(){
+  if(state.findTextLearning.weights !== null){
+    return state.findTextLearning.weights;
+  }
+  const stored = window.FindTextRanker?.loadWeightsFromStorage
+    ? window.FindTextRanker.loadWeightsFromStorage()
+    : null;
+  state.findTextLearning.weights = stored || null;
+  return state.findTextLearning.weights;
+}
+
+function buildFindTextCandidateRecords(query, candidates, source){
+  if(!window.FindTextRanker) return [];
+  return (candidates || []).map((candidate, idx) => {
+    const tokenTexts = (candidate.tokens || []).map(t => String(t.text || t.raw || '')).filter(Boolean);
+    const features = window.FindTextRanker.extractFeatures(query, candidate, { source });
+    return {
+      id: window.FindTextRanker.buildCandidateId(candidate, idx),
+      order: candidate.order,
+      heuristicScore: candidate.score,
+      box: candidate.box,
+      text: tokenTexts.join(' '),
+      tokens: tokenTexts,
+      features
+    };
+  });
+}
+
+function buildFindTextLearningEntry({
+  query,
+  normalized,
+  page,
+  source,
+  tokenSource,
+  matchSource,
+  candidates,
+  chosenCandidateId
+}){
+  return {
+    timestamp: new Date().toISOString(),
+    documentId: state.currentFileId || state.currentFileName || state.currentFile?.name || '',
+    page,
+    query: { raw: query, normalized },
+    toggles: {
+      usePdfjs: !!els.findTextPdfToggle?.checked,
+      useTesseract: !!els.findTextTessToggle?.checked,
+      findAll: !!els.findTextAllToggle?.checked,
+      bestMatch: !!els.findTextBestToggle?.checked,
+      showConstellations: !!els.findTextConstellationsToggle?.checked,
+      learningMode: isFindTextLearningEnabled()
+    },
+    tokenSource,
+    matchSource,
+    source,
+    candidates,
+    chosenCandidateId,
+    label: null
+  };
+}
+
+function recordFindTextLearningRun(entries){
+  if(!window.FindTextRanker || !entries.length) return;
+  const recorded = entries.map(entry => {
+    window.FindTextRanker.appendLogEvent(entry);
+    return entry;
+  });
+  state.findTextLearning.lastRun = recorded;
+  state.findTextLearning.lastLogEntries = recorded;
+}
+
+function hideFindTextLearningPicker(){
+  if(els.findTextLearningPicker){
+    els.findTextLearningPicker.style.display = 'none';
+    els.findTextLearningPicker.innerHTML = '';
+  }
+}
+
+function renderFindTextLearningPicker(entries){
+  if(!els.findTextLearningPicker) return;
+  if(!entries || !entries.length){
+    els.findTextLearningPicker.textContent = 'No candidates available for correction.';
+    els.findTextLearningPicker.style.display = 'block';
+    return;
+  }
+  const listItems = entries.flatMap(entry => entry.candidates.map(candidate => ({
+    entry,
+    candidate
+  })));
+  const listMarkup = listItems.map(item => {
+    const snippet = item.candidate.text || '<no text>';
+    const sourceTag = item.entry.source || item.entry.tokenSource || 'unknown';
+    return `
+      <div class="picker-item" data-entry-id="${item.entry.chosenCandidateId}" data-candidate-id="${item.candidate.id}">
+        <div>
+          <div>${snippet}</div>
+          <div class="picker-meta">order ${item.candidate.order} · score ${item.candidate.heuristicScore}</div>
+        </div>
+        <span class="picker-tag">${sourceTag}</span>
+      </div>
+    `;
+  }).join('');
+  els.findTextLearningPicker.innerHTML = `
+    <h4>Select the correct candidate</h4>
+    <div class="picker-list">${listMarkup}</div>
+  `;
+  els.findTextLearningPicker.style.display = 'block';
+  els.findTextLearningPicker.querySelectorAll('.picker-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const candidateId = item.dataset.candidateId;
+      const entry = entries.find(e => e.candidates.some(c => c.id === candidateId));
+      if(!entry || !window.FindTextRanker) return;
+      const feedback = {
+        ...entry,
+        label: 'bad',
+        correctedCandidateId: candidateId
+      };
+      window.FindTextRanker.appendLogEvent(feedback);
+      hideFindTextLearningPicker();
+    });
+  });
+}
+
+function collectFindTextLearningEntries({
+  query,
+  matchMode,
+  findAll,
+  useRanker,
+  weights,
+  pdfResult,
+  tessResult
+}){
+  if(!window.FindTextRanker) return [];
+  const normalized = normalizeFindTextInput(query);
+  const entries = [];
+  const collectEntry = (result, source) => {
+    if(!result) return;
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    const ranked = matchMode === 'best'
+      ? rankFindTextCandidates(candidates, {
+        mode: matchMode,
+        query: normalized,
+        source,
+        useRanker,
+        weights
+      }).ranked
+      : candidates.slice();
+    const candidateRecords = buildFindTextCandidateRecords(query, ranked, source);
+    const chosenCandidateId = findAll ? null : (candidateRecords[0]?.id || null);
+    entries.push(buildFindTextLearningEntry({
+      query,
+      normalized,
+      page: result.page ?? state.pageNum ?? 1,
+      source,
+      tokenSource: result.tokenSource || source,
+      matchSource: result.matchSource || null,
+      candidates: candidateRecords,
+      chosenCandidateId
+    }));
+  };
+  collectEntry(pdfResult, 'pdfjs');
+  collectEntry(tessResult, 'tesseract');
+  return entries;
 }
 
 function areaConfigsForPage(){
@@ -14168,6 +14397,8 @@ async function handleFindTextFileChange(e){
   state.findTextTessSelectionsCss = [];
   state.findTextResults = { pdf: null, tess: null };
   clearFindTextConstellations();
+  hideFindTextLearningPicker();
+  state.findTextLearning.lastRun = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
   setFindTextStatus('Loading document...');
@@ -14196,6 +14427,11 @@ async function handleFindTextSearch(){
   const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
   const findAll = els.findTextAllToggle ? els.findTextAllToggle.checked : false;
   const matchMode = els.findTextBestToggle?.checked ? 'best' : 'first';
+  const learningEnabled = isFindTextLearningEnabled();
+  const weights = getFindTextRankerWeights();
+  const useRanker = learningEnabled && !!weights && matchMode === 'best';
+  const rankerContext = { useRanker, weights, mode: matchMode };
+  state.findTextLearning.enabled = learningEnabled;
   if(!usePdf && !useTess){
     setFindTextStatus('Select PDF.js and/or Tesseract to search.', 'error');
     return;
@@ -14211,13 +14447,19 @@ async function handleFindTextSearch(){
   state.findTextTessSelectionsCss = [];
   state.findTextResults = { pdf: null, tess: null };
   clearFindTextConstellations();
+  hideFindTextLearningPicker();
+  state.findTextLearning.lastRun = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   let pdfResult = null;
   let tessResult = null;
   const statusBits = [];
   if(usePdf){
     if(findAll){
-      pdfResult = await findTextOnPageAllOccurrences(query, { useTesseract: false });
+      pdfResult = await findTextOnPageAllOccurrences(query, {
+        useTesseract: false,
+        includeCandidates: learningEnabled,
+        rankerContext: { ...rankerContext, source: 'pdfjs' }
+      });
       const count = pdfResult?.boxes?.length || 0;
       if(count){
         applyFindTextHighlights(pdfResult.boxes);
@@ -14229,7 +14471,11 @@ async function handleFindTextSearch(){
         state.findTextDebug.pdf = { boxesPx: [], matchSource: pdfResult?.matchSource || null, tokens: pdfResult?.tokens || 0 };
       }
     } else {
-      pdfResult = await findTextInDocument(query, { matchMode });
+      pdfResult = await findTextInDocument(query, {
+        matchMode,
+        includeCandidates: learningEnabled,
+        rankerContext
+      });
       if(pdfResult?.box){
         applyFindTextHighlight(pdfResult.box);
         state.findTextDebug.pdf = { boxPx: pdfResult.box, matchSource: pdfResult.matchSource, tokens: pdfResult.tokens };
@@ -14243,7 +14489,11 @@ async function handleFindTextSearch(){
   }
   if(useTess){
     if(findAll){
-      tessResult = await findTextOnPageAllOccurrences(query, { useTesseract: true });
+      tessResult = await findTextOnPageAllOccurrences(query, {
+        useTesseract: true,
+        includeCandidates: learningEnabled,
+        rankerContext: { ...rankerContext, source: 'tesseract-bbox' }
+      });
       const count = tessResult?.boxes?.length || 0;
       if(count){
         applyTesseractFindTextHighlights(tessResult.boxes);
@@ -14254,7 +14504,11 @@ async function handleFindTextSearch(){
         state.findTextDebug.tess = { boxesPx: [], matchSource: tessResult?.matchSource || null, tokens: tessResult?.tokens || 0 };
       }
     } else {
-      tessResult = await findTextInDocumentWithTesseract(query, { matchMode });
+      tessResult = await findTextInDocumentWithTesseract(query, {
+        matchMode,
+        includeCandidates: learningEnabled,
+        rankerContext
+      });
       if(tessResult?.box){
         applyTesseractFindTextHighlight(tessResult.box);
         state.findTextDebug.tess = { boxPx: tessResult.box, matchSource: tessResult.matchSource, tokens: tessResult.tokens };
@@ -14268,6 +14522,23 @@ async function handleFindTextSearch(){
   const pdfHasMatch = findAll ? (pdfResult?.boxes?.length || 0) > 0 : !!pdfResult?.box;
   const tessHasMatch = findAll ? (tessResult?.boxes?.length || 0) > 0 : !!tessResult?.box;
   const hasMatches = pdfHasMatch || tessHasMatch;
+  const learningEntries = learningEnabled
+    ? collectFindTextLearningEntries({
+      query,
+      matchMode,
+      findAll,
+      useRanker,
+      weights,
+      pdfResult,
+      tessResult
+    })
+    : [];
+  if(learningEnabled){
+    recordFindTextLearningRun(learningEntries);
+    const totalCandidates = learningEntries.reduce((sum, entry) => sum + (entry.candidates?.length || 0), 0);
+    const chosenId = learningEntries[0]?.chosenCandidateId || '<none>';
+    console.info(`[find-text-learning] candidates=${totalCandidates} chosen=${chosenId} recorded=${learningEntries.length > 0}`);
+  }
   const activeResult = (pdfHasMatch ? pdfResult : null) || (tessHasMatch ? tessResult : null);
   if(!hasMatches){
     setFindTextStatus(`No match found for "${query}". ${statusBits.join(' · ')}`, 'error');
@@ -14306,6 +14577,49 @@ els.findTextInput?.addEventListener('keydown', (e) => {
 });
 els.findTextConstellationsToggle?.addEventListener('change', () => {
   updateFindTextConstellations();
+});
+els.findTextLearningToggle?.addEventListener('change', () => {
+  state.findTextLearning.enabled = isFindTextLearningEnabled();
+  hideFindTextLearningPicker();
+});
+els.findTextGoodBtn?.addEventListener('click', () => {
+  if(!window.FindTextRanker) return;
+  const entries = state.findTextLearning.lastRun || [];
+  if(!entries.length) return;
+  entries.forEach(entry => {
+    const feedback = {
+      ...entry,
+      label: 'good',
+      winnerCandidateId: entry.chosenCandidateId || null
+    };
+    window.FindTextRanker.appendLogEvent(feedback);
+  });
+});
+els.findTextBadBtn?.addEventListener('click', () => {
+  const entries = state.findTextLearning.lastRun || [];
+  if(!entries.length) return;
+  renderFindTextLearningPicker(entries);
+});
+els.findTextDownloadLogBtn?.addEventListener('click', () => {
+  window.FindTextRanker?.downloadLog();
+});
+els.findTextClearLogBtn?.addEventListener('click', () => {
+  window.FindTextRanker?.clearLog();
+  hideFindTextLearningPicker();
+});
+els.findTextWeightsFile?.addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  if(!f || !window.FindTextRanker) return;
+  const text = await f.text();
+  let parsed = null;
+  try{
+    parsed = JSON.parse(text);
+  } catch(err){
+    setFindTextStatus('Invalid weights file. Expecting JSON.', 'error');
+    return;
+  }
+  state.findTextLearning.weights = parsed || null;
+  window.FindTextRanker.storeWeights(parsed || {});
 });
 
 function getTesseractWordBBox(word){
