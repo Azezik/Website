@@ -126,6 +126,9 @@
         <div class="actions find-text-learning-actions" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">
           <button id="find-text-good-btn" class="btn">Good</button>
           <button id="find-text-bad-btn" class="btn">Bad</button>
+          <button id="find-text-geometry-bad-btn" class="btn">Geometry wrong</button>
+          <button id="find-text-candidate-bad-btn" class="btn">Candidate wrong</button>
+          <button id="find-text-crop-bad-btn" class="btn">Crop/Text wrong</button>
           <button id="find-text-download-log-btn" class="btn">Download learning log</button>
           <button id="find-text-clear-log-btn" class="btn ghost">Clear learning log</button>
           <label class="btn ghost">
@@ -134,6 +137,20 @@
           </label>
         </div>
         <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
+        <details class="panel minimal" id="find-text-learning-insights">
+          <summary>Learning Insights</summary>
+          <div class="actions" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">
+            <label class="btn ghost">
+              Load JSONL
+              <input id="find-text-insights-file" type="file" accept=".jsonl,application/jsonl" style="display:none" />
+            </label>
+            <button id="find-text-insights-analyze" class="btn" type="button">Analyze</button>
+            <button id="find-text-insights-clear" class="btn ghost" type="button">Clear</button>
+            <button id="find-text-insights-export" class="btn" type="button">Export report JSON</button>
+          </div>
+          <div id="find-text-insights-summary" class="sub" style="margin-bottom:12px;"></div>
+          <div id="find-text-insights-report" class="code" style="white-space:pre-wrap;"></div>
+        </details>
         <div id="find-text-viewer-slot" class="viewer-slot"></div>
         <div id="find-text-learning-picker" class="find-text-learning-picker" style="display:none;"></div>
         <pre id="find-text-debug" class="code" style="margin-top:12px;white-space:pre-wrap;"></pre>
@@ -422,6 +439,7 @@
   <script src="tools/keyword-weighting.js"></script>
   <script src="tools/keyword-constellation.js"></script>
   <script src="tools/findtext-ranker.js"></script>
+  <script src="tools/findtext-learning-insights.js"></script>
   <script src="master-db.js"></script>
   <script src="orchestrator.js"></script>
   <script src="field-map.js"></script>
