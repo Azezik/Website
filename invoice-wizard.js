@@ -11482,11 +11482,18 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
   const debugEntries = [];
   const matches = Array.isArray(matchBoxes) ? matchBoxes : [];
   const keywordFilter = getFindTextConstellationKeywordFilter();
+  const searchTermRaw = els.findTextInput?.value || '';
+  const searchTermNormalized = normalizeFindTextInput(searchTermRaw);
+  const constellationDebug = /debug/i.test(location.search)
+    ? { enabled: true, logOnce: true, searchTerm: { raw: searchTermRaw, normalized: searchTermNormalized } }
+    : null;
   for(const matchBox of matches){
     if(!isRenderableFindTextBox(matchBox)) continue;
     const normBox = normalizeBox(matchBox, pageW, pageH);
     const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, tokens, {
-      keywordFilter
+      keywordFilter,
+      excludeAnchorBoxPx: matchBox,
+      debug: constellationDebug
     });
     if(!constellation) continue;
     const match = KeywordConstellation.matchConstellation(constellation, tokens, {
