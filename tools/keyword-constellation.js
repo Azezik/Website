@@ -54,12 +54,39 @@
     return links;
   }
 
-  function shouldIncludeToken(normText, keywordFilter){
-    if(!keywordFilter) return true;
-    if(typeof keywordFilter === 'function') return !!keywordFilter(normText);
-    if(Array.isArray(keywordFilter)) return keywordFilter.includes(normText);
-    if(keywordFilter instanceof Set) return keywordFilter.has(normText);
-    return true;
+  function resolveTokenEligibility(normText, keywordFilter){
+    if(!normText){
+      return { eligible: false, reason: 'emptyNormalized' };
+    }
+    if(!keywordFilter){
+      return { eligible: true, reason: 'fallbackNoFilter' };
+    }
+    if(typeof keywordFilter === 'function'){
+      const hit = !!keywordFilter(normText);
+      return { eligible: hit, reason: hit ? 'keywordFilterFn' : 'keywordFilterFnMiss' };
+    }
+    if(Array.isArray(keywordFilter)){
+      const hit = keywordFilter.includes(normText);
+      return { eligible: hit, reason: hit ? 'keywordList' : 'keywordListMiss' };
+    }
+    if(keywordFilter instanceof Set){
+      const hit = keywordFilter.has(normText);
+      return { eligible: hit, reason: hit ? 'inKeywordSet' : 'notInKeywordSet' };
+    }
+    return { eligible: true, reason: 'keywordFilterUnknown' };
+  }
+
+  function intersectsBox(token, box){
+    if(!token || !box) return false;
+    const tx1 = token.x || 0;
+    const ty1 = token.y || 0;
+    const tx2 = tx1 + (token.w || 0);
+    const ty2 = ty1 + (token.h || 0);
+    const bx1 = box.x || 0;
+    const by1 = box.y || 0;
+    const bx2 = bx1 + (box.w || 0);
+    const by2 = by1 + (box.h || 0);
+    return tx1 < bx2 && tx2 > bx1 && ty1 < by2 && ty2 > by1;
   }
 
   function captureConstellation(fieldKey, boxPx, normBox, page, pageW, pageH, tokens, opts={}){
@@ -69,27 +96,76 @@
     const radiusSecondary = Number.isFinite(opts.radiusSecondary) ? opts.radiusSecondary : EXPANDED_RADIUS;
     const tolerance = Number.isFinite(opts.tolerance) ? opts.tolerance : DEFAULT_TOLERANCE;
     const keywordFilter = opts.keywordFilter || null;
+    const excludeAnchorBoxPx = opts.excludeAnchorBoxPx || null;
+    const debug = opts.debug || null;
     const candidates = [];
+    const debugEntries = [];
     const addCandidate = (tok) => {
       if(tok?.page && page && tok.page !== page) return;
       const normText = normalizeKeywordText(tok.text || tok.raw || '');
-      if(!shouldIncludeToken(normText, keywordFilter)) return;
       const center = centerNorm(tok, pageW, pageH);
       const dist = Math.hypot(center.x - origin.x, center.y - origin.y);
-      candidates.push({ token: tok, center, dist, normText });
+      const eligibility = resolveTokenEligibility(normText, keywordFilter);
+      const inPrimary = withinRadius(origin, center, radiusPrimary);
+      const inSecondary = withinRadius(origin, center, radiusSecondary);
+      const entry = { token: tok, center, dist, normText, inPrimary, inSecondary, ...eligibility };
+      debugEntries.push(entry);
+      if(!eligibility.eligible) return;
+      candidates.push(entry);
     };
     tokens.forEach(addCandidate);
     candidates.sort((a,b)=> a.dist - b.dist);
 
     let filtered = candidates.filter(c => withinRadius(origin, c.center, radiusPrimary));
+    let usedExpandedRadius = false;
     if(filtered.length < MAX_SUPPORTS){
       filtered = candidates.filter(c => withinRadius(origin, c.center, radiusSecondary));
+      usedExpandedRadius = true;
     }
-    if(!filtered.length){ return null; }
-
-    const picked = filtered.slice(0, MAX_SUPPORTS);
-    const anchor = picked[0];
-    const supports = picked.slice(1);
+    if(!filtered.length){
+      if(debug?.enabled && (!debug.logOnce || !debug.logged)){
+        debug.logged = true;
+        console.debug('[find-text][constellation] capture', {
+          fieldKey,
+          searchTerm: debug.searchTerm || null,
+          origin,
+          radiusPrimary,
+          radiusSecondary,
+          usedExpandedRadius,
+          keywordFilter: keywordFilter ? { type: keywordFilter.constructor?.name || typeof keywordFilter, size: keywordFilter.size } : null,
+          candidates: debugEntries
+            .filter(entry => entry.inSecondary)
+            .map(entry => ({
+              rawText: entry.token?.text || entry.token?.raw || '',
+              normalizedText: entry.normText,
+              bbox: { x: entry.token?.x || 0, y: entry.token?.y || 0, w: entry.token?.w || 0, h: entry.token?.h || 0, page: entry.token?.page || page },
+              center: entry.center,
+              distance: entry.dist,
+              eligible: entry.eligible,
+              reason: entry.reason,
+              inPrimary: entry.inPrimary,
+              inSecondary: entry.inSecondary,
+              overlapsExcludeBox: excludeAnchorBoxPx ? intersectsBox(entry.token, excludeAnchorBoxPx) : false
+            })),
+          anchor: null,
+          supports: []
+        });
+      }
+      return null;
+    }
+    let anchorIndex = 0;
+    let anchorReason = 'distanceRank';
+    if(excludeAnchorBoxPx){
+      const nextIndex = filtered.findIndex(entry => !intersectsBox(entry.token, excludeAnchorBoxPx));
+      if(nextIndex >= 0){
+        anchorIndex = nextIndex;
+        anchorReason = nextIndex === 0 ? 'distanceRank' : 'anchorOverride:excludeAnchorBox';
+      } else {
+        anchorReason = 'anchorFallbackInBox';
+      }
+    }
+    const anchor = filtered[anchorIndex];
+    const supports = filtered.filter((_, idx) => idx !== anchorIndex).slice(0, MAX_SUPPORTS - 1);
     const fieldSize = { w: normBox.wN, h: normBox.hN };
 
     const mappedSupports = supports.map(s => ({
@@ -113,12 +189,56 @@
     const fieldToAnchor = delta(origin, anchor.center);
     const crossLinks = buildCrossLinks(mappedSupports);
 
+    if(debug?.enabled && (!debug.logOnce || !debug.logged)){
+      debug.logged = true;
+      const filteredSet = new Set(filtered.map(entry => entry.token));
+      const candidateDebug = debugEntries
+        .filter(entry => entry.inSecondary)
+        .map(entry => ({
+          rawText: entry.token?.text || entry.token?.raw || '',
+          normalizedText: entry.normText,
+          bbox: { x: entry.token?.x || 0, y: entry.token?.y || 0, w: entry.token?.w || 0, h: entry.token?.h || 0, page: entry.token?.page || page },
+          center: entry.center,
+          distance: entry.dist,
+          eligible: entry.eligible,
+          reason: entry.reason,
+          inPrimary: entry.inPrimary,
+          inSecondary: entry.inSecondary,
+          shortlisted: filteredSet.has(entry.token),
+          overlapsExcludeBox: excludeAnchorBoxPx ? intersectsBox(entry.token, excludeAnchorBoxPx) : false
+        }));
+      console.debug('[find-text][constellation] capture', {
+        fieldKey,
+        searchTerm: debug.searchTerm || null,
+        origin,
+        radiusPrimary,
+        radiusSecondary,
+        usedExpandedRadius,
+        keywordFilter: keywordFilter ? { type: keywordFilter.constructor?.name || typeof keywordFilter, size: keywordFilter.size } : null,
+        candidates: candidateDebug,
+        anchor: anchor
+          ? {
+            rawText: anchor.token?.text || anchor.token?.raw || '',
+            normalizedText: anchor.normText,
+            distanceRank: anchorIndex + 1,
+            reason: anchorReason
+          }
+          : null,
+        supports: supports.map((support, idx) => ({
+          rawText: support.token?.text || support.token?.raw || '',
+          normalizedText: support.normText,
+          distanceRank: (filtered.indexOf(support) + 1) || (idx + 2),
+          reason: 'distanceRank'
+        }))
+      });
+    }
+
     return {
       fieldKey,
       page,
       origin,
       fieldSize,
-      radiusUsed: filtered === candidates ? radiusPrimary : radiusSecondary,
+      radiusUsed: usedExpandedRadius ? radiusSecondary : radiusPrimary,
       tolerance,
       anchor: anchorEntry,
       supports: mappedSupports,
