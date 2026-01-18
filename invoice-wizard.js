@@ -11661,8 +11661,8 @@ async function buildFindTextPreviewText({ boxPx, tokenSource, page } = {}){
       .join(' ')
     ).filter(Boolean).join('\n').trim();
   }
-  if(tokenSource !== 'pdfjs'){
-    const pageCanvas = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const pageCanvas = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(pageCanvas){
     const { text } = await ocrTextFromBBox({ pageCanvas, bboxPx: { ...boxPx, page: pageNum } });
     return String(text || '').trim();
   }
