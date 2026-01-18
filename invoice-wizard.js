@@ -3937,6 +3937,11 @@ const KEYWORD_RELATION_SCOPE = new Set([
   'payment_status'
 ]);
 
+const FIND_TEXT_STOP_WORDS = new Set([
+  'of','to','for','and','the','a','an','in','on','at','by','with','from','as','is','or','be','are','was','were','it','this','that'
+]);
+const FIND_TEXT_MIN_WORD_LENGTH = 3;
+
 function getKeywordCatalogue(){
   return KEYWORD_CATALOGUE;
 }
@@ -3946,18 +3951,62 @@ function getFindTextConstellationKeywordFilter(){
   if(FIND_TEXT_KEYWORD_FILTER) return FIND_TEXT_KEYWORD_FILTER;
   const catalogue = getKeywordCatalogue();
   const filter = new Set();
+  let phraseCount = 0;
+  let wordsConsidered = 0;
+  let wordsAdded = 0;
+  let wordsSkipped = 0;
+  const skippedStopWords = new Set();
+  const shouldIncludeWord = (word) => {
+    if(!word) return false;
+    if(word.length < FIND_TEXT_MIN_WORD_LENGTH) return false;
+    if(FIND_TEXT_STOP_WORDS.has(word)){
+      skippedStopWords.add(word);
+      return false;
+    }
+    return true;
+  };
   Object.values(catalogue || {}).forEach(group => {
     Object.values(group || {}).forEach(entries => {
       (entries || []).forEach(entry => {
         const normalized = normalizeKeywordText(entry);
         if(!normalized) return;
+        phraseCount += 1;
         normalized.split(' ').forEach(word => {
-          if(/[a-z]/i.test(word)) filter.add(word);
+          wordsConsidered += 1;
+          if(!/[a-z]/i.test(word)){
+            wordsSkipped += 1;
+            return;
+          }
+          if(!shouldIncludeWord(word)){
+            wordsSkipped += 1;
+            return;
+          }
+          filter.add(word);
+          wordsAdded += 1;
         });
         filter.add(normalized);
       });
     });
   });
+  if(/debug/i.test(location.search)){
+    const skippedSample = Array.from(skippedStopWords).slice(0, 6);
+    console.debug(
+      '[find-text] keyword filter built',
+      { phrases: phraseCount, wordsConsidered, wordsAdded, wordsSkipped, skippedStopWords: skippedSample }
+    );
+    const sanity = ['date of issue', 'amount due'].map(sample => {
+      const normalized = normalizeKeywordText(sample);
+      const words = normalized.split(' ').filter(word => /[a-z]/i.test(word) && shouldIncludeWord(word));
+      return {
+        sample,
+        normalized,
+        phraseIncluded: filter.has(normalized),
+        wordMatches: words.filter(word => filter.has(word)),
+        wordSkipped: normalized.split(' ').filter(word => !shouldIncludeWord(word))
+      };
+    });
+    console.debug('[find-text] keyword filter sanity', sanity);
+  }
   FIND_TEXT_KEYWORD_FILTER = filter;
   return filter;
 }
