@@ -11706,6 +11706,7 @@ function renderFindTextCandidateList(entry){
         tokenSource: stepper.tokenSource,
         page: stepper.page
       });
+      setFindTextExpectedText(stepper.previewText);
       if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
     });
   });
@@ -11733,7 +11734,7 @@ async function refreshFindTextStepperFromEntry(entry, boxPx){
   });
   if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
   if(!stepper.expectedText){
-    setFindTextExpectedText(els.findTextInput?.value || '');
+    setFindTextExpectedText(stepper.previewText);
   }
 }
 
@@ -12617,6 +12618,7 @@ async function finalizeSelection(e) {
       tokenSource: stepper.tokenSource || stepper.source || 'pdfjs',
       page: stepper.boxPx.page || state.pageNum
     });
+    setFindTextExpectedText(stepper.previewText);
     stepper.geometryLabel = 'bad';
     if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
     if(els.findTextCandidateList){
