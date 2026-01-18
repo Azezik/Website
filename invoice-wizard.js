@@ -143,6 +143,7 @@ const els = {
   findTextAllToggle: document.getElementById('find-text-all-toggle'),
   findTextBestToggle: document.getElementById('find-text-best-toggle'),
   findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
+  findTextConstellationLockToggle: document.getElementById('find-text-constellation-lock-toggle'),
   findTextLearningToggle: document.getElementById('find-text-learning-toggle'),
   findTextGeometryBadBtn: document.getElementById('find-text-geometry-bad-btn'),
   findTextGeometryGoodBtn: document.getElementById('find-text-geometry-good-btn'),
@@ -494,6 +495,14 @@ let state = {
   findTextPdfConstellationsPx: [],
   findTextTessConstellationsCss: [],
   findTextTessConstellationsPx: [],
+  findTextLockedConstellations: null,
+  findTextConstellationLock: {
+    enabled: false,
+    source: null,
+    page: null,
+    tokenSource: null,
+    constellations: []
+  },
   findTextResults: { pdf: null, tess: null },
   findTextDebug: {
     pdf: null,
@@ -11474,6 +11483,144 @@ function clearFindTextConstellations(){
   }
 }
 
+function clearFindTextConstellationLock(){
+  state.findTextLockedConstellations = null;
+  state.findTextConstellationLock = {
+    enabled: false,
+    source: null,
+    page: null,
+    tokenSource: null,
+    constellations: []
+  };
+  if(els.findTextConstellationLockToggle){
+    els.findTextConstellationLockToggle.checked = false;
+  }
+}
+
+function getFindTextActiveConstellationSource(){
+  const pdfBoxes = state.findTextResults?.pdf?.boxes || [];
+  const tessBoxes = state.findTextResults?.tess?.boxes || [];
+  if(pdfBoxes.length){
+    return {
+      source: 'pdfjs',
+      page: state.findTextResults.pdf.page || 1,
+      tokenSource: state.findTextResults.pdf.tokenSource || 'pdfjs',
+      boxes: pdfBoxes
+    };
+  }
+  if(tessBoxes.length){
+    return {
+      source: 'tesseract',
+      page: state.findTextResults.tess.page || 1,
+      tokenSource: state.findTextResults.tess.tokenSource || 'tesseract',
+      boxes: tessBoxes
+    };
+  }
+  return null;
+}
+
+function setFindTextConstellationLockStatus(message = '', tone = 'muted'){
+  setFindTextStatus(message, tone);
+}
+
+async function lockFindTextConstellation(){
+  const active = getFindTextActiveConstellationSource();
+  if(!active){
+    setFindTextConstellationLockStatus('Run a search before locking a constellation.', 'error');
+    return false;
+  }
+  const tokens = await getFindTextConstellationTokens(active.tokenSource, active.page);
+  const vp = state.pageViewports[active.page - 1] || state.viewport || {};
+  const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+  const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+  const keywordFilter = getFindTextConstellationKeywordFilter();
+  const constellations = [];
+  active.boxes.forEach(matchBox => {
+    if(!isRenderableFindTextBox(matchBox)) return;
+    const normBox = normalizeBox(matchBox, pageW, pageH);
+    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, active.page, pageW, pageH, tokens, {
+      keywordFilter
+    });
+    if(constellation){
+      constellations.push(constellation);
+    }
+  });
+  if(!constellations.length){
+    setFindTextConstellationLockStatus('Unable to capture constellations for the current match.', 'error');
+    return false;
+  }
+  state.findTextConstellationLock = {
+    enabled: true,
+    source: active.source,
+    page: active.page,
+    tokenSource: active.tokenSource,
+    constellations
+  };
+  state.findTextLockedConstellations = constellations.map(constellation => serializeAreaConstellation(constellation));
+  setFindTextConstellationLockStatus(`Locked ${constellations.length} constellation${constellations.length === 1 ? '' : 's'}.`);
+  return true;
+}
+
+async function unlockFindTextConstellation(){
+  clearFindTextConstellationLock();
+  setFindTextConstellationLockStatus('Constellation lock cleared.');
+  await updateFindTextConstellations();
+}
+
+async function runFindTextConstellationLock(){
+  const lock = state.findTextConstellationLock;
+  if(!lock?.enabled || !lock.constellations?.length){
+    return false;
+  }
+  const page = lock.page || 1;
+  const tokens = await getFindTextConstellationTokens(lock.tokenSource || lock.source || 'pdfjs', page);
+  if(!tokens.length){
+    setFindTextConstellationLockStatus('Constellation lock could not load tokens on this page.', 'error');
+    return false;
+  }
+  const vp = state.pageViewports[page - 1] || state.viewport || {};
+  const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+  const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+  const { boxesPx, debugEntries } = buildFindTextConstellationMatches(lock.constellations, tokens, page, pageW, pageH);
+  if(!boxesPx.length){
+    setFindTextConstellationLockStatus('Constellation lock could not find a match on this page.', 'error');
+    return false;
+  }
+  state.selectionPx = null;
+  state.selectionCss = null;
+  state.findTextTessSelectionPx = null;
+  state.findTextTessSelectionCss = null;
+  state.findTextPdfSelectionsPx = [];
+  state.findTextPdfSelectionsCss = [];
+  state.findTextTessSelectionsPx = [];
+  state.findTextTessSelectionsCss = [];
+  const isTess = (lock.tokenSource || lock.source || '').startsWith('tesseract');
+  if(isTess){
+    applyTesseractFindTextHighlights(boxesPx);
+    state.findTextResults = { pdf: null, tess: { page, boxes: boxesPx, tokenSource: lock.tokenSource || 'tesseract' } };
+    state.findTextDebug.tess = { boxesPx, matchSource: 'constellation-lock', tokens: tokens.length };
+  } else {
+    applyFindTextHighlights(boxesPx);
+    state.findTextResults = { pdf: { page, boxes: boxesPx, tokenSource: lock.tokenSource || 'pdfjs' }, tess: null };
+    state.findTextDebug.pdf = { boxesPx, matchSource: 'constellation-lock', tokens: tokens.length };
+  }
+  if(!state.findTextDebug) state.findTextDebug = { pdf: null, tess: null, scale: null };
+  const debugTarget = isTess ? 'tess' : 'pdf';
+  const existing = state.findTextDebug[debugTarget] ? { ...state.findTextDebug[debugTarget] } : {};
+  existing.constellations = debugEntries;
+  state.findTextDebug[debugTarget] = existing;
+  state.pageNum = page;
+  state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
+  updatePageIndicator();
+  if(els.viewer && state.pageOffsets?.length){
+    els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
+  }
+  await updateFindTextConstellations();
+  setFindTextConstellationLockStatus(`Constellation lock matched ${boxesPx.length} box${boxesPx.length === 1 ? '' : 'es'} (page ${page}).`);
+  renderFindTextDebug();
+  return true;
+}
+
 function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH){
   if(!KeywordConstellation?.captureConstellation || !KeywordConstellation?.matchConstellation){
     return { boxesPx: [], debugEntries: [] };
@@ -11526,6 +11673,54 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
   return { boxesPx, debugEntries };
 }
 
+function buildFindTextConstellationMatches(constellations, tokens, page, pageW, pageH){
+  if(!KeywordConstellation?.matchConstellation || !Array.isArray(constellations)){
+    return { boxesPx: [], debugEntries: [] };
+  }
+  const boxesPx = [];
+  const debugEntries = [];
+  const valid = constellations.filter(Boolean);
+  valid.forEach(constellation => {
+    const match = KeywordConstellation.matchConstellation(constellation, tokens, {
+      page,
+      pageW,
+      pageH,
+      tolerance: constellation.tolerance
+    });
+    const best = match?.best;
+    if(!best?.predictedBoxPx) return;
+    if(isRenderableFindTextBox(best.predictedBoxPx)){
+      boxesPx.push(best.predictedBoxPx);
+    }
+    const anchorToken = best.anchor || null;
+    const supportTokens = (best.supportMatches || []).map(entry => entry?.token).filter(Boolean);
+    const allTokens = [anchorToken, ...supportTokens].filter(Boolean).filter(isFindTextConstellationKeyword);
+    allTokens.forEach(token => {
+      const candidate = {
+        x: token.x,
+        y: token.y,
+        w: token.w,
+        h: token.h,
+        page
+      };
+      if(isRenderableFindTextBox(candidate)){
+        boxesPx.push(candidate);
+      }
+    });
+    const anchorText = (anchorToken?.text || anchorToken?.raw || '').trim();
+    const supports = supportTokens
+      .map(token => (token?.text || token?.raw || '').trim())
+      .filter(Boolean);
+    debugEntries.push({
+      anchor: anchorText,
+      supports,
+      matchedEdges: best.matchedEdges || 0,
+      totalEdges: best.totalEdges || 0
+    });
+  });
+  return { boxesPx, debugEntries };
+}
+
 function toFindTextConstellationCss(boxesPx, options = {}){
   const { adjustForTesseract = false } = options;
   const { scaleX, scaleY } = getScaleFactors();
@@ -11560,6 +11755,9 @@ async function updateFindTextConstellations(){
     renderFindTextDebug();
     return;
   }
+  const lockedConstellations = state.findTextConstellationLock?.enabled
+    ? (state.findTextConstellationLock.constellations || [])
+    : [];
   const results = state.findTextResults || {};
   if(results.pdf?.boxes?.length){
     const page = results.pdf.page || 1;
@@ -11567,7 +11765,9 @@ async function updateFindTextConstellations(){
     const vp = state.pageViewports[page - 1] || state.viewport || {};
     const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
     const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
-    const { boxesPx, debugEntries } = buildFindTextConstellationBoxes(results.pdf.boxes, tokens, page, pageW, pageH);
+    const { boxesPx, debugEntries } = lockedConstellations.length
+      ? buildFindTextConstellationMatches(lockedConstellations, tokens, page, pageW, pageH)
+      : buildFindTextConstellationBoxes(results.pdf.boxes, tokens, page, pageW, pageH);
     state.findTextPdfConstellationsPx = boxesPx;
     state.findTextPdfConstellationsCss = toFindTextConstellationCss(boxesPx, { adjustForTesseract: false });
     if(!state.findTextDebug) state.findTextDebug = { pdf: null, tess: null, scale: null };
@@ -11581,7 +11781,9 @@ async function updateFindTextConstellations(){
     const vp = state.pageViewports[page - 1] || state.viewport || {};
     const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
     const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
-    const { boxesPx, debugEntries } = buildFindTextConstellationBoxes(results.tess.boxes, tokens, page, pageW, pageH);
+    const { boxesPx, debugEntries } = lockedConstellations.length
+      ? buildFindTextConstellationMatches(lockedConstellations, tokens, page, pageW, pageH)
+      : buildFindTextConstellationBoxes(results.tess.boxes, tokens, page, pageW, pageH);
     state.findTextTessConstellationsPx = boxesPx;
     state.findTextTessConstellationsCss = toFindTextConstellationCss(boxesPx, { adjustForTesseract: true });
     if(!state.findTextDebug) state.findTextDebug = { pdf: null, tess: null, scale: null };
@@ -14705,8 +14907,12 @@ async function handleFindTextFileChange(e){
   setFindTextStatus('Loading document...');
   try{
     await openFile(f);
-    setFindTextStatus('Document loaded. Enter text to highlight.');
-    renderFindTextDebug();
+    if(state.findTextConstellationLock?.enabled){
+      await runFindTextConstellationLock();
+    } else {
+      setFindTextStatus('Document loaded. Enter text to highlight.');
+      renderFindTextDebug();
+    }
   } catch(err){
     console.error('Find text load failed', err);
     setFindTextStatus('Failed to load document. Try again.', 'error');
@@ -14857,6 +15063,9 @@ async function handleFindTextSearch(){
       : null
   };
   state.findTextActiveSources = { pdf: pdfHasMatch, tess: tessHasMatch };
+  if(state.findTextConstellationLock?.enabled){
+    await lockFindTextConstellation();
+  }
   const { page } = activeResult;
   state.pageNum = page;
   state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
@@ -14887,6 +15096,17 @@ els.findTextInput?.addEventListener('keydown', (e) => {
 });
 els.findTextConstellationsToggle?.addEventListener('change', () => {
   updateFindTextConstellations();
+});
+els.findTextConstellationLockToggle?.addEventListener('change', async (e) => {
+  if(e.target.checked){
+    const locked = await lockFindTextConstellation();
+    if(!locked){
+      e.target.checked = false;
+    }
+    await updateFindTextConstellations();
+  } else {
+    await unlockFindTextConstellation();
+  }
 });
 els.findTextLearningToggle?.addEventListener('change', () => {
   state.findTextLearning.enabled = isFindTextLearningEnabled();
