@@ -898,6 +898,22 @@ async function getVisualRunTokens(pageNum){
   return ensureTokensForPage(pageNum);
 }
 
+function normalizeTesseractTokensForPage(tokens = [], pageNum){
+  if(!Array.isArray(tokens) || !tokens.length) return [];
+  const { scaleX = 1, scaleY = 1 } = getScaleFactors();
+  const safeScaleX = Number.isFinite(scaleX) && scaleX > 0 ? scaleX : 1;
+  const safeScaleY = Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
+  const pageOffset = Number.isFinite(state.pageOffsets?.[pageNum - 1]) ? state.pageOffsets[pageNum - 1] : 0;
+  return tokens.map(token => ({
+    ...token,
+    x: (token.x || 0) / safeScaleX,
+    y: ((token.y || 0) - pageOffset) / safeScaleY,
+    w: (token.w || 0) / safeScaleX,
+    h: (token.h || 0) / safeScaleY,
+    page: token.page || pageNum
+  }));
+}
+
 function resolveVisualRunFieldSpec(){
   const fieldKey = state.visualRun?.template?.fields?.[0]?.fieldKey || '';
   const fields = state.profile?.fields || [];
@@ -1021,7 +1037,10 @@ async function captureVisualRunConfig(){
     return false;
   }
   const tokens = await getVisualRunTokens(state.pageNum);
-  const res = await extractFieldValue(step, tokens, state.viewport);
+  const tokensForExtraction = state.visualRun?.tokenSource === 'tesseract'
+    ? normalizeTesseractTokensForPage(tokens, state.pageNum)
+    : tokens;
+  const res = await extractFieldValue(step, tokensForExtraction, state.viewport);
   let value = res.value || '';
   let raw = res.raw || '';
   let boxPx = res.boxPx || state.snappedPx;
@@ -1080,7 +1099,10 @@ async function runVisualRunExtraction(){
   updatePageIndicator();
   state.matchPoints = [];
   const tokens = await getVisualRunTokens(page);
-  const result = await extractFieldValue(fieldSpec, tokens, state.viewport);
+  const tokensForExtraction = visual.tokenSource === 'tesseract'
+    ? normalizeTesseractTokensForPage(tokens, page)
+    : tokens;
+  const result = await extractFieldValue(fieldSpec, tokensForExtraction, state.viewport);
   const rawText = result.rawBeforeClean || result.raw || '';
   const cleanedText = result.value || '';
   visual.rawText = rawText;
@@ -1097,7 +1119,7 @@ async function runVisualRunExtraction(){
   const snapshot = await buildVisualRunAttemptSnapshot({
     fieldSpec,
     result,
-    tokens,
+    tokens: tokensForExtraction,
     page
   });
   const attempt = recordVisualRunAttemptSnapshot(snapshot, { parentAttemptId: null });
