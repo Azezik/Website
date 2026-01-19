@@ -1079,7 +1079,21 @@ async function captureVisualRunConfig(){
   } else if(step.type === 'column'){
     extras.column = buildColumnModel(step, pct, boxPx, tokens);
   }
+  console.info('[visual-run][config] normalizeBox inputs', {
+    storedBoxPx: clonePlain(storedBoxPx),
+    canvasW,
+    canvasH,
+    viewport: clonePlain(vp),
+    normBox: clonePlain(normBox)
+  });
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
+  const savedField = state.profile?.fields?.find(f => f.fieldKey === step.fieldKey) || null;
+  console.info('[visual-run][config] saved field geometry', {
+    fieldKey: step.fieldKey,
+    bbox: clonePlain(savedField?.bbox || null),
+    bboxPct: clonePlain(savedField?.bboxPct || null),
+    rawBox: clonePlain(savedField?.rawBox || null)
+  });
   visual.configured = true;
   return true;
 }
@@ -1094,6 +1108,12 @@ async function runVisualRunExtraction(){
     alert('Unable to locate the field in the profile.');
     return;
   }
+  console.info('[visual-run][run] loaded field geometry', {
+    fieldKey: fieldSpec.fieldKey,
+    bbox: clonePlain(fieldSpec.bbox || null),
+    bboxPct: clonePlain(fieldSpec.bboxPct || null),
+    rawBox: clonePlain(fieldSpec.rawBox || null)
+  });
   const page = fieldSpec.page || state.pageNum || 1;
   state.pageNum = page;
   state.viewport = state.pageViewports[page - 1] || state.viewport;
@@ -8043,6 +8063,15 @@ function getOcrCropForSelection({docId, pageIndex, normBox}){
   }
   result.meta.computedPx = { sx: sxPx, sy: syPx, sw: swPx, sh: shPx, rotation };
   if(swPx <= 2 || shPx <= 2){
+    console.info('[visual-run][crop] tiny_or_zero_crop', {
+      normBox: clonePlain(normBox),
+      computedPx: clonePlain(result.meta.computedPx),
+      renderScaleX,
+      renderScaleY,
+      logicalW,
+      logicalH,
+      pageIndex
+    });
     result.meta.errors.push('tiny_or_zero_crop');
     result.meta.clamped = clamped;
     return result;
@@ -9190,6 +9219,11 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
     basePx = applyTransform(raw);
+    console.info('[visual-run][extract] base box from profile bbox', {
+      fieldKey: fieldSpec.fieldKey,
+      rawPx: clonePlain(raw),
+      basePx: clonePlain(basePx)
+    });
     if(fieldSpec.configBox){
       const cx0 = Number.isFinite(fieldSpec.configBox.x0) ? fieldSpec.configBox.x0 : fieldSpec.configBox[0];
       const cy0 = Number.isFinite(fieldSpec.configBox.y0) ? fieldSpec.configBox.y0 : fieldSpec.configBox[1];
