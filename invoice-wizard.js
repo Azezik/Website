@@ -187,6 +187,9 @@ const els = {
   visualRunCleanedOutput: document.getElementById('visual-run-cleaned'),
   visualRunNewFileInput: document.getElementById('visual-run-new-file'),
   visualRunResetBtn: document.getElementById('visual-run-reset'),
+  visualRunAttemptList: document.getElementById('visual-run-attempt-list'),
+  visualRunAttemptDetails: document.getElementById('visual-run-attempt-details'),
+  visualRunAttemptDownload: document.getElementById('visual-run-attempt-download'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
@@ -509,6 +512,8 @@ function ensureVisualRunState(){
       cleanedText: '',
       lastFile: null,
       configured: false,
+      attempts: [],
+      activeAttemptId: null,
       previousWizardId: null,
       previousGeometryId: null,
       previousSteps: null,
@@ -519,11 +524,227 @@ function ensureVisualRunState(){
   if(!state.visualRun.field){
     state.visualRun.field = buildVisualRunField();
   }
+  if(!Array.isArray(state.visualRun.attempts)){
+    state.visualRun.attempts = [];
+  }
+  if(!state.visualRun.activeAttemptId){
+    state.visualRun.activeAttemptId = null;
+  }
 }
 
 function setVisualRunStatus(message = ''){
   if(!els.visualRunStatus) return;
   els.visualRunStatus.textContent = message;
+}
+
+function createVisualRunAttemptId(){
+  return `visualrun_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+}
+
+function buildVisualRunAttemptDump(){
+  const attempts = state.visualRun?.attempts || [];
+  if(!attempts.length) return '(no attempts recorded)';
+  try{
+    return JSON.stringify({
+      activeAttemptId: state.visualRun?.activeAttemptId || null,
+      attempts
+    }, null, 2);
+  }catch(err){
+    return `Attempt serialization failed: ${err?.message || err}`;
+  }
+}
+
+function downloadVisualRunAttempts(){
+  try{
+    const text = buildVisualRunAttemptDump();
+    const blob = new Blob([text], { type:'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `visual-run-attempts-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  }catch(err){
+    console.error('visual run attempt download failed', err);
+    alert('Failed to download visual run attempt snapshot.');
+  }
+}
+
+function recordVisualRunAttemptSnapshot(snapshot, { parentAttemptId = null } = {}){
+  if(!snapshot || !state.visualRun) return null;
+  const attempt = {
+    ...snapshot,
+    parentAttemptId: parentAttemptId || null
+  };
+  state.visualRun.attempts = [...(state.visualRun.attempts || []), clonePlain(attempt)];
+  state.visualRun.activeAttemptId = attempt.attemptId;
+  return attempt;
+}
+
+function renderVisualRunAttemptList(){
+  if(!els.visualRunAttemptList) return;
+  const attempts = state.visualRun?.attempts || [];
+  if(!attempts.length){
+    els.visualRunAttemptList.innerHTML = '<div class="sub">No attempts recorded yet.</div>';
+    return;
+  }
+  const activeId = state.visualRun?.activeAttemptId;
+  els.visualRunAttemptList.innerHTML = attempts.map(attempt => {
+    const isActive = attempt.attemptId === activeId;
+    const label = attempt.query?.raw ? `"${attempt.query.raw}"` : attempt.attemptId;
+    const parent = attempt.parentAttemptId ? `branch of ${attempt.parentAttemptId}` : 'root';
+    return `
+      <div class="find-text-attempt-card ${isActive ? 'active' : ''}" data-attempt-id="${attempt.attemptId}">
+        <div><strong>${label}</strong></div>
+        <div class="sub">${attempt.source || 'unknown'} · ${parent}</div>
+      </div>
+    `;
+  }).join('');
+  els.visualRunAttemptList.querySelectorAll('.find-text-attempt-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const attemptId = card.dataset.attemptId;
+      if(!attemptId || !state.visualRun) return;
+      state.visualRun.activeAttemptId = attemptId;
+      renderVisualRunAttemptList();
+      renderVisualRunAttemptSnapshot();
+    });
+  });
+}
+
+function renderVisualRunAttemptSnapshot(){
+  if(!els.visualRunAttemptDetails) return;
+  const attempts = state.visualRun?.attempts || [];
+  const attempt = attempts.find(item => item.attemptId === state.visualRun?.activeAttemptId);
+  if(!attempt){
+    els.visualRunAttemptDetails.innerHTML = '<div class="sub">Select an attempt to view details.</div>';
+    return;
+  }
+  const stage = attempt.stages || {};
+  const cropPreview = stage.s5?.cropPreview;
+  const cropMeta = stage.s5?.cropMeta || {};
+  const cropErrors = cropMeta?.errors?.length ? `Errors: ${cropMeta.errors.join(', ')}` : 'Crop OK';
+  els.visualRunAttemptDetails.innerHTML = `
+    <div class="find-text-stage">
+      <h5>S0 Search Input</h5>
+      <div class="stage-meta">${attempt.source || 'unknown'} · ${attempt.matchMode || 'first'} · page ${attempt.page || 1}</div>
+      <pre class="code">${JSON.stringify(stage.s0 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S1 Candidate List</h5>
+      <pre class="code">${JSON.stringify(stage.s1?.candidates || [], null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S2 Chosen Match</h5>
+      <div class="stage-meta">${formatFindTextBox(stage.s2?.boxPx)}</div>
+      <pre class="code">${JSON.stringify(stage.s2 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S3 Constellation</h5>
+      <pre class="code">${JSON.stringify(stage.s3 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S4 Morphed Box</h5>
+      <div class="stage-meta">${formatFindTextBox(stage.s4?.boxPx)}</div>
+      <pre class="code">${JSON.stringify(stage.s4 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S5 Crop Artifact</h5>
+      <div class="stage-meta">${cropErrors}</div>
+      ${cropPreview ? `<img src="${cropPreview}" alt="Crop preview" style="max-width:220px;border:1px solid var(--border);margin-bottom:8px;" />` : ''}
+      <pre class="code">${JSON.stringify(cropMeta || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S6 Raw Extracted Text</h5>
+      <pre class="code">${JSON.stringify(stage.s6 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S7 Cleaned Text</h5>
+      <pre class="code">${JSON.stringify(stage.s7 || {}, null, 2)}</pre>
+    </div>
+  `;
+}
+
+async function buildVisualRunAttemptSnapshot({ fieldSpec, result, tokens, page } = {}){
+  if(!fieldSpec || !result || !tokens) return null;
+  const attemptBox = result.boxPx || state.snappedPx;
+  if(!attemptBox) return null;
+  const visual = state.visualRun || {};
+  const pageNum = attemptBox.page || page || fieldSpec.page || state.pageNum || 1;
+  const vp = state.pageViewports[pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+  const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+  const fieldLabel = visual.field?.name || fieldSpec.name || fieldSpec.fieldKey || 'visual run';
+  const boxWithPage = { ...attemptBox, page: pageNum };
+  const usedBoxPx = result.boxPx ? { ...result.boxPx, page: result.boxPx.page || pageNum } : boxWithPage;
+  const constellationSnapshot = buildFindTextConstellationSnapshot({
+    boxPx: boxWithPage,
+    tokens,
+    page: pageNum,
+    pageW,
+    pageH,
+    constellationOverride: fieldSpec.keywordConstellation || null
+  });
+  const normBox = normalizeBox(usedBoxPx, pageW, pageH);
+  const docId = state.currentFileId || state.currentFileName || state.currentFile?.name || '';
+  const cropInfo = getOcrCropForSelection({
+    docId,
+    pageIndex: pageNum - 1,
+    normBox
+  });
+  const cropPreview = cropInfo.cropBitmap?.toDataURL
+    ? cropInfo.cropBitmap.toDataURL('image/png')
+    : null;
+  return {
+    attemptId: createVisualRunAttemptId(),
+    createdAt: new Date().toISOString(),
+    documentId: docId,
+    page: pageNum,
+    source: 'visual-run',
+    tokenSource: visual.tokenSource || 'pdfjs',
+    query: {
+      raw: fieldLabel,
+      normalized: normalizeFindTextInput(fieldLabel)
+    },
+    matchMode: 'run',
+    matchSource: 'visual-run',
+    stages: {
+      s0: {
+        query: normalizeFindTextInput(fieldLabel),
+        rawQuery: fieldLabel,
+        tokenSource: visual.tokenSource || 'pdfjs'
+      },
+      s1: {
+        candidates: []
+      },
+      s2: {
+        chosenCandidateId: null,
+        boxPx: clonePlain(boxWithPage)
+      },
+      s3: {
+        constellation: constellationSnapshot.constellation,
+        match: constellationSnapshot.match
+      },
+      s4: {
+        boxPx: clonePlain(usedBoxPx),
+        source: result.method || 'run'
+      },
+      s5: {
+        cropMeta: cropInfo.meta,
+        cropPreview
+      },
+      s6: {
+        rawText: result.rawBeforeClean || result.raw || ''
+      },
+      s7: {
+        cleanedText: result.value || '',
+        correctedText: result.corrected || '',
+        correctionsApplied: result.correctionsApplied || result.corrections || [],
+        confidence: result.confidence ?? null
+      }
+    }
+  };
 }
 
 function prepareVisualRunContext(){
@@ -545,6 +766,8 @@ function prepareVisualRunContext(){
   updateVisualRunPrompt();
   updateVisualRunOutputs();
   updateVisualRunControls();
+  renderVisualRunAttemptList();
+  renderVisualRunAttemptSnapshot();
 }
 
 function restoreVisualRunContext(){
@@ -871,6 +1094,17 @@ async function runVisualRunExtraction(){
     keywordConstellation: fieldSpec.keywordConstellation || null,
     constellationMatch: result.constellationMatch || null
   });
+  const snapshot = await buildVisualRunAttemptSnapshot({
+    fieldSpec,
+    result,
+    tokens,
+    page
+  });
+  const attempt = recordVisualRunAttemptSnapshot(snapshot, { parentAttemptId: null });
+  if(attempt){
+    renderVisualRunAttemptList();
+    renderVisualRunAttemptSnapshot();
+  }
   setVisualRunStatus('Run mode extraction complete.');
 }
 
@@ -917,6 +1151,8 @@ function resetVisualRun(){
   visual.cleanedText = '';
   visual.lastFile = null;
   visual.tokenSource = 'pdfjs';
+  visual.attempts = [];
+  visual.activeAttemptId = null;
   clearVisualRunOverlays();
   state.profile = null;
   state.steps = [];
@@ -938,6 +1174,8 @@ function resetVisualRun(){
   if(els.visualRunSourcePdf) els.visualRunSourcePdf.checked = true;
   setVisualRunStatus('Visual Run reset.');
   renderVisualRunFieldRow();
+  renderVisualRunAttemptList();
+  renderVisualRunAttemptSnapshot();
   updateVisualRunPrompt();
   updateVisualRunControls();
 }
@@ -1092,6 +1330,8 @@ let state = {
     cleanedText: '',
     lastFile: null,
     configured: false,
+    attempts: [],
+    activeAttemptId: null,
     previousWizardId: null,
     previousGeometryId: null,
     previousSteps: null,
@@ -15612,6 +15852,7 @@ els.visualRunFileInput?.addEventListener('change', handleVisualRunFileChange);
 els.visualRunNewFileInput?.addEventListener('change', handleVisualRunNewFileChange);
 els.visualRunSaveExtractBtn?.addEventListener('click', handleVisualRunSaveExtract);
 els.visualRunResetBtn?.addEventListener('click', resetVisualRun);
+els.visualRunAttemptDownload?.addEventListener('click', downloadVisualRunAttempts);
 els.visualRunSourcePdf?.addEventListener('change', () => {
   if(els.visualRunSourcePdf?.checked) setVisualRunTokenSource('pdfjs');
 });
