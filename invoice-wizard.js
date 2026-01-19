@@ -898,11 +898,12 @@ async function getVisualRunTokens(pageNum){
   return ensureTokensForPage(pageNum);
 }
 
-function normalizeTesseractTokensForPage(tokens = [], pageNum){
+function normalizeTesseractTokensForPage(tokens = [], pageNum, options = {}){
   if(!Array.isArray(tokens) || !tokens.length) return [];
+  const { scaleToCss = false } = options;
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
-  const safeScaleX = Number.isFinite(scaleX) && scaleX > 0 ? scaleX : 1;
-  const safeScaleY = Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
+  const safeScaleX = scaleToCss && Number.isFinite(scaleX) && scaleX > 0 ? scaleX : 1;
+  const safeScaleY = scaleToCss && Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
   const pageOffset = Number.isFinite(state.pageOffsets?.[pageNum - 1]) ? state.pageOffsets[pageNum - 1] : 0;
   return tokens.map(token => ({
     ...token,
