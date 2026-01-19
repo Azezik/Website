@@ -119,6 +119,10 @@
             Show constellations
           </label>
           <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="find-text-lock-toggle" />
+            Lock constellation geometry
+          </label>
+          <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
             <input type="checkbox" id="find-text-learning-toggle" />
             Learning mode (Best match ranker)
           </label>
@@ -132,26 +136,36 @@
           </label>
         </div>
         <div id="find-text-status" class="sub" style="margin-bottom:12px;color:var(--muted);"></div>
+        <div id="find-text-attempts" class="panel minimal" style="margin-bottom:12px;">
+          <h4 style="margin:0 0 8px;">Attempt Snapshot</h4>
+          <div id="find-text-attempt-list" class="find-text-attempt-list"></div>
+          <div id="find-text-attempt-details" class="find-text-attempt-details"></div>
+        </div>
         <div id="find-text-stepper" class="panel minimal" style="margin-bottom:12px;">
           <h4 style="margin:0 0 8px;">Learning Stepper</h4>
           <div class="sub" style="margin-bottom:8px;">Preview (current box)</div>
           <div id="find-text-preview" class="code" style="white-space:pre-wrap;margin-bottom:8px;"></div>
           <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <span class="sub">Geometry:</span>
+            <span class="sub">Hit Box:</span>
             <button id="find-text-geometry-good-btn" class="btn">Good</button>
             <button id="find-text-geometry-bad-btn" class="btn">Bad</button>
             <button id="find-text-draw-box-btn" class="btn ghost">Draw new box?</button>
           </div>
           <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <span class="sub">Best candidate:</span>
+            <span class="sub">Candidate list:</span>
             <button id="find-text-candidate-good-btn" class="btn">Good</button>
             <button id="find-text-candidate-bad-btn" class="btn">Bad</button>
           </div>
           <div id="find-text-candidate-list" class="find-text-learning-picker" style="display:none;margin-bottom:8px;"></div>
           <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <span class="sub">Crop/Text:</span>
+            <span class="sub">Crop quality:</span>
             <button id="find-text-crop-good-btn" class="btn">Good</button>
             <button id="find-text-crop-bad-btn" class="btn">Bad</button>
+          </div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <span class="sub">Text / Cleaning:</span>
+            <button id="find-text-text-good-btn" class="btn">Good</button>
+            <button id="find-text-text-bad-btn" class="btn">Bad</button>
           </div>
           <textarea id="find-text-expected-text" class="code" style="width:100%;min-height:72px;margin-bottom:8px;" placeholder="Expected text..."></textarea>
           <div class="actions" style="gap:8px;flex-wrap:wrap;">

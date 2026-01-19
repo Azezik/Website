@@ -143,6 +143,7 @@ const els = {
   findTextAllToggle: document.getElementById('find-text-all-toggle'),
   findTextBestToggle: document.getElementById('find-text-best-toggle'),
   findTextConstellationsToggle: document.getElementById('find-text-constellations-toggle'),
+  findTextLockToggle: document.getElementById('find-text-lock-toggle'),
   findTextLearningToggle: document.getElementById('find-text-learning-toggle'),
   findTextGeometryBadBtn: document.getElementById('find-text-geometry-bad-btn'),
   findTextGeometryGoodBtn: document.getElementById('find-text-geometry-good-btn'),
@@ -150,6 +151,8 @@ const els = {
   findTextCandidateBadBtn: document.getElementById('find-text-candidate-bad-btn'),
   findTextCropGoodBtn: document.getElementById('find-text-crop-good-btn'),
   findTextCropBadBtn: document.getElementById('find-text-crop-bad-btn'),
+  findTextTextGoodBtn: document.getElementById('find-text-text-good-btn'),
+  findTextTextBadBtn: document.getElementById('find-text-text-bad-btn'),
   findTextDrawBoxBtn: document.getElementById('find-text-draw-box-btn'),
   findTextPreview: document.getElementById('find-text-preview'),
   findTextCandidateList: document.getElementById('find-text-candidate-list'),
@@ -159,6 +162,8 @@ const els = {
   findTextClearLogBtn: document.getElementById('find-text-clear-log-btn'),
   findTextWeightsFile: document.getElementById('find-text-weights-file'),
   findTextLearningPicker: document.getElementById('find-text-learning-picker'),
+  findTextAttemptList: document.getElementById('find-text-attempt-list'),
+  findTextAttemptDetails: document.getElementById('find-text-attempt-details'),
   findTextViewerSlot: document.getElementById('find-text-viewer-slot'),
   findTextDebug: document.getElementById('find-text-debug'),
   findTextInsightsFile: document.getElementById('find-text-insights-file'),
@@ -505,19 +510,26 @@ let state = {
     weights: null,
     lastRun: null,
     lastLogEntries: [],
+    attempts: [],
+    activeAttemptId: null,
+    lockedGeometry: null,
+    lockEnabled: false,
     stepper: {
       entry: null,
+      attemptId: null,
       source: null,
       tokenSource: null,
       page: null,
       boxPx: null,
       previewText: '',
       expectedText: '',
-      geometryLabel: null,
+      hitBoxLabel: null,
       candidateLabel: null,
       cropLabel: null,
+      textLabel: null,
       correctedCandidateId: null,
-      manualBoxMode: false
+      manualBoxMode: false,
+      correctionOfAttemptId: null
     }
   },
   findTextInsights: {
@@ -11672,17 +11684,20 @@ function renderFindTextDebug(){
 function resetFindTextStepper(){
   const stepper = state.findTextLearning.stepper;
   stepper.entry = null;
+  stepper.attemptId = null;
   stepper.source = null;
   stepper.tokenSource = null;
   stepper.page = null;
   stepper.boxPx = null;
   stepper.previewText = '';
   stepper.expectedText = '';
-  stepper.geometryLabel = null;
+  stepper.hitBoxLabel = null;
   stepper.candidateLabel = null;
   stepper.cropLabel = null;
+  stepper.textLabel = null;
   stepper.correctedCandidateId = null;
   stepper.manualBoxMode = false;
+  stepper.correctionOfAttemptId = null;
   if(els.findTextPreview) els.findTextPreview.textContent = '';
   if(els.findTextExpectedText) els.findTextExpectedText.value = '';
   if(els.findTextCandidateList){
@@ -11718,6 +11733,368 @@ async function buildFindTextPreviewText({ boxPx, tokenSource, page } = {}){
   return '';
 }
 
+function createFindTextAttemptId(){
+  return `findtext_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+}
+
+function formatFindTextBox(boxPx){
+  if(!boxPx) return '<none>';
+  return `page ${boxPx.page || 1} [${Math.round(boxPx.x || 0)}, ${Math.round(boxPx.y || 0)}, ${Math.round(boxPx.w || 0)}, ${Math.round(boxPx.h || 0)}]`;
+}
+
+function computeFindTextBoxDelta(baseBox, correctedBox){
+  if(!baseBox || !correctedBox) return null;
+  return {
+    dx: (correctedBox.x || 0) - (baseBox.x || 0),
+    dy: (correctedBox.y || 0) - (baseBox.y || 0),
+    dw: (correctedBox.w || 0) - (baseBox.w || 0),
+    dh: (correctedBox.h || 0) - (baseBox.h || 0)
+  };
+}
+
+function buildFindTextCandidateSummaries(candidates = []){
+  if(!Array.isArray(candidates)) return [];
+  return candidates.map((candidate, idx) => {
+    const tokenTexts = (candidate.tokens || []).map(t => String(t.text || t.raw || '')).filter(Boolean);
+    const text = candidate.text || tokenTexts.join(' ');
+    const order = Number.isFinite(candidate.order) ? candidate.order : idx;
+    const score = Number.isFinite(candidate.heuristicScore) ? candidate.heuristicScore : (Number.isFinite(candidate.score) ? candidate.score : null);
+    const box = candidate.box || null;
+    const id = candidate.id
+      || (window.FindTextRanker?.buildCandidateId ? window.FindTextRanker.buildCandidateId(candidate, idx) : `cand_${idx}_${Math.round(box?.x || 0)}:${Math.round(box?.y || 0)}:${Math.round(box?.w || 0)}:${Math.round(box?.h || 0)}:${box?.page || 0}`);
+    return {
+      id,
+      order,
+      score,
+      text,
+      box
+    };
+  });
+}
+
+function buildFindTextConstellationSnapshot({ boxPx, tokens, page, pageW, pageH, constellationOverride } = {}){
+  if(!KeywordConstellation?.captureConstellation || !KeywordConstellation?.matchConstellation) return { constellation: null, match: null };
+  if(!constellationOverride && !isRenderableFindTextBox(boxPx)) return { constellation: null, match: null };
+  const keywordFilter = getFindTextConstellationKeywordFilter();
+  const normBox = boxPx ? normalizeBox(boxPx, pageW, pageH) : null;
+  const constellation = constellationOverride
+    ? clonePlain(constellationOverride)
+    : KeywordConstellation.captureConstellation('find-text', boxPx, normBox, page, pageW, pageH, tokens, {
+      keywordFilter
+    });
+  if(!constellation) return { constellation: null, match: null };
+  const match = KeywordConstellation.matchConstellation(constellation, tokens, {
+    page,
+    pageW,
+    pageH,
+    maxResults: 1,
+    tolerance: constellation.tolerance
+  });
+  const best = match?.best || null;
+  const anchorToken = best?.anchor || null;
+  const supportTokens = (best?.supportMatches || []).map(entry => entry?.token).filter(Boolean);
+  const matchSummary = best ? {
+    matchedEdges: best.matchedEdges || 0,
+    totalEdges: best.totalEdges || 0,
+    predictedBoxPx: best.predictedBoxPx || null,
+    anchor: anchorToken ? {
+      text: String(anchorToken.text || anchorToken.raw || '').trim(),
+      box: { x: anchorToken.x, y: anchorToken.y, w: anchorToken.w, h: anchorToken.h, page }
+    } : null,
+    supports: supportTokens.map(token => ({
+      text: String(token.text || token.raw || '').trim(),
+      box: { x: token.x, y: token.y, w: token.w, h: token.h, page }
+    }))
+  } : null;
+  return { constellation: clonePlain(constellation), match: matchSummary };
+}
+
+function buildFindTextFieldSpecFromBox({ boxPx, page, keywordConstellation } = {}){
+  const pageNum = page || boxPx?.page || state.pageNum || 1;
+  const vp = state.pageViewports[pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+  const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+  const normBox = normalizeBox({ ...boxPx, page: pageNum }, pageW, pageH);
+  const bboxArr = [normBox.x0n, normBox.y0n, normBox.x0n + normBox.wN, normBox.y0n + normBox.hN];
+  return {
+    fieldKey: 'find_text',
+    type: 'static',
+    page: pageNum,
+    bbox: bboxArr,
+    configBox: bboxArr,
+    keywordConstellation: keywordConstellation ? clonePlain(keywordConstellation) : null,
+    tokensScoped: true,
+    useSuppliedTokensOnly: true
+  };
+}
+
+async function runFindTextExtractionPipeline({ boxPx, tokenSource, keywordConstellation } = {}){
+  if(!boxPx) return { result: null, fieldSpec: null, tokens: [] };
+  const pageNum = boxPx.page || state.pageNum || 1;
+  const vp = state.pageViewports[pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const tokens = await getFindTextConstellationTokens(tokenSource || 'pdfjs', pageNum);
+  const fieldSpec = buildFindTextFieldSpecFromBox({ boxPx, page: pageNum, keywordConstellation });
+  const prevMode = state.mode;
+  let result = null;
+  try{
+    state.mode = ModeEnum.RUN;
+    result = await extractFieldValue(fieldSpec, tokens, vp);
+  } finally {
+    state.mode = prevMode;
+  }
+  return { result, fieldSpec, tokens };
+}
+
+async function buildFindTextAttemptSnapshot({
+  query,
+  source,
+  tokenSource,
+  matchMode,
+  matchSource,
+  candidates,
+  chosenCandidateId,
+  chosenBoxPx,
+  constellationOverride
+} = {}){
+  if(!chosenBoxPx) return null;
+  const attemptId = createFindTextAttemptId();
+  const pageNum = chosenBoxPx.page || state.pageNum || 1;
+  const vp = state.pageViewports[pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+  const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+  const tokens = await getFindTextConstellationTokens(tokenSource || source || 'pdfjs', pageNum);
+  const constellationSnapshot = buildFindTextConstellationSnapshot({
+    boxPx: chosenBoxPx,
+    tokens,
+    page: pageNum,
+    pageW,
+    pageH,
+    constellationOverride
+  });
+  const extraction = await runFindTextExtractionPipeline({
+    boxPx: chosenBoxPx,
+    tokenSource: tokenSource || source || 'pdfjs',
+    keywordConstellation: constellationSnapshot.constellation
+  });
+  const extractionResult = extraction.result || {};
+  const usedBoxPx = extractionResult.boxPx || chosenBoxPx;
+  const normBox = normalizeBox(usedBoxPx, pageW, pageH);
+  const docId = state.currentFileId || state.currentFileName || state.currentFile?.name || '';
+  const cropInfo = getOcrCropForSelection({
+    docId,
+    pageIndex: pageNum - 1,
+    normBox
+  });
+  const cropPreview = cropInfo.cropBitmap?.toDataURL
+    ? cropInfo.cropBitmap.toDataURL('image/png')
+    : null;
+  return {
+    attemptId,
+    createdAt: new Date().toISOString(),
+    documentId: docId,
+    page: pageNum,
+    source: source || tokenSource || null,
+    tokenSource: tokenSource || source || null,
+    query: {
+      raw: query || '',
+      normalized: normalizeFindTextInput(query || '')
+    },
+    matchMode: matchMode || 'first',
+    matchSource: matchSource || null,
+    stages: {
+      s0: {
+        query: normalizeFindTextInput(query || ''),
+        rawQuery: query || '',
+        usePdfjs: !!els.findTextPdfToggle?.checked,
+        useTesseract: !!els.findTextTessToggle?.checked,
+        findAll: !!els.findTextAllToggle?.checked,
+        bestMatch: !!els.findTextBestToggle?.checked
+      },
+      s1: {
+        candidates: buildFindTextCandidateSummaries(candidates || [])
+      },
+      s2: {
+        chosenCandidateId: chosenCandidateId || null,
+        boxPx: clonePlain(chosenBoxPx)
+      },
+      s3: {
+        constellation: constellationSnapshot.constellation,
+        match: constellationSnapshot.match
+      },
+      s4: {
+        boxPx: clonePlain(usedBoxPx),
+        source: extractionResult.method || 'run'
+      },
+      s5: {
+        cropMeta: cropInfo.meta,
+        cropPreview
+      },
+      s6: {
+        rawText: extractionResult.raw || ''
+      },
+      s7: {
+        cleanedText: extractionResult.value || '',
+        correctedText: extractionResult.corrected || '',
+        correctionsApplied: extractionResult.correctionsApplied || [],
+        confidence: extractionResult.confidence ?? null
+      }
+    }
+  };
+}
+
+function recordFindTextAttemptSnapshot(snapshot, { parentAttemptId = null } = {}){
+  if(!snapshot) return null;
+  const attempt = {
+    ...snapshot,
+    parentAttemptId: parentAttemptId || null
+  };
+  state.findTextLearning.attempts = [...(state.findTextLearning.attempts || []), clonePlain(attempt)];
+  state.findTextLearning.activeAttemptId = attempt.attemptId;
+  if(window.FindTextRanker?.appendLogEvent){
+    window.FindTextRanker.appendLogEvent({
+      eventType: 'findtext.attempt',
+      ...attempt
+    });
+  }
+  return attempt;
+}
+
+function renderFindTextAttemptList(){
+  if(!els.findTextAttemptList) return;
+  const attempts = state.findTextLearning.attempts || [];
+  if(!attempts.length){
+    els.findTextAttemptList.innerHTML = '<div class="sub">No attempts recorded yet.</div>';
+    return;
+  }
+  const activeId = state.findTextLearning.activeAttemptId;
+  els.findTextAttemptList.innerHTML = attempts.map(attempt => {
+    const isActive = attempt.attemptId === activeId;
+    const label = attempt.query?.raw ? `"${attempt.query.raw}"` : attempt.attemptId;
+    const parent = attempt.parentAttemptId ? `branch of ${attempt.parentAttemptId}` : 'root';
+    return `
+      <div class="find-text-attempt-card ${isActive ? 'active' : ''}" data-attempt-id="${attempt.attemptId}">
+        <div><strong>${label}</strong></div>
+        <div class="sub">${attempt.source || 'unknown'} · ${parent}</div>
+      </div>
+    `;
+  }).join('');
+  els.findTextAttemptList.querySelectorAll('.find-text-attempt-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const attemptId = card.dataset.attemptId;
+      if(!attemptId) return;
+      state.findTextLearning.activeAttemptId = attemptId;
+      renderFindTextAttemptList();
+      renderFindTextAttemptSnapshot();
+    });
+  });
+}
+
+function renderFindTextAttemptSnapshot(){
+  if(!els.findTextAttemptDetails) return;
+  const attempts = state.findTextLearning.attempts || [];
+  const attempt = attempts.find(item => item.attemptId === state.findTextLearning.activeAttemptId);
+  if(!attempt){
+    els.findTextAttemptDetails.innerHTML = '<div class="sub">Select an attempt to view details.</div>';
+    return;
+  }
+  const stage = attempt.stages || {};
+  const cropPreview = stage.s5?.cropPreview;
+  const cropMeta = stage.s5?.cropMeta || {};
+  const cropErrors = cropMeta?.errors?.length ? `Errors: ${cropMeta.errors.join(', ')}` : 'Crop OK';
+  els.findTextAttemptDetails.innerHTML = `
+    <div class="find-text-stage">
+      <h5>S0 Search Input</h5>
+      <div class="stage-meta">${attempt.source || 'unknown'} · ${attempt.matchMode || 'first'} · page ${attempt.page || 1}</div>
+      <pre class="code">${JSON.stringify(stage.s0 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S1 Candidate List</h5>
+      <pre class="code">${JSON.stringify(stage.s1?.candidates || [], null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S2 Chosen Match</h5>
+      <div class="stage-meta">${formatFindTextBox(stage.s2?.boxPx)}</div>
+      <pre class="code">${JSON.stringify(stage.s2 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S3 Constellation</h5>
+      <pre class="code">${JSON.stringify(stage.s3 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S4 Morphed Box</h5>
+      <div class="stage-meta">${formatFindTextBox(stage.s4?.boxPx)}</div>
+      <pre class="code">${JSON.stringify(stage.s4 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S5 Crop Artifact</h5>
+      <div class="stage-meta">${cropErrors}</div>
+      ${cropPreview ? `<img src="${cropPreview}" alt="Crop preview" style="max-width:220px;border:1px solid var(--border);margin-bottom:8px;" />` : ''}
+      <pre class="code">${JSON.stringify(cropMeta || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S6 Raw Extracted Text</h5>
+      <pre class="code">${JSON.stringify(stage.s6 || {}, null, 2)}</pre>
+    </div>
+    <div class="find-text-stage">
+      <h5>S7 Cleaned Text</h5>
+      <pre class="code">${JSON.stringify(stage.s7 || {}, null, 2)}</pre>
+    </div>
+  `;
+}
+
+function getActiveFindTextAttempt(){
+  const attempts = state.findTextLearning.attempts || [];
+  return attempts.find(item => item.attemptId === state.findTextLearning.activeAttemptId) || null;
+}
+
+function updateFindTextLockStateFromAttempt(attempt){
+  if(!attempt) return;
+  state.findTextLearning.lockedGeometry = {
+    query: attempt.query || {},
+    source: attempt.source || null,
+    tokenSource: attempt.tokenSource || null,
+    page: attempt.page || 1,
+    baseBoxPx: clonePlain(attempt.stages?.s2?.boxPx || attempt.stages?.s4?.boxPx || null),
+    keywordConstellation: clonePlain(attempt.stages?.s3?.constellation || null)
+  };
+}
+
+async function runFindTextLockedGeometry(){
+  const locked = state.findTextLearning.lockedGeometry;
+  if(!locked?.baseBoxPx) return;
+  const query = locked.query?.raw || locked.query?.normalized || '';
+  const tokenSource = locked.tokenSource || locked.source || 'pdfjs';
+  const chosenBoxPx = { ...locked.baseBoxPx, page: locked.page || locked.baseBoxPx.page || 1 };
+  const snapshot = await buildFindTextAttemptSnapshot({
+    query,
+    source: 'locked',
+    tokenSource,
+    matchMode: 'locked',
+    matchSource: 'constellation',
+    candidates: [],
+    chosenCandidateId: null,
+    chosenBoxPx,
+    constellationOverride: locked.keywordConstellation || null
+  });
+  const attempt = recordFindTextAttemptSnapshot(snapshot, { parentAttemptId: null });
+  renderFindTextAttemptList();
+  renderFindTextAttemptSnapshot();
+  if(attempt?.stages?.s4?.boxPx){
+    if(tokenSource && tokenSource.includes('tesseract')){
+      applyTesseractFindTextHighlight(attempt.stages.s4.boxPx);
+    } else {
+      applyFindTextHighlight(attempt.stages.s4.boxPx);
+    }
+    state.findTextResults = {
+      pdf: tokenSource === 'pdfjs' ? { page: attempt.page || 1, boxes: [attempt.stages.s4.boxPx], tokenSource } : null,
+      tess: tokenSource !== 'pdfjs' ? { page: attempt.page || 1, boxes: [attempt.stages.s4.boxPx], tokenSource } : null
+    };
+  }
+  await refreshFindTextStepperFromAttempt(attempt);
+  await updateFindTextConstellations();
+  setFindTextStatus(`Locked geometry applied for "${query}".`);
+}
+
 function renderFindTextCandidateList(entry){
   if(!els.findTextCandidateList) return;
   if(!entry || !Array.isArray(entry.candidates) || !entry.candidates.length){
@@ -11727,11 +12104,12 @@ function renderFindTextCandidateList(entry){
   }
   const listMarkup = entry.candidates.map(candidate => {
     const snippet = candidate.text || '<no text>';
+    const score = Number.isFinite(candidate.heuristicScore) ? candidate.heuristicScore : (Number.isFinite(candidate.score) ? candidate.score : 0);
     return `
       <div class="picker-item" data-candidate-id="${candidate.id}">
         <div>
           <div>${snippet}</div>
-          <div class="picker-meta">order ${candidate.order} · score ${candidate.heuristicScore}</div>
+          <div class="picker-meta">order ${candidate.order} · score ${score}</div>
         </div>
       </div>
     `;
@@ -11747,16 +12125,56 @@ function renderFindTextCandidateList(entry){
       const match = entry.candidates.find(c => c.id === candidateId);
       if(!match) return;
       const stepper = state.findTextLearning.stepper;
+      const baseAttempt = getActiveFindTextAttempt();
       stepper.correctedCandidateId = candidateId;
       stepper.candidateLabel = 'bad';
       stepper.boxPx = match.box || stepper.boxPx;
-      stepper.previewText = await buildFindTextPreviewText({
-        boxPx: stepper.boxPx,
-        tokenSource: stepper.tokenSource,
-        page: stepper.page
+      const snapshot = await buildFindTextAttemptSnapshot({
+        query: baseAttempt?.query?.raw || '',
+        source: baseAttempt?.source || stepper.source || 'candidate',
+        tokenSource: stepper.tokenSource || baseAttempt?.tokenSource || 'pdfjs',
+        matchMode: baseAttempt?.matchMode || 'best',
+        matchSource: 'candidate',
+        candidates: entry.candidates || [],
+        chosenCandidateId: candidateId,
+        chosenBoxPx: stepper.boxPx
       });
-      setFindTextExpectedText(stepper.previewText);
-      if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+      const correctedAttempt = recordFindTextAttemptSnapshot(snapshot, {
+        parentAttemptId: baseAttempt?.attemptId || null
+      });
+      if(window.FindTextRanker?.appendLogEvent && baseAttempt){
+        window.FindTextRanker.appendLogEvent({
+          eventType: 'findtext.candidate_correction',
+          attemptId: correctedAttempt?.attemptId || null,
+          parentAttemptId: baseAttempt.attemptId,
+          chosenCandidateId: candidateId
+        });
+      }
+      renderFindTextAttemptList();
+      renderFindTextAttemptSnapshot();
+      if(correctedAttempt){
+        const tokenSource = correctedAttempt.tokenSource || correctedAttempt.source || 'pdfjs';
+        if(tokenSource.includes('tesseract')){
+          applyTesseractFindTextHighlight(correctedAttempt.stages?.s4?.boxPx || stepper.boxPx);
+        } else {
+          applyFindTextHighlight(correctedAttempt.stages?.s4?.boxPx || stepper.boxPx);
+        }
+        state.findTextResults = {
+          pdf: tokenSource === 'pdfjs' ? { page: correctedAttempt.page || 1, boxes: [correctedAttempt.stages?.s4?.boxPx || stepper.boxPx], tokenSource } : null,
+          tess: tokenSource !== 'pdfjs' ? { page: correctedAttempt.page || 1, boxes: [correctedAttempt.stages?.s4?.boxPx || stepper.boxPx], tokenSource } : null
+        };
+        state.findTextActiveSources = { pdf: tokenSource === 'pdfjs', tess: tokenSource !== 'pdfjs' };
+        await refreshFindTextStepperFromAttempt(correctedAttempt);
+        await updateFindTextConstellations();
+      } else {
+        stepper.previewText = await buildFindTextPreviewText({
+          boxPx: stepper.boxPx,
+          tokenSource: stepper.tokenSource,
+          page: stepper.page
+        });
+        setFindTextExpectedText(stepper.previewText);
+        if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+      }
     });
   });
 }
@@ -11772,6 +12190,7 @@ function setFindTextExpectedText(value){
 async function refreshFindTextStepperFromEntry(entry, boxPx){
   const stepper = state.findTextLearning.stepper;
   stepper.entry = entry;
+  stepper.attemptId = null;
   stepper.source = entry?.source || entry?.tokenSource || null;
   stepper.tokenSource = entry?.tokenSource || stepper.source || null;
   stepper.page = entry?.page || boxPx?.page || state.pageNum || 1;
@@ -11781,6 +12200,24 @@ async function refreshFindTextStepperFromEntry(entry, boxPx){
     tokenSource: stepper.tokenSource || stepper.source,
     page: stepper.page
   });
+  if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+  if(!stepper.expectedText){
+    setFindTextExpectedText(stepper.previewText);
+  }
+}
+
+async function refreshFindTextStepperFromAttempt(attempt){
+  if(!attempt) return;
+  const stepper = state.findTextLearning.stepper;
+  stepper.entry = {
+    candidates: attempt.stages?.s1?.candidates || []
+  };
+  stepper.attemptId = attempt.attemptId;
+  stepper.source = attempt.source || attempt.tokenSource || null;
+  stepper.tokenSource = attempt.tokenSource || attempt.source || null;
+  stepper.page = attempt.page || state.pageNum || 1;
+  stepper.boxPx = attempt.stages?.s4?.boxPx || attempt.stages?.s2?.boxPx || null;
+  stepper.previewText = attempt.stages?.s7?.cleanedText || attempt.stages?.s6?.rawText || '';
   if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
   if(!stepper.expectedText){
     setFindTextExpectedText(stepper.previewText);
@@ -12660,19 +13097,65 @@ async function finalizeSelection(e) {
   if (!state.selectionPx) return;
   if(state.findTextLearning?.stepper?.manualBoxMode && !isConfigMode()){
     const stepper = state.findTextLearning.stepper;
+    const baseAttempt = getActiveFindTextAttempt();
     stepper.manualBoxMode = false;
     stepper.boxPx = { ...state.selectionPx };
-    stepper.previewText = await buildFindTextPreviewText({
-      boxPx: stepper.boxPx,
-      tokenSource: stepper.tokenSource || stepper.source || 'pdfjs',
-      page: stepper.boxPx.page || state.pageNum
+    stepper.hitBoxLabel = 'bad';
+    const snapshot = await buildFindTextAttemptSnapshot({
+      query: baseAttempt?.query?.raw || '',
+      source: baseAttempt?.source || 'manual',
+      tokenSource: baseAttempt?.tokenSource || stepper.tokenSource || stepper.source || 'pdfjs',
+      matchMode: baseAttempt?.matchMode || 'manual',
+      matchSource: 'manual',
+      candidates: baseAttempt?.stages?.s1?.candidates || [],
+      chosenCandidateId: baseAttempt?.stages?.s2?.chosenCandidateId || null,
+      chosenBoxPx: stepper.boxPx
     });
-    setFindTextExpectedText(stepper.previewText);
-    stepper.geometryLabel = 'bad';
-    if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+    const correctedAttempt = recordFindTextAttemptSnapshot(snapshot, {
+      parentAttemptId: baseAttempt?.attemptId || null
+    });
+    if(window.FindTextRanker?.appendLogEvent && baseAttempt){
+      const baseBox = baseAttempt.stages?.s4?.boxPx || baseAttempt.stages?.s2?.boxPx || null;
+      const delta = computeFindTextBoxDelta(baseBox, stepper.boxPx);
+      window.FindTextRanker.appendLogEvent({
+        eventType: 'findtext.correction',
+        attemptId: correctedAttempt?.attemptId || null,
+        parentAttemptId: baseAttempt.attemptId,
+        source: baseAttempt.source,
+        tokenSource: baseAttempt.tokenSource,
+        baseBoxPx: baseBox,
+        correctedBoxPx: stepper.boxPx,
+        delta
+      });
+    }
+    renderFindTextAttemptList();
+    renderFindTextAttemptSnapshot();
+    if(correctedAttempt){
+      const tokenSource = correctedAttempt.tokenSource || correctedAttempt.source || 'pdfjs';
+      if(tokenSource.includes('tesseract')){
+        applyTesseractFindTextHighlight(correctedAttempt.stages?.s4?.boxPx || stepper.boxPx);
+      } else {
+        applyFindTextHighlight(correctedAttempt.stages?.s4?.boxPx || stepper.boxPx);
+      }
+      state.findTextResults = {
+        pdf: tokenSource === 'pdfjs' ? { page: correctedAttempt.page || 1, boxes: [correctedAttempt.stages?.s4?.boxPx || stepper.boxPx], tokenSource } : null,
+        tess: tokenSource !== 'pdfjs' ? { page: correctedAttempt.page || 1, boxes: [correctedAttempt.stages?.s4?.boxPx || stepper.boxPx], tokenSource } : null
+      };
+      state.findTextActiveSources = { pdf: tokenSource === 'pdfjs', tess: tokenSource !== 'pdfjs' };
+      await refreshFindTextStepperFromAttempt(correctedAttempt);
+    } else {
+      stepper.previewText = await buildFindTextPreviewText({
+        boxPx: stepper.boxPx,
+        tokenSource: stepper.tokenSource || stepper.source || 'pdfjs',
+        page: stepper.boxPx.page || state.pageNum
+      });
+      setFindTextExpectedText(stepper.previewText);
+      if(els.findTextPreview) els.findTextPreview.textContent = stepper.previewText || '';
+    }
     if(els.findTextCandidateList){
       els.findTextCandidateList.style.display = 'none';
     }
+    await updateFindTextConstellations();
     return;
   }
   state.pageNum = state.selectionPx.page;
@@ -14700,13 +15183,21 @@ async function handleFindTextFileChange(e){
   clearFindTextInsights();
   resetFindTextStepper();
   state.findTextLearning.lastRun = null;
+  state.findTextLearning.attempts = [];
+  state.findTextLearning.activeAttemptId = null;
   state.findTextDebug = { pdf: null, tess: null, scale: null };
   renderFindTextDebug();
+  renderFindTextAttemptList();
+  renderFindTextAttemptSnapshot();
   setFindTextStatus('Loading document...');
   try{
     await openFile(f);
     setFindTextStatus('Document loaded. Enter text to highlight.');
     renderFindTextDebug();
+    if(state.findTextLearning.lockEnabled && state.findTextLearning.lockedGeometry){
+      setFindTextStatus('Document loaded. Applying locked geometry...');
+      await runFindTextLockedGeometry();
+    }
   } catch(err){
     console.error('Find text load failed', err);
     setFindTextStatus('Failed to load document. Try again.', 'error');
@@ -14728,11 +15219,13 @@ async function handleFindTextSearch(){
   const useTess = els.findTextTessToggle ? els.findTextTessToggle.checked : false;
   const findAll = els.findTextAllToggle ? els.findTextAllToggle.checked : false;
   const matchMode = els.findTextBestToggle?.checked ? 'best' : 'first';
+  const includeCandidates = true;
   const learningEnabled = isFindTextLearningEnabled();
   const weights = getFindTextRankerWeights();
   const useRanker = learningEnabled && !!weights && matchMode === 'best';
   const rankerContext = { useRanker, weights, mode: matchMode };
   state.findTextLearning.enabled = learningEnabled;
+  state.findTextLearning.lockEnabled = !!els.findTextLockToggle?.checked;
   if(!usePdf && !useTess){
     setFindTextStatus('Select PDF.js and/or Tesseract to search.', 'error');
     return;
@@ -14759,7 +15252,7 @@ async function handleFindTextSearch(){
     if(findAll){
       pdfResult = await findTextOnPageAllOccurrences(query, {
         useTesseract: false,
-        includeCandidates: learningEnabled,
+        includeCandidates,
         rankerContext: { ...rankerContext, source: 'pdfjs' }
       });
       const count = pdfResult?.boxes?.length || 0;
@@ -14775,7 +15268,7 @@ async function handleFindTextSearch(){
     } else {
       pdfResult = await findTextInDocument(query, {
         matchMode,
-        includeCandidates: learningEnabled,
+        includeCandidates,
         rankerContext
       });
       if(pdfResult?.box){
@@ -14793,7 +15286,7 @@ async function handleFindTextSearch(){
     if(findAll){
       tessResult = await findTextOnPageAllOccurrences(query, {
         useTesseract: true,
-        includeCandidates: learningEnabled,
+        includeCandidates,
         rankerContext: { ...rankerContext, source: 'tesseract-bbox' }
       });
       const count = tessResult?.boxes?.length || 0;
@@ -14808,7 +15301,7 @@ async function handleFindTextSearch(){
     } else {
       tessResult = await findTextInDocumentWithTesseract(query, {
         matchMode,
-        includeCandidates: learningEnabled,
+        includeCandidates,
         rankerContext
       });
       if(tessResult?.box){
@@ -14857,6 +15350,7 @@ async function handleFindTextSearch(){
       : null
   };
   state.findTextActiveSources = { pdf: pdfHasMatch, tess: tessHasMatch };
+  const activeSource = pdfHasMatch ? 'pdfjs' : (tessHasMatch ? 'tesseract' : null);
   const { page } = activeResult;
   state.pageNum = page;
   state.viewport = state.pageViewports[state.pageNum - 1] || state.viewport;
@@ -14864,13 +15358,35 @@ async function handleFindTextSearch(){
   if(els.viewer && state.pageOffsets?.length){
     els.viewer.scrollTo({ top: state.pageOffsets[state.pageNum - 1], behavior: 'smooth' });
   }
-  if(learningEnabled && learningEntries.length){
-    const activeSource = pdfHasMatch ? 'pdfjs' : (tessHasMatch ? 'tesseract' : null);
-    const entry = learningEntries.find(item => item.source === activeSource) || learningEntries[0];
-    const boxPx = activeSource === 'pdfjs'
-      ? (findAll ? (pdfResult?.boxes?.[0] || null) : (pdfResult?.box || null))
-      : (findAll ? (tessResult?.boxes?.[0] || null) : (tessResult?.box || null));
-    await refreshFindTextStepperFromEntry(entry, boxPx);
+  const entry = learningEntries.length
+    ? (learningEntries.find(item => item.source === activeSource) || learningEntries[0])
+    : null;
+  const activeCandidates = entry?.candidates || activeResult?.candidates || [];
+  const chosenBoxPx = activeSource === 'pdfjs'
+    ? (findAll ? (pdfResult?.boxes?.[0] || null) : (pdfResult?.box || null))
+    : (findAll ? (tessResult?.boxes?.[0] || null) : (tessResult?.box || null));
+  const chosenCandidateId = entry?.chosenCandidateId || activeCandidates?.[0]?.id || null;
+  const snapshot = await buildFindTextAttemptSnapshot({
+    query,
+    source: activeSource,
+    tokenSource: activeResult?.tokenSource || activeSource,
+    matchMode,
+    matchSource: activeResult?.matchSource || null,
+    candidates: activeCandidates,
+    chosenCandidateId,
+    chosenBoxPx
+  });
+  const attempt = recordFindTextAttemptSnapshot(snapshot);
+  if(attempt){
+    renderFindTextAttemptList();
+    renderFindTextAttemptSnapshot();
+    if(els.findTextLockToggle?.checked){
+      state.findTextLearning.lockEnabled = true;
+      updateFindTextLockStateFromAttempt(attempt);
+    }
+    await refreshFindTextStepperFromAttempt(attempt);
+  } else if(learningEnabled && entry){
+    await refreshFindTextStepperFromEntry(entry, chosenBoxPx);
   }
   await updateFindTextConstellations();
   setFindTextStatus(`Found "${query}". ${statusBits.join(' · ')}`);
@@ -14888,15 +15404,23 @@ els.findTextInput?.addEventListener('keydown', (e) => {
 els.findTextConstellationsToggle?.addEventListener('change', () => {
   updateFindTextConstellations();
 });
+els.findTextLockToggle?.addEventListener('change', () => {
+  state.findTextLearning.lockEnabled = !!els.findTextLockToggle?.checked;
+  if(state.findTextLearning.lockEnabled){
+    updateFindTextLockStateFromAttempt(getActiveFindTextAttempt());
+  } else {
+    state.findTextLearning.lockedGeometry = null;
+  }
+});
 els.findTextLearningToggle?.addEventListener('change', () => {
   state.findTextLearning.enabled = isFindTextLearningEnabled();
   hideFindTextLearningPicker();
 });
 els.findTextGeometryGoodBtn?.addEventListener('click', () => {
-  state.findTextLearning.stepper.geometryLabel = 'good';
+  state.findTextLearning.stepper.hitBoxLabel = 'good';
 });
 els.findTextGeometryBadBtn?.addEventListener('click', () => {
-  state.findTextLearning.stepper.geometryLabel = 'bad';
+  state.findTextLearning.stepper.hitBoxLabel = 'bad';
 });
 els.findTextDrawBoxBtn?.addEventListener('click', () => {
   state.findTextLearning.stepper.manualBoxMode = true;
@@ -14922,50 +15446,41 @@ els.findTextCropGoodBtn?.addEventListener('click', () => {
 els.findTextCropBadBtn?.addEventListener('click', () => {
   state.findTextLearning.stepper.cropLabel = 'bad';
 });
+els.findTextTextGoodBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.textLabel = 'good';
+});
+els.findTextTextBadBtn?.addEventListener('click', () => {
+  state.findTextLearning.stepper.textLabel = 'bad';
+});
 els.findTextExpectedText?.addEventListener('input', (e) => {
   setFindTextExpectedText(e.target.value);
 });
 els.findTextStepperSaveBtn?.addEventListener('click', () => {
   const stepper = state.findTextLearning.stepper;
-  if(!window.FindTextRanker || !stepper.entry) return;
-  const label = (stepper.geometryLabel === 'good' && stepper.candidateLabel === 'good' && stepper.cropLabel === 'good')
+  const attempt = getActiveFindTextAttempt();
+  if(!window.FindTextRanker || !attempt) return;
+  const label = (stepper.hitBoxLabel === 'good' && stepper.candidateLabel === 'good' && stepper.cropLabel === 'good' && stepper.textLabel === 'good')
     ? 'good'
     : 'bad';
   const feedback = {
-    ...stepper.entry,
+    eventType: 'findtext.feedback',
+    attemptId: attempt.attemptId,
+    parentAttemptId: attempt.parentAttemptId || null,
+    source: attempt.source,
+    tokenSource: attempt.tokenSource,
     label,
-    geometryLabel: stepper.geometryLabel,
+    hitBoxLabel: stepper.hitBoxLabel,
     candidateLabel: stepper.candidateLabel,
     cropLabel: stepper.cropLabel,
+    textLabel: stepper.textLabel,
     correctedCandidateId: stepper.correctedCandidateId,
     previewExtractedText: stepper.previewText,
     expectedText: stepper.expectedText,
-    manualBoxPx: stepper.geometryLabel === 'bad' ? stepper.boxPx : null
+    manualBoxPx: stepper.hitBoxLabel === 'bad' ? stepper.boxPx : null
   };
   window.FindTextRanker.appendLogEvent(feedback);
   resetFindTextStepper();
   handleFindTextSearch();
-});
-els.findTextGeometryBadBtn?.addEventListener('click', () => {
-  const entries = state.findTextLearning.lastRun || [];
-  recordFindTextFeedback(entries, {
-    label: 'bad',
-    geometryLabel: 'wrong'
-  });
-});
-els.findTextCandidateBadBtn?.addEventListener('click', () => {
-  const entries = state.findTextLearning.lastRun || [];
-  recordFindTextFeedback(entries, {
-    label: 'bad',
-    candidateLabel: 'wrong'
-  });
-});
-els.findTextCropBadBtn?.addEventListener('click', () => {
-  const entries = state.findTextLearning.lastRun || [];
-  recordFindTextFeedback(entries, {
-    label: 'bad',
-    cropLabel: 'wrong'
-  });
 });
 els.findTextDownloadLogBtn?.addEventListener('click', () => {
   window.FindTextRanker?.downloadLog();
