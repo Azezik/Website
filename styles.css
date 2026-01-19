@@ -188,6 +188,60 @@ canvas.debug-crop, #pdfCanvas{ background:none !important; }
   font-size: 11px;
   color: var(--muted);
 }
+
+.find-text-attempt-list{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.find-text-attempt-card{
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #121212;
+  cursor: pointer;
+  min-width: 160px;
+}
+
+.find-text-attempt-card.active{
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.2);
+}
+
+.find-text-attempt-card .sub{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.find-text-attempt-details{
+  display: grid;
+  gap: 10px;
+}
+
+.find-text-stage{
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: #0f0f0f;
+}
+
+.find-text-stage h5{
+  margin: 0 0 6px 0;
+  font-size: 13px;
+}
+
+.find-text-stage .code{
+  margin: 0;
+  font-size: 12px;
+}
+
+.find-text-stage .stage-meta{
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
 #overlayControls{ margin:8px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 #copyControls{ margin:8px 0 0; display:flex; flex-wrap:wrap; gap:8px; }
 
