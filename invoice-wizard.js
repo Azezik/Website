@@ -681,17 +681,21 @@ function resolveVisualRunFieldSpec(){
   return fields.find(f => f.fieldKey === fieldKey) || fields[0] || null;
 }
 
-function buildVisualRunConstellationBoxes({ keywordConstellation, tokens, page, pageW, pageH } = {}){
-  if(!keywordConstellation || !KeywordConstellation?.matchConstellation){
+function buildVisualRunConstellationBoxes({ keywordConstellation, tokens, page, pageW, pageH, constellationMatch } = {}){
+  if(!KeywordConstellation?.matchConstellation){
     return { boxesPx: [], match: null };
   }
-  const match = KeywordConstellation.matchConstellation(keywordConstellation, tokens || [], {
-    page,
-    pageW,
-    pageH,
-    tolerance: keywordConstellation.tolerance
-  });
-  const best = match?.best;
+  let match = constellationMatch || null;
+  if(!match && keywordConstellation){
+    const matched = KeywordConstellation.matchConstellation(keywordConstellation, tokens || [], {
+      page,
+      pageW,
+      pageH,
+      tolerance: keywordConstellation.tolerance
+    });
+    match = matched?.best || null;
+  }
+  const best = match;
   if(!best) return { boxesPx: [], match };
   const anchorToken = best.anchor || null;
   const supportTokens = (best.supportMatches || []).map(entry => entry?.token).filter(Boolean);
@@ -718,7 +722,7 @@ function toOverlayCssBox(boxPx){
   };
 }
 
-function updateVisualRunOverlay({ boxPx, tokens, page, tokenSource, keywordConstellation } = {}){
+function updateVisualRunOverlay({ boxPx, tokens, page, tokenSource, keywordConstellation, constellationMatch } = {}){
   const visual = state.visualRun;
   if(!visual) return;
   visual.runBoxPx = boxPx ? { ...boxPx } : null;
@@ -729,7 +733,7 @@ function updateVisualRunOverlay({ boxPx, tokens, page, tokenSource, keywordConst
     const vp = state.pageViewports[page - 1] || state.viewport || {};
     const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
     const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
-    const { boxesPx } = buildVisualRunConstellationBoxes({ keywordConstellation, tokens, page, pageW, pageH });
+    const { boxesPx } = buildVisualRunConstellationBoxes({ keywordConstellation, tokens, page, pageW, pageH, constellationMatch });
     visual.constellationBoxesPx = boxesPx || [];
     visual.constellationBoxesCss = toFindTextConstellationCss(visual.constellationBoxesPx, { adjustForTesseract: tokenSource === 'tesseract' });
   }
@@ -864,7 +868,8 @@ async function runVisualRunExtraction(){
     tokens,
     page,
     tokenSource: visual.tokenSource,
-    keywordConstellation: fieldSpec.keywordConstellation || null
+    keywordConstellation: fieldSpec.keywordConstellation || null,
+    constellationMatch: result.constellationMatch || null
   });
   setVisualRunStatus('Run mode extraction complete.');
 }
@@ -9476,6 +9481,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     rule: 'pipeline.finalized',
     source: 'pipeline'
   });
+  if(staticRun){
+    result.constellationMatch = constellationContext?.best || null;
+  }
   result.tokens = result.tokens || [];
   return result;
 }
