@@ -891,7 +891,7 @@ async function getVisualRunTokens(pageNum){
   const visual = state.visualRun;
   const source = visual?.tokenSource || 'pdfjs';
   if(source === 'tesseract'){
-    const tokens = await ensureTesseractTokensForPage(pageNum);
+    const tokens = await ensureTesseractTokensForPageWithBBox(pageNum);
     state.tokensByPage[pageNum] = tokens;
     return tokens;
   }
