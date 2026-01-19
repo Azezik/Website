@@ -172,6 +172,21 @@ const els = {
   findTextInsightsExport: document.getElementById('find-text-insights-export'),
   findTextInsightsSummary: document.getElementById('find-text-insights-summary'),
   findTextInsightsReport: document.getElementById('find-text-insights-report'),
+  visualRunPanel: document.getElementById('visual-run'),
+  visualRunStatus: document.getElementById('visual-run-status'),
+  visualRunFieldRow: document.getElementById('visual-run-field-row'),
+  visualRunFieldError: document.getElementById('visual-run-field-error'),
+  visualRunPrompt: document.getElementById('visual-run-prompt'),
+  visualRunSaveFieldBtn: document.getElementById('visual-run-save-field'),
+  visualRunFileInput: document.getElementById('visual-run-file'),
+  visualRunSourcePdf: document.getElementById('visual-run-source-pdf'),
+  visualRunSourceTess: document.getElementById('visual-run-source-tess'),
+  visualRunSaveExtractBtn: document.getElementById('visual-run-save-extract'),
+  visualRunViewerSlot: document.getElementById('visual-run-viewer-slot'),
+  visualRunRawOutput: document.getElementById('visual-run-raw'),
+  visualRunCleanedOutput: document.getElementById('visual-run-cleaned'),
+  visualRunNewFileInput: document.getElementById('visual-run-new-file'),
+  visualRunResetBtn: document.getElementById('visual-run-reset'),
   extractedData:   document.getElementById('extracted-data'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
@@ -391,7 +406,7 @@ const BOTTOM_ANCHOR_FIELD_KEYS = new Set([
 ]);
 
 function showTab(id){
-  const sections = [els.docDashboard, els.extractedData, els.reports, els.findTextPanel];
+  const sections = [els.docDashboard, els.extractedData, els.reports, els.findTextPanel, els.visualRunPanel];
   if(isSkinV2 && els.wizardManager){
     sections.push(els.wizardManager);
   }
@@ -441,12 +456,454 @@ function restoreViewerHome(){
 }
 
 function handleFindTextTab(activeId){
-  if(activeId === 'find-text'){
+  const isFindText = activeId === 'find-text';
+  const isVisualRun = activeId === 'visual-run';
+  if(isFindText){
     moveViewerToHost(els.findTextViewerSlot);
+    if(els.wizardSection) els.wizardSection.style.display = 'none';
+  } else if(isVisualRun){
+    moveViewerToHost(els.visualRunViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
   } else {
     restoreViewerHome();
   }
+  if(state.visualRun){
+    const wasActive = !!state.visualRun.active;
+    state.visualRun.active = isVisualRun;
+    if(isVisualRun && !wasActive){
+      prepareVisualRunContext();
+    } else if(!isVisualRun && wasActive){
+      restoreVisualRunContext();
+    }
+  }
+}
+
+function buildVisualRunField(){
+  return {
+    id: genId('field'),
+    fieldType: 'static',
+    name: '',
+    order: 1,
+    fieldKey: '',
+    magicType: MAGIC_DATA_TYPE.ANY,
+    magicDataType: MAGIC_DATA_TYPE.ANY,
+    isGlobal: false
+  };
+}
+
+function ensureVisualRunState(){
+  if(!state.visualRun){
+    state.visualRun = {
+      active: false,
+      wizardId: '',
+      geometryId: DEFAULT_GEOMETRY_ID,
+      field: null,
+      template: null,
+      fieldLocked: false,
+      tokenSource: 'pdfjs',
+      runBoxPx: null,
+      runBoxCss: null,
+      constellationBoxesPx: [],
+      constellationBoxesCss: [],
+      rawText: '',
+      cleanedText: '',
+      lastFile: null,
+      configured: false,
+      previousWizardId: null,
+      previousGeometryId: null,
+      previousSteps: null,
+      previousStepIdx: 0,
+      previousWizardComplete: false
+    };
+  }
+  if(!state.visualRun.field){
+    state.visualRun.field = buildVisualRunField();
+  }
+}
+
+function setVisualRunStatus(message = ''){
+  if(!els.visualRunStatus) return;
+  els.visualRunStatus.textContent = message;
+}
+
+function prepareVisualRunContext(){
+  ensureVisualRunState();
+  if(state.visualRun.previousWizardId === null){
+    state.visualRun.previousWizardId = state.activeWizardId;
+    state.visualRun.previousGeometryId = state.activeGeometryId;
+    state.visualRun.previousSteps = state.steps;
+    state.visualRun.previousStepIdx = state.stepIdx;
+    state.visualRun.previousWizardComplete = state.wizardComplete;
+  }
+  if(els.visualRunSourcePdf && !els.visualRunSourcePdf.checked && !els.visualRunSourceTess?.checked){
+    els.visualRunSourcePdf.checked = true;
+  }
+  if(state.visualRun.template){
+    activateVisualRunWizard();
+  }
+  renderVisualRunFieldRow();
+  updateVisualRunPrompt();
+  updateVisualRunOutputs();
+  updateVisualRunControls();
+}
+
+function restoreVisualRunContext(){
+  const visual = state.visualRun;
+  if(!visual || visual.previousWizardId === null) return;
+  state.activeWizardId = visual.previousWizardId || state.activeWizardId;
+  state.activeGeometryId = visual.previousGeometryId || state.activeGeometryId;
+  state.steps = visual.previousSteps || state.steps;
+  state.stepIdx = visual.previousStepIdx || 0;
+  state.wizardComplete = visual.previousWizardComplete || false;
+  if(visual.previousWizardId){
+    ensureProfile(visual.previousWizardId, visual.previousGeometryId || null);
+  }
+  visual.previousWizardId = null;
+  visual.previousGeometryId = null;
+  visual.previousSteps = null;
+  visual.previousStepIdx = 0;
+  visual.previousWizardComplete = false;
+}
+
+function activateVisualRunWizard(){
+  const visual = state.visualRun;
+  if(!visual?.template) return;
+  state.activeWizardId = visual.wizardId;
+  state.activeGeometryId = visual.geometryId || DEFAULT_GEOMETRY_ID;
+  state.profile = null;
+  ensureProfile(visual.wizardId, visual.geometryId);
+  state.steps = buildStepsFromTemplate(visual.template);
+  state.stepIdx = 0;
+  state.wizardComplete = false;
+}
+
+function updateVisualRunPrompt(){
+  if(!els.visualRunPrompt) return;
+  const step = state.steps?.[state.stepIdx] || null;
+  els.visualRunPrompt.textContent = step?.prompt || 'Upload a document, then draw the field box.';
+}
+
+function renderVisualRunFieldRow(){
+  if(!els.visualRunFieldRow) return;
+  ensureVisualRunState();
+  const visual = state.visualRun;
+  const field = visual.field;
+  els.visualRunFieldRow.innerHTML = '';
+  let row = null;
+  if(typeof BuilderFieldRow !== 'undefined' && typeof BuilderFieldRow.createFieldRow === 'function'){
+    row = BuilderFieldRow.createFieldRow({
+      field,
+      index: 0,
+      magicTypeOptions: MAGIC_DATA_TYPE,
+      onDelete: () => {
+        if(visual.fieldLocked) return;
+        visual.field = buildVisualRunField();
+        renderVisualRunFieldRow();
+        updateVisualRunControls();
+      },
+      onChange: () => {
+        if(els.visualRunFieldError) els.visualRunFieldError.style.display = 'none';
+        updateVisualRunControls();
+      },
+      allowAreaType: false
+    });
+  }
+  if(!row){
+    row = document.createElement('div');
+    row.className = 'custom-field-row';
+    const nameInput = document.createElement('input');
+    nameInput.value = field.name || '';
+    nameInput.placeholder = 'Field name';
+    nameInput.addEventListener('input', (e) => {
+      field.name = e.target.value;
+      if(els.visualRunFieldError) els.visualRunFieldError.style.display = 'none';
+      updateVisualRunControls();
+    });
+    row.appendChild(nameInput);
+  }
+  const typeSelect = row.querySelector?.('.field-type');
+  if(typeSelect){
+    typeSelect.value = 'static';
+    typeSelect.disabled = true;
+    field.fieldType = 'static';
+  }
+  if(visual.fieldLocked){
+    row.querySelectorAll('input, select, button').forEach(el => {
+      if(el.classList.contains('delete-field-btn')) el.style.display = 'none';
+      el.disabled = true;
+    });
+  }
+  els.visualRunFieldRow.appendChild(row);
+}
+
+function updateVisualRunOutputs(){
+  if(els.visualRunRawOutput) els.visualRunRawOutput.value = state.visualRun?.rawText || '';
+  if(els.visualRunCleanedOutput) els.visualRunCleanedOutput.value = state.visualRun?.cleanedText || '';
+}
+
+function updateVisualRunControls(){
+  ensureVisualRunState();
+  const visual = state.visualRun;
+  if(els.visualRunSaveFieldBtn){
+    els.visualRunSaveFieldBtn.disabled = visual.fieldLocked;
+    els.visualRunSaveFieldBtn.textContent = visual.fieldLocked ? 'Field saved' : 'Save Field';
+  }
+  const hasField = !!visual.template;
+  const hasSource = !!(els.visualRunSourcePdf?.checked || els.visualRunSourceTess?.checked);
+  const hasSelection = !!state.snappedPx;
+  const hasFile = !!state.currentFileId;
+  if(els.visualRunSaveExtractBtn){
+    els.visualRunSaveExtractBtn.disabled = !(hasField && hasSource && hasSelection && hasFile);
+  }
+}
+
+function setVisualRunTokenSource(source){
+  const visual = state.visualRun;
+  if(!visual) return;
+  visual.tokenSource = source === 'tesseract' ? 'tesseract' : 'pdfjs';
+  updateVisualRunControls();
+}
+
+async function getVisualRunTokens(pageNum){
+  const visual = state.visualRun;
+  const source = visual?.tokenSource || 'pdfjs';
+  if(source === 'tesseract'){
+    const tokens = await ensureTesseractTokensForPage(pageNum);
+    state.tokensByPage[pageNum] = tokens;
+    return tokens;
+  }
+  return ensureTokensForPage(pageNum);
+}
+
+function resolveVisualRunFieldSpec(){
+  const fieldKey = state.visualRun?.template?.fields?.[0]?.fieldKey || '';
+  const fields = state.profile?.fields || [];
+  return fields.find(f => f.fieldKey === fieldKey) || fields[0] || null;
+}
+
+function toOverlayCssBox(boxPx){
+  if(!boxPx) return null;
+  const { scaleX = 1, scaleY = 1 } = getScaleFactors();
+  return {
+    x: boxPx.x / scaleX,
+    y: boxPx.y / scaleY,
+    w: boxPx.w / scaleX,
+    h: boxPx.h / scaleY,
+    page: boxPx.page
+  };
+}
+
+function updateVisualRunOverlay({ boxPx, tokens, page, tokenSource } = {}){
+  const visual = state.visualRun;
+  if(!visual) return;
+  visual.runBoxPx = boxPx ? { ...boxPx } : null;
+  visual.runBoxCss = boxPx ? toOverlayCssBox(boxPx) : null;
+  visual.constellationBoxesPx = [];
+  visual.constellationBoxesCss = [];
+  if(boxPx && Array.isArray(tokens) && tokens.length){
+    const vp = state.pageViewports[page - 1] || state.viewport || {};
+    const pageW = Math.max(1, Number(vp.width ?? vp.w ?? 1));
+    const pageH = Math.max(1, Number(vp.height ?? vp.h ?? 1));
+    const { boxesPx } = buildFindTextConstellationBoxes([boxPx], tokens, page, pageW, pageH);
+    visual.constellationBoxesPx = boxesPx;
+    visual.constellationBoxesCss = toFindTextConstellationCss(boxesPx, { adjustForTesseract: tokenSource === 'tesseract' });
+  }
+  drawOverlay();
+}
+
+function clearVisualRunOverlays(){
+  if(!state.visualRun) return;
+  state.visualRun.runBoxPx = null;
+  state.visualRun.runBoxCss = null;
+  state.visualRun.constellationBoxesPx = [];
+  state.visualRun.constellationBoxesCss = [];
+  drawOverlay();
+}
+
+async function saveVisualRunField(){
+  ensureVisualRunState();
+  const visual = state.visualRun;
+  const name = (visual.field?.name || '').trim();
+  if(!name){
+    if(els.visualRunFieldError) els.visualRunFieldError.style.display = 'block';
+    return;
+  }
+  if(els.visualRunFieldError) els.visualRunFieldError.style.display = 'none';
+  const baseField = {
+    ...visual.field,
+    id: visual.field.id || genId('field'),
+    fieldType: 'static',
+    name
+  };
+  const normalizedFields = normalizeTemplateFields([baseField]);
+  const templateId = visual.wizardId || `visual-run-${Date.now()}`;
+  const template = normalizeTemplate({
+    id: templateId,
+    wizardName: `Visual Run: ${name}`,
+    documentTypeId: state.docType,
+    version: PROFILE_VERSION,
+    fields: normalizedFields
+  });
+  visual.template = template;
+  visual.wizardId = template.id;
+  visual.fieldLocked = true;
+  visual.configured = false;
+  activateVisualRunWizard();
+  updateVisualRunPrompt();
+  renderVisualRunFieldRow();
+  updateVisualRunControls();
+  setVisualRunStatus('Field saved. Upload a document and draw the box.');
+}
+
+async function captureVisualRunConfig(){
+  const visual = state.visualRun;
+  if(!visual?.template) return false;
+  if(!state.snappedPx){
+    alert('Draw a box first.');
+    return false;
+  }
+  setWizardMode(ModeEnum.CONFIG);
+  const step = state.steps?.[state.stepIdx] || null;
+  if(!step){
+    alert('No field configured.');
+    return false;
+  }
+  const tokens = await getVisualRunTokens(state.pageNum);
+  const res = await extractFieldValue(step, tokens, state.viewport);
+  let value = res.value || '';
+  let raw = res.raw || '';
+  let boxPx = res.boxPx || state.snappedPx;
+  let confidence = res.confidence || 0;
+  let corrections = res.correctionsApplied || res.corrections || [];
+  let fieldTokens = res.tokens || [];
+  if(!value && state.snappedText){
+    value = (state.snappedText || '').trim();
+    raw = raw || value;
+  }
+
+  const storedBoxPx = (isConfigMode() && step.type === 'static' && state.selectionPx)
+    ? (state.selectionPx || boxPx)
+    : boxPx;
+  const vp = state.pageViewports[state.pageNum - 1] || state.viewport || { width: 1, height: 1 };
+  const canvasW = (vp.width ?? vp.w) || 1;
+  const canvasH = (vp.height ?? vp.h) || 1;
+  const normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
+  const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
+  const rawBoxData = { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h, canvasW, canvasH };
+  const extras = {};
+  if(step.type === 'static'){
+    const keywordRelations = computeKeywordRelationsForConfig(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH);
+    const keywordConstellation = (KeywordConstellation?.captureConstellation)
+      ? KeywordConstellation.captureConstellation(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH, tokens, {})
+      : null;
+    const lm = captureRingLandmark(storedBoxPx);
+    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+    extras.landmark = lm;
+    if(state.snappedLineMetrics){
+      extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+    }
+    extras.keywordRelations = keywordRelations || null;
+    extras.keywordConstellation = keywordConstellation || null;
+  } else if(step.type === 'column'){
+    extras.column = buildColumnModel(step, pct, boxPx, tokens);
+  }
+  upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
+  visual.configured = true;
+  return true;
+}
+
+async function runVisualRunExtraction(){
+  const visual = state.visualRun;
+  if(!visual?.template) return;
+  setWizardMode(ModeEnum.RUN);
+  ensureProfile(visual.wizardId, visual.geometryId);
+  const fieldSpec = resolveVisualRunFieldSpec();
+  if(!fieldSpec){
+    alert('Unable to locate the field in the profile.');
+    return;
+  }
+  const page = fieldSpec.page || state.pageNum || 1;
+  state.pageNum = page;
+  state.viewport = state.pageViewports[page - 1] || state.viewport;
+  updatePageIndicator();
+  state.matchPoints = [];
+  const tokens = await getVisualRunTokens(page);
+  const result = await extractFieldValue(fieldSpec, tokens, state.viewport);
+  const rawText = result.rawBeforeClean || result.raw || '';
+  const cleanedText = result.value || '';
+  visual.rawText = rawText;
+  visual.cleanedText = cleanedText;
+  updateVisualRunOutputs();
+  updateVisualRunOverlay({ boxPx: result.boxPx, tokens, page, tokenSource: visual.tokenSource });
+  setVisualRunStatus('Run mode extraction complete.');
+}
+
+async function handleVisualRunSaveExtract(){
+  const visual = state.visualRun;
+  if(!visual?.template) return;
+  const ok = await captureVisualRunConfig();
+  if(!ok) return;
+  await runVisualRunExtraction();
+}
+
+async function handleVisualRunFileChange(e){
+  const file = e.target.files?.[0];
+  if(!file) return;
+  state.visualRun.lastFile = file;
+  clearVisualRunOverlays();
+  await openFile(file);
+  updateVisualRunControls();
+}
+
+async function handleVisualRunNewFileChange(e){
+  const file = e.target.files?.[0];
+  if(!file) return;
+  state.visualRun.lastFile = file;
+  clearVisualRunOverlays();
+  await openFile(file);
+  if(state.visualRun?.template){
+    await runVisualRunExtraction();
+  }
+}
+
+function resetVisualRun(){
+  const visual = state.visualRun;
+  if(!visual) return;
+  if(visual.wizardId){
+    clearWizardArtifacts(state.username, state.docType, visual.wizardId);
+  }
+  visual.field = buildVisualRunField();
+  visual.template = null;
+  visual.wizardId = '';
+  visual.fieldLocked = false;
+  visual.configured = false;
+  visual.rawText = '';
+  visual.cleanedText = '';
+  visual.lastFile = null;
+  visual.tokenSource = 'pdfjs';
+  clearVisualRunOverlays();
+  state.profile = null;
+  state.steps = [];
+  state.stepIdx = 0;
+  state.wizardComplete = false;
+  setWizardMode(ModeEnum.CONFIG);
+  resetDocArtifacts();
+  if(els.pdfCanvas){
+    const ctx = els.pdfCanvas.getContext('2d');
+    ctx?.clearRect(0, 0, els.pdfCanvas.width, els.pdfCanvas.height);
+  }
+  if(els.imgCanvas){
+    els.imgCanvas.removeAttribute('src');
+  }
+  if(els.visualRunRawOutput) els.visualRunRawOutput.value = '';
+  if(els.visualRunCleanedOutput) els.visualRunCleanedOutput.value = '';
+  if(els.visualRunFileInput) els.visualRunFileInput.value = '';
+  if(els.visualRunNewFileInput) els.visualRunNewFileInput.value = '';
+  if(els.visualRunSourcePdf) els.visualRunSourcePdf.checked = true;
+  setVisualRunStatus('Visual Run reset.');
+  renderVisualRunFieldRow();
+  updateVisualRunPrompt();
+  updateVisualRunControls();
 }
 
 function showWizardDetailsTab(wizardId){
@@ -583,6 +1040,28 @@ let state = {
   wizardComplete: false,
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
+  visualRun: {
+    active: false,
+    wizardId: '',
+    geometryId: DEFAULT_GEOMETRY_ID,
+    field: null,
+    template: null,
+    fieldLocked: false,
+    tokenSource: 'pdfjs',
+    runBoxPx: null,
+    runBoxCss: null,
+    constellationBoxesPx: [],
+    constellationBoxesCss: [],
+    rawText: '',
+    cleanedText: '',
+    lastFile: null,
+    configured: false,
+    previousWizardId: null,
+    previousGeometryId: null,
+    previousSteps: null,
+    previousStepIdx: 0,
+    previousWizardComplete: false
+  },
 };
 
 let loginHydrated = false;
@@ -1499,6 +1978,10 @@ function persistTemplate(user, docType, template){
 
 function getWizardTemplateById(id){
   if(!id) return null;
+  const visualTemplate = state.visualRun?.template;
+  if(visualTemplate && visualTemplate.id === id){
+    return visualTemplate;
+  }
   return (state.wizardTemplates || []).find(t => t.id === id) || null;
 }
 
@@ -13016,6 +13499,22 @@ function paintOverlay(ctx, options = {}){
       ctx.strokeRect(b.x, b.y + off, b.w, b.h);
     }
   }
+  if(state.visualRun?.active){
+    if(state.visualRun.constellationBoxesCss?.length){
+      ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.25;
+      for(const b of state.visualRun.constellationBoxesCss){
+        if(pageFilter && b.page !== pageFilter) continue;
+        const off = offsetForPage(b.page);
+        ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+      }
+    }
+    if(state.visualRun.runBoxCss && (!pageFilter || state.visualRun.runBoxCss.page === pageFilter)){
+      ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2;
+      const b = state.visualRun.runBoxCss;
+      const off = offsetForPage(b.page);
+      ctx.strokeRect(b.x, b.y + off, b.w, b.h);
+    }
+  }
   if(state.snappedCss && (!pageFilter || state.snappedCss.page === pageFilter)){
     ctx.strokeStyle = '#44ccff'; ctx.lineWidth = 2;
     const s = state.snappedCss; const off2 = offsetForPage(s.page);
@@ -13209,6 +13708,9 @@ async function finalizeSelection(e) {
     inputsSnapshot:{ selectionBox: state.snappedPx, normBox: nb }
   });
   drawOverlay();
+  if(state.visualRun?.active){
+    updateVisualRunControls();
+  }
 }
 
 els.overlayCanvas.addEventListener('pointerup', e=>finalizeSelection(e), { passive: false });
@@ -15066,6 +15568,17 @@ els.configureCustomBtn?.addEventListener('click', openNewWizardFromDashboard);
 els.builderAddFieldBtn?.addEventListener('click', addBuilderField);
 els.builderSaveBtn?.addEventListener('click', saveBuilderTemplate);
 els.builderCancelBtn?.addEventListener('click', ()=>{ resetBuilderErrors(); closeBuilder(); });
+els.visualRunSaveFieldBtn?.addEventListener('click', saveVisualRunField);
+els.visualRunFileInput?.addEventListener('change', handleVisualRunFileChange);
+els.visualRunNewFileInput?.addEventListener('change', handleVisualRunNewFileChange);
+els.visualRunSaveExtractBtn?.addEventListener('click', handleVisualRunSaveExtract);
+els.visualRunResetBtn?.addEventListener('click', resetVisualRun);
+els.visualRunSourcePdf?.addEventListener('change', () => {
+  if(els.visualRunSourcePdf?.checked) setVisualRunTokenSource('pdfjs');
+});
+els.visualRunSourceTess?.addEventListener('change', () => {
+  if(els.visualRunSourceTess?.checked) setVisualRunTokenSource('tesseract');
+});
 els.wizardManagerNewBtn?.addEventListener('click', ()=>{ state.activeWizardId = ''; openBuilder(null); });
 els.wizardManagerImportBtn?.addEventListener('click', ()=>{ els.wizardDefinitionImportInput?.click(); });
 els.wizardExportDescription?.addEventListener('input', enforceWizardExportWordLimit);

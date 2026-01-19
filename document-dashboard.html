@@ -62,6 +62,7 @@
       <nav class="subtabs" id="dashTabs">
         <button class="tablink active" data-target="document-dashboard">Doc Dashboard</button>
         <button class="tablink" data-target="find-text">Find Text</button>
+        <button class="tablink" data-target="visual-run">Visual Run</button>
         <button class="tablink" data-target="wizard-manager">Wizard Manager</button>
         <button class="tablink" data-target="preconfigured-wizards">Pre-configured Wizards</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
@@ -189,6 +190,84 @@
         <div id="find-text-viewer-slot" class="viewer-slot"></div>
         <div id="find-text-learning-picker" class="find-text-learning-picker" style="display:none;"></div>
         <pre id="find-text-debug" class="code" style="margin-top:12px;white-space:pre-wrap;"></pre>
+      </section>
+
+      <section id="visual-run" class="panel" style="display:none;">
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Visual Run</h3>
+          <span id="visual-run-status" class="sub" style="color:var(--muted);"></span>
+        </div>
+        <p class="sub" style="margin:0;color:var(--muted);">
+          Visual Run replays the Config → Run extraction pipeline for a single field, so you can inspect each transformation step.
+        </p>
+
+        <div class="visual-run-grid">
+          <div class="visual-run-stack">
+            <div class="panel minimal visual-run-stage">
+              <h4>1. Field configuration</h4>
+              <div id="visual-run-field-row" class="visual-run-field"></div>
+              <p id="visual-run-field-error" class="sub" style="display:none;color:#a75a2a;">Name your field to continue.</p>
+              <div class="actions" style="justify-content:flex-start;gap:10px;flex-wrap:wrap;">
+                <button id="visual-run-save-field" class="btn primary" type="button">Save Field</button>
+              </div>
+            </div>
+
+            <div class="panel minimal visual-run-stage">
+              <h4>2. Config Mode (draw the box)</h4>
+              <p id="visual-run-prompt" class="sub" style="margin:0 0 8px;color:var(--muted);">Upload a document, then draw the field box.</p>
+              <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <label class="btn ghost">
+                  Upload Document
+                  <input id="visual-run-file" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+                </label>
+              </div>
+              <div class="actions visual-run-source" style="gap:12px;flex-wrap:wrap;margin:8px 0 12px;">
+                <span class="sub">Extraction source</span>
+                <label class="toggle-inline" style="display:flex;align-items:center;gap:6px;">
+                  <input type="radio" name="visual-run-source" id="visual-run-source-pdf" value="pdfjs" checked />
+                  PDF.js tokens
+                </label>
+                <label class="toggle-inline" style="display:flex;align-items:center;gap:6px;">
+                  <input type="radio" name="visual-run-source" id="visual-run-source-tess" value="tesseract" />
+                  Tesseract OCR
+                </label>
+              </div>
+              <div class="actions" style="justify-content:flex-start;gap:10px;flex-wrap:wrap;">
+                <button id="visual-run-save-extract" class="btn primary" type="button" disabled>Save and Extract</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="visual-run-preview">
+            <div class="panel minimal visual-run-stage">
+              <h4>Run-mode preview</h4>
+              <div id="visual-run-viewer-slot" class="viewer-slot"></div>
+            </div>
+
+            <div class="panel minimal visual-run-stage">
+              <h4>Run output</h4>
+              <div class="field">
+                <label for="visual-run-raw">Raw extracted text</label>
+                <textarea id="visual-run-raw" class="code" rows="3" readonly></textarea>
+              </div>
+              <div class="field">
+                <label for="visual-run-cleaned">Cleaned output (OCRMagic)</label>
+                <textarea id="visual-run-cleaned" class="code" rows="3" readonly></textarea>
+              </div>
+              <p class="sub" style="margin:0;color:var(--muted);">
+                Constellation overlays use <strong>KeywordConstellation.matchConstellation</strong> (the same engine behind Find Text) to show anchor/support token boxes.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="actions" style="justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:12px;">
+          <label class="btn ghost">
+            Upload New Document
+            <input id="visual-run-new-file" type="file" accept="application/pdf,image/png,image/jpeg" style="display:none" />
+          </label>
+          <button id="visual-run-reset" class="btn ghost" type="button">Reset</button>
+        </div>
       </section>
 
       <section id="wizard-manager" class="panel" style="display:none;">
