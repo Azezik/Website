@@ -10867,6 +10867,7 @@ async function openFile(file){
 function cleanupDoc(){
   state.tokensByPage = [];
   state.tessTokensByPage = {};
+  state.tessTokensByPageBBox = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
