@@ -8524,6 +8524,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
+  const visualRunActive = staticRun && !!state.visualRun?.active;
   const magicTypeResolution = resolveMagicDataType(fieldSpec.fieldKey || '');
   if(ocrMagicDebugEnabled()){
     ocrMagicDebug({
@@ -9406,7 +9407,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
       }
       if(!hintLocked){
-        const pads = isConfigMode() ? [4] : [4,8,12];
+        const pads = isConfigMode() ? [4] : (visualRunActive ? [2,4,6] : [4,8,12]);
         for(const pad of pads){
           const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
           const r = await attempt(search);
@@ -9425,7 +9426,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           }
         }
       }
-      if(!hintLocked && staticRun){
+      if(!hintLocked && staticRun && !visualRunActive){
         const verticalFactors = [0.5, 1, 1.5];
         for(const factor of verticalFactors){
           for(const dir of [-1,1]){
@@ -9484,7 +9485,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       }
     }
   }
-  if(!result && staticRun && keywordRelations && keywordRelations.secondaries?.length){
+  if(!result && staticRun && !visualRunActive && keywordRelations && keywordRelations.secondaries?.length){
     const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     if(!keywordIndex){
@@ -9510,7 +9511,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     result = bestHintCandidate; method = method || 'bbox'; if(staticRun && stageUsed.value === null){ stageUsed.value = 2; }
   }
 
-  if(!result){
+  if(!result && !visualRunActive){
     const lv = labelValueHeuristic(fieldSpec, tokens);
       if(lv.value){
         let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', lv.value, state.mode, spanKey);
@@ -9541,11 +9542,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     traceEvent(spanKey,'fallback.search',{
       stageLabel:'Fallback search',
       stepNumber:6,
-      notes:'No confident result; evaluating snapped text fallback',
-      inputsSnapshot:{ selectionText: state.snappedText || null }
+      notes: visualRunActive ? 'No confident result; using in-box fallback' : 'No confident result; evaluating snapped text fallback',
+      inputsSnapshot:{ selectionText: visualRunActive ? selectionRaw || null : (state.snappedText || null) }
     });
-    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', state.snappedText, state.mode, spanKey);
-    const fbBox = state.snappedPx || basePx || null;
+    const fallbackText = visualRunActive ? (selectionRaw || '') : (state.snappedText || '');
+    const fb = FieldDataEngine.clean(fieldSpec.fieldKey||'', fallbackText, state.mode, spanKey);
+    const fbBox = visualRunActive ? (basePx || null) : (state.snappedPx || basePx || null);
     let verifiedFb = verifyCleanedValue(fb, { fieldKey: fieldSpec.fieldKey, boxPx: fbBox });
     if(fbBox){
       const { cleaned: patchedCleaned } = await applyAnyFieldVerifier(verifiedFb, {
@@ -9573,7 +9575,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     const raw = selectionRaw.trim();
     result.value = raw; result.raw = raw; result.confidence = 0.1; result.boxPx = result.boxPx || basePx || state.snappedPx || null; result.tokens = result.tokens || firstAttempt?.tokens || [];
   }
-  if(staticRun && keywordRelations && result && basePx && !hintLocked){
+  if(staticRun && keywordRelations && result && basePx && !hintLocked && !visualRunActive){
     const page = result.boxPx?.page || basePx.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     if(!keywordIndex){
@@ -9596,7 +9598,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     }
   }
   let triangulationAudit = null;
-  if(staticRun && triangulatedBox && !hintLocked && (keywordRelations || constellationBox)){
+  if(staticRun && triangulatedBox && !hintLocked && (keywordRelations || constellationBox) && !visualRunActive){
     const page = triangulatedBox.page || result?.boxPx?.page || basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
     const scored = scoreTriangulatedCandidates({
