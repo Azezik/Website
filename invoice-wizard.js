@@ -4832,6 +4832,26 @@ function isFindTextConstellationKeyword(token){
   return getFindTextConstellationKeywordFilter().has(normalized);
 }
 
+function boxesOverlap(a, b){
+  if(!a || !b) return false;
+  const ax2 = (a.x || 0) + (a.w || 0);
+  const ay2 = (a.y || 0) + (a.h || 0);
+  const bx2 = (b.x || 0) + (b.w || 0);
+  const by2 = (b.y || 0) + (b.h || 0);
+  const overlapX = Math.min(ax2, bx2) - Math.max(a.x || 0, b.x || 0);
+  const overlapY = Math.min(ay2, by2) - Math.max(a.y || 0, b.y || 0);
+  return overlapX > 0 && overlapY > 0;
+}
+
+function filterFindTextConstellationTokens(tokens, matchBox){
+  if(!Array.isArray(tokens)) return [];
+  return tokens.filter(token => {
+    if(!token || !matchBox) return !!token;
+    if(token.page && matchBox.page && token.page !== matchBox.page) return true;
+    return !boxesOverlap(token, matchBox);
+  });
+}
+
 function editDistance(a,b){
   const dp = Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
   for(let i=0;i<=a.length;i++) dp[i][0]=i;
@@ -12316,14 +12336,18 @@ function buildFindTextConstellationBoxes(matchBoxes, tokens, page, pageW, pageH)
   const debugEntries = [];
   const matches = Array.isArray(matchBoxes) ? matchBoxes : [];
   const keywordFilter = getFindTextConstellationKeywordFilter();
+  if(!(keywordFilter instanceof Set) || keywordFilter.size === 0){
+    return { boxesPx: [], debugEntries: [] };
+  }
   for(const matchBox of matches){
     if(!isRenderableFindTextBox(matchBox)) continue;
     const normBox = normalizeBox(matchBox, pageW, pageH);
-    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, tokens, {
+    const filteredTokens = filterFindTextConstellationTokens(tokens, matchBox);
+    const constellation = KeywordConstellation.captureConstellation('find-text', matchBox, normBox, page, pageW, pageH, filteredTokens, {
       keywordFilter
     });
     if(!constellation) continue;
-    const match = KeywordConstellation.matchConstellation(constellation, tokens, {
+    const match = KeywordConstellation.matchConstellation(constellation, filteredTokens, {
       page,
       pageW,
       pageH,
