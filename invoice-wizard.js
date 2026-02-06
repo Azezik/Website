@@ -128,6 +128,19 @@ const els = {
   wizardDetailsBackBtn: document.getElementById('wizard-details-back'),
   wizardDetailsActions: document.getElementById('wizard-details-actions'),
   wizardDetailsLog: document.getElementById('wizard-details-log'),
+  chartReadySection: document.getElementById('chartready-section'),
+  chartReadyGenerateBtn: document.getElementById('chartready-generate'),
+  chartReadyUploadBtn: document.getElementById('chartready-upload'),
+  chartReadyRefreshBtn: document.getElementById('chartready-refresh'),
+  chartReadyFileInput: document.getElementById('chartready-file'),
+  chartReadySummary: document.getElementById('chartready-summary'),
+  chartReadyErrors: document.getElementById('chartready-errors'),
+  chartReadyCharts: document.getElementById('chartready-charts'),
+  chartReadyMoneyInCanvas: document.getElementById('chartready-money-in'),
+  chartReadyMoneyOutCanvas: document.getElementById('chartready-money-out'),
+  chartReadyGrossCanvas: document.getElementById('chartready-gross'),
+  chartReadyYtdWrap: document.getElementById('chartready-ytd-wrap'),
+  chartReadyYtdCanvas: document.getElementById('chartready-ytd'),
   wizardExportTitle: document.getElementById('wizard-export-title'),
   wizardExportDescription: document.getElementById('wizard-export-description'),
   wizardExportCounter: document.getElementById('wizard-export-counter'),
@@ -1227,6 +1240,7 @@ function showWizardDetailsTab(wizardId){
   state.activeWizardId = wizardId || '';
   showTab('wizard-details');
   renderWizardDetailsActions();
+  renderChartReadyPanel();
   renderWizardBatchLog(state.activeWizardId);
 }
 els.tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.target)));
@@ -2461,6 +2475,7 @@ const LS = {
   dbKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb`,
   rowsKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.masterdb_rows`,
   batchLogKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.batch_log`,
+  chartReadyKey: (u, d, wizardId = DEFAULT_WIZARD_ID) => `accounts.${u}.wizards.${d}${wizardId && wizardId !== DEFAULT_WIZARD_ID ? `.${wizardId}` : ''}.chartready`,
   getDb(u, d, wizardId = DEFAULT_WIZARD_ID) {
     const raw = localStorage.getItem(this.dbKey(u, d, wizardId));
     return raw ? JSON.parse(raw) : [];
@@ -2482,6 +2497,17 @@ const LS = {
   },
   setBatchLog(u, d, entries, wizardId = DEFAULT_WIZARD_ID){
     localStorage.setItem(this.batchLogKey(u, d, wizardId), JSON.stringify(Array.isArray(entries) ? entries : []));
+  },
+  getChartReady(u, d, wizardId = DEFAULT_WIZARD_ID){
+    const raw = localStorage.getItem(this.chartReadyKey(u, d, wizardId));
+    if(!raw) return null;
+    try { return JSON.parse(raw); } catch(err){ return null; }
+  },
+  setChartReady(u, d, payload, wizardId = DEFAULT_WIZARD_ID){
+    localStorage.setItem(this.chartReadyKey(u, d, wizardId), JSON.stringify(payload || null));
+  },
+  removeChartReady(u, d, wizardId = DEFAULT_WIZARD_ID){
+    localStorage.removeItem(this.chartReadyKey(u, d, wizardId));
   },
   getProfile(u,d,wizardId = DEFAULT_WIZARD_ID, geometryId = null){
     const keys = [];
@@ -2638,6 +2664,7 @@ function clearWizardArtifacts(username, docType, wizardId){
   try { LS.removeProfile(username, docType, wizardId); } catch(err){}
   try { localStorage.removeItem(LS.dbKey(username, docType, wizardId)); } catch(err){}
   try { localStorage.removeItem(LS.rowsKey(username, docType, wizardId)); } catch(err){}
+  try { LS.removeChartReady(username, docType, wizardId); } catch(err){}
   try {
     geometryIds.forEach(gid => {
       const patternKey = patternStoreKey(docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
@@ -2728,6 +2755,7 @@ async function deleteWizardEverywhere(username, docType, wizardId){
   try { localStorage.removeItem(LS.geometryMetaKey(username, docType, wizardId)); } catch(err){}
   try { localStorage.removeItem(LS.dbKey(username, docType, wizardId)); } catch(err){}
   try { localStorage.removeItem(LS.rowsKey(username, docType, wizardId)); } catch(err){}
+  try { LS.removeChartReady(username, docType, wizardId); } catch(err){}
   try {
     geometryIds.forEach(gid => {
       const patternKey = patternStoreKey(docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
@@ -2938,6 +2966,8 @@ function buildBackupPayload(username){
       if(db && db.length) wizardEntry.masterDb = cloneJsonSafe(db) || db;
       const rows = LS.getRows(username, docType, wizardId);
       if(rows && rows.rows && rows.rows.length) wizardEntry.masterDbRows = cloneJsonSafe(rows) || rows;
+      const chartReady = LS.getChartReady(username, docType, wizardId);
+      if(chartReady) wizardEntry.chartReady = cloneJsonSafe(chartReady) || chartReady;
       const patternKey = patternStoreKey(docType, wizardId);
       try{
         const patternRaw = localStorage.getItem(patternKey);
@@ -3025,6 +3055,7 @@ function applyRestorePayload(payload){
       if(data?.profile) LS.setProfile(username, docType, data.profile, wizardId);
       if(data?.masterDb) LS.setDb(username, docType, data.masterDb, wizardId);
       if(data?.masterDbRows) LS.setRows(username, docType, data.masterDbRows, wizardId);
+      if(data?.chartReady) LS.setChartReady(username, docType, data.chartReady, wizardId);
       if(data?.patternBundle){
         try{
           const key = patternStoreKey(docType, wizardId);
@@ -7270,6 +7301,135 @@ function createWizardDeleteButton(template){
     await deleteWizardEverywhere(state.username, docType, template.id);
   });
   return deleteBtn;
+}
+
+const chartReadyCharts = { moneyIn: null, moneyOut: null, gross: null, ytd: null };
+
+function clearChartReadyCharts(){
+  Object.keys(chartReadyCharts).forEach(key => {
+    if(chartReadyCharts[key] && typeof chartReadyCharts[key].destroy === 'function'){
+      chartReadyCharts[key].destroy();
+    }
+    chartReadyCharts[key] = null;
+  });
+}
+
+function chartReadyContext(){
+  const template = getWizardTemplateById(state.activeWizardId);
+  const docType = template?.documentTypeId || state.docType;
+  const wizardId = template?.id || state.activeWizardId || DEFAULT_WIZARD_ID;
+  return { username: state.username, docType, wizardId };
+}
+
+function renderChartReadySummary(artifact){
+  if(!els.chartReadySummary) return;
+  if(!artifact){
+    els.chartReadySummary.textContent = 'No ChartReady artifact yet. Generate or upload a CSV to begin.';
+    return;
+  }
+  const s = artifact.summary || {};
+  els.chartReadySummary.textContent = `Source: ${artifact.source || '-'} • Rows read: ${s.totalRowsRead || 0} • Used: ${s.rowsUsed || 0} • Invalid dates: ${s.rowsExcludedInvalidEventDate || 0} • Dedupe resolved: ${s.dedupeCollisionsResolved || 0}`;
+}
+
+function renderChartReadyErrors(artifact){
+  if(!els.chartReadyErrors) return;
+  if(!artifact){
+    els.chartReadyErrors.textContent = '';
+    return;
+  }
+  const parts = [];
+  if(Array.isArray(artifact.errors) && artifact.errors.length) parts.push(`Errors: ${artifact.errors.join(' | ')}`);
+  if(Array.isArray(artifact.warnings) && artifact.warnings.length) parts.push(`Warnings: ${artifact.warnings.join(' | ')}`);
+  if(Array.isArray(artifact.invalidRows) && artifact.invalidRows.length) parts.push(`Invalid rows: ${artifact.invalidRows.length}`);
+  els.chartReadyErrors.textContent = parts.join(' • ');
+}
+
+function buildLineChart(canvas, label, points){
+  if(!canvas || !window.Chart) return null;
+  return new window.Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      datasets: [{
+        label,
+        data: points,
+        borderWidth: 2,
+        tension: 0.2
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+    }
+  });
+}
+
+function renderChartReadyCharts(artifact){
+  clearChartReadyCharts();
+  if(!artifact || !artifact.datasets || !window.Chart){
+    if(els.chartReadyYtdWrap) els.chartReadyYtdWrap.style.display = 'none';
+    return;
+  }
+  chartReadyCharts.moneyIn = buildLineChart(els.chartReadyMoneyInCanvas, 'Money In', artifact.datasets.money_in || []);
+  chartReadyCharts.moneyOut = buildLineChart(els.chartReadyMoneyOutCanvas, 'Money Out', artifact.datasets.money_out || []);
+  chartReadyCharts.gross = buildLineChart(els.chartReadyGrossCanvas, 'Gross / Total', artifact.datasets.gross_or_total || []);
+  const ytd = artifact.datasets.ytd_total || [];
+  if(els.chartReadyYtdWrap) els.chartReadyYtdWrap.style.display = ytd.length ? '' : 'none';
+  if(ytd.length) chartReadyCharts.ytd = buildLineChart(els.chartReadyYtdCanvas, 'YTD Total', ytd);
+}
+
+function renderChartReadyPanel(){
+  const { username, docType, wizardId } = chartReadyContext();
+  const artifact = LS.getChartReady(username, docType, wizardId);
+  renderChartReadySummary(artifact);
+  renderChartReadyErrors(artifact);
+  renderChartReadyCharts(artifact);
+}
+
+function persistChartReadyArtifact({ username, docType, wizardId, artifact }){
+  LS.setChartReady(username, docType, artifact, wizardId);
+}
+
+async function runChartReadyGenerate({ source = 'generate' } = {}){
+  if(!window.ChartReady){
+    renderChartReadyErrors({ errors: ['ChartReady module not loaded.'] });
+    return;
+  }
+  const { username, docType, wizardId } = chartReadyContext();
+  const payload = getOrHydrateMasterRows(username, docType, wizardId);
+  const csvText = MasterDB.toCsvRows(payload);
+  const artifact = window.ChartReady.fromCsvText(csvText, { source });
+  persistChartReadyArtifact({ username, docType, wizardId, artifact });
+  renderChartReadyPanel();
+}
+
+async function runChartReadyUpload(file){
+  if(!file || !window.ChartReady) return;
+  const csvText = await file.text();
+  const { username, docType, wizardId } = chartReadyContext();
+  const artifact = window.ChartReady.fromCsvText(csvText, { source: 'upload' });
+  persistChartReadyArtifact({ username, docType, wizardId, artifact });
+  renderChartReadyPanel();
+}
+
+function runChartReadyRefresh(){
+  return runChartReadyGenerate({ source: 'refresh' });
+}
+
+function bindChartReadyEvents(){
+  if(els.chartReadyGenerateBtn){
+    els.chartReadyGenerateBtn.addEventListener('click', () => runChartReadyGenerate({ source: 'generate' }));
+  }
+  if(els.chartReadyRefreshBtn){
+    els.chartReadyRefreshBtn.addEventListener('click', () => runChartReadyRefresh());
+  }
+  if(els.chartReadyUploadBtn && els.chartReadyFileInput){
+    els.chartReadyUploadBtn.addEventListener('click', () => els.chartReadyFileInput.click());
+    els.chartReadyFileInput.addEventListener('change', async (event) => {
+      const file = event?.target?.files?.[0];
+      if(file) await runChartReadyUpload(file);
+      event.target.value = '';
+    });
+  }
 }
 
 function renderWizardDetailsActions(){
@@ -18122,3 +18282,4 @@ initSnapshotMode();
 syncModeUi();
 syncStaticDebugToggleUI();
 syncOcrTraceToggleUI();
+bindChartReadyEvents();

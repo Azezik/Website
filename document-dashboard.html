@@ -330,6 +330,23 @@
           <button id="wizard-details-back" class="btn ghost" type="button">Back</button>
         </div>
         <div id="wizard-details-actions"></div>
+        <section id="chartready-section" class="panel minimal" style="margin-top:12px;">
+          <h4 style="margin:0 0 10px 0;">ChartReady</h4>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;">
+            <button id="chartready-generate" class="btn" type="button">Generate</button>
+            <button id="chartready-upload" class="btn" type="button">Upload</button>
+            <button id="chartready-refresh" class="btn" type="button">Refresh</button>
+            <input id="chartready-file" type="file" accept=".csv,text/csv" style="display:none;" />
+          </div>
+          <div id="chartready-summary" class="sub" style="margin-top:8px;"></div>
+          <div id="chartready-errors" class="sub" style="margin-top:8px;color:#c62828;"></div>
+          <div id="chartready-charts" style="margin-top:12px;display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));">
+            <div><canvas id="chartready-money-in"></canvas></div>
+            <div><canvas id="chartready-money-out"></canvas></div>
+            <div><canvas id="chartready-gross"></canvas></div>
+            <div id="chartready-ytd-wrap" style="display:none;"><canvas id="chartready-ytd"></canvas></div>
+          </div>
+        </section>
         <div id="wizard-details-log"></div>
       </section>
 
@@ -564,6 +581,8 @@
   <script src="tools/findtext-ranker.js"></script>
   <script src="tools/findtext-learning-insights.js"></script>
   <script src="master-db.js"></script>
+  <script src="chart-ready.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="orchestrator.js"></script>
   <script src="field-map.js"></script>
   <script src="snapshot-store.js"></script>
