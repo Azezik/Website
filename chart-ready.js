@@ -4,10 +4,25 @@
 })(typeof self !== 'undefined' ? self : this, function(){
   const VERSION = 1;
   const CANONICAL_HEADER = ['event_date', 'money_in', 'money_out', 'gross_or_total', 'ytd_total', 'doc_id'];
+  const HEADER_ALIASES = {
+    event_date: ['event_date'],
+    money_in: ['money_in'],
+    money_out: ['money_out'],
+    gross_or_total: ['gross_or_total', 'total_amount'],
+    ytd_total: ['ytd_total'],
+    doc_id: ['doc_id', 'file_id']
+  };
 
   function cleanText(value){
     if(value === undefined || value === null) return '';
     return String(value).trim();
+  }
+
+  function normalizeHeader(value){
+    return cleanText(value)
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+      .replace(/[^a-z0-9_]/g, '');
   }
 
   function parseCsvLine(line){
@@ -97,9 +112,23 @@
 
   function resolveColumns(headerRow){
     const map = {};
-    const normalized = Array.isArray(headerRow) ? headerRow.map(h => cleanText(h).toLowerCase()) : [];
+    const normalized = Array.isArray(headerRow) ? headerRow.map(normalizeHeader) : [];
     CANONICAL_HEADER.forEach(col => {
-      map[col] = normalized.indexOf(col);
+      const canonicalIndex = normalized.indexOf(col);
+      if(canonicalIndex >= 0){
+        map[col] = canonicalIndex;
+        return;
+      }
+      const aliases = HEADER_ALIASES[col] || [];
+      let aliasIndex = -1;
+      for(let i = 0; i < aliases.length; i++){
+        const idx = normalized.indexOf(aliases[i]);
+        if(idx >= 0){
+          aliasIndex = idx;
+          break;
+        }
+      }
+      map[col] = aliasIndex;
     });
     return map;
   }
