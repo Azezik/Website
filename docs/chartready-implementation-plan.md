@@ -1,186 +1,183 @@
-# ChartReady Implementation Proposal (No Code Changes Yet)
+# ChartReady Grounded Implementation Plan (Design-Only, Additive)
 
-## Scope Guardrail
-ChartReady should be implemented as a **strictly additive layer** that starts from an already-produced MasterDB CSV payload and emits derived chart artifacts. It must not modify wizard config, extraction, MasterDB generation, or upstream profile behavior.
+## Scope and non-goals
+- **Strictly additive**: no edits to extraction, wizard configuration flow, or MasterDB generation internals.
+- ChartReady runs only from:
+  1) existing MasterDB CSV generated from existing rows, or
+  2) user-uploaded CSV.
+- UI placement is fixed: **Wizard Manager → Wizard Details**, under the existing first action-row buttons.
 
-## Where ChartReady Logic Should Live
+## 1) Exact files to change (existing) and new files to add
 
-### 1) New engine module: `chart-ready.js`
-Create a standalone browser/Node-compatible utility module (same style as `master-db.js`) that owns all deterministic CSV -> chartready transforms:
-- header/alias resolution
-- required-column validation
-- row parsing/normalization
-- invalid date tracking
-- dedupe (`doc_id`, last occurrence wins)
-- stable sort (`event_date` asc, `doc_id` asc)
-- dataset generation
-- run summary generation
+### Existing files to change
+1. `document-dashboard.html`
+   - Add a ChartReady subsection container under `#wizard-details-actions` and before/alongside the existing log region.
+   - Add a hidden CSV file input for Upload.
+   - Add a chart mount region (4 canvases max) and summary/error region.
+   - Add one Chart.js script include (if not already loaded).
 
-Recommended public API:
-- `ChartReady.fromCsvText(csvText, options?)`
-- `ChartReady.fromRows({ header, rows }, options?)`
-- `ChartReady.toChartJsSeries(result)` (if you want a tiny adapter layer)
+2. `invoice-wizard.js`
+   - Extend `els` with ChartReady element refs.
+   - Extend `LS` with ChartReady keys/get/set/remove helpers.
+   - Extend Wizard Details rendering to add **Generate / Upload / Refresh** below current action row.
+   - Add orchestration handlers (Generate, Upload, Refresh).
+   - Add Chart.js rendering + cleanup of chart instances.
+   - Add backup/restore integration in existing payload functions.
+   - Add delete/reset cleanup integration where wizard artifacts are removed.
 
-Reasoning: the repository already isolates export logic in a focused utility (`master-db.js`) and keeps orchestration/UI in `invoice-wizard.js`; ChartReady should follow that split.
+### New files to add
+1. `chart-ready.js`
+   - Pure data-transform module (no DOM): parse CSV → normalize rows → compute chart payload + summary.
+   - Browser global export style to match existing utility pattern (`master-db.js` style).
 
-### 2) UI orchestration in `invoice-wizard.js`
-Wire button click handlers and persistence in `invoice-wizard.js` (same place as Wizard Manager actions and MasterDB export flow).
+2. `docs/chartready-contract.md` (optional but recommended)
+   - Freeze schema, alias map, confidence/error semantics for future changes.
 
-### 3) UI markup in `document-dashboard.html`
-Add a ChartReady subsection under Wizard Details, directly below the existing first action row (Edit/Add Template/Export/Delete), with:
-- `Generate`
-- `Upload`
-- `Refresh`
-- hidden file input for CSV upload
-- chart mount + summary/error mount
+3. `test/chart-ready.test.js` (if test harness supports it)
+   - Deterministic cases for parsing, normalization, sorting, filtering, and dataset generation.
 
-## Existing MasterDB / CSV Utilities to Reuse
+## 2) File-level diff strategy: sections/functions to edit and changes
 
-## Reuse directly
-1. **MasterDB rows hydration for a wizard**
-   - `getOrHydrateMasterRows(user, docType, wizardId)` already returns canonical `{ header, rows }` for current wizard context.
-   - Use this as the Generate/Refresh source (instead of rebuilding extraction data).
+## `document-dashboard.html`
+### Existing anchors
+- Wizard details section exists at `#wizard-details`, currently with:
+  - `#wizard-details-actions`
+  - `#wizard-details-log`
 
-2. **CSV serialization for “Generate” parity with download mental model**
-   - `MasterDB.toCsvRows(payload)` already serializes `{ header, rows }` deterministically.
-   - Generate should obtain wizard rows via `getOrHydrateMasterRows(...)`, serialize to CSV text, then pass into ChartReady parser (in-memory), matching spec language (“exactly as if user was about to download it”).
+### Planned edits
+- Add a new subsection directly under `#wizard-details-actions`:
+  - Title: `ChartReady`
+  - Buttons: `Generate`, `Upload`, `Refresh`
+  - Hidden input: `type="file" accept=".csv,text/csv"`
+- Add mounts:
+  - `#chartready-summary`
+  - `#chartready-errors`
+  - `#chartready-charts` (contains canvases for Money In, Money Out, Gross/Total, YTD)
 
-3. **Wizard context resolution**
-   - `resolveExtractedWizardContext()` gives active wizard/docType for extracted artifacts and should be reused for ChartReady target wizard.
+## `invoice-wizard.js`
+### A) Element map (`els`) additions
+- Add refs for new nodes:
+  - `chartReadySection`, `chartReadyGenerateBtn`, `chartReadyUploadBtn`, `chartReadyRefreshBtn`, `chartReadyFileInput`, `chartReadySummary`, `chartReadyErrors`, `chartReadyCharts`.
 
-4. **LocalStorage namespace pattern via `LS`**
-   - Existing `LS` methods (`dbKey`, `rowsKey`, `batchLogKey`) establish naming pattern under `accounts.<user>.wizards.<docType>.<wizardId>.*`.
-   - Add chartready keys in this same utility object for consistency and easy cleanup.
+### B) `LS` helper extensions (same namespace pattern)
+- Add methods and keys:
+  - `chartReadyKey(u,d,wizardId)`
+  - `getChartReady(u,d,wizardId)`
+  - `setChartReady(u,d,payload,wizardId)`
+  - `removeChartReady(u,d,wizardId)`
+  - Optional: `chartReadySourceKey(...)` if storing upload source metadata separately.
 
-5. **Existing upload UI pattern**
-   - Reuse the hidden file input + button-trigger pattern used for wizard import/upload actions in `invoice-wizard.js`.
+### C) Wizard details action rendering
+- Existing function: `renderWizardDetailsActions()`.
+- Keep current action row intact (`Edit`, `Add Template`, `Export Wizard`, `Delete`).
+- Append ChartReady subsection **below first row**, not replacing it.
+- Attach button handlers there.
 
-## Reuse with small extension
-1. **Backup/restore support**
-   - `buildBackupPayload` / `applyRestorePayload` should include ChartReady derived artifacts so wizard details remain portable.
+### D) Generate / Upload / Refresh orchestration
+- Generate flow:
+  1. Resolve wizard/docType context using existing selection resolver.
+  2. Get rows via `getOrHydrateMasterRows(user, docType, wizardId)`.
+  3. Serialize using `MasterDB.toCsvRows(payload)`.
+  4. Run `ChartReady.fromCsvText(csvText, options)`.
+  5. Persist via `LS.setChartReady(...)`.
+  6. Render summary/errors/charts.
+- Upload flow:
+  1. Trigger hidden file input.
+  2. Read selected CSV text.
+  3. Same transform/persist/render path as Generate.
+- Refresh flow:
+  - Alias of Generate, sourcing latest rows and replacing persisted artifacts.
 
-2. **Delete/reset cleanup**
-   - `clearWizardArtifacts` and `deleteWizardEverywhere` should remove ChartReady derived artifacts alongside MasterDB artifacts.
+### E) Chart rendering
+- Add render functions that consume persisted ChartReady payload and draw default charts only:
+  - Money In
+  - Money Out
+  - Gross/Total
+  - YTD (only if at least one valid numeric point)
+- Manage lifecycle:
+  - destroy previous chart instances before redraw.
 
-## New Files / Modules Needed
+### F) cleanup integration points
+- Extend `clearWizardArtifacts(username, docType, wizardId)` to remove ChartReady LS key(s).
+- Extend `deleteWizardEverywhere(username, docType, wizardId)` to remove ChartReady LS key(s).
+- Extend `wipeAllWizardData()` only indirectly through `localStorage.clear()` (already global), but still keep targeted remove methods for non-global paths.
 
-1. `chart-ready.js` (new)
-   - Pure deterministic engine.
-   - No DOM.
-   - Exposes parse/validate/dedupe/sort/dataset build.
+### G) backup/restore integration points
+- In `buildBackupPayload(username)` include ChartReady artifact under each `wizardEntry`.
+- In `applyRestorePayload(payload)` restore ChartReady artifacts for each wizard.
 
-2. `test/chart-ready.test.js` (new)
-   - Required columns missing -> readable error listing missing columns.
-   - Alias map behavior (minimal deterministic aliases only).
-   - Money coercion: `$`, commas, spaces, parentheses negatives.
-   - Invalid dates excluded from time-series and counted in summary.
-   - Dedupe rule: last occurrence wins.
-   - Sort rule: `event_date`, then `doc_id`.
-   - Dataset omission of null Y values.
-   - YTD dataset only if present + at least one numeric value.
+## `chart-ready.js` (new)
+### Contents
+- CSV parser + canonical column resolver.
+- Numeric coercion (`$`, commas, spaces, parentheses negatives).
+- Date normalization to ISO date (`YYYY-MM-DD`) for x-axis.
+- Per-row filtering: invalid date rows excluded from time-series but counted in summary.
+- Deterministic dedupe by `doc_id` (last row wins).
+- Stable sort by date asc, then `doc_id` asc.
+- Build datasets for required default series.
 
-3. Optional: `docs/chartready-contract.md` (new)
-   - freeze the accepted canonical columns + alias map + output shape.
+## 3) Function signatures to add (no implementation yet)
 
-## Storage Shape for Derived Artifacts
+## `chart-ready.js`
+- `ChartReady.fromCsvText(csvText, options = {}) => ChartReadyResult`
+- `ChartReady.fromRows(rowsPayload, options = {}) => ChartReadyResult`
+- `ChartReady.resolveColumns(headerRow, options = {}) => ResolvedColumns`
+- `ChartReady.buildDatasets(events, options = {}) => ChartReadyDatasets`
 
-Add LS helpers in `invoice-wizard.js`:
-- `chartReadyKey(u,d,wizardId)` -> `accounts.<u>.wizards.<d>[.<wizardId>].chartready`
-- `chartReadyRunKey(u,d,wizardId)` (optional if separating large artifacts and summary)
+Suggested shapes:
+- `rowsPayload: { header: string[], rows: Array<{ fileId?: string, cells: any[] }|any[]> }`
+- `ChartReadyResult: {
+    version: number,
+    createdAtISO: string,
+    source: 'generate'|'upload'|'refresh',
+    summary: { totalRowsRead:number, rowsUsed:number, rowsExcludedInvalidEventDate:number, dedupeCollisionsResolved:number },
+    errors: string[],
+    warnings: string[],
+    events: Array<{ event_date:string, doc_id:string, money_in:number|null, money_out:number|null, gross_or_total:number|null, ytd_total:number|null }>,
+    datasets: { money_in: Point[], money_out: Point[], gross_or_total: Point[], ytd_total: Point[] }
+  }`
+- `Point: { x: string, y: number }`
 
-Recommended artifact payload:
-```json
-{
-  "version": 1,
-  "createdAt": "ISO",
-  "source": "generate|upload|refresh",
-  "schema": {
-    "canonicalColumns": ["event_date","money_in","money_out","gross_or_total","ytd_total","doc_id"],
-    "aliasesUsed": {"Doc ID":"doc_id"}
-  },
-  "summary": {
-    "totalRowsRead": 0,
-    "rowsUsed": 0,
-    "rowsExcludedInvalidEventDate": 0,
-    "dedupeCollisionsResolved": 0
-  },
-  "invalidRows": [
-    { "rowIndex": 0, "reason": "invalid_event_date", "event_date_raw": "...", "doc_id": "..." }
-  ],
-  "events": [
-    { "event_date":"2025-01-01", "event_date_display":"01/01/2025", "money_in":123, "money_out":null, "gross_or_total":400, "ytd_total":null, "doc_id":"abc" }
-  ],
-  "datasets": {
-    "money_in": [{"x":"2025-01-01","y":123}],
-    "money_out": [],
-    "gross_or_total": [],
-    "ytd_total": []
-  }
-}
-```
+## `invoice-wizard.js`
+- `function createChartReadyControls(template){ /* returns HTMLElement */ }`
+- `async function runChartReadyGenerate({ source = 'generate' } = {})`
+- `async function runChartReadyUpload(file)`
+- `function runChartReadyRefresh()`
+- `function persistChartReadyArtifact({ username, docType, wizardId, artifact })`
+- `function loadChartReadyArtifact({ username, docType, wizardId })`
+- `function renderChartReadyPanel({ username, docType, wizardId })`
+- `function renderChartReadyCharts(artifact)`
+- `function clearChartReadyCharts()`
 
-## Generate / Upload / Refresh Wiring in Wizard Manager UI
+## 4) Generate / Upload / Refresh source, execution, persistence, rendering
+- **Generate**: uses existing hydrated master rows (`getOrHydrateMasterRows`) + existing CSV serializer (`MasterDB.toCsvRows`), runs `ChartReady.fromCsvText`, persists to LS, renders.
+- **Upload**: uses user CSV text directly, runs same ChartReady engine path, persists to LS, renders.
+- **Refresh**: reruns Generate path and overwrites persisted artifact.
+- Rendering reads from persisted artifact (single source of truth) to avoid UI/data drift.
 
-## Placement
-On Wizard Details page (`#wizard-details`), add ChartReady section beneath existing button row:
-- row 1: existing wizard actions
-- row 2: ChartReady controls (`Generate`, `Upload`, `Refresh`)
-- then summary/errors/charts region
+## 5) Storage keys + cleanup/backup/restore alignment
 
-## Button behaviors (exact mapping)
+### LS key pattern (consistent with existing)
+- `accounts.<u>.wizards.<d>[.<wizardId>].chartready`
 
-1. **Generate**
-   - Resolve wizard context.
-   - Pull existing master rows with `getOrHydrateMasterRows(...)`.
-   - Serialize to CSV with `MasterDB.toCsvRows(...)`.
-   - Run `ChartReady.fromCsvText(csv)`.
-   - Persist returned artifacts under wizard (`LS.setChartReady(...)`).
-   - Render summary + charts from persisted result.
+### Integration points
+- Remove in:
+  - `clearWizardArtifacts(...)`
+  - `deleteWizardEverywhere(...)`
+- Include in backup payload in `buildBackupPayload(...)` under each wizard entry:
+  - `wizardEntry.chartReady = <artifact>` (if present)
+- Restore in `applyRestorePayload(...)`:
+  - if `data.chartReady` then `LS.setChartReady(...)`
 
-2. **Upload**
-   - Open file picker (CSV only).
-   - Read selected CSV text.
-   - Run same ChartReady engine path as Generate.
-   - Persist artifacts under wizard.
-   - Render summary + charts.
+## 6) Output dataset shape chosen for Chart.js
+**Chosen shape: `[{x, y}]` points** for every series.
+- Reason: natural time-scale compatibility and sparse-series support (no need to align labels arrays when fields are partially empty).
 
-3. **Refresh**
-   - Call same flow as Generate (hard alias).
-   - Intended after new docs update MasterDB rows.
+## 7) Default charts confirmation (no chart selection UI)
+Only render these default charts:
+1. Money In
+2. Money Out
+3. Gross/Total
+4. YTD (render **only if** dataset contains at least one valid numeric point)
 
-## Rendering
-Use Chart.js in details panel only (no impact to other tabs):
-- `Money In over time`
-- `Money Out over time`
-- `Gross/Total over time`
-- `YTD Total over time` only if dataset has at least one point
-
-If validation fails (missing required columns):
-- show readable error with missing column list
-- do not render datasets
-- keep upstream untouched
-
-## Minimal Deterministic Alias Map (V1)
-Keep tiny + explicit to remain deterministic:
-- `event_date`: `event_date`, `Event Date`, `Invoice Date`, `Pay Date`, `Deposit Date`
-- `money_in`: `money_in`, `Money In`, `Cash In`
-- `money_out`: `money_out`, `Money Out`, `Cash Out`
-- `gross_or_total`: `gross_or_total`, `Gross`, `Invoice Total`, `Total`
-- `ytd_total`: `ytd_total`, `YTD`, `YTD Total`
-- `doc_id`: `doc_id`, `Doc ID`, `File ID`
-
-(If multiple aliases exist simultaneously, prefer exact canonical name first, then first alias in static list.)
-
-## Determinism Notes (Important)
-- `doc_id` fallback for blank values should be deterministic hash from normalized row content + original row index string.
-- Deduping rule is positional: iterate input order and overwrite by `doc_id` so last wins.
-- Sorting always by parsed date asc, then `doc_id` lex asc.
-- Dataset generation should be pure projection (`x=event_date`, `y=column`) and skip null y-values.
-
-## Incremental Rollout Sequence
-1. Add engine + tests.
-2. Add storage keys + cleanup + backup/restore integration.
-3. Add Wizard Details ChartReady UI controls.
-4. Add chart renderer + run summary/error panel.
-5. Add one smoke test in UI harness if available.
-
+No user chart-picker UI is added in this phase.
