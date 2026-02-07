@@ -7321,6 +7321,53 @@ function chartReadyContext(){
   return { username: state.username, docType, wizardId };
 }
 
+function parseChartableDate(value){
+  const raw = (value ?? '').toString().trim();
+  if(!raw) return { ok: false, reason: 'missing_event_date' };
+  const normalized = raw.replace(/\s+/g, ' ');
+  const parsed = new Date(normalized);
+  if(!Number.isFinite(parsed.getTime())){
+    return { ok: false, reason: 'invalid_event_date' };
+  }
+  return { ok: true, value: parsed.toISOString().slice(0, 10) };
+}
+
+function parseChartableNumeric(value){
+  if(value === undefined || value === null || value === '') return null;
+  const cleaned = String(value).replace(/[$,%\s,]/g, '').trim();
+  if(!cleaned) return null;
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
+function isChartable(extractedRowOrMasterRow){
+  const row = extractedRowOrMasterRow || {};
+  const fields = row.fields && typeof row.fields === 'object' ? row.fields : {};
+  const getScalar = (key) => {
+    if(Object.prototype.hasOwnProperty.call(row, key)) return row[key];
+    if(fields[key] && typeof fields[key] === 'object') return fields[key].value ?? fields[key].raw ?? '';
+    return fields[key] ?? '';
+  };
+  const eventDate = parseChartableDate(getScalar('event_date'));
+  if(!eventDate.ok){
+    return { ok: false, reason: eventDate.reason };
+  }
+  const numericCandidates = [
+    ['money_in', parseChartableNumeric(getScalar('money_in'))],
+    ['money_out', parseChartableNumeric(getScalar('money_out'))],
+    ['gross_or_total', parseChartableNumeric(getScalar('gross_or_total'))],
+    ['total_amount', parseChartableNumeric(getScalar('total_amount'))],
+    ['ytd_total', parseChartableNumeric(getScalar('ytd_total'))]
+  ];
+  const present = numericCandidates
+    .filter(([, val]) => Number.isFinite(val))
+    .map(([key]) => key);
+  if(!present.length){
+    return { ok: false, reason: 'missing_numeric_series' };
+  }
+  return { ok: true, event_date: eventDate.value, numericKeys: present };
+}
+
 function renderChartReadySummary(artifact){
   if(!els.chartReadySummary) return;
   if(!artifact){
@@ -14769,6 +14816,11 @@ function compileDocument(fileId, lineItems){
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
     warnings: []
   };
+  const chartable = isChartable(compiled);
+  compiled.isChartable = !!chartable.ok;
+  if(!chartable.ok){
+    compiled.chartableReason = chartable.reason || 'not_chartable';
+  }
   if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
     compiled.warnings.push('line_totals_vs_subtotal');
     if(byKey['subtotal_amount']){
@@ -18255,6 +18307,12 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       }
     }
     if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
+    const extractedEntriesForGate = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim());
+    const extractedScalarKeys = extractedEntriesForGate.map(entry => entry.fieldKey).filter(Boolean);
+    const areaRowCountForGate = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
+    const chartableProbe = isChartable({
+      fields: Object.fromEntries(extractedEntriesForGate.map(entry => [entry.fieldKey, { value: entry.value }]))
+    });
     const isSingleGeometry = geometryIds.length === 1;
     if(isSingleGeometry){
       const staticFieldKeys = new Set(
@@ -18271,25 +18329,37 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         const minCoverage = 0.3;
         const minExtracted = 4;
         if(coverage < minCoverage || extractedStaticCount < minExtracted){
+          const rejectReason = 'quality_gate_failed_low_coverage';
           console.warn('[run-mode][postcheck] rejecting document', {
-            reason: 'quality_gate_failed_low_coverage',
+            reason: rejectReason,
             extractedStaticCount,
             totalStaticCount,
             coverage,
             minCoverage,
-            minExtracted
+            minExtracted,
+            extractedScalarKeys,
+            extractedScalarCount: extractedScalarKeys.length,
+            areaRowCount: areaRowCountForGate,
+            chartable: chartableProbe.ok,
+            chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
           });
-          logBatchRejection({ reason: 'quality_gate_failed_low_coverage', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+          logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
           return;
         }
         const lowConfidenceEntries = staticEntries.filter(entry => Number.isFinite(entry.confidence) && entry.confidence < 0.9);
         if(lowConfidenceEntries.length >= 2){
+          const rejectReason = 'quality_gate_low_confidence_2plus';
           console.warn('[run-mode][postcheck] rejecting document', {
-            reason: 'quality_gate_low_confidence_2plus',
+            reason: rejectReason,
             lowConfidenceCount: lowConfidenceEntries.length,
-            lowConfidenceFields: lowConfidenceEntries.map(entry => entry.fieldKey)
+            lowConfidenceFields: lowConfidenceEntries.map(entry => entry.fieldKey),
+            extractedScalarKeys,
+            extractedScalarCount: extractedScalarKeys.length,
+            areaRowCount: areaRowCountForGate,
+            chartable: chartableProbe.ok,
+            chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
           });
-          logBatchRejection({ reason: 'quality_gate_low_confidence_2plus', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+          logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
           return;
         }
       }
@@ -18302,6 +18372,14 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       notes: lineItems.length ? 'line items captured' : 'no line items found'
     });
     const compiled = compileDocument(state.currentFileId, lineItems);
+    console.info('[run-mode][postcheck] acceptance decision', {
+      reason: null,
+      extractedScalarKeys,
+      extractedScalarCount: extractedScalarKeys.length,
+      areaRowCount: areaRowCountForGate,
+      chartable: chartableProbe.ok,
+      chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
+    });
     const processedAtISO = new Date().toISOString();
     const batchEntry = {
       fileName: file?.name || compiled?.fileName || null,
