@@ -3844,28 +3844,14 @@ function inferVerticalAnchor(field){
   return BOTTOM_ANCHOR_FIELD_KEYS.has(key) ? VERTICAL_ANCHOR.BOTTOM : VERTICAL_ANCHOR.TOP;
 }
 
-function resolveConfiguredPageNumber(field, fallbackPage = 1){
-  const fallback = Math.max(1, Number(fallbackPage) || 1);
-  const explicitPage = Number(field?.page);
-  if(Number.isFinite(explicitPage) && explicitPage >= 1){
-    return Math.floor(explicitPage);
-  }
-  const explicitPageIndex = Number(field?.pageIndex);
-  if(Number.isFinite(explicitPageIndex) && explicitPageIndex >= 0){
-    return Math.floor(explicitPageIndex) + 1;
-  }
-  return fallback;
-}
-
 function inferPageRole(field, page=1){
   if(field?.pageRole === PAGE_ROLE.FIRST || field?.pageRole === PAGE_ROLE.LAST || field?.pageRole === PAGE_ROLE.EXPLICIT){
     return field.pageRole;
   }
-  const configuredPage = resolveConfiguredPageNumber(field, page);
   const key = field?.fieldKey || '';
   if(FOOTER_FIELD_KEYS.has(key)) return PAGE_ROLE.LAST;
   if(HEADER_FIELD_KEYS.has(key)) return PAGE_ROLE.FIRST;
-  return configuredPage === 1 ? PAGE_ROLE.FIRST : PAGE_ROLE.EXPLICIT;
+  return page === 1 ? PAGE_ROLE.FIRST : PAGE_ROLE.EXPLICIT;
 }
 
 function normBoxFromField(field){
@@ -3916,19 +3902,14 @@ function geometryToNormBox(geom){
 }
 
 function resolveStaticPlacement(field, viewports=[], totalPages){
-  if(!field || field.type !== 'static'){
-    const configuredPage = resolveConfiguredPageNumber(field, field?.page || 1);
-    return { pageNumber: configuredPage, pageRole: inferPageRole(field, configuredPage), anchor: inferVerticalAnchor(field), normBox: normBoxFromField(field) };
-  }
+  if(!field || field.type !== 'static') return { pageNumber: field?.page || 1, pageRole: inferPageRole(field, field?.page || 1), anchor: inferVerticalAnchor(field), normBox: normBoxFromField(field) };
   const pages = Math.max(1, Number.isFinite(totalPages) ? totalPages : (viewports?.length || 1));
-  const configuredPage = resolveConfiguredPageNumber(field, field?.page || 1);
-  const role = inferPageRole(field, configuredPage);
+  const role = inferPageRole(field, field.page || 1);
   const anchor = inferVerticalAnchor(field);
   const configMask = normalizeConfigMask(field);
-  const configuredPageIndex = clamp(configuredPage - 1, 0, pages - 1);
   const pageIdx = role === PAGE_ROLE.LAST
     ? pages - 1
-    : (role === PAGE_ROLE.FIRST ? 0 : configuredPageIndex);
+    : (role === PAGE_ROLE.FIRST ? 0 : clamp(Number.isFinite(field.pageIndex) ? field.pageIndex : ((field.page||1) - 1), 0, pages - 1));
   const pageNumber = pageIdx + 1;
   const geom = field.staticGeom || buildStaticGeometry(normBoxFromField(field), anchor);
   const normBox = geometryToNormBox(geom);
@@ -17927,14 +17908,6 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       });
       let tokens = tokenResolution.tokens || [];
       const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
-      const placementTokenHits = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
-      const placementOverlapStats = {
-        inBoxTokens: placementTokenHits.length,
-        tokenCount: tokenResolution.tokenCount ?? tokens.length,
-        overlapRatio: (tokenResolution.tokenCount || tokens.length)
-          ? Number((placementTokenHits.length / (tokenResolution.tokenCount ?? tokens.length)).toFixed(4))
-          : 0
-      };
       const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
       const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
@@ -17985,14 +17958,6 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         console.info('[run-mode][diag] static search input', {
           fieldKey: spec.fieldKey,
           targetPage,
-          tokenResolver: {
-            engineUsed: tokenResolution.engineUsed || null,
-            tokenSource: tokenResolution.tokenSource || null,
-            resolverReason: tokenResolution.resolverReason || null,
-            fallbackFrom: tokenResolution.fallbackFrom || null,
-            tokenCount: tokenResolution.tokenCount ?? tokens.length,
-            overlap: placementOverlapStats
-          },
           placement: {
             bboxNorm: placement?.bbox || null,
             bboxArray: bboxArr || null,
@@ -18145,14 +18110,6 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             preCleanText: extractionResult?.rawBeforeClean || raw || '',
             cleanedText: corrected ?? value ?? '',
             finalValue: value || ''
-          },
-          tokenResolver: {
-            engineUsed: tokenResolution.engineUsed || null,
-            tokenSource: tokenResolution.tokenSource || null,
-            resolverReason: tokenResolution.resolverReason || null,
-            fallbackFrom: tokenResolution.fallbackFrom || null,
-            tokenCount: tokenResolution.tokenCount ?? tokens.length,
-            overlap: placementOverlapStats
           },
           rejectionReason,
           discarded: !value,
