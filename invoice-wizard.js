@@ -8764,7 +8764,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     return { pageW, pageH };
   };
 
-    if(state.modes.rawData){
+    if(state.modes.rawData && isConfigMode() && !state.visualRun?.active){
     let boxPx = null;
     if(isConfigMode() && state.snappedPx){
       boxPx = state.snappedPx;
@@ -14689,7 +14689,16 @@ function compileDocument(fileId, lineItems){
   state.selectedRunId = fileId || state.selectedRunId;
   raw.forEach(r=>{
     if(areaFieldKeys.has(r.fieldKey)) return;
-    byKey[r.fieldKey] = { value: r.value, raw: r.raw, correctionsApplied: r.correctionsApplied || [], confidence: r.confidence || 0, tokens: r.tokens || [] };
+    byKey[r.fieldKey] = {
+      value: r.value,
+      raw: r.raw,
+      correctionsApplied: r.correctionsApplied || [],
+      confidence: r.confidence || 0,
+      tokens: r.tokens || [],
+      engineUsed: r.engineUsed || null,
+      tokenSource: r.tokenSource || null,
+      extractionMeta: r.extractionMeta ? clonePlain(r.extractionMeta) : null
+    };
   });
   getExtractableFields().forEach(f=>{
     if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
@@ -16589,6 +16598,45 @@ async function ensureTesseractTokensForPageWithBBox(pageNum, canvasEl=null){
   return tokens;
 }
 
+async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'auto', mode = 'run' } = {}){
+  const page = Math.max(1, Number(pageNum) || 1);
+  const enginePref = String(preferredEngine || 'auto').toLowerCase();
+  const wantTesseract = enginePref === 'tesseract' || enginePref === 'tesseract-bbox';
+  const wantPdf = enginePref === 'pdfjs';
+  const modeLabel = mode || (isRunMode() ? 'run' : (isConfigMode() ? 'config' : 'unknown'));
+
+  const buildResult = (tokens, engineUsed, tokenSource, resolverReason, fallbackFrom = null) => ({
+    page,
+    tokens: Array.isArray(tokens) ? tokens : [],
+    engineUsed,
+    tokenSource,
+    resolverReason,
+    fallbackFrom,
+    tokenCount: Array.isArray(tokens) ? tokens.length : 0,
+    mode: modeLabel
+  });
+
+  if(wantTesseract){
+    const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
+    const normalized = normalizeTesseractTokensForPage(tessTokens, page);
+    return buildResult(normalized, 'tesseract', 'tesseract-bbox', 'preferred_tesseract');
+  }
+
+  if(wantPdf){
+    const pdfTokens = await ensureTokensForPage(page);
+    return buildResult(pdfTokens, 'pdfjs', 'pdfjs', 'preferred_pdfjs');
+  }
+
+  const pdfTokens = await ensureTokensForPage(page);
+  if(Array.isArray(pdfTokens) && pdfTokens.length){
+    return buildResult(pdfTokens, 'pdfjs', 'pdfjs', 'pdf_tokens_available');
+  }
+
+  const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
+  const normalized = normalizeTesseractTokensForPage(tessTokens, page);
+  return buildResult(normalized, 'tesseract', 'tesseract-bbox', 'pdf_empty_tokens_fallback', 'pdfjs');
+}
+
 function isRenderableFindTextBox(box){
   return !!(box && Number.isFinite(box.w) && Number.isFinite(box.h) && box.w > 0 && box.h > 0);
 }
@@ -16935,8 +16983,13 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     return;
   }
   if(!state.snappedPx){ alert('Draw a box first.'); return; }
-  const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || DEFAULT_FIELDS[state.stepIdx] || DEFAULT_FIELDS[0];
+  const tokenResolution = await resolveExtractionTokensForField({
+    pageNum: state.pageNum,
+    preferredEngine: 'auto',
+    mode: 'config'
+  });
+  const tokens = tokenResolution.tokens || [];
 
   const isAreaStep = !!step.isArea;
   const areaKey = step.areaId || (isAreaStep ? (step.fieldKey || step.fieldId) : null) || step.fieldKey;
@@ -17036,7 +17089,25 @@ els.confirmBtn?.addEventListener('click', async ()=>{
 
   const fid = state.currentFileId;
   if(fid && !isAreaStep){
-    const rec = { fieldKey: step.fieldKey, raw, value, confidence, correctionsApplied: corrections, page: state.pageNum, bboxPct: pct, ts: Date.now(), tokens: fieldTokens };
+    const rec = {
+      fieldKey: step.fieldKey,
+      raw,
+      value,
+      confidence,
+      correctionsApplied: corrections,
+      page: state.pageNum,
+      bboxPct: pct,
+      ts: Date.now(),
+      tokens: fieldTokens,
+      engineUsed: tokenResolution.engineUsed,
+      tokenSource: tokenResolution.tokenSource,
+      extractionMeta: {
+        resolverReason: tokenResolution.resolverReason,
+        fallbackFrom: tokenResolution.fallbackFrom || null,
+        tokenCount: tokenResolution.tokenCount ?? (tokens?.length || 0),
+        mode: tokenResolution.mode || 'config'
+      }
+    };
     rawStore.upsert(fid, rec);
     compileDocument(fid, state.currentLineItems);
   }
@@ -17831,6 +17902,23 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
       let tokens = state.tokensByPage[targetPage] || [];
+      let tokenResolution = {
+        page: targetPage,
+        engineUsed: 'pdfjs',
+        tokenSource: 'pdfjs',
+        resolverReason: 'run_cached_tokens',
+        fallbackFrom: null,
+        tokenCount: tokens.length,
+        mode: 'run'
+      };
+      if(!tokens.length){
+        tokenResolution = await resolveExtractionTokensForField({
+          pageNum: targetPage,
+          preferredEngine: 'auto',
+          mode: 'run'
+        });
+        tokens = tokenResolution.tokens || [];
+      }
       const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
       const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
@@ -18127,7 +18215,24 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         let conf = confidence;
         const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
         if(dup) conf *= 0.5;
-        const rec = { fieldKey: spec.fieldKey, raw, value, confidence: conf, correctionsApplied: corrections, page: targetPage, bbox: pct, ts: Date.now() };
+        const rec = {
+          fieldKey: spec.fieldKey,
+          raw,
+          value,
+          confidence: conf,
+          correctionsApplied: corrections,
+          page: targetPage,
+          bbox: pct,
+          ts: Date.now(),
+          engineUsed: tokenResolution.engineUsed,
+          tokenSource: tokenResolution.tokenSource,
+          extractionMeta: {
+            resolverReason: tokenResolution.resolverReason,
+            fallbackFrom: tokenResolution.fallbackFrom || null,
+            tokenCount: tokenResolution.tokenCount ?? (tokens?.length || 0),
+            mode: tokenResolution.mode || 'run'
+          }
+        };
         rawStore.upsert(state.currentFileId, rec);
       }
       if(spec.type === 'static'){
