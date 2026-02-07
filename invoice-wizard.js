@@ -17590,6 +17590,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     runDiagnostics.startExtraction(guardKey);
   }
   setExtractionLoading(true);
+  let runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
   try {
     activateRunMode({ clearDoc: true });
     const wizardId = runContext.wizardId || profile?.wizardId || currentWizardId();
@@ -17794,7 +17795,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       note:'post-merge'
     });
     geomSnapshotCursor = mergedSnapshot;
-    const runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
+    runSpanKey = { docId: state.currentFileId || state.currentFileName || file?.name || 'doc', pageIndex: 0, fieldKey: '__run__' };
     if(isRunMode()) mirrorDebugLog(`[run-mode] starting extraction for ${file?.name || 'file'}`);
     traceEvent(runSpanKey,'bbox:read',{
       stageLabel:'Run start',
@@ -17912,12 +17913,41 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
     state.activeGeometryId = geometryId;
 
-    await extractAreaRows(activeProfile);
+    const docStageState = {
+      extractedStaticKeys: [],
+      areaRowCount: Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0,
+      chartable: null,
+      chartableReason: null,
+      rejectReason: null
+    };
+    const logDocStage = (stage, phase, extra = {}) => {
+      const keys = docStageState.extractedStaticKeys.length;
+      const areas = docStageState.areaRowCount;
+      const chartable = docStageState.chartable;
+      const rejectReason = docStageState.rejectReason;
+      console.info(`[run-mode] stage=${stage}.${phase} keys=${keys} areas=${areas} chartable=${chartable == null ? 'n/a' : chartable} reason=${rejectReason || 'null'}`, extra || {});
+    };
+
+    logDocStage('areas', 'start');
+    try {
+      await extractAreaRows(activeProfile);
+    docStageState.areaRowCount = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
     traceEvent(runSpanKey,'columns:merge',{
       stageLabel:'Area rows scanned',
-      counts:{ areas: (activeProfile.fields||[]).filter(f=>f.isArea || f.fieldType==='areabox').length },
+      counts:{ areas: docStageState.areaRowCount },
       notes:'Area rows extraction complete'
     });
+    logDocStage('areas', 'done');
+    } catch(err){
+      console.error('[run-mode] stage-fail areas', err);
+      traceEvent(runSpanKey,'columns:merge',{
+        stageLabel:'Area rows scanned',
+        counts:{ areas: docStageState.areaRowCount },
+        errors:[err],
+        notes:'stage-fail areas'
+      });
+      throw err;
+    }
     if(isRunMode()){
       const iterationList = (activeProfile.fields || []).map(f => ({
         key: f.fieldKey,
@@ -17939,6 +17969,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
 
     const includeLineItems = activeProfile?.masterDbConfig?.includeLineItems !== false;
+    logDocStage('static-extract', 'start');
+    try {
     for(const spec of (activeProfile.fields || [])){
       const isAreaField = spec.isArea || spec.fieldType === 'areabox';
       const isSubordinateField = isExplicitSubordinate(spec);
@@ -18306,6 +18338,21 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         );
       }
     }
+    docStageState.extractedStaticKeys = (rawStore.get(state.currentFileId) || [])
+      .filter(entry => String(entry?.value || '').trim())
+      .map(entry => entry.fieldKey)
+      .filter(Boolean);
+    logDocStage('static-extract', 'done', { extractedStaticKeys: docStageState.extractedStaticKeys });
+    } catch(err){
+      console.error('[run-mode] stage-fail static-extract', err);
+      traceEvent(runSpanKey,'arith:check',{
+        stageLabel:'Static extraction',
+        counts:{ keys: docStageState.extractedStaticKeys.length, areas: docStageState.areaRowCount },
+        errors:[err],
+        notes:'stage-fail static-extract'
+      });
+      throw err;
+    }
     if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
     const extractedEntriesForGate = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim());
     const extractedScalarKeys = extractedEntriesForGate.map(entry => entry.fieldKey).filter(Boolean);
@@ -18313,96 +18360,126 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     const chartableProbe = isChartable({
       fields: Object.fromEntries(extractedEntriesForGate.map(entry => [entry.fieldKey, { value: entry.value }]))
     });
-    const isSingleGeometry = geometryIds.length === 1;
-    if(isSingleGeometry){
-      const staticFieldKeys = new Set(
-        (activeProfile.fields || [])
-          .filter(f => f.type === 'static' && !(f.isArea || f.fieldType === 'areabox'))
-          .map(f => f.fieldKey)
-          .filter(Boolean)
-      );
-      if(staticFieldKeys.size){
-        const staticEntries = (rawStore.get(state.currentFileId) || []).filter(entry => staticFieldKeys.has(entry.fieldKey) && String(entry.value || '').trim());
-        const extractedStaticCount = staticEntries.length;
-        const totalStaticCount = staticFieldKeys.size;
-        const coverage = totalStaticCount ? extractedStaticCount / totalStaticCount : 0;
-        const minCoverage = 0.3;
-        const minExtracted = 4;
-        if(coverage < minCoverage || extractedStaticCount < minExtracted){
-          const rejectReason = 'quality_gate_failed_low_coverage';
-          console.warn('[run-mode][postcheck] rejecting document', {
-            reason: rejectReason,
-            extractedStaticCount,
-            totalStaticCount,
-            coverage,
-            minCoverage,
-            minExtracted,
-            extractedScalarKeys,
-            extractedScalarCount: extractedScalarKeys.length,
-            areaRowCount: areaRowCountForGate,
-            chartable: chartableProbe.ok,
-            chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
-          });
-          logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
-          return;
-        }
-        const lowConfidenceEntries = staticEntries.filter(entry => Number.isFinite(entry.confidence) && entry.confidence < 0.9);
-        if(lowConfidenceEntries.length >= 2){
-          const rejectReason = 'quality_gate_low_confidence_2plus';
-          console.warn('[run-mode][postcheck] rejecting document', {
-            reason: rejectReason,
-            lowConfidenceCount: lowConfidenceEntries.length,
-            lowConfidenceFields: lowConfidenceEntries.map(entry => entry.fieldKey),
-            extractedScalarKeys,
-            extractedScalarCount: extractedScalarKeys.length,
-            areaRowCount: areaRowCountForGate,
-            chartable: chartableProbe.ok,
-            chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
-          });
-          logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
-          return;
-        }
-      }
+    docStageState.extractedStaticKeys = extractedScalarKeys;
+    docStageState.areaRowCount = areaRowCountForGate;
+    docStageState.chartable = !!chartableProbe.ok;
+    docStageState.chartableReason = chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable');
+    logDocStage('postcheck', 'start', {
+      extractedScalarKeys,
+      extractedScalarCount: extractedScalarKeys.length,
+      areaRowCount: areaRowCountForGate,
+      chartable: docStageState.chartable,
+      chartableReason: docStageState.chartableReason
+    });
+
+    const hasExtractedContent = extractedScalarKeys.length > 0 || areaRowCountForGate > 0;
+    if(!hasExtractedContent){
+      const rejectReason = 'no_extracted_content';
+      docStageState.rejectReason = rejectReason;
+      console.warn('[run-mode][postcheck] rejecting document', {
+        reason: rejectReason,
+        extractedScalarKeys,
+        extractedScalarCount: extractedScalarKeys.length,
+        areaRowCount: areaRowCountForGate,
+        chartable: docStageState.chartable,
+        chartableReason: docStageState.chartableReason
+      });
+      traceEvent(runSpanKey,'arith:check',{
+        stageLabel:'Postcheck',
+        counts:{ keys: extractedScalarKeys.length, areas: areaRowCountForGate },
+        output:{ accepted:false, reason: rejectReason, chartable: docStageState.chartable, chartableReason: docStageState.chartableReason },
+        notes:'postcheck rejected'
+      });
+      traceEvent(runSpanKey,'finalize',{
+        stageLabel:'Run complete',
+        output:{ accepted:false, reason: rejectReason },
+        notes:'Run mode rejected after postcheck'
+      });
+      logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
+      logDocStage('postcheck', 'done', { accepted: false, reason: rejectReason });
+      return;
     }
-    const lineItems = await extractLineItems(activeProfile);
+
+    traceEvent(runSpanKey,'arith:check',{
+      stageLabel:'Postcheck',
+      counts:{ keys: extractedScalarKeys.length, areas: areaRowCountForGate },
+      output:{ accepted:true, reason:null, chartable: docStageState.chartable, chartableReason: docStageState.chartableReason },
+      notes:'postcheck accepted'
+    });
+    logDocStage('postcheck', 'done', { accepted: true, reason: null });
+
+    logDocStage('line-items', 'start');
+    let lineItems = [];
+    try {
+      lineItems = await extractLineItems(activeProfile);
+      logDocStage('line-items', 'done', { lineItems: lineItems.length });
+    } catch(err){
+      console.error('[run-mode] stage-fail line-items', err);
+      traceEvent(runSpanKey,'columns:merge',{
+        stageLabel:'Line items extracted',
+        counts:{ lineItems: 0 },
+        errors:[err],
+        notes:'stage-fail line-items'
+      });
+      throw err;
+    }
     if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
     traceEvent(runSpanKey,'columns:merge',{
       stageLabel:'Line items extracted',
       counts:{ lineItems: lineItems.length },
       notes: lineItems.length ? 'line items captured' : 'no line items found'
     });
-    const compiled = compileDocument(state.currentFileId, lineItems);
-    console.info('[run-mode][postcheck] acceptance decision', {
-      reason: null,
-      extractedScalarKeys,
-      extractedScalarCount: extractedScalarKeys.length,
-      areaRowCount: areaRowCountForGate,
-      chartable: chartableProbe.ok,
-      chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
-    });
-    const processedAtISO = new Date().toISOString();
-    const batchEntry = {
-      fileName: file?.name || compiled?.fileName || null,
-      processedAtISO,
-      status: 'accepted'
-    };
-    if(wizardId){ batchEntry.wizardId = wizardId; }
-    if(geometryId){ batchEntry.geometryId = geometryId; }
-    const batchLog = LS.getBatchLog(state.username, state.docType, wizardId);
-    batchLog.push(batchEntry);
-    LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardId);
-    if(state.snapshotMode){
-      const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
-      if(manifest){ compiled.snapshotManifestId = manifest.id; }
+    logDocStage('finalize', 'start');
+    try {
+      const compiled = compileDocument(state.currentFileId, lineItems);
+      console.info('[run-mode][postcheck] acceptance decision', {
+        reason: null,
+        extractedScalarKeys,
+        extractedScalarCount: extractedScalarKeys.length,
+        areaRowCount: areaRowCountForGate,
+        chartable: chartableProbe.ok,
+        chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
+      });
+      const processedAtISO = new Date().toISOString();
+      const batchEntry = {
+        fileName: file?.name || compiled?.fileName || null,
+        processedAtISO,
+        status: 'accepted'
+      };
+      if(wizardId){ batchEntry.wizardId = wizardId; }
+      if(geometryId){ batchEntry.geometryId = geometryId; }
+      const batchLog = LS.getBatchLog(state.username, state.docType, wizardId);
+      batchLog.push(batchEntry);
+      LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardId);
+      if(state.snapshotMode){
+        const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
+        if(manifest){ compiled.snapshotManifestId = manifest.id; }
+      }
+      if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
+      traceEvent(runSpanKey,'finalize',{
+        stageLabel:'Run complete',
+        output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length, accepted:true, reason:null },
+        notes:'Run mode finished'
+      });
+      logDocStage('finalize', 'done', { accepted: true, reason: null, fileId: compiled.fileId });
+    } catch(err){
+      console.error('[run-mode] stage-fail finalize', err);
+      traceEvent(runSpanKey,'finalize',{
+        stageLabel:'Run complete',
+        output:{ accepted:false, reason:'finalize_failed' },
+        errors:[err],
+        notes:'stage-fail finalize'
+      });
+      throw err;
     }
-    if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
+  } catch(err){
+    console.error('[run-mode] stage-fail unhandled', err);
     traceEvent(runSpanKey,'finalize',{
       stageLabel:'Run complete',
-      output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length },
-      notes:'Run mode finished'
+      output:{ accepted:false, reason:'run_failed' },
+      errors:[err],
+      notes:'run failed before finalize'
     });
-  } catch(err){
-    console.error('Run mode extraction failed', err);
     if(!runContext.isBatch){ notifyRunIssue(err?.message || 'Extraction failed. Please try again.'); }
   } finally {
     setExtractionLoading(false);
