@@ -17901,12 +17901,24 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
       state.pageNum = targetPage;
       state.viewport = state.pageViewports[targetPage-1] || state.viewport;
-      const tokenResolution = await resolveExtractionTokensForField({
-        pageNum: targetPage,
-        preferredEngine: 'auto',
+      let tokens = state.tokensByPage[targetPage] || [];
+      let tokenResolution = {
+        page: targetPage,
+        engineUsed: 'pdfjs',
+        tokenSource: 'pdfjs',
+        resolverReason: 'run_cached_tokens',
+        fallbackFrom: null,
+        tokenCount: tokens.length,
         mode: 'run'
-      });
-      let tokens = tokenResolution.tokens || [];
+      };
+      if(!tokens.length){
+        tokenResolution = await resolveExtractionTokensForField({
+          pageNum: targetPage,
+          preferredEngine: 'auto',
+          mode: 'run'
+        });
+        tokens = tokenResolution.tokens || [];
+      }
       const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
       const configMask = placement?.configMask || normalizeConfigMask(spec);
       const bboxArr = placement?.bbox || spec.bbox;
