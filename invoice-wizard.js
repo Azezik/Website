@@ -3,7 +3,9 @@ const pdfjsLibRef = window.pdfjsLib;
 const TesseractRef = window.Tesseract;
 const StaticFieldMode = window.StaticFieldMode || null;
 const KeywordWeighting = window.KeywordWeighting || null;
-const KeywordConstellation = window.KeywordConstellation || null;
+const KeywordConstellation = window.EngineFindTextConstellation || window.KeywordConstellation || null;
+const FindTextEngine = window.EngineFindText || null;
+const FindTextRankerEngine = window.EngineFindTextRanker || null;
 const AreaScoping = window.AreaScoping || null;
 const AreaFinder = window.AreaFinder || null;
 const GeometryBox = window.EngineGeometryBox || {};
@@ -12186,6 +12188,7 @@ const tokenProvider = window.SkinV2TokenProviderAdapter?.createSkinV2TokenProvid
     };
 
 function normalizeFindTextInput(text){
+  if(FindTextEngine?.normalizeFindTextInput) return FindTextEngine.normalizeFindTextInput(text);
   return String(text || '').trim().replace(/\s+/g, ' ');
 }
 
@@ -12194,6 +12197,7 @@ function normalizeFindTextInput(text){
 // - Normalize by removing punctuation/diacritics and lowercasing.
 // - Allow substring matches within tokens to handle punctuation/spacing differences.
 function normalizeFindTextMatchText(text){
+  if(FindTextRankerEngine?.normalizeMatchText) return FindTextRankerEngine.normalizeMatchText(text);
   return String(text || '')
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -12204,10 +12208,12 @@ function normalizeFindTextMatchText(text){
 }
 
 function normalizeFindTextMatchToken(text){
+  if(FindTextRankerEngine?.normalizeMatchToken) return FindTextRankerEngine.normalizeMatchToken(text);
   return normalizeFindTextMatchText(text).replace(/\s+/g, '');
 }
 
 function getFindTextQueryParts(query){
+  if(FindTextRankerEngine?.getQueryParts) return FindTextRankerEngine.getQueryParts(query);
   const normalized = normalizeFindTextMatchText(query);
   return normalized ? normalized.split(' ').filter(Boolean) : [];
 }
@@ -12222,6 +12228,7 @@ function isFindTextTokenMatch(candidateNorm, partNorm){
 }
 
 function scoreFindTextTokenMatch(candidateNorm, partNorm){
+  if(FindTextRankerEngine?.scoreFindTextTokenMatch) return FindTextRankerEngine.scoreFindTextTokenMatch(candidateNorm, partNorm);
   if(!candidateNorm || !partNorm) return 0;
   if(candidateNorm === partNorm) return 3;
   if(candidateNorm.startsWith(partNorm)) return 2;
@@ -12231,27 +12238,18 @@ function scoreFindTextTokenMatch(candidateNorm, partNorm){
 }
 
 function rankFindTextCandidates(candidates, options = {}){
-  const { mode = 'first', query = '', source = '', useRanker = false, weights = null } = options || {};
-  let ranked = candidates.slice();
-  let rankedBy = 'order';
-  if(mode === 'best'){
-    if(useRanker && weights && window.FindTextRanker?.rankCandidates){
-      ranked = window.FindTextRanker.rankCandidates(candidates, { query, source, weights, fallbackKey: 'score' });
-      rankedBy = 'learned';
-    } else {
-      ranked.sort((a,b)=> {
-        if(b.score !== a.score) return b.score - a.score;
-        return a.order - b.order;
-      });
-      rankedBy = 'heuristic';
-    }
-  } else {
-    ranked.sort((a,b)=> a.order - b.order);
+  if(FindTextRankerEngine?.rankFindTextCandidates){
+    return FindTextRankerEngine.rankFindTextCandidates(candidates, {
+      ...(options || {}),
+      learnedRanker: window.FindTextRanker || null
+    });
   }
-  return { ranked, chosen: ranked[0] || null, rankedBy };
+  const ranked = (candidates || []).slice().sort((a,b)=> a.order - b.order);
+  return { ranked, chosen: ranked[0] || null, rankedBy: 'order' };
 }
 
 function scoreFindTextCandidate(tokens, partNorms, querySquashed){
+  if(FindTextRankerEngine?.scoreFindTextCandidate) return FindTextRankerEngine.scoreFindTextCandidate(tokens, partNorms, querySquashed);
   const tokenText = tokens.map(t => String(t.text || t.raw || '')).join(' ');
   const tokenNorms = tokens.map(t => normalizeFindTextMatchToken(t.text || t.raw || ''));
   let score = 0;
@@ -12268,6 +12266,13 @@ function scoreFindTextCandidate(tokens, partNorms, querySquashed){
 }
 
 function findTextMatchCandidatesInTokens(tokens, query){
+  if(FindTextEngine?.findTextMatchCandidatesInTokens){
+    return FindTextEngine.findTextMatchCandidatesInTokens(tokens, query, {
+      rankerEngine: FindTextRankerEngine,
+      groupIntoLines,
+      bboxOfTokens
+    });
+  }
   const parts = getFindTextQueryParts(query);
   if(!parts.length) return [];
   const partNorms = parts.map(part => normalizeFindTextMatchToken(part)).filter(Boolean);
@@ -12321,6 +12326,15 @@ function findTextMatchCandidatesInTokens(tokens, query){
 }
 
 function findTextMatchInTokens(tokens, query, options = {}){
+  if(FindTextEngine?.findTextMatchInTokens){
+    return FindTextEngine.findTextMatchInTokens(tokens, query, {
+      ...(options || {}),
+      rankerEngine: FindTextRankerEngine,
+      learnedRanker: window.FindTextRanker || null,
+      groupIntoLines,
+      bboxOfTokens
+    });
+  }
   const { mode = 'first', rankerContext = null } = options || {};
   const candidates = findTextMatchCandidatesInTokens(tokens, query);
   if(!candidates.length) return null;
@@ -12339,6 +12353,13 @@ function findTextMatchInTokens(tokens, query, options = {}){
 }
 
 function findTextMatchesInTokens(tokens, query){
+  if(FindTextEngine?.findTextMatchesInTokens){
+    return FindTextEngine.findTextMatchesInTokens(tokens, query, {
+      rankerEngine: FindTextRankerEngine,
+      groupIntoLines,
+      bboxOfTokens
+    });
+  }
   return findTextMatchCandidatesInTokens(tokens, query).map(entry => entry.box);
 }
 
