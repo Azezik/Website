@@ -717,6 +717,13 @@ const viewerHome = {
   nextSibling: els.viewer?.nextSibling || null
 };
 
+const debugFindTextAdapter = window.DebugFindTextAdapter?.createFindTextAdapter
+  ? window.DebugFindTextAdapter.createFindTextAdapter()
+  : null;
+const debugVisualRunAdapter = window.DebugVisualRunAdapter?.createVisualRunAdapter
+  ? window.DebugVisualRunAdapter.createVisualRunAdapter()
+  : null;
+
 function moveViewerToHost(host){
   if(!els.viewer || !host) return;
   if(els.viewer.parentElement !== host){
@@ -734,13 +741,23 @@ function restoreViewerHome(){
 function handleFindTextTab(activeId){
   const isFindText = activeId === 'find-text';
   const isVisualRun = activeId === 'visual-run';
+  if(!state.debugSandbox){
+    state.debugSandbox = { findTextSession: null, visualRunSession: null };
+  }
   if(isFindText){
+    if(!state.debugSandbox.findTextSession && debugFindTextAdapter?.beginSession){
+      state.debugSandbox.findTextSession = debugFindTextAdapter.beginSession();
+    }
     moveViewerToHost(els.findTextViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
   } else if(isVisualRun){
     moveViewerToHost(els.visualRunViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
   } else {
+    if(state.debugSandbox.findTextSession && debugFindTextAdapter?.endSession){
+      debugFindTextAdapter.endSession(state.debugSandbox.findTextSession);
+      state.debugSandbox.findTextSession = null;
+    }
     restoreViewerHome();
   }
   if(state.visualRun){
@@ -1022,6 +1039,12 @@ async function buildVisualRunAttemptSnapshot({ fieldSpec, result, tokens, page }
 
 function prepareVisualRunContext(){
   ensureVisualRunState();
+  if(!state.debugSandbox){
+    state.debugSandbox = { findTextSession: null, visualRunSession: null };
+  }
+  if(!state.debugSandbox.visualRunSession && debugVisualRunAdapter?.beginSession){
+    state.debugSandbox.visualRunSession = debugVisualRunAdapter.beginSession();
+  }
   if(state.visualRun.previousWizardId === null){
     state.visualRun.previousWizardId = state.activeWizardId;
     state.visualRun.previousGeometryId = state.activeGeometryId;
@@ -1046,6 +1069,10 @@ function prepareVisualRunContext(){
 function restoreVisualRunContext(){
   const visual = state.visualRun;
   if(!visual || visual.previousWizardId === null) return;
+  if(state.debugSandbox?.visualRunSession && debugVisualRunAdapter?.endSession){
+    debugVisualRunAdapter.endSession(state.debugSandbox.visualRunSession);
+    state.debugSandbox.visualRunSession = null;
+  }
   state.activeWizardId = visual.previousWizardId || state.activeWizardId;
   state.activeGeometryId = visual.previousGeometryId || state.activeGeometryId;
   state.steps = visual.previousSteps || state.steps;
@@ -1631,6 +1658,10 @@ let state = {
   wizardComplete: false,
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
+  debugSandbox: {
+    findTextSession: null,
+    visualRunSession: null
+  },
   visualRun: {
     active: false,
     wizardId: '',
@@ -1655,6 +1686,43 @@ let state = {
     previousStepIdx: 0,
     previousWizardComplete: false
   },
+};
+
+
+function captureDebugSandboxCoreState(){
+  return {
+    activeWizardId: state.activeWizardId,
+    activeGeometryId: state.activeGeometryId,
+    profile: clonePlain(state.profile),
+    steps: clonePlain(state.steps),
+    stepIdx: state.stepIdx,
+    wizardComplete: state.wizardComplete,
+    tokensByPage: clonePlain(state.tokensByPage),
+    tessTokensByPage: clonePlain(state.tessTokensByPage),
+    keywordIndexByPage: clonePlain(state.keywordIndexByPage)
+  };
+}
+
+function restoreDebugSandboxCoreState(snapshot){
+  if(!snapshot) return;
+  state.activeWizardId = snapshot.activeWizardId || state.activeWizardId;
+  state.activeGeometryId = snapshot.activeGeometryId || state.activeGeometryId;
+  state.profile = clonePlain(snapshot.profile);
+  state.steps = clonePlain(snapshot.steps) || [];
+  state.stepIdx = Number.isFinite(snapshot.stepIdx) ? snapshot.stepIdx : 0;
+  state.wizardComplete = !!snapshot.wizardComplete;
+  state.tokensByPage = clonePlain(snapshot.tokensByPage) || [];
+  state.tessTokensByPage = clonePlain(snapshot.tessTokensByPage) || {};
+  state.keywordIndexByPage = clonePlain(snapshot.keywordIndexByPage) || {};
+}
+
+window.__skinV2DebugSandboxHooks = {
+  captureCoreState: captureDebugSandboxCoreState,
+  restoreCoreState: restoreDebugSandboxCoreState,
+  getProfileStoreContract(){ return activeProfileStoreContract || profileStoreContract; },
+  setProfileStoreContract(contract){ activeProfileStoreContract = contract || profileStoreContract; },
+  getRawStoreContract(){ return activeRawStoreContract || rawStoreContract; },
+  setRawStoreContract(contract){ activeRawStoreContract = contract || rawStoreContract; }
 };
 
 let loginHydrated = false;
@@ -3954,13 +4022,25 @@ function loadProfile(u, d, wizardId = currentWizardId(), geometryId = currentGeo
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
-const profileStore = window.SkinV2ProfileStoreAdapter?.createSkinV2ProfileStore
+const profileStoreContract = window.SkinV2ProfileStoreAdapter?.createSkinV2ProfileStore
   ? window.SkinV2ProfileStoreAdapter.createSkinV2ProfileStore({
       loadProfile,
       saveProfile,
       migrateProfile
     })
   : { loadProfile, saveProfile, migrateProfile };
+let activeProfileStoreContract = profileStoreContract;
+const profileStore = {
+  loadProfile(...args){
+    return (activeProfileStoreContract || profileStoreContract).loadProfile(...args);
+  },
+  saveProfile(...args){
+    return (activeProfileStoreContract || profileStoreContract).saveProfile(...args);
+  },
+  migrateProfile(...args){
+    return (activeProfileStoreContract || profileStoreContract).migrateProfile(...args);
+  }
+};
 
 // Raw and compiled stores
 const rawFieldMap = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
@@ -3971,13 +4051,14 @@ const rawStoreContract = window.SkinV2RawStoreAdapter?.createSkinV2RawStore
       getByFile(fileId){ return rawFieldMap.get(fileId) || []; },
       clearByFile(fileId){ rawFieldMap.clear(fileId); }
     };
+let activeRawStoreContract = rawStoreContract;
 const rawStore = {
-  upsert(fileId, rec){ rawStoreContract.upsert(fileId, rec); },
-  getByFile(fileId){ return rawStoreContract.getByFile(fileId); },
-  clearByFile(fileId){ rawStoreContract.clearByFile(fileId); },
+  upsert(fileId, rec){ (activeRawStoreContract || rawStoreContract).upsert(fileId, rec); },
+  getByFile(fileId){ return (activeRawStoreContract || rawStoreContract).getByFile(fileId); },
+  clearByFile(fileId){ (activeRawStoreContract || rawStoreContract).clearByFile(fileId); },
   // Backward-compatible aliases while Stage 1 keeps existing call sites.
-  get(fileId){ return rawStoreContract.getByFile(fileId); },
-  clear(fileId){ rawStoreContract.clearByFile(fileId); }
+  get(fileId){ return (activeRawStoreContract || rawStoreContract).getByFile(fileId); },
+  clear(fileId){ (activeRawStoreContract || rawStoreContract).clearByFile(fileId); }
 };
 const fileMeta = {};       // {fileId: {fileName}}
 const SNAPSHOT_BYTE_LIMIT = 2_500_000;
