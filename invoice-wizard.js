@@ -4022,13 +4022,19 @@ function loadProfile(u, d, wizardId = currentWizardId(), geometryId = currentGeo
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
-const profileStoreContract = window.SkinV2ProfileStoreAdapter?.createSkinV2ProfileStore
-  ? window.SkinV2ProfileStoreAdapter.createSkinV2ProfileStore({
+const profileStoreContract = (!isSkinV2 && window.LegacyProfileStoreAdapter?.createLegacyProfileStore)
+  ? window.LegacyProfileStoreAdapter.createLegacyProfileStore({
       loadProfile,
       saveProfile,
       migrateProfile
     })
-  : { loadProfile, saveProfile, migrateProfile };
+  : window.SkinV2ProfileStoreAdapter?.createSkinV2ProfileStore
+    ? window.SkinV2ProfileStoreAdapter.createSkinV2ProfileStore({
+        loadProfile,
+        saveProfile,
+        migrateProfile
+      })
+    : { loadProfile, saveProfile, migrateProfile };
 let activeProfileStoreContract = profileStoreContract;
 const profileStore = {
   loadProfile(...args){
@@ -4044,13 +4050,15 @@ const profileStore = {
 
 // Raw and compiled stores
 const rawFieldMap = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
-const rawStoreContract = window.SkinV2RawStoreAdapter?.createSkinV2RawStore
-  ? window.SkinV2RawStoreAdapter.createSkinV2RawStore({ rawMap: rawFieldMap })
-  : {
-      upsert(fileId, rec){ rawFieldMap.upsert(fileId, rec); },
-      getByFile(fileId){ return rawFieldMap.get(fileId) || []; },
-      clearByFile(fileId){ rawFieldMap.clear(fileId); }
-    };
+const rawStoreContract = (!isSkinV2 && window.LegacyRawStoreAdapter?.createLegacyRawStore)
+  ? window.LegacyRawStoreAdapter.createLegacyRawStore({ rawMap: rawFieldMap })
+  : window.SkinV2RawStoreAdapter?.createSkinV2RawStore
+    ? window.SkinV2RawStoreAdapter.createSkinV2RawStore({ rawMap: rawFieldMap })
+    : {
+        upsert(fileId, rec){ rawFieldMap.upsert(fileId, rec); },
+        getByFile(fileId){ return rawFieldMap.get(fileId) || []; },
+        clearByFile(fileId){ rawFieldMap.clear(fileId); }
+      };
 let activeRawStoreContract = rawStoreContract;
 const rawStore = {
   upsert(fileId, rec){ (activeRawStoreContract || rawStoreContract).upsert(fileId, rec); },
@@ -12224,28 +12232,38 @@ function getTokenSourceInfoForPage(pageNum){
   };
 }
 
-const tokenProvider = window.SkinV2TokenProviderAdapter?.createSkinV2TokenProvider
-  ? window.SkinV2TokenProviderAdapter.createSkinV2TokenProvider({
+const tokenProvider = (!isSkinV2 && window.LegacyTokenProviderAdapter?.createLegacyTokenProvider)
+  ? window.LegacyTokenProviderAdapter.createLegacyTokenProvider({
       ensureDocumentLoaded: ensureTokensForPage,
       ensurePdfTokens: ensureTokensForPage,
       ensureTesseractTokens: ensureTesseractTokensForPage,
       getPageViewport,
       getTokenSourceInfo: getTokenSourceInfoForPage
     })
-  : {
-      ensureDocumentLoaded: ensureTokensForPage,
-      getPageTokens(pageNum, options = {}){
-        if(options?.source === 'tesseract') return ensureTesseractTokensForPage(pageNum, options?.canvasEl || null);
-        return ensureTokensForPage(pageNum, options?.pageObj || null, options?.viewport || null, options?.canvasEl || null);
-      },
-      getPageViewport,
-      getTokenSourceInfo: getTokenSourceInfoForPage
-    };
+  : window.SkinV2TokenProviderAdapter?.createSkinV2TokenProvider
+    ? window.SkinV2TokenProviderAdapter.createSkinV2TokenProvider({
+        ensureDocumentLoaded: ensureTokensForPage,
+        ensurePdfTokens: ensureTokensForPage,
+        ensureTesseractTokens: ensureTesseractTokensForPage,
+        getPageViewport,
+        getTokenSourceInfo: getTokenSourceInfoForPage
+      })
+    : {
+        ensureDocumentLoaded: ensureTokensForPage,
+        getPageTokens(pageNum, options = {}){
+          if(options?.source === 'tesseract') return ensureTesseractTokensForPage(pageNum, options?.canvasEl || null);
+          return ensureTokensForPage(pageNum, options?.pageObj || null, options?.viewport || null, options?.canvasEl || null);
+        },
+        getPageViewport,
+        getTokenSourceInfo: getTokenSourceInfoForPage
+      };
 
 
-const extractionEngine = window.EngineExtraction?.createExtractionEngine
-  ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
-  : null;
+const extractionEngine = (!isSkinV2 && window.LegacyExtractionRuntimeAdapter?.createLegacyExtractionRuntime)
+  ? window.LegacyExtractionRuntimeAdapter.createLegacyExtractionRuntime({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+  : window.EngineExtraction?.createExtractionEngine
+    ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+    : null;
 
 function normalizeFindTextInput(text){
   if(FindTextEngine?.normalizeFindTextInput) return FindTextEngine.normalizeFindTextInput(text);
