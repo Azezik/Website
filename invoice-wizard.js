@@ -17,6 +17,7 @@ const ColumnScoringEngine = window.EngineColumnScoring || null;
 const StaticScoringEngine = window.EngineStaticScoring || null;
 const StaticRingLandmarkEngine = window.EngineStaticRingLandmark || {};
 const GeometryAnchors = window.EngineGeometryAnchors || {};
+const CompileEngine = window.EngineCompile || null;
 
 const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -14794,45 +14795,21 @@ function resolveMasterDbConfigForRecord(profile, template, recordFields){
 
 function compileDocument(fileId, lineItems){
   const raw = rawStore.get(fileId);
-  const byKey = {};
   const wizardId = currentWizardId();
   const activeTemplate = wizardId === DEFAULT_WIZARD_ID ? null : normalizeTemplate(getWizardTemplateById(wizardId));
   const areaFieldKeys = getAreaFieldKeys();
   if(!state.snapshotMode){ state.lastSnapshotManifestId = ''; }
   state.selectedRunId = fileId || state.selectedRunId;
-  raw.forEach(r=>{
-    if(areaFieldKeys.has(r.fieldKey)) return;
-    byKey[r.fieldKey] = {
-      value: r.value,
-      raw: r.raw,
-      correctionsApplied: r.correctionsApplied || [],
-      confidence: r.confidence || 0,
-      tokens: r.tokens || [],
-      engineUsed: r.engineUsed || null,
-      tokenSource: r.tokenSource || null,
-      extractionMeta: r.extractionMeta ? clonePlain(r.extractionMeta) : null
-    };
-  });
-  getExtractableFields().forEach(f=>{
-    if(!byKey[f.fieldKey]) byKey[f.fieldKey] = { value:'', raw:'', confidence:0, tokens:[] };
-  });
   const cleanScalar = val => {
     if(val === undefined || val === null) return '';
     if(typeof val === 'string') return val.replace(/\s+/g,' ').trim();
     return String(val);
   };
-  const sub = parseFloat(byKey['subtotal_amount']?.value);
-  const tax = parseFloat(byKey['tax_amount']?.value);
-  const tot = parseFloat(byKey['invoice_total']?.value);
-  if(isFinite(sub) && isFinite(tax) && isFinite(tot)){
-    const diff = Math.abs(sub + tax - tot);
-    const adj = diff < 1 ? 0.05 : -0.2;
-    ['subtotal_amount','tax_amount','invoice_total'].forEach(k=>{
-      if(byKey[k]) byKey[k].confidence = clamp((byKey[k].confidence||0)+adj,0,1);
-    });
-  }
-  const invoiceNumber = cleanScalar(byKey['invoice_number']?.value);
   const db = LS.getDb(state.username, state.docType, wizardId);
+  const nextByKey = CompileEngine?.toFieldMap
+    ? CompileEngine.toFieldMap(raw, areaFieldKeys, getExtractableFields())
+    : {};
+  const invoiceNumber = cleanScalar(nextByKey['invoice_number']?.value);
   const findExistingIndex = () => db.findIndex(r => r.fileId === fileId || (invoiceNumber && cleanScalar(r.invoice?.number) === invoiceNumber));
   const hasExplicitLineItems = arguments.length >= 2;
   let items = Array.isArray(lineItems) ? lineItems : [];
@@ -14847,59 +14824,34 @@ function compileDocument(fileId, lineItems){
     }
   }
   if(!Array.isArray(items)) items = [];
-  const enriched = items.map((it,i)=>{
-    let amount = it.amount;
-    if(!amount && it.quantity && it.unit_price){
-      const q=parseFloat(it.quantity); const u=parseFloat(it.unit_price);
-      if(!isNaN(q) && !isNaN(u)) amount=(q*u).toFixed(2);
-    }
-    return { line_no:i+1, ...it, amount };
-  });
-  let lineSum=0; let allHave=true;
-  enriched.forEach(it=>{ if(it.amount){ lineSum+=parseFloat(it.amount); } else allHave=false; });
-  const compiled = {
+  const compileRecord = CompileEngine?.compileRecord;
+  const fieldsForConfig = CompileEngine?.toFieldMap
+    ? CompileEngine.toFieldMap(raw, areaFieldKeys, getExtractableFields())
+    : nextByKey;
+  const compiled = compileRecord ? compileRecord({
     fileId,
-    fileHash: fileId,
     fileName: fileMeta[fileId]?.fileName || 'unnamed',
-    processedAtISO: new Date().toISOString(),
-    fields: byKey,
-    invoice: {
-      number: invoiceNumber,
-      salesDateISO: cleanScalar(byKey['invoice_date']?.value),
-      salesperson: cleanScalar(byKey['salesperson_rep']?.value),
-      store: cleanScalar(byKey['store_name']?.value)
-    },
-    totals: {
-      subtotal: byKey['subtotal_amount']?.value || '',
-      tax: byKey['tax_amount']?.value || '',
-      total: byKey['invoice_total']?.value || '',
-      discount: byKey['discounts_amount']?.value || ''
-    },
-    masterDbConfig: resolveMasterDbConfigForRecord(state.profile, activeTemplate, byKey),
-    lineItems: enriched,
+    rawEntries: raw,
+    areaFieldKeys,
+    extractableFields: getExtractableFields(),
+    lineItems: items,
+    masterDbConfig: resolveMasterDbConfigForRecord(state.profile, activeTemplate, fieldsForConfig),
     areaOccurrences: buildAreaOccurrencesPayload(),
     areaRows: (state.currentAreaRows || []).map(r => clonePlain(r)),
     templateKey: `${state.username}:${state.docType}:${wizardId}`,
-    warnings: []
-  };
-  const chartable = isChartable(compiled);
-  compiled.isChartable = !!chartable.ok;
-  if(!chartable.ok){
-    compiled.chartableReason = chartable.reason || 'not_chartable';
-  }
-  if(allHave && isFinite(sub) && Math.abs(lineSum - sub) > 0.02){
-    compiled.warnings.push('line_totals_vs_subtotal');
-    if(byKey['subtotal_amount']){
-      byKey['subtotal_amount'].confidence = clamp((byKey['subtotal_amount'].confidence||0)*0.8,0,1);
-    }
+    snapshotManifestId: state.lastSnapshotManifestId,
+    clamp,
+    cleanScalar,
+    isChartable,
+    processedAtISO: new Date().toISOString()
+  }) : null;
+  if(!compiled){
+    throw new Error('EngineCompile.compileRecord is unavailable');
   }
   existingIdx = findExistingIndex();
   const invNum = compiled.invoice.number;
   const idx = existingIdx >= 0 ? existingIdx : db.findIndex(r => r.fileId === compiled.fileId || (invNum && cleanScalar(r.invoice?.number) === invNum));
   if(idx>=0) db[idx] = compiled; else db.push(compiled);
-  if(state.lastSnapshotManifestId){
-    compiled.snapshotManifestId = state.lastSnapshotManifestId;
-  }
   if(state.mode === ModeEnum.RUN){
     const staticFieldShape = Object.fromEntries(Object.entries(compiled.fields || {}).map(([k,v])=>[k,{
       value: v?.value ?? '',
