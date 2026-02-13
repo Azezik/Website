@@ -12,6 +12,8 @@ const GeometryBox = window.EngineGeometryBox || {};
 const PageSpace = window.EnginePageSpace || {};
 const CleaningNormalize = window.EngineCleaningNormalize || {};
 const FieldNormalizers = window.EngineFieldNormalizers || {};
+const ColumnExtractorEngine = window.EngineColumnExtractor || null;
+const ColumnScoringEngine = window.EngineColumnScoring || null;
 const StaticScoringEngine = window.EngineStaticScoring || null;
 const StaticRingLandmarkEngine = window.EngineStaticRingLandmark || {};
 const GeometryAnchors = window.EngineGeometryAnchors || {};
@@ -83,6 +85,153 @@ const scoreRingEdges = StaticRingLandmarkEngine.edgeScore || null;
 const runRingLandmarkMatch = StaticRingLandmarkEngine.matchRingLandmark || null;
 const applyRingLandmarkOffset = StaticRingLandmarkEngine.applyLandmarkOffset || null;
 const projectAnchorBox = GeometryAnchors.boxFromAnchor || null;
+const normalizeColumnGuardList = ColumnExtractorEngine?.normalizeGuardList || ((list = []) => {
+  const cleanedTokenText = str => String(str || '').replace(/[^a-z0-9]/gi,'').toLowerCase();
+  return Array.from(new Set(list.map(w => cleanedTokenText(w)).filter(Boolean)));
+});
+const buildColumnRowBands = ColumnExtractorEngine?.buildRowBands || ((anchorTokens, pageHeight) => {
+  if(!anchorTokens.length) return [];
+  const ordered = anchorTokens.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
+  const groups=[];
+  let current=null;
+  for(const tok of ordered){
+    if(!current){
+      current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
+      continue;
+    }
+    const gap=Math.abs(tok.cy - current.cy);
+    const threshold=Math.max(current.height, tok.h)*0.65;
+    if(gap <= threshold){
+      current.tokens.push(tok);
+      current.sumCy += tok.cy;
+      current.count += 1;
+      current.cy = current.sumCy/current.count;
+      current.height = Math.max(current.height, tok.h);
+      current.text = current.tokens.map(t=>t.text).join(' ');
+    } else {
+      groups.push(current);
+      current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
+    }
+  }
+  if(current) groups.push(current);
+  return groups.map((row,idx)=>{
+    const next=groups[idx+1];
+    const rowTop=Math.min(...row.tokens.map(t=>t.y));
+    const rowBottom=Math.max(...row.tokens.map(t=>t.y + t.h));
+    const rowHeight=Math.max(rowBottom - rowTop, row.height, 6);
+    let y0=rowTop;
+    let y1=rowBottom;
+    const nextTop = next ? Math.min(...next.tokens.map(t=>t.y)) : Infinity;
+    if(Number.isFinite(nextTop)){
+      const boundary=(rowBottom + nextTop)/2;
+      if(Number.isFinite(boundary)){
+        y1 = Math.max(rowBottom, Math.min(boundary, nextTop));
+      }
+    }
+    const maxY1 = Number.isFinite(nextTop) ? Math.max(rowBottom, Math.min(nextTop, pageHeight)) : pageHeight;
+    const minBand=Math.max(rowHeight,8);
+    if(y1 - y0 < minBand){
+      y1 = Math.min(maxY1, y0 + minBand);
+    }
+    y0=Math.max(0, Math.min(y0, pageHeight));
+    y1=Math.max(y0 + 1, Math.min(y1, pageHeight));
+    if(y1 <= y0){
+      y0=Math.max(0,rowTop);
+      y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
+    }
+    if(!Number.isFinite(nextTop)){
+      y1 = pageHeight;
+    }
+    return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
+  });
+});
+const getColumnCellTokens = ColumnExtractorEngine?.tokensForCell || ((desc, band, pageTokens) => {
+  const headerLimit = desc.headerBottom + desc.headerPad;
+  const y0 = band.y0;
+  const y1 = band.y1;
+  const expectedLeft = Number.isFinite(desc.expectedLeft) ? desc.expectedLeft : null;
+  const expectedRight = Number.isFinite(desc.expectedRight) ? desc.expectedRight : null;
+  const expectedCenter = Number.isFinite(desc.expectedCenter)
+    ? desc.expectedCenter
+    : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? (expectedLeft + expectedRight) / 2 : null);
+  const expectedWidth = Number.isFinite(desc.expectedWidth) ? desc.expectedWidth : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? Math.max(0, expectedRight - expectedLeft) : null);
+  const tolerance = Number.isFinite(desc.feraTolerance) ? desc.feraTolerance : null;
+  const align = desc.align || 'left';
+  const scored=[];
+  for(const tok of pageTokens){
+    if(tok.page !== desc.page) continue;
+    const cx = tok.x + tok.w/2;
+    if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
+    const cy = tok.y + tok.h/2;
+    if(cy <= headerLimit) continue;
+    const text=(tok.text||'').trim();
+    if(!text) continue;
+    const top=tok.y;
+    const bottom=tok.y + tok.h;
+    const overlap=Math.min(bottom, y1) - Math.max(top, y0);
+    const minOverlap=Math.min(tok.h, y1 - y0) * 0.35;
+    if(overlap < minOverlap) continue;
+    const leftEdge = tok.x;
+    const rightEdge = tok.x + tok.w;
+    const center = leftEdge + tok.w/2;
+    let diff = 0;
+    if(align === 'right' && Number.isFinite(expectedRight)){
+      diff = Math.abs(rightEdge - expectedRight);
+    } else if(align === 'center' && Number.isFinite(expectedCenter)){
+      diff = Math.abs(center - expectedCenter);
+    } else if(Number.isFinite(expectedLeft)){
+      diff = Math.abs(leftEdge - expectedLeft);
+    } else if(Number.isFinite(expectedRight)){
+      diff = Math.abs(rightEdge - expectedRight);
+    } else if(Number.isFinite(expectedCenter)){
+      diff = Math.abs(center - expectedCenter);
+    } else {
+      diff = 0;
+    }
+    const tokenWithCy = { ...tok, cy };
+    scored.push({ token: tokenWithCy, diff });
+  }
+  scored.sort((a,b)=> (a.token.x - b.token.x) || (a.token.y - b.token.y));
+  let feraOk = true;
+  let feraReason = null;
+  let bestDiff = null;
+  let tokensOut = scored.map(s => s.token);
+  if(tolerance && scored.length){
+    const within = scored.filter(s => s.diff <= tolerance);
+    if(within.length){
+      within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
+      bestDiff = within[0]?.diff ?? null;
+      tokensOut = within.map(s => s.token);
+    } else {
+      const sortedByDiff = scored.slice().sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
+      bestDiff = sortedByDiff[0]?.diff ?? null;
+      feraOk = false;
+      feraReason = 'fera_out_of_tolerance';
+      const keep = Math.max(1, Math.ceil(Math.min(3, sortedByDiff.length) / 2));
+      tokensOut = sortedByDiff.slice(0, keep).map(s => s.token);
+    }
+  }
+  if(tokensOut.length){
+    tokensOut.sort((a,b)=> a.x - b.x || a.y - b.y || a.w - b.w);
+  }
+  return {
+    tokens: tokensOut,
+    feraOk,
+    feraReason,
+    feraTolerance: tolerance,
+    feraBestDiff: bestDiff,
+    feraExpected: {
+      left: expectedLeft,
+      right: expectedRight,
+      center: expectedCenter,
+      width: expectedWidth,
+      align
+    }
+  };
+});
+const pickColumnRowTarget = ColumnScoringEngine?.pickRowTarget || ((counts, fallback) => fallback);
+const pruneColumnRowsBySupport = ColumnScoringEngine?.pruneRowsBySupport || ((rows) => rows);
+const applyColumnQtyUnitAmountConsistency = ColumnScoringEngine?.applyQuantityUnitAmountConsistency || ((row) => row);
 
 const STATIC_DEBUG_STORAGE_KEY = 'wiz.staticDebug';
 const LEGACY_PDF_SCALE = 1.5;
@@ -10106,222 +10255,6 @@ async function extractLineItems(profile){
   const guardWordsBase = new Set(['subtotal','sub-total','total','grandtotal','balance','amount','amountdue','totaldue','tax','taxamount','hst','gst','qst','notes','deposit']);
   const cleanedTokenText = str => String(str||'').replace(/[^a-z0-9]/gi,'').toLowerCase();
 
-  function normalizeGuardList(list){
-    return Array.from(new Set((list||[]).map(w=>cleanedTokenText(w)).filter(Boolean)));
-  }
-
-  function buildRowBands(anchorTokens, pageHeight){
-    if(!anchorTokens.length) return [];
-    const ordered = anchorTokens.slice().sort((a,b)=> a.cy - b.cy || a.y - b.y || a.x - b.x);
-    const groups=[];
-    let current=null;
-    for(const tok of ordered){
-      if(!current){
-        current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
-        continue;
-      }
-      const gap=Math.abs(tok.cy - current.cy);
-      const threshold=Math.max(current.height, tok.h)*0.65;
-      if(gap <= threshold){
-        current.tokens.push(tok);
-        current.sumCy += tok.cy;
-        current.count += 1;
-        current.cy = current.sumCy/current.count;
-        current.height = Math.max(current.height, tok.h);
-        current.text = current.tokens.map(t=>t.text).join(' ');
-      } else {
-        groups.push(current);
-        current={ tokens:[tok], sumCy: tok.cy, count:1, cy: tok.cy, height: tok.h, text:(tok.text||'').trim() };
-      }
-    }
-    if(current) groups.push(current);
-    return groups.map((row,idx)=>{
-      const next=groups[idx+1];
-      const rowTop=Math.min(...row.tokens.map(t=>t.y));
-      const rowBottom=Math.max(...row.tokens.map(t=>t.y + t.h));
-      const rowHeight=Math.max(rowBottom - rowTop, row.height, 6);
-      let y0=rowTop;
-      let y1=rowBottom;
-      const nextTop = next ? Math.min(...next.tokens.map(t=>t.y)) : Infinity;
-      if(Number.isFinite(nextTop)){
-        const boundary=(rowBottom + nextTop)/2;
-        if(Number.isFinite(boundary)){
-          y1 = Math.max(rowBottom, Math.min(boundary, nextTop));
-        }
-      }
-      const maxY1 = Number.isFinite(nextTop) ? Math.max(rowBottom, Math.min(nextTop, pageHeight)) : pageHeight;
-      const minBand=Math.max(rowHeight,8);
-      if(y1 - y0 < minBand){
-        y1 = Math.min(maxY1, y0 + minBand);
-      }
-      y0=Math.max(0, Math.min(y0, pageHeight));
-      y1=Math.max(y0 + 1, Math.min(y1, pageHeight));
-      if(y1 <= y0){
-        y0=Math.max(0,rowTop);
-        y1=Math.max(y0 + 1, Math.min(pageHeight,rowBottom || (rowTop + rowHeight)));
-      }
-      if(!Number.isFinite(nextTop)){
-        y1 = pageHeight;
-      }
-      return { index:idx, y0, y1, cy:row.cy, height:rowHeight, text:row.text.trim(), tokens:row.tokens };
-    });
-  }
-
-  function tokensForCell(desc, band, pageTokens){
-    const headerLimit = desc.headerBottom + desc.headerPad;
-    const y0 = band.y0;
-    const y1 = band.y1;
-    const expectedLeft = Number.isFinite(desc.expectedLeft) ? desc.expectedLeft : null;
-    const expectedRight = Number.isFinite(desc.expectedRight) ? desc.expectedRight : null;
-    const expectedCenter = Number.isFinite(desc.expectedCenter)
-      ? desc.expectedCenter
-      : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? (expectedLeft + expectedRight) / 2 : null);
-    const expectedWidth = Number.isFinite(desc.expectedWidth) ? desc.expectedWidth : (Number.isFinite(expectedLeft) && Number.isFinite(expectedRight) ? Math.max(0, expectedRight - expectedLeft) : null);
-    const tolerance = Number.isFinite(desc.feraTolerance) ? desc.feraTolerance : null;
-    const align = desc.align || 'left';
-    const scored=[];
-    for(const tok of pageTokens){
-      if(tok.page !== desc.page) continue;
-      const cx = tok.x + tok.w/2;
-      if(cx < desc.x0 - 1 || cx > desc.x1 + 1) continue;
-      const cy = tok.y + tok.h/2;
-      if(cy <= headerLimit) continue;
-      const text=(tok.text||'').trim();
-      if(!text) continue;
-      const top=tok.y;
-      const bottom=tok.y + tok.h;
-      const overlap=Math.min(bottom, y1) - Math.max(top, y0);
-      const minOverlap=Math.min(tok.h, y1 - y0) * 0.35;
-      if(overlap < minOverlap) continue;
-      const leftEdge = tok.x;
-      const rightEdge = tok.x + tok.w;
-      const center = leftEdge + tok.w/2;
-      let diff = 0;
-      if(align === 'right' && Number.isFinite(expectedRight)){
-        diff = Math.abs(rightEdge - expectedRight);
-      } else if(align === 'center' && Number.isFinite(expectedCenter)){
-        diff = Math.abs(center - expectedCenter);
-      } else if(Number.isFinite(expectedLeft)){
-        diff = Math.abs(leftEdge - expectedLeft);
-      } else if(Number.isFinite(expectedRight)){
-        diff = Math.abs(rightEdge - expectedRight);
-      } else if(Number.isFinite(expectedCenter)){
-        diff = Math.abs(center - expectedCenter);
-      } else {
-        diff = 0;
-      }
-      const tokenWithCy = { ...tok, cy };
-      scored.push({ token: tokenWithCy, diff });
-    }
-    scored.sort((a,b)=> (a.token.x - b.token.x) || (a.token.y - b.token.y));
-    let feraOk = true;
-    let feraReason = null;
-    let bestDiff = null;
-    let tokensOut = scored.map(s => s.token);
-    if(tolerance && scored.length){
-      const within = scored.filter(s => s.diff <= tolerance);
-      if(within.length){
-        within.sort((a,b)=> a.diff - b.diff || a.token.y - b.token.y || a.token.x - b.token.x);
-        bestDiff = within[0].diff;
-        const closenessAllowance = Math.max(desc.typicalHeight || 0, tolerance * 0.3, 6);
-        const keepThreshold = Math.min(tolerance, bestDiff + closenessAllowance);
-        const keepSet = new Set(within.filter(s => s.diff <= keepThreshold).map(s => s.token));
-        tokensOut = scored
-          .filter(s => keepSet.has(s.token))
-          .sort((a,b)=> a.token.y - b.token.y || a.token.x - b.token.x)
-          .map(s => s.token);
-      } else {
-        feraOk = false;
-        feraReason = 'fera_tolerance_fail';
-        tokensOut = [];
-      }
-    }
-    return {
-      tokens: tokensOut,
-      feraOk,
-      feraReason,
-      feraTolerance: tolerance,
-      feraBestDiff: bestDiff,
-      feraExpected: {
-        left: expectedLeft,
-        right: expectedRight,
-        center: expectedCenter,
-        width: expectedWidth,
-        align
-      }
-    };
-  }
-
-  function computeTrimmedAverage(counts){
-    if(!Array.isArray(counts) || !counts.length) return null;
-    if(counts.length < 3){
-      const sum = counts.reduce((acc, val) => acc + val, 0);
-      return counts.length ? sum / counts.length : null;
-    }
-    const sorted = counts.slice().sort((a,b)=>a-b);
-    const trimmed = sorted.slice(1, sorted.length - 1);
-    if(!trimmed.length){
-      const sum = counts.reduce((acc, val) => acc + val, 0);
-      return counts.length ? sum / counts.length : null;
-    }
-    const sum = trimmed.reduce((acc, val) => acc + val, 0);
-    return trimmed.length ? sum / trimmed.length : null;
-  }
-
-  function pickRowTarget(counts, fallback){
-    if(!Array.isArray(counts) || !counts.length) return fallback;
-    const trimmed = computeTrimmedAverage(counts);
-    if(Number.isFinite(trimmed) && trimmed > 0){
-      return Math.round(trimmed);
-    }
-    const sum = counts.reduce((acc, val) => acc + val, 0);
-    const avg = counts.length ? sum / counts.length : null;
-    if(Number.isFinite(avg) && avg > 0){
-      return Math.round(avg);
-    }
-    return fallback;
-  }
-
-  function pruneRowsBySupport(rows, target){
-    if(!Array.isArray(rows) || rows.length <= target) return rows;
-    const buckets = new Map();
-    rows.forEach((row, idx) => {
-      const support = row.__columnHits || 0;
-      if(!buckets.has(support)) buckets.set(support, []);
-      buckets.get(support).push({ row, idx });
-    });
-    const toDrop = new Set();
-    let remaining = rows.length;
-    const supportLevels = Array.from(buckets.keys()).sort((a,b)=>a-b);
-    for(const level of supportLevels){
-      const entries = buckets.get(level);
-      entries.sort((a,b)=>{
-        const aTokens = a.row.__totalTokens || 0;
-        const bTokens = b.row.__totalTokens || 0;
-        if(aTokens !== bTokens) return aTokens - bTokens;
-        const aAnchor = a.row.__anchorTokens || 0;
-        const bAnchor = b.row.__anchorTokens || 0;
-        if(aAnchor !== bAnchor) return aAnchor - bAnchor;
-        return b.idx - a.idx;
-      });
-      for(const entry of entries){
-        if(remaining <= target) break;
-        toDrop.add(entry.idx);
-        remaining--;
-      }
-      if(remaining <= target) break;
-    }
-    if(remaining > target){
-      for(let i=rows.length-1; i>=0 && remaining>target; i--){
-        if(!toDrop.has(i)){
-          toDrop.add(i);
-          remaining--;
-        }
-      }
-    }
-    return rows.filter((row, idx) => !toDrop.has(idx));
-  }
-
   const results=[];
   const layout={ pages:{} };
   const configuredPages = Array.from(new Set(colFields.map(f=>f.page||1))).sort((a,b)=>a-b);
@@ -10387,7 +10320,7 @@ async function extractLineItems(profile){
         cy: s.cyNorm * pageHeight,
         h: Math.max(s.hNorm * pageHeight, 1)
       })) : [];
-      const guardList = normalizeGuardList(field.column.guardWords || field.column.bottomGuards || []);
+      const guardList = normalizeColumnGuardList(field.column.guardWords || field.column.bottomGuards || []);
       guardList.forEach(g => guardWordsBase.add(g));
       const typicalHeight = anchorSample?.h || rowSamples[0]?.h || lineHeightPx || 12;
       const headerPad = Math.max(4, typicalHeight * (field.column.header ? 0.6 : 0.35));
@@ -10793,7 +10726,7 @@ async function extractLineItems(profile){
       continue;
     }
 
-    const rowBands = buildRowBands(anchorBandTokens, pageHeight);
+    const rowBands = buildColumnRowBands(anchorBandTokens, pageHeight);
     if(!rowBands.length){
       layout.pages[page] = { page, columns: buildColumnLayout(), rows: [], top: 0, bottom: 0 };
       continue;
@@ -10817,7 +10750,7 @@ async function extractLineItems(profile){
       };
 
       for(const desc of descriptors){
-        const cellResult = tokensForCell(desc, band, pageTokens);
+        const cellResult = getColumnCellTokens(desc, band, pageTokens);
         const cellTokens = cellResult.tokens;
         const raw = cellTokens.map(t=>t.text).join(' ').replace(/\s+/g,' ').trim();
         const spanKey = { docId, pageIndex: page-1, fieldKey: desc.outKey };
@@ -10902,19 +10835,7 @@ async function extractLineItems(profile){
       row.amount = row.amount || '';
       if(row.line_no === '' && !row.__missing.line_no){ row.__missing.line_no = true; }
 
-      if(row.quantity) row.quantity = row.quantity.replace(/[^0-9.-]/g,'');
-      if(row.unit_price){
-        const num=parseFloat(row.unit_price.replace(/[^0-9.-]/g,''));
-        row.unit_price = Number.isFinite(num) ? num.toFixed(2) : '';
-      }
-      if(row.amount){
-        const num=parseFloat(row.amount.replace(/[^0-9.-]/g,''));
-        row.amount = Number.isFinite(num) ? num.toFixed(2) : '';
-      }
-      if(!row.amount && row.quantity && row.unit_price){
-        const q=parseFloat(row.quantity), u=parseFloat(row.unit_price);
-        if(Number.isFinite(q) && Number.isFinite(u)) row.amount=(q*u).toFixed(2);
-      }
+      applyColumnQtyUnitAmountConsistency(row);
 
       pageRows.push(row);
     }
@@ -10929,13 +10850,13 @@ async function extractLineItems(profile){
     const countsForAverage = nonAnchorCounts.length ? nonAnchorCounts : allCounts;
     let targetRowCount = pageRows.length;
     if(countsForAverage.length){
-      const desired = pickRowTarget(countsForAverage, pageRows.length);
+      const desired = pickColumnRowTarget(countsForAverage, pageRows.length);
       if(Number.isFinite(desired) && desired > 0){
         targetRowCount = Math.min(pageRows.length, Math.max(1, desired));
       }
     }
 
-    const filteredRows = targetRowCount < pageRows.length ? pruneRowsBySupport(pageRows, targetRowCount) : pageRows;
+    const filteredRows = targetRowCount < pageRows.length ? pruneColumnRowsBySupport(pageRows, targetRowCount) : pageRows;
     const pageRowEntries=[];
     for(const row of filteredRows){
       row.__rowIndex = globalRowIndex;
