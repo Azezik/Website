@@ -12,6 +12,7 @@ const GeometryBox = window.EngineGeometryBox || {};
 const PageSpace = window.EnginePageSpace || {};
 const CleaningNormalize = window.EngineCleaningNormalize || {};
 const FieldNormalizers = window.EngineFieldNormalizers || {};
+const StaticScoringEngine = window.EngineStaticScoring || null;
 
 const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -9344,7 +9345,17 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         ? 1
         : Math.max(0.65, 1 - Math.min(1, baseDistNorm / maxRadius));
       const hintPenalty = farFromHint ? 0.6 : 1;
-      const distanceScore = Math.max(0, 1 - (distNorm / maxRadius)) * baseBias * hintPenalty;
+      const distanceScore = StaticScoringEngine?.scoreDistance
+        ? StaticScoringEngine.scoreDistance({
+            candidateCenter: { x: cx, y: cy },
+            triCenter: { x: triCx, y: triCy },
+            baseCenter: (baseCx === null || baseCy === null) ? null : { x: baseCx, y: baseCy },
+            pageW,
+            pageH,
+            maxRadius,
+            farFromHint
+          })
+        : Math.max(0, 1 - (distNorm / maxRadius)) * baseBias * hintPenalty;
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
       let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
@@ -9362,8 +9373,18 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       const lineInfo = computeLineDiff(observedLineCount);
       const lineScore = staticRun ? lineScoreForDiff(lineInfo.lineDiff) : 1;
       const baseConf = cleaned.conf || (cleaned.value || cleaned.raw ? 1 : 0.15);
-      const totalScore = clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
-      const confidence = clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorRes.ok ? 1 : anchorRes.softOk ? 0.85 : 0.75) * (0.55 + distanceScore * 0.45), 0, 1);
+      const totalScore = StaticScoringEngine?.scoreTotal
+        ? StaticScoringEngine.scoreTotal({ baseConf, keywordScore, distanceScore, anchorScore, fpScore, lineScore })
+        : clamp(baseConf * keywordScore * (0.55 + distanceScore * 0.45) * anchorScore * fpScore * lineScore, 0, 2);
+      const confidence = StaticScoringEngine?.scoreConfidence
+        ? StaticScoringEngine.scoreConfidence({
+            cleanedConf: cleaned.conf || 0.6,
+            fingerprintOk,
+            anchorOk: !!anchorRes.ok,
+            anchorSoftOk: !!anchorRes.softOk,
+            distanceScore
+          })
+        : clamp((cleaned.conf || 0.6) * (fingerprintOk ? 1 : 0.75) * (anchorRes.ok ? 1 : anchorRes.softOk ? 0.85 : 0.75) * (0.55 + distanceScore * 0.45), 0, 1);
       if(staticRun && staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey) && anchorRef){
         const anchorDeltas = {
           top: Math.round(box.y - anchorRef.y),
@@ -9377,7 +9398,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           { anchorBox: anchorRef, candidateBox: box, deltas: anchorDeltas, stage: 'stage-2' }
         );
       }
-      return applyFieldBias({
+      const scoredCandidate = {
         source,
         box,
         cx,
@@ -9398,7 +9419,10 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         totalScore,
         confidence,
         tokens: candTokens
-      });
+      };
+      return StaticScoringEngine?.applyFieldBias
+        ? StaticScoringEngine.applyFieldBias(scoredCandidate, { isCustomerNameField, isCustomerAddressField })
+        : applyFieldBias(scoredCandidate);
     };
 
     for(const line of lines){
@@ -9421,6 +9445,14 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     if(currentCandidate){ candidates.push(currentCandidate); }
 
     if(!candidates.length) return null;
+    if(StaticScoringEngine?.rankCandidates){
+      return StaticScoringEngine.rankCandidates(candidates, {
+        staticRun,
+        maxStaticCandidates: MAX_STATIC_CANDIDATES,
+        currentCandidate,
+        minStaticAcceptScore: MIN_STATIC_ACCEPT_SCORE
+      });
+    }
     let sorted = candidates.slice().sort((a,b)=> b.totalScore - a.totalScore);
     if(staticRun && sorted.length > MAX_STATIC_CANDIDATES){
       sorted = sorted.slice(0, MAX_STATIC_CANDIDATES);
