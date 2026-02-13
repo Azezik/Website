@@ -12161,6 +12161,11 @@ const tokenProvider = window.SkinV2TokenProviderAdapter?.createSkinV2TokenProvid
       getTokenSourceInfo: getTokenSourceInfoForPage
     };
 
+
+const extractionEngine = window.EngineExtraction?.createExtractionEngine
+  ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+  : null;
+
 function normalizeFindTextInput(text){
   if(FindTextEngine?.normalizeFindTextInput) return FindTextEngine.normalizeFindTextInput(text);
   return String(text || '').trim().replace(/\s+/g, ' ');
@@ -17880,625 +17885,189 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         fields: profileFieldDiagnostics
       });
     }
-    const prepared = await prepareRunDocument(file);
-    if(!prepared){ return; }
-    const tokenStats = summarizeTokenCache();
-    if(!state.numPages && tokenStats.pageCount){
-      state.numPages = tokenStats.pageCount;
-    }
-    if(isRunMode()){
-      mirrorDebugLog(`[run-mode] tokens cached for ${tokenStats.pageCount || state.numPages || 0} page(s), total tokens=${tokenStats.totalTokens}`);
-      if(tokenStats.perPage?.length){
-        const preview = tokenStats.perPage.filter(p => p.page > 0).map(p => `p${p.page}:${p.tokens}`).join(', ');
-        if(preview) mirrorDebugLog(`[run-mode] token breakdown: ${preview}`);
-      }
-    }
-    traceEvent(runSpanKey,'tokens:rank',{
-      stageLabel:'Tokens ready',
-      counts:{ tokens: tokenStats.totalTokens, pages: tokenStats.pageCount || state.numPages || 0 },
-      notes:'Tokens cached for run mode'
-    });
-    if(tokenStats.totalTokens === 0){
-      const warnMsg = 'Tokenization returned zero tokens; extraction may be empty';
-      console.warn('[run-mode]', warnMsg);
-      mirrorDebugLog(`[run-mode][warn] ${warnMsg}`);
-      traceEvent(runSpanKey,'tokens:warn',{
-        stageLabel:'Tokenization warning',
-        counts:{ tokens: 0, pages: tokenStats.pageCount || state.numPages || 0 },
-        notes: warnMsg
-      });
-    }
-    if(geometryIds.length > 1){
-      const selection = selectGeometryForRun({ wizardId, docType: state.docType, geometryIds, preferredGeometryId: geometryId });
-      if(selection?.winner && selection.probePassed){
-        if(selection.winner.geometryId !== geometryId){
-          geometryId = selection.winner.geometryId;
-          profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
-          storedProfile = selection.winner.profile;
-          resolvedProfile = storedProfile || null;
-          state.profile = resolvedProfile;
-          state.activeGeometryId = geometryId;
-          syncActiveWizardId(state.profile);
-          syncActiveGeometryId(state.profile);
-          hydrateFingerprintsFromProfile(state.profile);
-          activeProfile = state.profile;
-        }
-      } else if(selection && !selection.probePassed){
-        if(!runContext.isBatch){ notifyRunIssue('No matching template matched this document. Please configure or select a template.'); }
-        logBatchRejection({ reason: 'no_matching_template', wizardIdOverride: wizardId, geometryIdOverride: geometryId });
-        return;
-      }
-    }
-    state.activeGeometryId = geometryId;
-
-    const docStageState = {
-      extractedStaticKeys: [],
-      areaRowCount: Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0,
-      chartable: null,
-      chartableReason: null,
-      rejectReason: null
-    };
-    const logDocStage = (stage, phase, extra = {}) => {
-      const keys = docStageState.extractedStaticKeys.length;
-      const areas = docStageState.areaRowCount;
-      const chartable = docStageState.chartable;
-      const rejectReason = docStageState.rejectReason;
-      console.info(`[run-mode] stage=${stage}.${phase} keys=${keys} areas=${areas} chartable=${chartable == null ? 'n/a' : chartable} reason=${rejectReason || 'null'}`, extra || {});
-    };
-
-    logDocStage('areas', 'start');
-    try {
-      await extractAreaRows(activeProfile);
-    docStageState.areaRowCount = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
-    traceEvent(runSpanKey,'columns:merge',{
-      stageLabel:'Area rows scanned',
-      counts:{ areas: docStageState.areaRowCount },
-      notes:'Area rows extraction complete'
-    });
-    logDocStage('areas', 'done');
-    } catch(err){
-      console.error('[run-mode] stage-fail areas', err);
-      traceEvent(runSpanKey,'columns:merge',{
-        stageLabel:'Area rows scanned',
-        counts:{ areas: docStageState.areaRowCount },
-        errors:[err],
-        notes:'stage-fail areas'
-      });
-      throw err;
-    }
-    if(isRunMode()){
-      const iterationList = (activeProfile.fields || []).map(f => ({
-        key: f.fieldKey,
-        type: f.type,
-        page: f.page ?? (Number.isFinite(f.pageIndex) ? f.pageIndex + 1 : null),
-        isArea: f.isArea || f.fieldType === 'areabox',
-        areaId: f.areaId || null,
-        hasBBox: Array.isArray(f.bbox) && f.bbox.length === 4,
-        hasNormBox: !!(f.normBox || f.bboxPct),
-        configMask: f.configMask || null
-      }));
-      console.info('[run-mode][diag] static extraction iteration list', { total: iterationList.length, fields: iterationList });
-      console.info('[run-mode][diag] static field order', {
-        wizardId: activeProfile.wizardId || state.activeWizardId || null,
-        docType: activeProfile.docType || state.docType || null,
-        profileKey: profileStorageKey,
-        fieldOrder: iterationList.map(f => f.key)
-      });
+    const runExtractionEngine = extractionEngine?.orchestrate
+      ? extractionEngine
+      : (window.EngineExtraction?.createExtractionEngine
+        ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+        : null);
+    if(!runExtractionEngine?.orchestrate){
+      throw new Error('EngineExtraction.orchestrate is unavailable');
     }
 
-    const includeLineItems = activeProfile?.masterDbConfig?.includeLineItems !== false;
-    logDocStage('static-extract', 'start');
-    try {
-    for(const spec of (activeProfile.fields || [])){
-      const isAreaField = spec.isArea || spec.fieldType === 'areabox';
-      const isSubordinateField = isExplicitSubordinate(spec);
-      // Only skip subordinate fields when we are actually treating them as dynamic (line-item) children.
-      if(isAreaField){ continue; }
-      if(isSubordinateField && includeLineItems){ continue; }
-      const placement = spec.type === 'static'
-        ? resolveStaticPlacement(spec, state.pageViewports, state.numPages)
-        : null;
-      const targetPage = placement?.pageNumber
-        ? clamp(placement.pageNumber, 1, state.numPages || 1)
-        : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
-      state.pageNum = targetPage;
-      state.viewport = state.pageViewports[targetPage-1] || state.viewport;
-      let tokens = state.tokensByPage[targetPage] || [];
-      let tokenResolution = {
-        page: targetPage,
-        engineUsed: 'pdfjs',
-        tokenSource: 'pdfjs',
-        resolverReason: 'run_cached_tokens',
-        fallbackFrom: null,
-        tokenCount: tokens.length,
-        mode: 'run'
-      };
-      if(!tokens.length){
-        tokenResolution = await resolveExtractionTokensForField({
-          pageNum: targetPage,
-          preferredEngine: 'auto',
-          mode: 'run'
-        });
-        tokens = tokenResolution.tokens || [];
-      }
-      const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
-      const configMask = placement?.configMask || normalizeConfigMask(spec);
-      const bboxArr = placement?.bbox || spec.bbox;
-      const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
-      if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){
-        keywordRelations.page = targetPage;
-      }
-      let areaScope = null;
-      if(isSubordinateField && spec.areaId){
-        const scopedArea = pickAreaScope(spec.areaId, targetPage, { lowConfidenceFloor: 0.2 });
-        if(scopedArea && scopedArea.box){
-          areaScope = { box: scopedArea.box, confidence: scopedArea.occ?.confidence ?? null, source: scopedArea.occ?.source || null };
-          tokens = tokensWithinArea(tokens, scopedArea.box);
+    const engineResult = await runExtractionEngine.orchestrate({
+      file,
+      profile: activeProfile,
+      wizardId,
+      geometryId,
+      runContext,
+      ensureDocumentLoaded: async () => prepareRunDocument(file),
+      prepareTokens: async () => {
+        const tokenStats = summarizeTokenCache();
+        if(!state.numPages && tokenStats.pageCount){
+          state.numPages = tokenStats.pageCount;
         }
-      }
-      const fieldSpec = {
-        fieldKey: spec.fieldKey,
-        regex: spec.regex,
-        landmark: spec.landmark,
-        bbox: bboxArr,
-        page: targetPage,
-        type: spec.type,
-        anchorMetrics: spec.anchorMetrics || null,
-        keywordRelations,
-        configMask,
-        tokenScope: areaScope ? 'area' : undefined,
-        useSuppliedTokensOnly: !!areaScope,
-        tokensScoped: !!areaScope
-      };
-      if(areaScope){
-        fieldSpec.areaBoxPx = areaScope.box;
-        fieldSpec.areaScope = areaScope;
-      }
-      const fieldSpanKey = {
-        docId: state.currentFileId || state.currentFileName || 'doc',
-        pageIndex: targetPage-1,
-        fieldKey: spec.fieldKey || '',
-        parentFieldKey: '__run__'
-      };
-      if(isRunMode() && spec.type === 'static'){
-        const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1;
-        const viewportMeta = {
-          width: targetViewport?.width ?? targetViewport?.w ?? null,
-          height: targetViewport?.height ?? targetViewport?.h ?? null,
-          scale: targetViewport?.scale ?? null,
-          dpr,
-          rotation: state.pageTransform?.rotation ?? 0
-        };
-        console.info('[run-mode][diag] static search input', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          placement: {
-            bboxNorm: placement?.bbox || null,
-            bboxArray: bboxArr || null,
-            boxPx: placement?.boxPx || null,
-            configMask,
-            configBox: spec.configBox || null
-          },
-          viewport: viewportMeta,
-          keywordRelations: !!keywordRelations,
-          anchorMetrics: !!spec.anchorMetrics
-        });
-      }
-      if(spec.type === 'static'){
-        const hitTokens = placement?.boxPx ? tokensInBox(tokens, placement.boxPx, { minOverlap: 0 }) : [];
-        logStaticDebug(
-          `resolve ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(placement?.boxPx)}`,
-          { tokens: hitTokens.length, preview: summarizeTokens(hitTokens) }
-        );
-        traceEvent(
-          fieldSpanKey,
-          'bbox:read',
-          {
-            stageLabel:'BBox read (run)',
-            bbox:{ pixel: placement?.boxPx || null, normalized: placement?.bbox || null },
-            counts:{ tokens: tokens.length },
-            input:{ boxPx: placement?.boxPx || null, normBox: placement?.bbox || null, configMask },
-            notes:`targetPage=${targetPage}`
+        if(isRunMode()){
+          mirrorDebugLog(`[run-mode] tokens cached for ${tokenStats.pageCount || state.numPages || 0} page(s), total tokens=${tokenStats.totalTokens}`);
+          if(tokenStats.perPage?.length){
+            const preview = tokenStats.perPage.filter(p => p.page > 0).map(p => `p${p.page}:${p.tokens}`).join(', ');
+            if(preview) mirrorDebugLog(`[run-mode] token breakdown: ${preview}`);
           }
-        );
-      }
-      state.snappedPx = null; state.snappedText = '';
-      if(isRunMode() && spec.type === 'static'){
-        console.info('[run-mode][diag] static extraction payload (pre-call)', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          profileBoxes: {
-            normBox: spec.normBox || spec.bboxPct || null,
-            bbox: spec.bbox || null,
-            boxPx: spec.boxPx || null,
-            configBox: spec.configBox || null
-          },
-          placementBox: placement?.boxPx || null,
-          placementNormBox: placement?.bbox || null
-        });
-      }
-      if(isRunMode() && spec.type === 'static'){
-        const profileBoxes = {
-          normBox: spec.normBox || spec.bboxPct || null,
-          bbox: spec.bbox || null,
-          boxPx: spec.boxPx || null,
-          configBox: spec.configBox || null
-        };
-        const missingBoxes = !profileBoxes.normBox && !profileBoxes.bbox && !profileBoxes.boxPx && !placement?.boxPx;
-        if(missingBoxes){
-          console.warn('[run-mode][diag] MISSING_BBOX', {
-            fieldKey: spec.fieldKey,
-            storageKey: profileStorageKey,
-            docId: state.currentFileId || state.currentFileName || null,
-            wizardId: currentWizardId(),
-            docType: state.docType || null,
-            targetPage
-          });
         }
-        console.info('[run-mode][diag] static bbox resolve', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          profileBoxes,
-          placementBoxes: {
-            bboxNorm: placement?.bbox || null,
-            bboxArray: bboxArr || null,
-            boxPx: placement?.boxPx || null
-          }
+        traceEvent(runSpanKey,'tokens:rank',{
+          stageLabel:'Tokens ready',
+          counts:{ tokens: tokenStats.totalTokens, pages: tokenStats.pageCount || state.numPages || 0 },
+          notes:'Tokens cached for run mode'
         });
-      }
-      if(isRunMode() && spec.type === 'static'){
-        const extractorPath = spec.landmark ? 'static.landmark+bbox' : 'static.bbox-first';
-        const preExtractPayload = {
-          tag:'run.before-extract',
-          stage:'run.extract.start',
-          mode:'run',
-          username: state.username,
-          docType: state.docType,
-          wizardId,
-          profileKey: profileStorageKey,
-          fieldKey: spec.fieldKey || null,
-          page: targetPage,
-          extractorPath,
-          bbox:{
-            placementNorm: placement?.bbox || null,
-            placementPx: placement?.boxPx || null,
-            profileNorm: spec.normBox || spec.bboxPct || bboxArr || null,
-            profilePx: spec.boxPx || null
-          }
-        };
-        console.info('[flight-recorder]', JSON.stringify(preExtractPayload));
-        traceEvent(fieldSpanKey,'extract.start',{
-          stageLabel:'Static extract start',
-          bbox:{ pixel: placement?.boxPx || null, normalized: placement?.bbox || null },
-          input:{
-            extractorPath,
-            profileNorm: spec.normBox || spec.bboxPct || bboxArr || null,
-            profilePx: spec.boxPx || null,
-            placementPx: placement?.boxPx || null
-          },
-          notes:`page=${targetPage}`
-        });
-      }
-      const extractionResult = await extractFieldValue(fieldSpec, tokens, state.viewport);
-      const normalizedExtractionPayload = normalizePayloadForLog(extractionResult);
-      if(isRunMode() && spec.type === 'static'){
-        console.info('[run-mode][diag] static extraction payload (post-call)', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          payload: normalizedExtractionPayload
-        });
-      }
-      const {
-        value,
-        boxPx,
-        confidence,
-        raw,
-        corrections,
-        corrected,
-        method,
-        fingerprintOk,
-        anchorOk,
-        cleanedOk
-      } = extractionResult || {};
-      const resultTokens = extractionResult?.tokens || [];
-      const resolvedBox = boxPx || placement?.boxPx || null;
-      const normalizedResolved = resolvedBox ? toPct(targetViewport, resolvedBox) : placement?.bbox || null;
-      const rejectionReason = value ? null : (!extractionResult ? 'no_result' : (cleanedOk === false ? 'clean_failed_or_empty' : 'empty_value'));
-      if(isRunMode()){
-        console.info('[run-mode][diag] field iteration summary', {
-          fieldKey: spec.fieldKey,
-          type: spec.type || null,
-          targetPage,
-          profileBoxes: {
-            normBox: spec.normBox || spec.bboxPct || null,
-            bbox: spec.bbox || null,
-            boxPx: spec.boxPx || null,
-            configBox: spec.configBox || null
-          },
-          placementBox: placement?.boxPx || null,
-          placementNormBox: placement?.bbox || null,
-          runtimeBox: resolvedBox,
-          runtimeNormBox: normalizedResolved,
-          valueFlow: {
-            rawText: raw || '',
-            preCleanText: extractionResult?.rawBeforeClean || raw || '',
-            cleanedText: corrected ?? value ?? '',
-            finalValue: value || ''
-          },
-          rejectionReason,
-          discarded: !value,
-          payload: normalizedExtractionPayload
-        });
-      }
-      if(isRunMode() && spec.type === 'static'){
-        const extractorPath = method || extractionResult?.method || (spec.landmark ? 'static.landmark+bbox' : 'static.bbox-first');
-        const postExtractPayload = {
-          tag:'run.after-extract',
-          stage:'run.extract.done',
-          mode:'run',
-          username: state.username,
-          docType: state.docType,
-          wizardId,
-          profileKey: profileStorageKey,
-          fieldKey: spec.fieldKey || null,
-          page: targetPage,
-          extractorPath,
-          value: value || '',
-          confidence: confidence ?? null,
-          bbox:{
-            normalized: normalizedResolved || placement?.bbox || null,
-            pixel: resolvedBox || placement?.boxPx || null
-          },
-          rejectionReason
-        };
-        console.info('[flight-recorder]', JSON.stringify(postExtractPayload));
-        traceEvent(fieldSpanKey,'extract.done',{
-          stageLabel:'Static extract done',
-          bbox:{ pixel: resolvedBox || placement?.boxPx || null, normalized: normalizedResolved || placement?.bbox || null },
-          output:{ value: value || '', confidence: confidence ?? null, method: extractorPath },
-          notes: rejectionReason ? `rejection=${rejectionReason}` : 'value extracted'
-        });
-      }
-      if(spec.type === 'static'){
-        traceEvent(
-          fieldSpanKey,
-          'bbox:expand',
-          {
-            stageLabel:'BBox expand (run)',
-            bbox:{ pixel: resolvedBox, normalized: normalizedResolved },
-            counts:{ tokens: tokens.length },
-            notes: resolvedBox ? 'resolved search box' : 'using placement bbox only'
-          }
-        );
-      }
-      if(isRunMode() && spec.type === 'static'){
-        console.info('[run-mode][diag] static extraction payload (post-processed)', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          payload: normalizedExtractionPayload,
-          rejectionReason,
-          resolvedBox,
-          normalizedBox: normalizedResolved
-        });
-        console.info('[run-mode][diag] static extraction result', {
-          fieldKey: spec.fieldKey,
-          targetPage,
-          method: method || extractionResult?.method || null,
-          rawText: raw,
-          rawBeforeClean: extractionResult?.rawBeforeClean || raw || '',
-          cleanedText: corrected ?? value ?? '',
-          finalValue: value || '',
-          confidence,
-          fingerprintOk: fingerprintOk ?? null,
-          anchorOk: anchorOk ?? null,
-          cleanedOk: cleanedOk ?? null,
-          tokens: resultTokens.length,
-          boxPx: resolvedBox,
-          normalizedBox: normalizedResolved,
-          rejectionReason
-        });
-        if(!value){
-          console.warn('[run-mode][diag] discarding field value', {
-            fieldKey: spec.fieldKey,
-            reason: rejectionReason,
-            method: method || extractionResult?.method || null,
-            rawText: raw,
-            confidence,
-            fingerprintOk: fingerprintOk ?? null,
-            anchorOk: anchorOk ?? null
-          });
+        if(tokenStats.totalTokens === 0){
+          const warnMsg = 'Tokenization returned zero tokens; extraction may be empty';
+          console.warn('[run-mode]', warnMsg);
+          mirrorDebugLog(`[run-mode][warn] ${warnMsg}`);
         }
-      }
-      if(value){
-        const vp = targetViewport || {width:1,height:1};
-        const nb = boxPx ? normalizeBox(boxPx, (vp.width ?? vp.w) || 1, (vp.height ?? vp.h) || 1) : null;
-        const pct = nb ? { x0: nb.x0n, y0: nb.y0n, x1: nb.x0n + nb.wN, y1: nb.y0n + nb.hN } : null;
-        const arr = rawStore.get(state.currentFileId) || [];
-        let conf = confidence;
-        const dup = arr.find(r=>r.fieldKey!==spec.fieldKey && ['subtotal_amount','tax_amount','invoice_total'].includes(spec.fieldKey) && ['subtotal_amount','tax_amount','invoice_total'].includes(r.fieldKey) && r.value===value);
-        if(dup) conf *= 0.5;
-        const rec = {
-          fieldKey: spec.fieldKey,
-          raw,
-          value,
-          confidence: conf,
-          correctionsApplied: corrections,
-          page: targetPage,
-          bbox: pct,
-          ts: Date.now(),
-          engineUsed: tokenResolution.engineUsed,
-          tokenSource: tokenResolution.tokenSource,
-          extractionMeta: {
-            resolverReason: tokenResolution.resolverReason,
-            fallbackFrom: tokenResolution.fallbackFrom || null,
-            tokenCount: tokenResolution.tokenCount ?? (tokens?.length || 0),
-            mode: tokenResolution.mode || 'run'
+        return tokenStats;
+      },
+      selectGeometry: async () => {
+        if(geometryIds.length <= 1) return { wizardId, geometryId, profile: activeProfile };
+        const selection = selectGeometryForRun({ wizardId, docType: state.docType, geometryIds, preferredGeometryId: geometryId });
+        if(selection?.winner && selection.probePassed){
+          if(selection.winner.geometryId !== geometryId){
+            geometryId = selection.winner.geometryId;
+            profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
+            storedProfile = selection.winner.profile;
+            resolvedProfile = storedProfile || null;
+            state.profile = resolvedProfile;
+            state.activeGeometryId = geometryId;
+            syncActiveWizardId(state.profile);
+            syncActiveGeometryId(state.profile);
+            hydrateFingerprintsFromProfile(state.profile);
+            activeProfile = state.profile;
           }
-        };
-        rawStore.upsert(state.currentFileId, rec);
-      }
-      if(spec.type === 'static'){
-        const postTokens = boxPx ? tokensInBox(tokens, boxPx, { minOverlap: 0 }) : [];
-        logStaticDebug(
-          `resolved ${spec.fieldKey || ''}: role=${placement?.pageRole || spec.pageRole || inferPageRole(spec, targetPage)} anchor=${placement?.anchor || spec.verticalAnchor || inferVerticalAnchor(spec)} pages=${state.numPages || 1} -> page ${targetPage} box=${formatBoxForLog(boxPx || placement?.boxPx)}`,
-          { tokens: postTokens.length, preview: summarizeTokens(postTokens) }
-        );
-        traceEvent(
-          fieldSpanKey,
-          'finalize',
-          {
-            stageLabel:'Finalize (run)',
-            output:{ value: value || '', confidence },
-            bbox:{ pixel: boxPx || placement?.boxPx || null, normalized: normalizedResolved || placement?.bbox || null },
-            counts:{ tokens: tokens.length },
-            notes: value ? 'value extracted' : 'no value extracted'
+          return { wizardId, geometryId, profile: activeProfile };
+        }
+        if(selection && !selection.probePassed){
+          if(!runContext.isBatch){ notifyRunIssue('No matching template matched this document. Please configure or select a template.'); }
+          return { rejected: true, reason: 'no_matching_template', wizardId, geometryId };
+        }
+        return { wizardId, geometryId, profile: activeProfile };
+      },
+      extractAreaRows: async ({ profile: profileForRun }) => {
+        logDocStage('areas', 'start');
+        await extractAreaRows(profileForRun);
+        docStageState.areaRowCount = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
+        traceEvent(runSpanKey,'columns:merge',{
+          stageLabel:'Area rows scanned',
+          counts:{ areas: docStageState.areaRowCount },
+          notes:'Area rows extraction complete'
+        });
+        logDocStage('areas', 'done');
+      },
+      extractStaticFields: async ({ profile: profileForRun }) => {
+        const includeLineItems = profileForRun?.masterDbConfig?.includeLineItems !== false;
+        logDocStage('static-extract', 'start');
+        for(const spec of (profileForRun.fields || [])){
+          const isAreaField = spec.isArea || spec.fieldType === 'areabox';
+          const isSubordinateField = isExplicitSubordinate(spec);
+          if(isAreaField) continue;
+          if(isSubordinateField && includeLineItems) continue;
+          const placement = spec.type === 'static'
+            ? resolveStaticPlacement(spec, state.pageViewports, state.numPages)
+            : null;
+          const targetPage = placement?.pageNumber
+            ? clamp(placement.pageNumber, 1, state.numPages || 1)
+            : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
+          state.pageNum = targetPage;
+          state.viewport = state.pageViewports[targetPage-1] || state.viewport;
+          let tokens = state.tokensByPage[targetPage] || [];
+          if(!tokens.length){
+            const tokenResolution = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'auto', mode: 'run' });
+            tokens = tokenResolution.tokens || [];
           }
-        );
+          const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
+          const configMask = placement?.configMask || normalizeConfigMask(spec);
+          const bboxArr = placement?.bbox || spec.bbox;
+          const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
+          if(keywordRelations && keywordRelations.page && keywordRelations.page !== targetPage){ keywordRelations.page = targetPage; }
+          let areaScope = null;
+          if(isSubordinateField && spec.areaId){
+            const scopedArea = pickAreaScope(spec.areaId, targetPage, { lowConfidenceFloor: 0.2 });
+            if(scopedArea && scopedArea.box){
+              areaScope = { box: scopedArea.box, confidence: scopedArea.occ?.confidence ?? null, source: scopedArea.occ?.source || null };
+              tokens = tokensWithinArea(tokens, scopedArea.box);
+            }
+          }
+          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope };
+          if(areaScope){ fieldSpec.areaBoxPx = areaScope.box; fieldSpec.areaScope = areaScope; }
+          state.snappedPx = null; state.snappedText = '';
+          const result = await extractFieldValue(fieldSpec, tokens, targetViewport);
+          const value = result?.value || '';
+          const rawValue = result?.raw || value;
+          const rec = { fieldKey: spec.fieldKey, label: spec.label, value, raw: rawValue, confidence: result?.confidence || 0, tokens: result?.tokens || [], correctionsApplied: result?.correctionsApplied || [], engineUsed: result?.engineUsed || null, tokenSource: result?.tokenSource || null, extractionMeta: result?.extractionMeta || null };
+          rawStore.upsert(state.currentFileId, rec);
+        }
+        docStageState.extractedStaticKeys = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim()).map(entry => entry.fieldKey).filter(Boolean);
+        logDocStage('static-extract', 'done', { extractedStaticKeys: docStageState.extractedStaticKeys });
+      },
+      buildPostCheck: async () => {
+        const extractedEntriesForGate = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim());
+        const extractedScalarKeys = extractedEntriesForGate.map(entry => entry.fieldKey).filter(Boolean);
+        const areaRowCountForGate = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
+        const chartableProbe = isChartable({ fields: Object.fromEntries(extractedEntriesForGate.map(entry => [entry.fieldKey, { value: entry.value }])) });
+        docStageState.extractedStaticKeys = extractedScalarKeys;
+        docStageState.areaRowCount = areaRowCountForGate;
+        docStageState.chartable = !!chartableProbe.ok;
+        docStageState.chartableReason = chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable');
+        const hasExtractedContent = extractedScalarKeys.length > 0 || areaRowCountForGate > 0;
+        if(!hasExtractedContent){
+          const rejectReason = 'no_extracted_content';
+          docStageState.rejectReason = rejectReason;
+          return { hasExtractedContent: false, reason: rejectReason, extractedEntriesForGate, extractedScalarKeys, areaRowCountForGate, chartableProbe };
+        }
+        return { hasExtractedContent: true, reason: null, extractedEntriesForGate, extractedScalarKeys, areaRowCountForGate, chartableProbe };
+      },
+      extractLineItems: async ({ profile: profileForRun }) => {
+        logDocStage('line-items', 'start');
+        const lineItems = await extractLineItems(profileForRun);
+        logDocStage('line-items', 'done', { lineItems: lineItems.length });
+        return lineItems;
+      },
+      compile: async ({ lineItems, postCheck }) => {
+        logDocStage('finalize', 'start');
+        const compiled = compileDocument(state.currentFileId, lineItems);
+        const processedAtISO = new Date().toISOString();
+        const batchEntry = { fileName: file?.name || compiled?.fileName || null, processedAtISO, status: 'accepted' };
+        if(wizardId){ batchEntry.wizardId = wizardId; }
+        if(geometryId){ batchEntry.geometryId = geometryId; }
+        const batchLog = LS.getBatchLog(state.username, state.docType, wizardId);
+        batchLog.push(batchEntry);
+        LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardId);
+        if(state.snapshotMode){
+          const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
+          if(manifest){ compiled.snapshotManifestId = manifest.id; }
+        }
+        const tokenCounts = collectTokenCountsByPage();
+        logParityMetrics({
+          wizardId: wizardId || currentWizardId() || null,
+          geometryId: geometryId || currentGeometryId() || null,
+          docType: state.docType || null,
+          pdfTokenCountByPage: tokenCounts.pdfTokenCountByPage,
+          tessTokenCountByPage: tokenCounts.tessTokenCountByPage,
+          extractedNonEmptyFieldCount: postCheck?.extractedEntriesForGate?.length || 0,
+          compiledRowCount: Array.isArray(compiled?.lineItems) ? compiled.lineItems.length : 0
+        });
+        logDocStage('finalize', 'done', { accepted: true, reason: null, fileId: compiled.fileId });
+        return compiled;
       }
-    }
-    docStageState.extractedStaticKeys = (rawStore.get(state.currentFileId) || [])
-      .filter(entry => String(entry?.value || '').trim())
-      .map(entry => entry.fieldKey)
-      .filter(Boolean);
-    logDocStage('static-extract', 'done', { extractedStaticKeys: docStageState.extractedStaticKeys });
-    } catch(err){
-      console.error('[run-mode] stage-fail static-extract', err);
-      traceEvent(runSpanKey,'arith:check',{
-        stageLabel:'Static extraction',
-        counts:{ keys: docStageState.extractedStaticKeys.length, areas: docStageState.areaRowCount },
-        errors:[err],
-        notes:'stage-fail static-extract'
-      });
-      throw err;
-    }
-    if(isRunMode()) mirrorDebugLog(`[run-mode] static fields extracted (${(activeProfile.fields||[]).length})`);
-    const extractedEntriesForGate = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim());
-    const extractedScalarKeys = extractedEntriesForGate.map(entry => entry.fieldKey).filter(Boolean);
-    const areaRowCountForGate = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
-    const chartableProbe = isChartable({
-      fields: Object.fromEntries(extractedEntriesForGate.map(entry => [entry.fieldKey, { value: entry.value }]))
-    });
-    docStageState.extractedStaticKeys = extractedScalarKeys;
-    docStageState.areaRowCount = areaRowCountForGate;
-    docStageState.chartable = !!chartableProbe.ok;
-    docStageState.chartableReason = chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable');
-    logDocStage('postcheck', 'start', {
-      extractedScalarKeys,
-      extractedScalarCount: extractedScalarKeys.length,
-      areaRowCount: areaRowCountForGate,
-      chartable: docStageState.chartable,
-      chartableReason: docStageState.chartableReason
     });
 
-    const hasExtractedContent = extractedScalarKeys.length > 0 || areaRowCountForGate > 0;
-    if(!hasExtractedContent){
-      const rejectReason = 'no_extracted_content';
+    if(!engineResult?.accepted){
+      const rejectReason = engineResult?.reason || 'run_rejected';
       docStageState.rejectReason = rejectReason;
-      console.warn('[run-mode][postcheck] rejecting document', {
-        reason: rejectReason,
-        extractedScalarKeys,
-        extractedScalarCount: extractedScalarKeys.length,
-        areaRowCount: areaRowCountForGate,
-        chartable: docStageState.chartable,
-        chartableReason: docStageState.chartableReason
-      });
-      traceEvent(runSpanKey,'arith:check',{
-        stageLabel:'Postcheck',
-        counts:{ keys: extractedScalarKeys.length, areas: areaRowCountForGate },
-        output:{ accepted:false, reason: rejectReason, chartable: docStageState.chartable, chartableReason: docStageState.chartableReason },
-        notes:'postcheck rejected'
-      });
       traceEvent(runSpanKey,'finalize',{
         stageLabel:'Run complete',
         output:{ accepted:false, reason: rejectReason },
-        notes:'Run mode rejected after postcheck'
+        notes:'Run mode rejected after orchestration'
       });
       logBatchRejection({ reason: rejectReason, wizardIdOverride: wizardId, geometryIdOverride: geometryId });
-      logDocStage('postcheck', 'done', { accepted: false, reason: rejectReason });
       return;
-    }
-
-    traceEvent(runSpanKey,'arith:check',{
-      stageLabel:'Postcheck',
-      counts:{ keys: extractedScalarKeys.length, areas: areaRowCountForGate },
-      output:{ accepted:true, reason:null, chartable: docStageState.chartable, chartableReason: docStageState.chartableReason },
-      notes:'postcheck accepted'
-    });
-    logDocStage('postcheck', 'done', { accepted: true, reason: null });
-
-    logDocStage('line-items', 'start');
-    let lineItems = [];
-    try {
-      lineItems = await extractLineItems(activeProfile);
-      logDocStage('line-items', 'done', { lineItems: lineItems.length });
-    } catch(err){
-      console.error('[run-mode] stage-fail line-items', err);
-      traceEvent(runSpanKey,'columns:merge',{
-        stageLabel:'Line items extracted',
-        counts:{ lineItems: 0 },
-        errors:[err],
-        notes:'stage-fail line-items'
-      });
-      throw err;
-    }
-    if(isRunMode()) mirrorDebugLog(`[run-mode] dynamic line items extracted (${lineItems.length})`);
-    traceEvent(runSpanKey,'columns:merge',{
-      stageLabel:'Line items extracted',
-      counts:{ lineItems: lineItems.length },
-      notes: lineItems.length ? 'line items captured' : 'no line items found'
-    });
-    logDocStage('finalize', 'start');
-    try {
-      const compiled = compileDocument(state.currentFileId, lineItems);
-      console.info('[run-mode][postcheck] acceptance decision', {
-        reason: null,
-        extractedScalarKeys,
-        extractedScalarCount: extractedScalarKeys.length,
-        areaRowCount: areaRowCountForGate,
-        chartable: chartableProbe.ok,
-        chartableReason: chartableProbe.ok ? null : (chartableProbe.reason || 'not_chartable')
-      });
-      const processedAtISO = new Date().toISOString();
-      const batchEntry = {
-        fileName: file?.name || compiled?.fileName || null,
-        processedAtISO,
-        status: 'accepted'
-      };
-      if(wizardId){ batchEntry.wizardId = wizardId; }
-      if(geometryId){ batchEntry.geometryId = geometryId; }
-      const batchLog = LS.getBatchLog(state.username, state.docType, wizardId);
-      batchLog.push(batchEntry);
-      LS.setBatchLog(state.username, state.docType, batchLog.slice(-500), wizardId);
-      if(state.snapshotMode){
-        const manifest = await buildSnapshotManifest(state.currentFileId, getOverlayFlags());
-        if(manifest){ compiled.snapshotManifestId = manifest.id; }
-      }
-      if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
-      const tokenCounts = collectTokenCountsByPage();
-      logParityMetrics({
-        wizardId: wizardId || currentWizardId() || null,
-        geometryId: geometryId || currentGeometryId() || null,
-        docType: state.docType || null,
-        pdfTokenCountByPage: tokenCounts.pdfTokenCountByPage,
-        tessTokenCountByPage: tokenCounts.tessTokenCountByPage,
-        extractedNonEmptyFieldCount: extractedEntriesForGate.length,
-        compiledRowCount: Array.isArray(compiled?.lineItems) ? compiled.lineItems.length : 0
-      });
-      traceEvent(runSpanKey,'finalize',{
-        stageLabel:'Run complete',
-        output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length, accepted:true, reason:null },
-        notes:'Run mode finished'
-      });
-      logDocStage('finalize', 'done', { accepted: true, reason: null, fileId: compiled.fileId });
-    } catch(err){
-      console.error('[run-mode] stage-fail finalize', err);
-      traceEvent(runSpanKey,'finalize',{
-        stageLabel:'Run complete',
-        output:{ accepted:false, reason:'finalize_failed' },
-        errors:[err],
-        notes:'stage-fail finalize'
-      });
-      throw err;
     }
   } catch(err){
     console.error('[run-mode] stage-fail unhandled', err);
