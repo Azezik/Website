@@ -89,6 +89,39 @@ function formatArrayBox(boxArr){
   return Array.isArray(boxArr) ? `[${boxArr.map(v=>Math.round(v??0)).join(',')}]` : '<none>';
 }
 
+const PARITY_DEBUG_STORAGE_KEY = 'wiz.parityDebug';
+function parityDebugEnabled(){
+  try {
+    if(typeof window !== 'undefined' && window.DEBUG_WROKIT_PARITY === true) return true;
+    if(/(?:^|[?&])parity-debug=1(?:&|$)/i.test(location.search || '')) return true;
+    return localStorage.getItem(PARITY_DEBUG_STORAGE_KEY) === '1';
+  } catch(err){
+    return false;
+  }
+}
+function logParityMetrics(summary){
+  if(!parityDebugEnabled()) return;
+  try {
+    console.info('[parity][stage1]', summary);
+  } catch(err){
+    console.warn('[parity][stage1] log failed', err);
+  }
+}
+
+function collectTokenCountsByPage(){
+  const maxPages = Math.max(state.numPages || 0, state.tokensByPage?.length || 0);
+  const pdfTokenCountByPage = {};
+  const tessTokenCountByPage = {};
+  for(let page = 1; page <= maxPages; page++){
+    const sourceInfo = tokenProvider?.getTokenSourceInfo ? tokenProvider.getTokenSourceInfo(page) : null;
+    const pdfCount = sourceInfo?.pdfTokenCount ?? (Array.isArray(state.tokensByPage?.[page]) ? state.tokensByPage[page].length : 0);
+    if(pdfCount > 0){ pdfTokenCountByPage[page] = pdfCount; }
+    const tessCount = sourceInfo?.tessTokenCount ?? (Array.isArray(state.tessTokensByPage?.[page]) ? state.tessTokensByPage[page].length : 0);
+    if(tessCount > 0){ tessTokenCountByPage[page] = tessCount; }
+  }
+  return { pdfTokenCountByPage, tessTokenCountByPage };
+}
+
 /* Invoice Wizard (vanilla JS, pdf.js + tesseract.js)
    - Works with invoice-wizard.html structure & styles.css theme
    - Renders PDFs/images, multi-page, overlay box drawing
@@ -3694,8 +3727,31 @@ function loadProfile(u, d, wizardId = currentWizardId(), geometryId = currentGeo
   }catch(e){ console.error('loadProfile', e); return null; }
 }
 
+const profileStore = window.SkinV2ProfileStoreAdapter?.createSkinV2ProfileStore
+  ? window.SkinV2ProfileStoreAdapter.createSkinV2ProfileStore({
+      loadProfile,
+      saveProfile,
+      migrateProfile
+    })
+  : { loadProfile, saveProfile, migrateProfile };
+
 // Raw and compiled stores
-const rawStore = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
+const rawFieldMap = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
+const rawStoreContract = window.SkinV2RawStoreAdapter?.createSkinV2RawStore
+  ? window.SkinV2RawStoreAdapter.createSkinV2RawStore({ rawMap: rawFieldMap })
+  : {
+      upsert(fileId, rec){ rawFieldMap.upsert(fileId, rec); },
+      getByFile(fileId){ return rawFieldMap.get(fileId) || []; },
+      clearByFile(fileId){ rawFieldMap.clear(fileId); }
+    };
+const rawStore = {
+  upsert(fileId, rec){ rawStoreContract.upsert(fileId, rec); },
+  getByFile(fileId){ return rawStoreContract.getByFile(fileId); },
+  clearByFile(fileId){ rawStoreContract.clearByFile(fileId); },
+  // Backward-compatible aliases while Stage 1 keeps existing call sites.
+  get(fileId){ return rawStoreContract.getByFile(fileId); },
+  clear(fileId){ rawStoreContract.clearByFile(fileId); }
+};
 const fileMeta = {};       // {fileId: {fileName}}
 const SNAPSHOT_BYTE_LIMIT = 2_500_000;
 const SNAPSHOT_PIXEL_CAP = 14_000_000;
@@ -6502,7 +6558,7 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
   state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
   ensureConfiguredFlag(state.profile);
   hydrateFingerprintsFromProfile(state.profile);
-  saveProfile(state.username, state.docType, state.profile);
+  profileStore.saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
   }
@@ -8112,7 +8168,7 @@ function captureGlobalLandmarks(){
     const lm = captureRingLandmark(px);
     return { bboxPct:{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1}, landmark: lm };
   });
-  saveProfile(state.username, state.docType, state.profile);
+  profileStore.saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
   }
@@ -12113,6 +12169,35 @@ async function ensureTesseractTokensForPage(pageNum, canvasEl=null){
   return tokens;
 }
 
+function getPageViewport(pageNum){
+  return state.pageViewports?.[(pageNum || 1) - 1] || null;
+}
+
+function getTokenSourceInfoForPage(pageNum){
+  return {
+    pdfTokenCount: Array.isArray(state.tokensByPage?.[pageNum]) ? state.tokensByPage[pageNum].length : 0,
+    tessTokenCount: Array.isArray(state.tessTokensByPage?.[pageNum]) ? state.tessTokensByPage[pageNum].length : 0
+  };
+}
+
+const tokenProvider = window.SkinV2TokenProviderAdapter?.createSkinV2TokenProvider
+  ? window.SkinV2TokenProviderAdapter.createSkinV2TokenProvider({
+      ensureDocumentLoaded: ensureTokensForPage,
+      ensurePdfTokens: ensureTokensForPage,
+      ensureTesseractTokens: ensureTesseractTokensForPage,
+      getPageViewport,
+      getTokenSourceInfo: getTokenSourceInfoForPage
+    })
+  : {
+      ensureDocumentLoaded: ensureTokensForPage,
+      getPageTokens(pageNum, options = {}){
+        if(options?.source === 'tesseract') return ensureTesseractTokensForPage(pageNum, options?.canvasEl || null);
+        return ensureTokensForPage(pageNum, options?.pageObj || null, options?.viewport || null, options?.canvasEl || null);
+      },
+      getPageViewport,
+      getTokenSourceInfo: getTokenSourceInfoForPage
+    };
+
 function normalizeFindTextInput(text){
   return String(text || '').trim().replace(/\s+/g, ' ');
 }
@@ -13557,7 +13642,7 @@ async function buildKeywordIndexForPage(pageNum, tokens=null, vpOverride=null, o
     }
   }
 
-  tokens = tokens || state.tokensByPage[pageNum] || await ensureTokensForPage(pageNum, null, vpOverride);
+  tokens = tokens || state.tokensByPage[pageNum] || await tokenProvider.getPageTokens(pageNum, { pageObj: null, viewport: vpOverride });
   if(!Array.isArray(tokens)) tokens = [];
 
   const vp = vpOverride || (state.isImage ? state.viewport : state.pageViewports[pageNum-1]) || {};
@@ -13693,7 +13778,7 @@ async function extractAreaRows(profile){
       if(!areaBoxPx) continue;
       const page = areaBoxPx.page || occ.page || 1;
       const vp = state.pageViewports[(page||1)-1] || state.viewport || { width:1, height:1, w:1, h:1 };
-      const pageTokens = state.tokensByPage[page] || await ensureTokensForPage(page);
+      const pageTokens = state.tokensByPage[page] || await tokenProvider.getPageTokens(page);
       const scopedTokens = tokensWithinArea(pageTokens, areaBoxPx);
       const pageW = (vp.width ?? vp.w) || 1;
       const pageH = (vp.height ?? vp.h) || 1;
@@ -15142,7 +15227,7 @@ function renderResultsTable(){
   const { docType: dt, wizardId } = resolveExtractedWizardContext();
   const profileForView = (wizardId === currentWizardId() && dt === state.docType)
     ? state.profile
-    : loadProfile(state.username, dt, wizardId, DEFAULT_GEOMETRY_ID);
+    : profileStore.loadProfile(state.username, dt, wizardId, DEFAULT_GEOMETRY_ID);
   let db = LS.getDb(state.username, dt, wizardId);
   if(isRunMode()){
     const previewFields = db[0]?.fields || {};
@@ -15471,7 +15556,7 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     previousSnapshot: prevGeomSnapshot,
     note: `field=${step.fieldKey || ''}`
   });
-  saveProfile(state.username, state.docType, state.profile);
+  profileStore.saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
   }
@@ -15490,7 +15575,7 @@ function ensureAnchorFor(fieldKey){
   };
   if(anchorMap[fieldKey]){
     f.anchor = anchorMap[fieldKey];
-    saveProfile(state.username, state.docType, state.profile);
+    profileStore.saveProfile(state.username, state.docType, state.profile);
     if(isSkinV2){
       persistPatternBundle(state.profile);
     }
@@ -15643,7 +15728,7 @@ function completeLogin(opts = {}){
     }));
   } catch(err){ console.warn('[id-drift][completeLogin] log failed', err); }
   const targetWizardId = state.activeWizardId || (isSkinV2 ? '' : DEFAULT_WIZARD_ID);
-  const existing = targetWizardId ? loadProfile(state.username, state.docType, targetWizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
+  const existing = targetWizardId ? profileStore.loadProfile(state.username, state.docType, targetWizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
   state.profile = existing || state.profile || null;
   hydrateFingerprintsFromProfile(state.profile);
   try {
@@ -16113,7 +16198,7 @@ els.docType?.addEventListener('change', ()=>{
     state.activeWizardId = DEFAULT_WIZARD_ID;
   }
   const wizardId = state.activeWizardId || (isSkinV2 ? '' : currentWizardId());
-  const existing = wizardId ? loadProfile(state.username, state.docType, wizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
+  const existing = wizardId ? profileStore.loadProfile(state.username, state.docType, wizardId, state.activeGeometryId || DEFAULT_GEOMETRY_ID) : null;
   state.profile = existing || null;
   hydrateFingerprintsFromProfile(state.profile);
   renderSavedFieldsTable();
@@ -16203,14 +16288,14 @@ if(modelSelect){
       } else {
         state.activeWizardId = DEFAULT_WIZARD_ID;
         state.activeGeometryId = DEFAULT_GEOMETRY_ID;
-        state.profile = loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
+        state.profile = profileStore.loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
         hydrateFingerprintsFromProfile(state.profile);
         alert('Default wizard selected.');
       }
     } else if(val.startsWith('custom:')){
       state.activeWizardId = val.replace('custom:','');
       state.activeGeometryId = DEFAULT_GEOMETRY_ID;
-      state.profile = loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
+      state.profile = profileStore.loadProfile(state.username, state.docType, currentWizardId(), state.activeGeometryId);
       hydrateFingerprintsFromProfile(state.profile);
       if(isSkinV2){
         populateModelSelect(`custom:${state.activeWizardId}`);
@@ -17559,7 +17644,7 @@ function geometrySizeDistance(targetSize, currentSize){
 function selectGeometryForRun({ wizardId, docType, geometryIds, preferredGeometryId }){
   const candidates = geometryIds.map(gid => ({
     geometryId: gid,
-    profile: loadProfile(state.username, docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid)
+    profile: profileStore.loadProfile(state.username, docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid)
   })).filter(c => !!c.profile);
   if(candidates.length <= 1){
     return { winner: candidates[0] || null, probePassed: true };
@@ -17635,10 +17720,10 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     let profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
     const geometryIds = collectGeometryIdsForWizard(state.username, state.docType, wizardId);
     console.info('[geom-run-selector]', { wizardId, geometryIds, requestedGeometryId: geometryId, profileKey: profileStorageKey });
-    let storedProfile = loadProfile(state.username, state.docType, wizardId, geometryId);
+    let storedProfile = profileStore.loadProfile(state.username, state.docType, wizardId, geometryId);
     if(!storedProfile){
       for(const gid of geometryIds){
-        const candidateProfile = loadProfile(state.username, state.docType, wizardId, gid);
+        const candidateProfile = profileStore.loadProfile(state.username, state.docType, wizardId, gid);
         if(candidateProfile){
           storedProfile = candidateProfile;
           geometryId = gid;
@@ -18456,6 +18541,16 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         if(manifest){ compiled.snapshotManifestId = manifest.id; }
       }
       if(isRunMode()) mirrorDebugLog(`[run-mode] MasterDB written for ${compiled.fileId}`);
+      const tokenCounts = collectTokenCountsByPage();
+      logParityMetrics({
+        wizardId: wizardId || currentWizardId() || null,
+        geometryId: geometryId || currentGeometryId() || null,
+        docType: state.docType || null,
+        pdfTokenCountByPage: tokenCounts.pdfTokenCountByPage,
+        tessTokenCountByPage: tokenCounts.tessTokenCountByPage,
+        extractedNonEmptyFieldCount: extractedEntriesForGate.length,
+        compiledRowCount: Array.isArray(compiled?.lineItems) ? compiled.lineItems.length : 0
+      });
       traceEvent(runSpanKey,'finalize',{
         stageLabel:'Run complete',
         output:{ fileId: compiled.fileId, fields: (activeProfile.fields||[]).length, lineItems: lineItems.length, accepted:true, reason:null },
