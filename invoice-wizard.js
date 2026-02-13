@@ -13,6 +13,8 @@ const PageSpace = window.EnginePageSpace || {};
 const CleaningNormalize = window.EngineCleaningNormalize || {};
 const FieldNormalizers = window.EngineFieldNormalizers || {};
 const StaticScoringEngine = window.EngineStaticScoring || null;
+const StaticRingLandmarkEngine = window.EngineStaticRingLandmark || {};
+const GeometryAnchors = window.EngineGeometryAnchors || {};
 
 const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -77,6 +79,10 @@ const normalizeDate = FieldNormalizers.normalizeDate || ((raw) => {
   const pad = n => n.toString().padStart(2,'0');
   return `${y}-${pad(m)}-${pad(d)}`;
 });
+const scoreRingEdges = StaticRingLandmarkEngine.edgeScore || null;
+const runRingLandmarkMatch = StaticRingLandmarkEngine.matchRingLandmark || null;
+const applyRingLandmarkOffset = StaticRingLandmarkEngine.applyLandmarkOffset || null;
+const projectAnchorBox = GeometryAnchors.boxFromAnchor || null;
 
 const STATIC_DEBUG_STORAGE_KEY = 'wiz.staticDebug';
 const LEGACY_PDF_SCALE = 1.5;
@@ -7897,6 +7903,7 @@ function findLandmark(tokens, spec, viewportPx){
   return null;
 }
 function boxFromAnchor(landmarkPx, anchor, viewportPx){
+  if(projectAnchorBox) return projectAnchorBox(landmarkPx, anchor, viewportPx);
   const {dx,dy,w,h} = anchor; // normalized offsets relative to page
   return { x: landmarkPx.x + dx*viewportPx.w, y: landmarkPx.y + dy*viewportPx.h, w: w*viewportPx.w, h: h*viewportPx.h, page: landmarkPx.page };
 }
@@ -7981,6 +7988,7 @@ function captureRingLandmark(boxPx, rot=0){
 }
 
 function edgeScore(sample, tmpl, half=null){
+  if(scoreRingEdges) return scoreRingEdges(sample, tmpl, half);
   const mask = tmpl.ringMask;
   const w = tmpl.patchSize;
   let count=0, sumA=0, sumB=0;
@@ -8013,6 +8021,14 @@ function edgeScore(sample, tmpl, half=null){
 }
 
 function matchRingLandmark(lm, guessPx, half=null){
+  if(runRingLandmarkMatch){
+    const vp = state.pageViewports[guessPx.page-1] || state.viewport;
+    return runRingLandmarkMatch(lm, guessPx, {
+      captureFn: box => captureRingLandmark(box, state.pageTransform.rotation),
+      viewport: vp,
+      half
+    });
+  }
   const vp = state.pageViewports[guessPx.page-1] || state.viewport;
   const range = 0.25 * ((vp.h ?? vp.height) || 1);
   const step = 4;
@@ -9734,7 +9750,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     if(!runMode){
       let m = matchRingLandmark(fieldSpec.landmark, basePx);
       if(m){
-        const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+        const box = (applyRingLandmarkOffset
+          ? applyRingLandmarkOffset(m, fieldSpec.landmark.offset, basePx)
+          : { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page });
         const r = await attempt(box);
         const anchorRes = r ? anchorMatchesCandidate(r) : null;
         if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){ result=r; method='ring'; score=m.score; comp=m.comparator; }
@@ -9751,7 +9769,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         for(const half of ['right','left']){
           m = matchRingLandmark(fieldSpec.landmark, basePx, half);
           if(m){
-            const box = { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page };
+            const box = (applyRingLandmarkOffset
+          ? applyRingLandmarkOffset(m, fieldSpec.landmark.offset, basePx)
+          : { x: m.x + fieldSpec.landmark.offset.dx*basePx.w, y: m.y + fieldSpec.landmark.offset.dy*basePx.h, w: basePx.w, h: basePx.h, page: basePx.page });
             const r = await attempt(box);
             const geomOk = r && (Math.abs((box.y+box.h/2)-(basePx.y+basePx.h/2)) < basePx.h || box.y >= basePx.y);
             const gramOk = r && r.value && (!fieldSpec.regex || new RegExp(fieldSpec.regex,'i').test(r.value));
