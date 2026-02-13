@@ -6,6 +6,74 @@ const KeywordWeighting = window.KeywordWeighting || null;
 const KeywordConstellation = window.KeywordConstellation || null;
 const AreaScoping = window.AreaScoping || null;
 const AreaFinder = window.AreaFinder || null;
+const GeometryBox = window.EngineGeometryBox || {};
+const PageSpace = window.EnginePageSpace || {};
+const CleaningNormalize = window.EngineCleaningNormalize || {};
+const FieldNormalizers = window.EngineFieldNormalizers || {};
+
+const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
+  x0n: boxPx.x / canvasW,
+  y0n: boxPx.y / canvasH,
+  wN: boxPx.w / canvasW,
+  hN: boxPx.h / canvasH
+}));
+const denormalizeBox = GeometryBox.denormalizeBox || ((normBox, W, H) => ({
+  sx: Math.round(normBox.x0n * W),
+  sy: Math.round(normBox.y0n * H),
+  sw: Math.max(1, Math.round(normBox.wN * W)),
+  sh: Math.max(1, Math.round(normBox.hN * H))
+}));
+const intersect = GeometryBox.intersect || ((a,b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y);
+const getViewportDimensions = PageSpace.getViewportDimensions || ((viewport) => ({
+  width: Math.max(1, ((viewport?.width ?? viewport?.w) || 0) || 1),
+  height: Math.max(1, ((viewport?.height ?? viewport?.h) || 0) || 1)
+}));
+const applyPageTransform = PageSpace.applyTransform || ((boxPx, transform = {}, viewport = {}) => {
+  const { scale = 1, rotation = 0 } = transform || {};
+  if(scale === 1 && rotation === 0) return { ...boxPx };
+  const wPage = ((viewport.w ?? viewport.width) || 1);
+  const hPage = ((viewport.h ?? viewport.height) || 1);
+  const cx = wPage / 2, cy = hPage / 2;
+  const x = boxPx.x + boxPx.w / 2;
+  const y = boxPx.y + boxPx.h / 2;
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  const dx = (x - cx) * scale;
+  const dy = (y - cy) * scale;
+  const x2 = dx * cos - dy * sin + cx;
+  const y2 = dx * sin + dy * cos + cy;
+  const w = boxPx.w * scale;
+  const h = boxPx.h * scale;
+  return { x: x2 - w / 2, y: y2 - h / 2, w, h, page: boxPx.page };
+});
+const collapseAdjacentDuplicates = CleaningNormalize.collapseAdjacentDuplicates || ((str) => {
+  if(!str) return '';
+  let out = str;
+  const re = /(\b[\w#&.-]+(?:\s+[\w#&.-]+)*)\s+\1\b/gi;
+  let prev;
+  do { prev = out; out = out.replace(re, '$1'); } while(out !== prev);
+  return out;
+});
+const normalizeMoney = FieldNormalizers.normalizeMoney || ((raw) => {
+  if(!raw) return '';
+  const sign = /-/.test(raw) ? '-' : '';
+  const cleaned = raw.replace(/[^0-9.,]/g, '').replace(/,/g,'');
+  const num = parseFloat(cleaned);
+  if(isNaN(num)) return '';
+  const abs = Math.abs(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return sign + abs;
+});
+const normalizeDate = FieldNormalizers.normalizeDate || ((raw) => {
+  if(!raw) return '';
+  const txt = raw.trim().replace(/(\d)(st|nd|rd|th)/gi, '$1');
+  const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+  let y,m,d; let match;
+  if((match = txt.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/))){ y = +match[1]; m = +match[2]; d = +match[3]; }
+  else if((match = txt.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))){ const a = +match[1], b = +match[2]; if(a > 12){ d = a; m = b; } else { m = a; d = b; } y = +match[3]; }
+  else if((match = txt.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$/))){ m = months[match[1].slice(0,3).toLowerCase()] || 0; d = +match[2]; y = +match[3]; }
+  if(!y || !m || !d) return '';
+  const pad = n => n.toString().padStart(2,'0');
+  return `${y}-${pad(m)}-${pad(d)}`;
+});
 
 const STATIC_DEBUG_STORAGE_KEY = 'wiz.staticDebug';
 const LEGACY_PDF_SCALE = 1.5;
@@ -4390,26 +4458,6 @@ function buildAreaOccurrencesPayload(){
   return occurrences;
 }
 
-const normalizeBox = (boxPx, canvasW, canvasH) => ({
-  x0n: boxPx.x / canvasW,
-  y0n: boxPx.y / canvasH,
-  wN: boxPx.w / canvasW,
-  hN: boxPx.h / canvasH
-});
-
-const denormalizeBox = (normBox, W, H) => ({
-  sx: Math.round(normBox.x0n * W),
-  sy: Math.round(normBox.y0n * H),
-  sw: Math.max(1, Math.round(normBox.wN * W)),
-  sh: Math.max(1, Math.round(normBox.hN * H))
-});
-
-function getViewportDimensions(viewport){
-  const width = Math.max(1, ((viewport?.width ?? viewport?.w) || 0) || 1);
-  const height = Math.max(1, ((viewport?.height ?? viewport?.h) || 0) || 1);
-  return { width, height };
-}
-
 function getPageViewportSize(page){
   const vp = state.pageViewports[(page||1)-1] || state.viewport || {};
   return getViewportDimensions(vp);
@@ -4665,25 +4713,9 @@ function validateSelection(sel){
 }
 
 function applyTransform(boxPx, transform=state.pageTransform, opts={}){
-  const { scale=1, rotation=0 } = transform || {};
-  if(scale === 1 && rotation === 0) return { ...boxPx };
   const vp = state.pageViewports[boxPx.page-1] || state.viewport;
-  const wPage = ((vp.w ?? vp.width) || 1);
-  const hPage = ((vp.h ?? vp.height) || 1);
-  const cx = wPage/2, cy = hPage/2;
-  const x = boxPx.x + boxPx.w/2;
-  const y = boxPx.y + boxPx.h/2;
-  const cos = Math.cos(rotation), sin = Math.sin(rotation);
-  let dx = (x - cx) * scale;
-  let dy = (y - cy) * scale;
-  const x2 = dx*cos - dy*sin + cx;
-  const y2 = dx*sin + dy*cos + cy;
-  const w = boxPx.w * scale;
-  const h = boxPx.h * scale;
-  return { x: x2 - w/2, y: y2 - h/2, w, h, page: boxPx.page };
+  return applyPageTransform(boxPx, transform, vp);
 }
-
-function intersect(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 function bboxOfTokens(tokens){
   const x1 = Math.min(...tokens.map(t=>t.x)), y1 = Math.min(...tokens.map(t=>t.y));
   const x2 = Math.max(...tokens.map(t=>t.x + t.w)), y2 = Math.max(...tokens.map(t=>t.y + t.h));
@@ -4697,51 +4729,6 @@ function cosine3Gram(a,b){
   return (dot===0)?0:(dot/Math.sqrt(nA*nB));
 }
 
-function collapseAdjacentDuplicates(str){
-  if(!str) return '';
-  let out = str;
-  const re = /(\b[\w#&.-]+(?:\s+[\w#&.-]+)*)\s+\1\b/gi;
-  do { var prev = out; out = out.replace(re, '$1'); } while(out !== prev);
-  return out;
-}
-
-function normalizeMoney(raw){
-  if(!raw) return '';
-  const sign = /-/.test(raw) ? '-' : '';
-  const cleaned = raw.replace(/[^0-9.,]/g, '').replace(/,/g,'');
-  const num = parseFloat(cleaned);
-  if(isNaN(num)) return '';
-  const abs = Math.abs(num).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  });
-  return sign + abs;
-}
-
-function normalizeDate(raw){
-  if(!raw) return '';
-  const txt = raw.trim().replace(/(\d)(st|nd|rd|th)/gi, '$1');
-  const months = {
-    jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12
-  };
-  let y,m,d;
-  let match;
-  if((match = txt.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/))){
-    y = +match[1]; m = +match[2]; d = +match[3];
-  } else if((match = txt.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))){
-    const a = +match[1], b = +match[2];
-    // if first part >12 assume DD/MM/YYYY else MM/DD/YYYY
-    if(a > 12){ d = a; m = b; } else { m = a; d = b; }
-    y = +match[3];
-  } else if((match = txt.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$/))){
-    m = months[match[1].slice(0,3).toLowerCase()] || 0;
-    d = +match[2];
-    y = +match[3];
-  }
-  if(!y || !m || !d) return '';
-  const pad = n => n.toString().padStart(2,'0');
-  return `${y}-${pad(m)}-${pad(d)}`;
-}
 
 const KNOWN_LEXICON = [
   'DELIVERY','PICKUP','SUBTOTAL','TOTAL','BALANCE','DEPOSIT','CONTINUATION','GST','QST','HST'
