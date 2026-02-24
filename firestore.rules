@@ -1,12 +1,33 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // User-specific data (including backups) is scoped by UID
-    match /Users/{userId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    function isSignedInOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
     }
 
-    // Global username registry to prevent hijacking
+    // Canonical lower-case user namespace used by app collections.
+    match /users/{userId}/{document=**} {
+      allow read, write: if isSignedInOwner(userId);
+    }
+
+    // Backward-compatible legacy upper-case namespace.
+    match /Users/{userId}/{document=**} {
+      allow read, write: if isSignedInOwner(userId);
+    }
+
+    // Canonical lower-case username registry.
+    match /usernames/{usernameLower} {
+      allow get: if request.auth != null;
+      allow create: if request.auth != null
+        && !exists(/databases/$(database)/documents/usernames/$(usernameLower))
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if request.auth != null
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Backward-compatible legacy upper-case username registry.
     match /Usernames/{usernameLower} {
       allow get: if request.auth != null;
       allow create: if request.auth != null
