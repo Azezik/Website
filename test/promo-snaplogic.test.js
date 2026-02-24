@@ -61,6 +61,22 @@ const { applyPromoSnap, deletePromoSnap, listActiveEvents } = PromoSnapLogic;
   assert.strictEqual(active[0].type, 'promo');
 })();
 
+
+(function shouldReplaceAcrossStagesByDefaultForSnappedLead(){
+  const events = [
+    { id:'ev-stage-a', leadId:'lead-1', stageId:'stage-a', scheduleDate:'2026-02-24', type:'pipeline', active:true, status:'active' },
+    { id:'ev-stage-b', leadId:'lead-1', stageId:'stage-b', scheduleDate:'2026-02-25', type:'pipeline', active:true, status:'active' }
+  ];
+
+  const res = applyPromoSnap(events, { promoId:'promo-x', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-23' });
+  const promo = listActiveEvents(res.events, { leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-23' });
+
+  assert.strictEqual(promo.length, 1);
+  assert.deepStrictEqual(promo[0].replacesEventIds.sort(), ['ev-stage-a', 'ev-stage-b']);
+  assert.strictEqual(res.events.find(ev => ev.id === 'ev-stage-a').active, false);
+  assert.strictEqual(res.events.find(ev => ev.id === 'ev-stage-b').active, false);
+})();
+
 (function shouldReplaceFutureStageEventsWhenPromoDateIsEarlier(){
   const events = [
     { id:'ev-24', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-24', type:'pipeline', active:true, status:'active' },

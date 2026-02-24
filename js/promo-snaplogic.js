@@ -72,10 +72,11 @@
       return { events: next, promoEvent: existingPromo, replacedEvent: null, idempotent: true };
     }
 
+    const shouldMatchStageForReplacement = opts.replaceAcrossStages === false ? (opts.matchStage !== false) : false;
     const replacementTargets = next.filter(ev => {
       if(!ev?.active || ev.type === 'promo') return false;
       if(ev.leadId !== ref.leadId) return false;
-      if(opts.matchStage !== false && (ev.stageId || null) !== (ref.stageId || null)) return false;
+      if(shouldMatchStageForReplacement && (ev.stageId || null) !== (ref.stageId || null)) return false;
       return isOnOrAfter(ev.scheduleDate, ref.scheduleDate);
     });
 
