@@ -4,6 +4,19 @@
 })(typeof self !== 'undefined' ? self : this, function(){
   function cloneEvent(event){ return { ...(event || {}) }; }
 
+  function parseDateValue(value){
+    if(typeof value !== 'string' || !value) return null;
+    const date = new Date(`${value}T00:00:00Z`);
+    return Number.isNaN(date.getTime()) ? null : date.getTime();
+  }
+
+  function isOnOrAfter(dateA, dateB){
+    const a = parseDateValue(dateA);
+    const b = parseDateValue(dateB);
+    if(a === null || b === null) return String(dateA || '') >= String(dateB || '');
+    return a >= b;
+  }
+
   function buildScheduleKey(event, opts = {}){
     const useStage = opts.matchStage !== false;
     return [event?.leadId || '', event?.scheduleDate || '', useStage ? (event?.stageId || '') : ''].join('::');
@@ -59,16 +72,23 @@
       return { events: next, promoEvent: existingPromo, replacedEvent: null, idempotent: true };
     }
 
-    const toReplace = activeForKey.find(ev => ev.type !== 'promo') || activeForKey[0] || null;
+    const replacementTargets = next.filter(ev => {
+      if(!ev?.active || ev.type === 'promo') return false;
+      if(ev.leadId !== ref.leadId) return false;
+      if(opts.matchStage !== false && (ev.stageId || null) !== (ref.stageId || null)) return false;
+      return isOnOrAfter(ev.scheduleDate, ref.scheduleDate);
+    });
 
-    if(toReplace){
-      const replaceIdx = next.findIndex(ev => ev.id === toReplace.id);
-      const superseded = {
-        ...deactivateEvent(toReplace, 'superseded_by_promo', atISO),
+    replacementTargets.forEach((target) => {
+      const replaceIdx = next.findIndex(ev => ev.id === target.id);
+      if(replaceIdx < 0) return;
+      next[replaceIdx] = {
+        ...deactivateEvent(next[replaceIdx], 'superseded_by_promo', atISO),
         replacedByPromoId: promo.promoId
       };
-      next[replaceIdx] = superseded;
-    }
+    });
+
+    const toReplace = replacementTargets[0] || activeForKey.find(ev => ev.type !== 'promo') || activeForKey[0] || null;
 
     const promoEventId = promo.eventId || `promo:${promo.promoId}:${ref.leadId}:${ref.scheduleDate}:${ref.stageId || 'all'}`;
     const promoEvent = {
@@ -81,7 +101,8 @@
       active: true,
       status: 'active',
       createdAtISO: atISO,
-      replacesEventId: toReplace?.id || null
+      replacesEventId: toReplace?.id || null,
+      replacesEventIds: replacementTargets.map(ev => ev.id)
     };
 
     next.forEach((ev, idx) => {
@@ -127,17 +148,21 @@
       next[promoIdx] = deactivateEvent(next[promoIdx], 'promo_deleted', atISO);
     }
 
+    const replacedIds = Array.isArray(activePromo.replacesEventIds) && activePromo.replacesEventIds.length
+      ? activePromo.replacesEventIds
+      : (activePromo.replacesEventId ? [activePromo.replacesEventId] : []);
+
     let restoredEvent = null;
-    if(activePromo.replacesEventId){
-      const prevIdx = next.findIndex(ev => ev.id === activePromo.replacesEventId);
-      if(prevIdx >= 0){
-        restoredEvent = {
-          ...activateEvent(next[prevIdx], atISO),
-          replacedByPromoId: null
-        };
-        next[prevIdx] = restoredEvent;
-      }
-    }
+    replacedIds.forEach((replacedId) => {
+      const prevIdx = next.findIndex(ev => ev.id === replacedId);
+      if(prevIdx < 0) return;
+      const restored = {
+        ...activateEvent(next[prevIdx], atISO),
+        replacedByPromoId: null
+      };
+      next[prevIdx] = restored;
+      if(!restoredEvent) restoredEvent = restored;
+    });
 
     assertSingleActive(next, ref, opts);
     return { events: next, restoredEvent, promoEvent: next[promoIdx] || null, noOp: false };
