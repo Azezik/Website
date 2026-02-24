@@ -61,4 +61,27 @@ const { applyPromoSnap, deletePromoSnap, listActiveEvents } = PromoSnapLogic;
   assert.strictEqual(active[0].type, 'promo');
 })();
 
+(function shouldReplaceFutureStageEventsWhenPromoDateIsEarlier(){
+  const events = [
+    { id:'ev-24', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-24', type:'pipeline', active:true, status:'active' },
+    { id:'ev-25', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-25', type:'pipeline', active:true, status:'active' }
+  ];
+
+  const res = applyPromoSnap(events, { promoId:'promo-1', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-23' });
+  const promoActive = listActiveEvents(res.events, { leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-23' });
+
+  assert.strictEqual(promoActive.length, 1);
+  assert.strictEqual(promoActive[0].type, 'promo');
+  assert.deepStrictEqual(promoActive[0].replacesEventIds.sort(), ['ev-24', 'ev-25']);
+
+  const old24 = res.events.find(ev => ev.id === 'ev-24');
+  const old25 = res.events.find(ev => ev.id === 'ev-25');
+  assert.strictEqual(old24.active, false);
+  assert.strictEqual(old25.active, false);
+
+  const deleted = deletePromoSnap(res.events, { promoId:'promo-1', leadId:'lead-1', stageId:'active-snap', scheduleDate:'2026-02-23' });
+  assert.strictEqual(deleted.events.find(ev => ev.id === 'ev-24').active, true);
+  assert.strictEqual(deleted.events.find(ev => ev.id === 'ev-25').active, true);
+})();
+
 console.log('promo-snaplogic tests passed.');
