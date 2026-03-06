@@ -119,17 +119,18 @@
           boxPx: scope,
           tokens: winner.line?.tokens || inBox,
           method: pad ? 'ai-micro-expansion' : 'ai-in-box',
-          engine: 'ai'
+          engine: 'ai_algo'
         };
         if(confidence >= 0.65) return best;
       }
     }
-    return best || { value: '', raw: '', confidence: 0.1, boxPx, tokens: [], method: 'ai-fallback', engine: 'ai' };
+    return best || { value: '', raw: '', confidence: 0.1, boxPx, tokens: [], method: 'ai-fallback', engine: 'ai_algo' };
   }
 
   function registerField({ step, normBox, page, rawBox, viewport }){
     const hints = LABEL_HINTS[step?.fieldKey] || [];
     return {
+      schema: 'ai_algo/v1',
       strategy: 'bbox-first-micro-expansion-v1',
       page,
       hints,

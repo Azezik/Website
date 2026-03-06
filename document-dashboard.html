@@ -29,8 +29,12 @@
         <p class="subtitle">Structured data from the documents you already use.</p>
       </div>
       <label class="toggle-inline" style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" id="ai-algo-toggle" />
-        AI Algo
+        <span>Extraction Engine</span>
+        <select id="extraction-engine-select">
+          <option value="legacy">Legacy</option>
+          <option value="ai_algo">AI Algo</option>
+          <option value="wrokit_vision">WrokitVision</option>
+        </select>
       </label>
       <button id="logout-btn" class="btn ghost" type="button">Logout</button>
     </div>
@@ -614,6 +618,8 @@
   <script src="engines/core/compile-engine.js"></script>
   <script src="engines/core/extraction-engine.js"></script>
   <script src="engines/core/ai-extraction-engine.js"></script>
+  <script src="engines/core/wrokit-vision-engine.js"></script>
+  <script src="engines/core/engine-registry.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
