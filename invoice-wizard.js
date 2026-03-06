@@ -17976,6 +17976,14 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       throw new Error('EngineExtraction.orchestrate is unavailable');
     }
 
+    // docStageState accumulates per-stage diagnostics used throughout the callbacks.
+    // logDocStage emits a debug line for each pipeline stage transition.
+    const docStageState = {};
+    const logDocStage = (stage, status, extra = {}) => {
+      const detail = extra && Object.keys(extra).length ? ' ' + JSON.stringify(extra) : '';
+      mirrorDebugLog(`[run-mode][stage] ${stage} ${status}${detail}`);
+    };
+
     const engineResult = await runExtractionEngine.orchestrate({
       file,
       profile: activeProfile,
