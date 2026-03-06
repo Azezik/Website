@@ -10028,6 +10028,22 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       }
     }
   }
+  // Constellation direct fallback: when bbox-search and landmark both failed, but
+  // the constellation engine matched the field's surrounding anchor keywords with
+  // sufficient confidence, extract directly from its predicted box. This closes
+  // the architectural gap where constellation data was captured at config time and
+  // matched at run time but never used as a standalone extraction candidate.
+  if(!result && staticRun && !visualRunActive && constellationBox && constellationContext?.best?.matchedEdges >= 2){
+    for(const pad of [0, 3]){
+      const cProbePx = { x: constellationBox.x - pad, y: constellationBox.y - pad, w: constellationBox.w + pad*2, h: constellationBox.h + pad*2, page: constellationBox.page };
+      const r = await attempt(cProbePx);
+      const anchorRes = r ? anchorMatchesCandidate(r) : null;
+      if(r && anchorRes && (anchorRes.ok || anchorRes.softOk) && r.value){
+        r.confidence = Math.min(r.confidence || 0.45, 0.45);
+        result = r; method = 'constellation'; if(staticRun && stageUsed.value === null){ stageUsed.value = 3; } break;
+      }
+    }
+  }
   if(!result && staticRun && !visualRunActive && keywordRelations && keywordRelations.secondaries?.length){
     const page = basePx?.page || fieldSpec.page || state.pageNum || 1;
     const { pageW, pageH } = getPageSize(page);
@@ -11452,44 +11468,11 @@ async function readTokensForPage(pageObj, vp){
 }
 
 async function readImageTokensForPage(pageNum, canvasEl=null){
-  const canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || els.imgCanvas;
-  if(!canvas){ return []; }
-  const opts = { tessedit_pageseg_mode: 6, oem: 1 };
-  try{
-    const { data } = await TesseractRef.recognize(canvas, 'eng', opts);
-    const tokens = (data.words || []).map(w => {
-      const raw = w.text.trim();
-      if(!raw) return null;
-      const { text: corrected, corrections } = applyOcrCorrections(raw);
-      // OCR trace hook: token-time corrections from full-page Tesseract.
-      traceTokenCorrection({
-        raw,
-        corrected,
-        corrections,
-        source: 'tesseract_fullpage',
-        pageIndex: pageNum - 1,
-        box: { x: w.bbox?.x || 0, y: w.bbox?.y || 0, w: w.bbox?.width || 0, h: w.bbox?.height || 0, page: pageNum }
-      });
-      return {
-        raw,
-        corrected,
-        text: corrected,
-        correctionsApplied: corrections,
-        confidence: (w.confidence || 0) / 100,
-        x: w.bbox?.x || 0,
-        y: w.bbox?.y || 0,
-        w: w.bbox?.width || 0,
-        h: w.bbox?.height || 0,
-        page: pageNum
-      };
-    }).filter(Boolean);
-    logStaticDebug(`full-page-ocr page=${pageNum}`, { tokens: tokens.length, meanConf: tokens.reduce((s,t)=>s+t.confidence,0)/(tokens.length||1) });
-    return tokens;
-  } catch(err){
-    console.warn('Full-page OCR failed', err);
-    logStaticDebug(`full-page-ocr-failed page=${pageNum}`, { error: err?.message || err });
-    return [];
-  }
+  // Delegate to the canonical full-page OCR implementation that uses the robust
+  // getTesseractWordBBox() extractor. The previous inline copy used w.bbox?.x
+  // directly, which fails when Tesseract returns x0/y0/x1/y1 instead of x/y/width/height.
+  // All callers (ensureTesseractTokensForPage, ensureTokensForPage image path) converge here.
+  return readImageTokensForPageWithBBox(pageNum, canvasEl);
 }
 
 function getTessCropCacheKey(bboxPx, pageNumOverride){
@@ -18025,6 +18008,16 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         return tokenStats;
       },
       selectGeometry: async () => {
+        // Layout mismatch gate: if the profile's highest-page field exceeds the
+        // document's actual page count, this is definitively the wrong document.
+        // Fail cleanly here instead of returning empty fields after full extraction.
+        const _profileMaxPage = Math.max(...(activeProfile?.fields || []).map(f => Number(f.page) || 1), 1);
+        const _currentPageCount = state.numPages || 1;
+        if(_profileMaxPage > _currentPageCount){
+          mirrorDebugLog(`[layout-gate] LAYOUT_MISMATCH: profile expects ${_profileMaxPage} page(s), document has ${_currentPageCount}`);
+          if(!runContext.isBatch){ notifyRunIssue('This document does not match the selected template (page count mismatch). Please select the correct template.'); }
+          return { rejected: true, reason: 'LAYOUT_MISMATCH', wizardId, geometryId };
+        }
         if(geometryIds.length <= 1) return { wizardId, geometryId, profile: activeProfile };
         const selection = selectGeometryForRun({ wizardId, docType: state.docType, geometryIds, preferredGeometryId: geometryId });
         if(selection?.winner && selection.probePassed){
@@ -18096,7 +18089,20 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope };
           if(areaScope){ fieldSpec.areaBoxPx = areaScope.box; fieldSpec.areaScope = areaScope; }
           state.snappedPx = null; state.snappedText = '';
-          const result = await extractFieldValue(fieldSpec, tokens, targetViewport);
+          let result = await extractFieldValue(fieldSpec, tokens, targetViewport);
+          // Half-filled PDF fallback: template labels live in the PDF text layer
+          // (supporting constellation/keyword matching) but user-filled values do not.
+          // When PDF.js tokens were used and extraction returned empty, retry with
+          // Tesseract which reads the rendered bitmap and sees both labels and values.
+          // ensureTesseractTokensForPageWithBBox caches results, so cost is one
+          // Tesseract call per page across all fields on that page.
+          if(!result?.value && !state.isImage && (state.tokensByPage[targetPage] || []).length > 0){
+            const tessRes = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'tesseract', mode: 'run' });
+            if(tessRes.tokenCount > 0){
+              const tessResult = await extractFieldValue(fieldSpec, tessRes.tokens, targetViewport);
+              if(tessResult?.value){ result = tessResult; }
+            }
+          }
           const value = result?.value || '';
           const rawValue = result?.raw || value;
           const rec = { fieldKey: spec.fieldKey, label: spec.label, value, raw: rawValue, confidence: result?.confidence || 0, tokens: result?.tokens || [], correctionsApplied: result?.correctionsApplied || [], engineUsed: result?.engineUsed || null, tokenSource: result?.tokenSource || null, extractionMeta: result?.extractionMeta || null };
