@@ -19,6 +19,7 @@ const StaticRingLandmarkEngine = window.EngineStaticRingLandmark || {};
 const GeometryAnchors = window.EngineGeometryAnchors || {};
 const CompileEngine = window.EngineCompile || null;
 const AIExtractionEngine = window.EngineAIExtraction || null;
+const EngineRegistry = window.WrokitEngineRegistry || null;
 
 const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -510,7 +511,7 @@ const els = {
   uploadBtn:       document.getElementById('upload-btn'),
   resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
-  aiAlgoToggle:    document.getElementById('ai-algo-toggle'),
+  extractionEngineSelect: document.getElementById('extraction-engine-select'),
   dropzone:        document.getElementById('dropzone'),
   fileInput:       document.getElementById('file-input'),
   staticDebugModal: document.getElementById('staticDebugModal'),
@@ -606,46 +607,56 @@ const DEFAULT_GEOMETRY_ID = 'geom0';
 const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
 const EXTRACTED_WIZARD_SELECTION_KEY = 'wiz.extractedSelection';
-const AI_ALGO_TOGGLE_KEY = 'wiz.aiAlgoEnabled';
-const ENGINE_KIND = { LEGACY: 'legacy', AI: 'ai' };
+const EXTRACTION_ENGINE_KEY = 'wiz.extractionEngine';
+const ENGINE_KIND = EngineRegistry?.ENGINE_KIND || { LEGACY: 'legacy', AI_ALGO: 'ai_algo', WROKIT_VISION: 'wrokit_vision' };
 
 const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
 const magicTypeResolutionLog = new Set();
 
 
-function loadAIAlgoPreference(){
+function normalizeEngineType(raw){
+  if(EngineRegistry?.normalizeEngineType){
+    return EngineRegistry.normalizeEngineType(raw);
+  }
+  const value = String(raw || '').toLowerCase();
+  if(value === 'ai') return ENGINE_KIND.AI_ALGO;
+  if(value === ENGINE_KIND.AI_ALGO || value === ENGINE_KIND.WROKIT_VISION || value === ENGINE_KIND.LEGACY) return value;
+  return ENGINE_KIND.LEGACY;
+}
+
+function loadExtractionEnginePreference(){
   try {
-    return localStorage.getItem(AI_ALGO_TOGGLE_KEY) === '1';
+    return normalizeEngineType(localStorage.getItem(EXTRACTION_ENGINE_KEY));
   } catch(err){
-    return false;
+    return ENGINE_KIND.LEGACY;
   }
 }
 
-function persistAIAlgoPreference(enabled){
+function persistExtractionEnginePreference(engineType){
   try {
-    localStorage.setItem(AI_ALGO_TOGGLE_KEY, enabled ? '1' : '0');
+    localStorage.setItem(EXTRACTION_ENGINE_KEY, normalizeEngineType(engineType));
   } catch(err){ /* ignore */ }
 }
 
 function getConfiguredEngineType(){
-  return state.aiAlgoEnabled ? ENGINE_KIND.AI : ENGINE_KIND.LEGACY;
+  return normalizeEngineType(state.selectedEngineType);
 }
 
 function getProfileEngineType(profile){
-  const kind = String(profile?.engineType || profile?.engine || '').toLowerCase();
-  return kind === ENGINE_KIND.AI ? ENGINE_KIND.AI : ENGINE_KIND.LEGACY;
+  return normalizeEngineType(profile?.engineType || profile?.engine);
 }
 
-function shouldUseAIEngineForField(fieldSpec){
-  const fieldEngine = String(fieldSpec?.engineType || '').toLowerCase();
-  if(fieldEngine === ENGINE_KIND.AI) return true;
-  const profileEngine = getProfileEngineType(state.profile);
-  return profileEngine === ENGINE_KIND.AI;
+function resolveFieldEngineType(fieldSpec){
+  const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
+  if(fieldEngine !== ENGINE_KIND.LEGACY || String(fieldSpec?.engineType || '').toLowerCase() === ENGINE_KIND.LEGACY){
+    return fieldEngine;
+  }
+  return getProfileEngineType(state.profile);
 }
 
-function syncAIAlgoToggleUI(){
-  if(!els.aiAlgoToggle) return;
-  els.aiAlgoToggle.checked = !!state.aiAlgoEnabled;
+function syncExtractionEngineUI(){
+  if(!els.extractionEngineSelect) return;
+  els.extractionEngineSelect.value = getConfiguredEngineType();
 }
 
 function normalizeWizardId(raw){
@@ -1700,7 +1711,7 @@ let state = {
   builderEditingId: null,
   currentAreaRows: [],
   wizardComplete: false,
-  aiAlgoEnabled: loadAIAlgoPreference(),
+  selectedEngineType: loadExtractionEnginePreference(),
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
   debugSandbox: {
@@ -3582,7 +3593,7 @@ window.dumpMaster = function(){
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 9;
+const PROFILE_VERSION = 10;
 const PATTERN_BUNDLE_VERSION = 3;
 const PATTERN_STORE_KEY_PREFIX = 'wiz.patternBundle';
 const migrations = {
@@ -3733,6 +3744,12 @@ const migrations = {
       if(!field.engineType){
         field.engineType = p.engineType;
       }
+    });
+  },
+  9: p => {
+    p.engineType = normalizeEngineType(p.engineType || p.engine || ENGINE_KIND.LEGACY);
+    (p.fields || []).forEach(field => {
+      field.engineType = normalizeEngineType(field.engineType || p.engineType);
     });
   }
 };
@@ -9141,20 +9158,26 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
-  if(ftype === 'static' && shouldUseAIEngineForField(fieldSpec) && AIExtractionEngine?.extractScalar){
+  const fieldEngineType = resolveFieldEngineType(fieldSpec);
+  if(ftype === 'static' && fieldEngineType !== ENGINE_KIND.LEGACY){
     const resolvedBox = state.snappedPx || (fieldSpec.bbox
       ? applyTransform(toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}))
       : null);
     if(resolvedBox){
-      const aiResult = AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox });
-      return {
-        value: aiResult?.value || '',
-        raw: aiResult?.raw || aiResult?.value || '',
-        confidence: aiResult?.confidence || 0,
-        boxPx: aiResult?.boxPx || resolvedBox,
-        tokens: aiResult?.tokens || [],
-        method: aiResult?.method || 'ai'
-      };
+      const engineResult = EngineRegistry?.extractScalar
+        ? EngineRegistry.extractScalar(fieldEngineType, { fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox })
+        : (AIExtractionEngine?.extractScalar ? AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox }) : null);
+      if(engineResult){
+        return {
+          value: engineResult?.value || '',
+          raw: engineResult?.raw || engineResult?.value || '',
+          confidence: engineResult?.confidence || 0,
+          boxPx: engineResult?.boxPx || resolvedBox,
+          tokens: engineResult?.tokens || [],
+          method: engineResult?.method || fieldEngineType,
+          engineUsed: fieldEngineType
+        };
+      }
     }
   }
   const runMode = isRunMode();
@@ -12553,11 +12576,20 @@ const tokenProvider = (!isSkinV2 && window.LegacyTokenProviderAdapter?.createLeg
       };
 
 
-const extractionEngine = (!isSkinV2 && window.LegacyExtractionRuntimeAdapter?.createLegacyExtractionRuntime)
-  ? window.LegacyExtractionRuntimeAdapter.createLegacyExtractionRuntime({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
-  : window.EngineExtraction?.createExtractionEngine
-    ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
-    : null;
+const extractionEngineByType = new Map();
+function getRuntimeExtractionEngine(engineType){
+  const normalized = normalizeEngineType(engineType);
+  if(extractionEngineByType.has(normalized)) return extractionEngineByType.get(normalized);
+  const runtime = EngineRegistry?.createRuntime
+    ? EngineRegistry.createRuntime(normalized, { tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+    : ((!isSkinV2 && window.LegacyExtractionRuntimeAdapter?.createLegacyExtractionRuntime)
+      ? window.LegacyExtractionRuntimeAdapter.createLegacyExtractionRuntime({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+      : (window.EngineExtraction?.createExtractionEngine
+        ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
+        : null));
+  extractionEngineByType.set(normalized, runtime);
+  return runtime;
+}
 
 function normalizeFindTextInput(text){
   if(FindTextEngine?.normalizeFindTextInput) return FindTextEngine.normalizeFindTextInput(text);
@@ -17373,9 +17405,10 @@ els.ocrTraceToggle?.addEventListener('change', ()=>{
     startOcrTraceSession({ trigger: 'toggle' });
   }
 });
-els.aiAlgoToggle?.addEventListener('change', ()=>{
-  state.aiAlgoEnabled = !!els.aiAlgoToggle.checked;
-  persistAIAlgoPreference(state.aiAlgoEnabled);
+els.extractionEngineSelect?.addEventListener('change', ()=>{
+  state.selectedEngineType = normalizeEngineType(els.extractionEngineSelect.value);
+  persistExtractionEnginePreference(state.selectedEngineType);
+  syncExtractionEngineUI();
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
@@ -17542,19 +17575,21 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     : null;
   const extras = {};
   const activeConfigEngine = getConfiguredEngineType();
+  const engineConfigPayload = {
+    step,
+    normBox,
+    page: state.pageNum,
+    rawBox: rawBoxData,
+    viewport: vp
+  };
+  const engineOwnedConfig = EngineRegistry?.registerFieldConfig
+    ? EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload)
+    : {};
   const areaBoxForStep = isAreaStep
     ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }
     : getAreaSelection(areaKey);
   if(step.type === 'static'){
-    if(activeConfigEngine === ENGINE_KIND.AI && AIExtractionEngine?.registerField){
-      extras.aiConfig = AIExtractionEngine.registerField({
-        step,
-        normBox,
-        page: state.pageNum,
-        rawBox: rawBoxData,
-        viewport: vp
-      });
-    } else {
+    if(activeConfigEngine === ENGINE_KIND.LEGACY){
       const lm = captureRingLandmark(storedBoxPx);
       lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
       extras.landmark = lm;
@@ -17563,18 +17598,14 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       }
       extras.keywordRelations = keywordRelations || null;
       extras.keywordConstellation = keywordConstellation || null;
+    } else {
+      Object.assign(extras, engineOwnedConfig || {});
     }
   } else if(step.type === 'column'){
-    if(activeConfigEngine === ENGINE_KIND.AI && AIExtractionEngine?.registerField){
-      extras.aiConfig = AIExtractionEngine.registerField({
-        step,
-        normBox,
-        page: state.pageNum,
-        rawBox: rawBoxData,
-        viewport: vp
-      });
-    } else {
+    if(activeConfigEngine === ENGINE_KIND.LEGACY){
       extras.column = buildColumnModel(step, pct, boxPx, tokens);
+    } else {
+      Object.assign(extras, engineOwnedConfig || {});
     }
   }
   if(isAreaStep && areaBoxForStep){
@@ -18322,11 +18353,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         fields: profileFieldDiagnostics
       });
     }
-    const runExtractionEngine = extractionEngine?.orchestrate
-      ? extractionEngine
-      : (window.EngineExtraction?.createExtractionEngine
-        ? window.EngineExtraction.createExtractionEngine({ tokenProvider, profileStore, rawStore, compileEngine: window.EngineCompile || null })
-        : null);
+    const runtimeEngineType = getProfileEngineType(activeProfile || state.profile);
+    const runExtractionEngine = getRuntimeExtractionEngine(runtimeEngineType);
     if(!runExtractionEngine?.orchestrate){
       throw new Error('EngineExtraction.orchestrate is unavailable');
     }
@@ -18619,5 +18647,5 @@ initSnapshotMode();
 syncModeUi();
 syncStaticDebugToggleUI();
 syncOcrTraceToggleUI();
-syncAIAlgoToggleUI();
+syncExtractionEngineUI();
 bindChartReadyEvents();
