@@ -18,6 +18,7 @@ const StaticScoringEngine = window.EngineStaticScoring || null;
 const StaticRingLandmarkEngine = window.EngineStaticRingLandmark || {};
 const GeometryAnchors = window.EngineGeometryAnchors || {};
 const CompileEngine = window.EngineCompile || null;
+const AIExtractionEngine = window.EngineAIExtraction || null;
 
 const normalizeBox = GeometryBox.normalizeBox || ((boxPx, canvasW, canvasH) => ({
   x0n: boxPx.x / canvasW,
@@ -509,6 +510,7 @@ const els = {
   uploadBtn:       document.getElementById('upload-btn'),
   resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
+  aiAlgoToggle:    document.getElementById('ai-algo-toggle'),
   dropzone:        document.getElementById('dropzone'),
   fileInput:       document.getElementById('file-input'),
   staticDebugModal: document.getElementById('staticDebugModal'),
@@ -604,9 +606,47 @@ const DEFAULT_GEOMETRY_ID = 'geom0';
 const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
 const EXTRACTED_WIZARD_SELECTION_KEY = 'wiz.extractedSelection';
+const AI_ALGO_TOGGLE_KEY = 'wiz.aiAlgoEnabled';
+const ENGINE_KIND = { LEGACY: 'legacy', AI: 'ai' };
 
 const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
 const magicTypeResolutionLog = new Set();
+
+
+function loadAIAlgoPreference(){
+  try {
+    return localStorage.getItem(AI_ALGO_TOGGLE_KEY) === '1';
+  } catch(err){
+    return false;
+  }
+}
+
+function persistAIAlgoPreference(enabled){
+  try {
+    localStorage.setItem(AI_ALGO_TOGGLE_KEY, enabled ? '1' : '0');
+  } catch(err){ /* ignore */ }
+}
+
+function getConfiguredEngineType(){
+  return state.aiAlgoEnabled ? ENGINE_KIND.AI : ENGINE_KIND.LEGACY;
+}
+
+function getProfileEngineType(profile){
+  const kind = String(profile?.engineType || profile?.engine || '').toLowerCase();
+  return kind === ENGINE_KIND.AI ? ENGINE_KIND.AI : ENGINE_KIND.LEGACY;
+}
+
+function shouldUseAIEngineForField(fieldSpec){
+  const fieldEngine = String(fieldSpec?.engineType || '').toLowerCase();
+  if(fieldEngine === ENGINE_KIND.AI) return true;
+  const profileEngine = getProfileEngineType(state.profile);
+  return profileEngine === ENGINE_KIND.AI;
+}
+
+function syncAIAlgoToggleUI(){
+  if(!els.aiAlgoToggle) return;
+  els.aiAlgoToggle.checked = !!state.aiAlgoEnabled;
+}
 
 function normalizeWizardId(raw){
   if(raw === undefined || raw === null) return '';
@@ -1386,6 +1426,7 @@ async function captureVisualRunConfig(){
     viewport: clonePlain(vp),
     normBox: clonePlain(normBox)
   });
+  if(state.profile){ state.profile.engineType = activeConfigEngine; }
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   const savedField = state.profile?.fields?.find(f => f.fieldKey === step.fieldKey) || null;
   console.info('[visual-run][config] saved field geometry', {
@@ -1659,6 +1700,7 @@ let state = {
   builderEditingId: null,
   currentAreaRows: [],
   wizardComplete: false,
+  aiAlgoEnabled: loadAIAlgoPreference(),
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
   debugSandbox: {
@@ -3540,7 +3582,7 @@ window.dumpMaster = function(){
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 8;
+const PROFILE_VERSION = 9;
 const PATTERN_BUNDLE_VERSION = 3;
 const PATTERN_STORE_KEY_PREFIX = 'wiz.patternBundle';
 const migrations = {
@@ -3682,6 +3724,16 @@ const migrations = {
   },
   7: p => {
     p.masterDbConfig = buildMasterDbConfigFromProfile(p, p.masterDbConfig || null);
+  },
+  8: p => {
+    if(!p.engineType){
+      p.engineType = ENGINE_KIND.LEGACY;
+    }
+    (p.fields || []).forEach(field => {
+      if(!field.engineType){
+        field.engineType = p.engineType;
+      }
+    });
   }
 };
 
@@ -4090,6 +4142,7 @@ function saveCurrentProfileAsModel(){
     return;
   }
   ensureProfile();
+  if(!state.profile.engineType){ state.profile.engineType = getConfiguredEngineType(); }
   const id = `${state.username}:${state.docType}:${Date.now()}`;
   const wizardId = currentWizardId();
   const models = getModels();
@@ -6724,7 +6777,11 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
     };
   }) : [];
   const remapById = template ? Object.fromEntries((template.fields || []).map(f => [f.id, f.fieldKey])) : {};
-  if(existing){ remapProfileFieldKeys(existing, remapById, templateFields); }
+  if(existing){
+    remapProfileFieldKeys(existing, remapById, templateFields);
+    existing.engineType = getProfileEngineType(existing);
+    (existing.fields || []).forEach(field => { if(!field.engineType) field.engineType = existing.engineType; });
+  }
   const geometryIndex = getGeometryIndex(state.username, state.docType, resolvedWizardId, collectGeometryIdsForWizard(state.username, state.docType, resolvedWizardId));
   const geometryMeta = geometryIndex.find(m => m.geometryId === resolvedGeometryId) || normalizeGeometryMeta({ geometryId: resolvedGeometryId, displayName: `Layout ${geometryIndex.length + 1}` });
 
@@ -6735,7 +6792,8 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
     geometryId: resolvedGeometryId,
     geometry: geometryMeta,
     version: PROFILE_VERSION,
-    fields: templateFields,
+    engineType: getConfiguredEngineType(),
+    fields: templateFields.map(field => ({ ...field, engineType: getConfiguredEngineType() })),
     globals: [],
     landmarks: [
       // General identifiers
@@ -9083,6 +9141,22 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   async function extractFieldValue(fieldSpec, tokens, viewportPx){
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
+  if(ftype === 'static' && shouldUseAIEngineForField(fieldSpec) && AIExtractionEngine?.extractScalar){
+    const resolvedBox = state.snappedPx || (fieldSpec.bbox
+      ? applyTransform(toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}))
+      : null);
+    if(resolvedBox){
+      const aiResult = AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox });
+      return {
+        value: aiResult?.value || '',
+        raw: aiResult?.raw || aiResult?.value || '',
+        confidence: aiResult?.confidence || 0,
+        boxPx: aiResult?.boxPx || resolvedBox,
+        tokens: aiResult?.tokens || [],
+        method: aiResult?.method || 'ai'
+      };
+    }
+  }
   const runMode = isRunMode();
   const staticRun = runMode && ftype === 'static';
   const visualRunActive = staticRun && !!state.visualRun?.active;
@@ -15645,6 +15719,7 @@ function renderReports(){
 /* ---------------------- Profile save / table --------------------- */
 function upsertFieldInProfile(step, normBox, value, confidence, page, extras={}, raw='', corrections=[], tokens=[], rawBox=null) {
   ensureProfile();
+  if(!state.profile.engineType){ state.profile.engineType = getConfiguredEngineType(); }
   const prevGeomSnapshot = snapshotProfileGeometry(state.profile);
   const existing = state.profile.fields.find(f => f.fieldKey === step.fieldKey);
   const pctBox = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
@@ -15719,12 +15794,16 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     correctionsApplied: corrections,
     tokens,
     magicDataType: normalizeMagicDataType(step.magicDataType || step.magicType),
-    magicType: normalizeMagicDataType(step.magicDataType || step.magicType)
+    magicType: normalizeMagicDataType(step.magicDataType || step.magicType),
+    engineType: state.profile.engineType || getConfiguredEngineType()
   };
   if(extras.lineMetrics){
     entry.lineMetrics = clonePlain(extras.lineMetrics);
     if(extras.lineMetrics.lineCount !== undefined) entry.lineCount = extras.lineMetrics.lineCount;
     if(extras.lineMetrics.lineHeights) entry.lineHeights = clonePlain(extras.lineMetrics.lineHeights);
+  }
+  if(extras.aiConfig){
+    entry.aiConfig = clonePlain(extras.aiConfig);
   }
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
@@ -17294,6 +17373,10 @@ els.ocrTraceToggle?.addEventListener('change', ()=>{
     startOcrTraceSession({ trigger: 'toggle' });
   }
 });
+els.aiAlgoToggle?.addEventListener('change', ()=>{
+  state.aiAlgoEnabled = !!els.aiAlgoToggle.checked;
+  persistAIAlgoPreference(state.aiAlgoEnabled);
+});
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
   if(els.ocrTraceToggle){
@@ -17458,20 +17541,41 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     ? KeywordConstellation.captureConstellation(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH, pageTokens, {})
     : null;
   const extras = {};
+  const activeConfigEngine = getConfiguredEngineType();
   const areaBoxForStep = isAreaStep
     ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }
     : getAreaSelection(areaKey);
   if(step.type === 'static'){
-    const lm = captureRingLandmark(storedBoxPx);
-    lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
-    extras.landmark = lm;
-    if(state.snappedLineMetrics){
-      extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+    if(activeConfigEngine === ENGINE_KIND.AI && AIExtractionEngine?.registerField){
+      extras.aiConfig = AIExtractionEngine.registerField({
+        step,
+        normBox,
+        page: state.pageNum,
+        rawBox: rawBoxData,
+        viewport: vp
+      });
+    } else {
+      const lm = captureRingLandmark(storedBoxPx);
+      lm.anchorHints = ANCHOR_HINTS[step.fieldKey] || [];
+      extras.landmark = lm;
+      if(state.snappedLineMetrics){
+        extras.lineMetrics = clonePlain(state.snappedLineMetrics);
+      }
+      extras.keywordRelations = keywordRelations || null;
+      extras.keywordConstellation = keywordConstellation || null;
     }
-    extras.keywordRelations = keywordRelations || null;
-    extras.keywordConstellation = keywordConstellation || null;
   } else if(step.type === 'column'){
-    extras.column = buildColumnModel(step, pct, boxPx, tokens);
+    if(activeConfigEngine === ENGINE_KIND.AI && AIExtractionEngine?.registerField){
+      extras.aiConfig = AIExtractionEngine.registerField({
+        step,
+        normBox,
+        page: state.pageNum,
+        rawBox: rawBoxData,
+        viewport: vp
+      });
+    } else {
+      extras.column = buildColumnModel(step, pct, boxPx, tokens);
+    }
   }
   if(isAreaStep && areaBoxForStep){
     extras.areaBox = areaBoxForStep;
@@ -17490,6 +17594,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       }
     }
   }
+  if(state.profile){ state.profile.engineType = activeConfigEngine; }
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
@@ -18514,4 +18619,5 @@ initSnapshotMode();
 syncModeUi();
 syncStaticDebugToggleUI();
 syncOcrTraceToggleUI();
+syncAIAlgoToggleUI();
 bindChartReadyEvents();
