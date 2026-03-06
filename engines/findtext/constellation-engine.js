@@ -128,36 +128,105 @@
     return { pass: dxErr <= tolerance && dyErr <= tolerance, error: dxErr + dyErr, dxErr, dyErr };
   }
 
-  function matchConstellation(constellation, tokens, opts = {}){
-    if(!constellation || !Array.isArray(tokens)) return null;
-    const tolerance = Number.isFinite(opts.tolerance) ? opts.tolerance : (constellation.tolerance || DEFAULT_TOLERANCE);
-    const page = opts.page || constellation.page || tokens[0]?.page || 1;
-    const pageW = opts.pageW || 1;
-    const pageH = opts.pageH || 1;
-    const maxResults = Math.max(1, opts.maxResults || 1);
-    const normalizeKeywordText = opts.normalizeKeywordText || defaultNormalizeKeywordText;
+  function levenshteinDistance(a = '', b = ''){
+    const s = String(a || '');
+    const t = String(b || '');
+    if(s === t) return 0;
+    if(!s.length) return t.length;
+    if(!t.length) return s.length;
+    const prev = new Array(t.length + 1);
+    const curr = new Array(t.length + 1);
+    for(let j=0; j<=t.length; j++) prev[j] = j;
+    for(let i=1; i<=s.length; i++){
+      curr[0] = i;
+      for(let j=1; j<=t.length; j++){
+        const cost = s[i-1] === t[j-1] ? 0 : 1;
+        curr[j] = Math.min(prev[j] + 1, curr[j-1] + 1, prev[j-1] + cost);
+      }
+      for(let j=0; j<=t.length; j++) prev[j] = curr[j];
+    }
+    return prev[t.length];
+  }
 
-    const anchorNorm = normalizeKeywordText(constellation.anchor?.normText || constellation.anchor?.text || '');
-    if(!anchorNorm) return null;
+  function isCompatibleNormText(expectedNorm, candidateNorm){
+    const expected = String(expectedNorm || '');
+    const candidate = String(candidateNorm || '');
+    if(!expected || !candidate) return false;
+    if(expected === candidate) return true;
+    if(expected.length >= 4 && candidate.includes(expected)) return true;
+    if(candidate.length >= 4 && expected.includes(candidate)) return true;
+    const maxLen = Math.max(expected.length, candidate.length);
+    if(maxLen <= 3) return false;
+    return levenshteinDistance(expected, candidate) <= 1;
+  }
 
-    const tokenPool = tokens
-      .filter(t => !t.page || !page || t.page === page)
-      .map(t => ({ token: t, normText: normalizeKeywordText(t.text || t.raw || ''), center: centerNorm(t, pageW, pageH) }));
+  function median(values = []){
+    const nums = values.filter(v => Number.isFinite(v));
+    if(!nums.length) return 0;
+    const sorted = nums.slice().sort((a,b)=>a-b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+  }
 
-    const anchorCandidates = tokenPool.filter(t => t.normText === anchorNorm);
-    if(!anchorCandidates.length) return null;
+  function estimateBridgeOffset(constellation, tokenPool, textMatcher){
+    const descriptors = [
+      constellation.anchor ? { normText: constellation.anchor.normText || constellation.anchor.text || '', center: constellation.anchor.center } : null,
+      ...((constellation.supports || []).map(s => ({ normText: s.normText || s.text || '', center: s.center })))
+    ].filter(Boolean);
+    if(!descriptors.length) return { dx: 0, dy: 0, samples: 0 };
+    const deltas = [];
+    for(const desc of descriptors){
+      const matches = tokenPool.filter(t => textMatcher(desc.normText, t.normText));
+      if(!matches.length) continue;
+      let best = null;
+      for(const cand of matches){
+        const dx = (cand.center.x || 0) - (desc.center?.x || 0);
+        const dy = (cand.center.y || 0) - (desc.center?.y || 0);
+        const err = Math.hypot(dx, dy);
+        if(!best || err < best.err){ best = { dx, dy, err }; }
+      }
+      if(best) deltas.push(best);
+    }
+    if(!deltas.length) return { dx: 0, dy: 0, samples: 0 };
+    return { dx: median(deltas.map(d => d.dx)), dy: median(deltas.map(d => d.dy)), samples: deltas.length };
+  }
+
+  function computeConstellationMatches(constellation, tokenPool, opts = {}){
+    const {
+      tolerance,
+      totalEdges,
+      page,
+      pageW,
+      pageH,
+      anchorMatcher,
+      supportMatcher,
+      bridgeOffset = { dx: 0, dy: 0 },
+      minAnchorDistance = null
+    } = opts;
+    const anchorNorm = (constellation.anchor?.normText || constellation.anchor?.text || '').toString();
+    let anchorCandidates = tokenPool.filter(t => anchorMatcher(anchorNorm, t.normText));
+    if(!anchorCandidates.length && Number.isFinite(minAnchorDistance)){
+      const expected = {
+        x: (constellation.anchor?.center?.x || 0) + (bridgeOffset.dx || 0),
+        y: (constellation.anchor?.center?.y || 0) + (bridgeOffset.dy || 0)
+      };
+      anchorCandidates = tokenPool
+        .map(t => ({ ...t, __dist: Math.hypot((t.center.x || 0) - expected.x, (t.center.y || 0) - expected.y) }))
+        .filter(t => t.__dist <= minAnchorDistance)
+        .sort((a,b)=> a.__dist - b.__dist)
+        .slice(0, 3);
+    }
+    if(!anchorCandidates.length) return [];
 
     const matches = [];
-    const totalEdges = 1 + (constellation.supports?.length || 0) + (constellation.crossLinks?.length || 0);
-
     for(const anchorCand of anchorCandidates){
       const supportMatches = [];
       let matchedEdges = 1;
       let errorSum = 0;
 
-      constellation.supports.forEach((supportDesc, idx) => {
+      (constellation.supports || []).forEach((supportDesc, idx) => {
         const expectedDelta = supportDesc.anchorDelta;
-        const candidates = tokenPool.filter(c => c.normText === supportDesc.normText);
+        const candidates = tokenPool.filter(c => supportMatcher(supportDesc.normText, c.normText));
         let bestCandidate = null;
         for(const cand of candidates){
           const actualDelta = delta(anchorCand.center, cand.center);
@@ -214,10 +283,68 @@
         supportMatches: supportMatches.filter(Boolean)
       });
     }
+    return matches;
+  }
+
+  function matchConstellation(constellation, tokens, opts = {}){
+    if(!constellation || !Array.isArray(tokens)) return null;
+    const toleranceBase = Number.isFinite(opts.tolerance) ? opts.tolerance : (constellation.tolerance || DEFAULT_TOLERANCE);
+    const page = opts.page || constellation.page || tokens[0]?.page || 1;
+    const pageW = opts.pageW || 1;
+    const pageH = opts.pageH || 1;
+    const maxResults = Math.max(1, opts.maxResults || 1);
+    const normalizeKeywordText = opts.normalizeKeywordText || defaultNormalizeKeywordText;
+    const source = String(opts.source || opts.tokenSource || '').toLowerCase();
+    const bridgeEnabled = opts.enableCrossSourceBridge !== false;
+
+    const anchorNorm = normalizeKeywordText(constellation.anchor?.normText || constellation.anchor?.text || '');
+    if(!anchorNorm) return null;
+
+    const tokenPool = tokens
+      .filter(t => !t.page || !page || t.page === page)
+      .map(t => ({ token: t, normText: normalizeKeywordText(t.text || t.raw || ''), center: centerNorm(t, pageW, pageH) }));
+
+    const totalEdges = 1 + (constellation.supports?.length || 0) + (constellation.crossLinks?.length || 0);
+    const strictMatcher = (expected, actual) => expected === actual;
+    const compatMatcher = (expected, actual) => isCompatibleNormText(expected, actual);
+
+    let matches = computeConstellationMatches(constellation, tokenPool, {
+      tolerance: toleranceBase,
+      totalEdges,
+      page,
+      pageW,
+      pageH,
+      anchorMatcher: strictMatcher,
+      supportMatcher: strictMatcher
+    });
+
+    const strictBest = matches[0] || null;
+    const strictStrong = !!(strictBest && strictBest.matchedEdges >= Math.max(2, Math.ceil(totalEdges * 0.5)));
+
+    if((!strictStrong || !matches.length) && bridgeEnabled){
+      const sourceToleranceBoost = source.includes('tesseract') ? 2.5 : 1.8;
+      const bridgeTolerance = Math.max(toleranceBase * sourceToleranceBoost, toleranceBase + 0.01);
+      const bridgeOffset = estimateBridgeOffset(constellation, tokenPool, compatMatcher);
+      const bridgedMatches = computeConstellationMatches(constellation, tokenPool, {
+        tolerance: bridgeTolerance,
+        totalEdges,
+        page,
+        pageW,
+        pageH,
+        anchorMatcher: compatMatcher,
+        supportMatcher: compatMatcher,
+        bridgeOffset,
+        minAnchorDistance: 0.12
+      }).map(m => ({ ...m, bridgeApplied: true, bridgeOffset, bridgeTolerance }));
+      if(bridgedMatches.length){
+        matches = matches.concat(bridgedMatches);
+      }
+    }
 
     matches.sort((a,b)=> (b.matchedEdges - a.matchedEdges) || (a.errorSum - b.errorSum));
     return { best: matches[0] || null, matches: matches.slice(0, maxResults) };
   }
+
 
   return {
     BASE_RADIUS,

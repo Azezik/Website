@@ -40,4 +40,39 @@ function makeToken(x, y, text, page=1){
   assert.ok(Math.abs(predicted.h - fieldBoxPx.h) < 0.001, 'height should be preserved');
 })();
 
+
+(function testCrossSourceBridgeWithOcrLikeTokens(){
+  const pageW = 200;
+  const pageH = 200;
+  const fieldBoxPx = { x: 100, y: 100, w: 20, h: 10, page: 1 };
+  const normBox = { x0n: fieldBoxPx.x / pageW, y0n: fieldBoxPx.y / pageH, wN: fieldBoxPx.w / pageW, hN: fieldBoxPx.h / pageH };
+  const tokens = [
+    makeToken(80, 100, 'Total'),
+    makeToken(60, 120, 'Subtotal'),
+    makeToken(100, 80, 'HST'),
+    makeToken(20, 150, 'Balance')
+  ];
+  const constellation = captureConstellation('invoice_total', fieldBoxPx, normBox, 1, pageW, pageH, tokens, {});
+  assert.ok(constellation, 'constellation should be captured for bridge test');
+
+  const ocrLikeTokens = [
+    makeToken(95, 108, 'T0tal'),
+    makeToken(75, 128, 'Subt0tal'),
+    makeToken(115, 88, 'H5T'),
+    makeToken(35, 158, 'Balancc')
+  ];
+
+  const bridged = matchConstellation(constellation, ocrLikeTokens, {
+    page: 1,
+    pageW,
+    pageH,
+    tolerance: DEFAULT_TOLERANCE,
+    source: 'tesseract-bbox'
+  });
+
+  assert.ok(bridged && bridged.best, 'bridge should match OCR-like token variations');
+  assert.ok(bridged.best.matchedEdges >= 3, 'bridge should recover enough constellation edges');
+  assert.ok(bridged.best.bridgeApplied, 'bridge flag should be set when reconciliation pass is used');
+})();
+
 console.log('Keyword constellation tests passed.');

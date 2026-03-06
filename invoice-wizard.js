@@ -1558,6 +1558,9 @@ let state = {
   pageOffsets: [],         // y-offset of each page within pdfCanvas
   tokensByPage: [],          // {page:number: Token[] in px}
   tessTokensByPage: {},      // tesseract tokens per page
+  acroTokensByPage: {},
+  pdfTextTokenCountByPage: {},
+  currentTokenSourceByPage: {},
   keywordIndexByPage: {},   // per-page keyword bbox cache
   areaMatchesByPage: {},    // per-page detected area occurrences
   areaOccurrencesById: {},  // area occurrences keyed by areaId
@@ -2058,7 +2061,7 @@ function clearTransientStateLocal(){
   state.telemetry = []; state.currentTraceId = null;
   state.lastOcrCropPx = null; state.lastOcrCropCss = null;
   state.cropAudits = []; state.cropHashes = {};
-  state.tokensByPage = []; state.tessTokensByPage = {}; state.currentLineItems = [];
+  state.tokensByPage = []; state.tessTokensByPage = {}; state.acroTokensByPage = {}; state.pdfTextTokenCountByPage = {}; state.currentTokenSourceByPage = {}; state.currentLineItems = [];
   state.areaMatchesByPage = {}; state.areaOccurrencesById = {}; state.areaExtractions = {}; state.currentAreaRows = [];
   state.currentFileId = ''; state.currentFileName = '';
   state.lineLayout = null;
@@ -4337,6 +4340,50 @@ const toPx = (vp, pctBox) => {
   return { x, y, w: wPx, h: hPx, page: pctBox.page };
 };
 
+
+function resolveConfigPageHeightForField(fieldSpec){
+  const rawH = Number(fieldSpec?.rawBox?.canvasH);
+  if(Number.isFinite(rawH) && rawH > 0) return rawH;
+  const anchorH = Number(fieldSpec?.anchorMetrics?.pageHeightPx);
+  if(Number.isFinite(anchorH) && anchorH > 0) return anchorH;
+  const cfg = fieldSpec?.configBox || null;
+  if(cfg){
+    const y0 = Number.isFinite(cfg.y0) ? cfg.y0 : Number(cfg[1]);
+    const y1 = Number.isFinite(cfg.y1) ? cfg.y1 : Number(cfg[3]);
+    if(Number.isFinite(y0) && Number.isFinite(y1) && y1 > y0){
+      const hN = Math.max(0.0001, y1 - y0);
+      const boxH = Number.isFinite(fieldSpec?.rawBox?.h) ? fieldSpec.rawBox.h : null;
+      if(Number.isFinite(boxH) && boxH > 0){ return boxH / hN; }
+    }
+  }
+  return null;
+}
+
+function adjustBoxForHeightMismatch(boxPx, fieldSpec, viewportDims, runtime = {}){
+  if(!isRunMode() || !boxPx || !fieldSpec || !viewportDims) return { boxPx, ratio: 1, adjusted: false };
+  const configHeight = resolveConfigPageHeightForField(fieldSpec);
+  const renderHeight = Number(viewportDims.height || viewportDims.h || 0);
+  if(!Number.isFinite(configHeight) || configHeight <= 0 || !Number.isFinite(renderHeight) || renderHeight <= 0){
+    return { boxPx, ratio: 1, adjusted: false };
+  }
+  const ratio = renderHeight / configHeight;
+  if(!Number.isFinite(ratio) || Math.abs(1 - ratio) <= 0.08){
+    return { boxPx, ratio: Number.isFinite(ratio) ? ratio : 1, adjusted: false };
+  }
+  const adjustedBox = { ...boxPx, y: boxPx.y * ratio, h: boxPx.h * ratio };
+  if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
+    logStaticDebug(`bbox-y-rescale field=${fieldSpec.fieldKey||''} page=${boxPx.page||''} ratio=${ratio.toFixed(3)} configH=${Math.round(configHeight)} renderH=${Math.round(renderHeight)}`,
+      { field: fieldSpec.fieldKey, ratio, configHeight, renderHeight, before: boxPx, after: adjustedBox, runtime });
+  }
+  return { boxPx: adjustedBox, ratio, adjusted: true };
+}
+
+function stripLeadingOcrArtifacts(text){
+  const src = String(text || '');
+  if(!src) return src;
+  return src.replace(/^\s*[|£¦`~_]+\s*/u, '').replace(/^\s*N\s+(?=[A-Za-z])/u, '');
+}
+
 const toPct = (vp, pxBox) => {
   const w = ((vp.w ?? vp.width) || 1);
   const h = ((vp.h ?? vp.height) || 1);
@@ -4878,6 +4925,9 @@ function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
   }));
   const matches = edgeStats.filter(e => e.within).length;
   const nearMisses = edgeStats.filter(e => !e.within && e.soft).length;
+  const topEdge = edgeStats.find(e => e.label === 'top');
+  const bottomEdge = edgeStats.find(e => e.label === 'bottom');
+  const verticalHardFail = !!(topEdge && bottomEdge && !topEdge.soft && !bottomEdge.soft);
   const textMatch = Number.isFinite(expectedText) && Number.isFinite(candidate.textHeightPx)
     ? Math.abs(candidate.textHeightPx - expectedText) <= softTolerance
     : false;
@@ -4891,8 +4941,8 @@ function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
   if(!ok && matches === required - 1 && textMatch){
     ok = true;
   }
-  const softOk = !ok && (matches + nearMisses >= required || textMatch);
-  const status = ok ? 'ok' : (softOk ? 'soft' : 'fail');
+  const softOk = !ok && !verticalHardFail && (matches + nearMisses >= required || textMatch);
+  const status = verticalHardFail ? 'reject' : (ok ? 'ok' : (softOk ? 'soft' : 'fail'));
   if(staticDebugEnabled() && debugCtx?.enabled){
     const annotated = distances.map(d => {
       const ready = Number.isFinite(d.expected) && Number.isFinite(d.actual);
@@ -4908,7 +4958,10 @@ function anchorMetricsSatisfied(saved, candidate, debugCtx=null){
       `field=${debugCtx.fieldKey||''} page=${debugCtx.page||''} anchors: ${annotated}, height=${heightStatus} tol=${Math.round(tolerance)} soft=${Math.round(softTolerance)} viewport=${Math.round(targetWidth)}x${Math.round(targetHeight)} -> status=${status}`
     );
   }
-  return { ok, softOk, status, matches, textMatch, tolerance, nearMisses };
+  if(verticalHardFail){
+    return { ok: false, softOk: false, status, matches, textMatch, tolerance, nearMisses, verticalHardFail: true };
+  }
+  return { ok, softOk, status, matches, textMatch, tolerance, nearMisses, verticalHardFail: false };
 }
 
 function anchorMatchForBox(savedMetrics, box, tokens, viewportW, viewportH, debugCtx=null){
@@ -9359,7 +9412,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       return null;
     }
     if(multilineValue){
-      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', multilineValue, state.mode, spanKey);
+      const sanitizedMultiline = runtimeTokenSource.includes('tesseract') ? stripLeadingOcrArtifacts(multilineValue) : multilineValue;
+      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', sanitizedMultiline, state.mode, spanKey);
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
       const baseText = cleaned.value || cleaned.raw || multilineValue || '';
       if(baseText && searchBox){
@@ -9459,6 +9513,12 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       return attemptResult;
     }
     let sel = selectionFirst(hits, h=>FieldDataEngine.clean(fieldSpec.fieldKey||'', h, state.mode, spanKey));
+    if(runtimeTokenSource.includes('tesseract') && sel?.raw){
+      const sanitizedSelRaw = stripLeadingOcrArtifacts(sel.raw);
+      if(sanitizedSelRaw !== sel.raw){
+        sel = { ...sel, raw: sanitizedSelRaw, value: sanitizedSelRaw };
+      }
+    }
     let cleaned = sel.cleaned || {};
     cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: searchBox });
     const baseText = cleaned.value || cleaned.raw || sel.raw || '';
@@ -9491,6 +9551,11 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       confidence = lineAdj.confidence;
     }
     confidence = clamp(confidence * anchorFactor, 0, 1);
+    const verticalDrift = Number.isFinite(hintDistance) ? Math.abs(hintDistance) : 0;
+    if(verticalDrift > 24){
+      const driftPenalty = Math.max(0.55, 1 - Math.min(0.35, (verticalDrift - 24) / 220));
+      confidence = clamp(confidence * driftPenalty, 0, 1);
+    }
     const lineInfo = computeLineDiff(observedLineCount, lineAdj?.expected);
     const attemptResult = {
       value: sel.value,
@@ -9612,7 +9677,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           })
         : Math.max(0, 1 - (distNorm / maxRadius)) * baseBias * hintPenalty;
       const rawText = candTokens.map(t=>t.text).join(' ').trim();
-      let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', rawText, state.mode, spanKey);
+      const sanitizedRawText = runtimeTokenSource.includes('tesseract') ? stripLeadingOcrArtifacts(rawText) : rawText;
+    let cleaned = FieldDataEngine.clean(fieldSpec.fieldKey||'', sanitizedRawText, state.mode, spanKey);
       cleaned = verifyCleanedValue(cleaned, { fieldKey: fieldSpec.fieldKey, boxPx: box });
       const fingerprintOk = fingerprintMatches(fieldSpec.fieldKey||'', cleaned.code, state.mode, fieldSpec.fieldKey, null);
       const anchorRes = anchorMatchForBox(fieldSpec.anchorMetrics, box, candTokens, viewportDims.width, viewportDims.height);
@@ -9744,6 +9810,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   let selectionRaw = '';
   let firstAttempt = null;
   const keywordConstellation = staticRun ? (fieldSpec.keywordConstellation || null) : null;
+  const runtimeTokenSource = String(fieldSpec?.runtime?.tokenSource || '').toLowerCase();
+  const runtimeKeywordMatches = Number(fieldSpec?.runtime?.keywordMatchCount);
+  const keywordDegradedMode = staticRun && runtimeTokenSource.includes('tesseract') && runtimeKeywordMatches === 0;
   const recordHintCandidate = cand => {
     if(!cand || !cand.boxPx) return;
     const dist = cand.hintDistance ?? distanceToHint(cand.boxPx);
@@ -9758,7 +9827,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   };
   if(fieldSpec.bbox){
     const raw = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
-    basePx = applyTransform(raw);
+    const adjustedBase = adjustBoxForHeightMismatch(raw, fieldSpec, viewportDims, fieldSpec.runtime);
+    basePx = applyTransform(adjustedBase.boxPx || raw);
     console.info('[visual-run][extract] base box from profile bbox', {
       fieldKey: fieldSpec.fieldKey,
       rawPx: clonePlain(raw),
@@ -9771,7 +9841,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       const cy1 = Number.isFinite(fieldSpec.configBox.y1) ? fieldSpec.configBox.y1 : fieldSpec.configBox[3];
       if([cx0, cy0, cx1, cy1].every(v => typeof v === 'number' && Number.isFinite(v))){
         const anchorRaw = toPx(viewportPx, { x0: cx0, y0: cy0, x1: cx1, y1: cy1, page: fieldSpec.page });
-        anchorBox = applyTransform(anchorRaw);
+        const adjustedAnchor = adjustBoxForHeightMismatch(anchorRaw, fieldSpec, viewportDims, fieldSpec.runtime);
+        anchorBox = applyTransform(adjustedAnchor.boxPx || anchorRaw);
       }
     }
     if(!anchorBox){
@@ -9802,7 +9873,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         page,
         pageW,
         pageH,
-        maxResults: 3
+        maxResults: 3,
+        source: runtimeTokenSource || fieldSpec?.runtime?.tokenSource || null
       });
       if(constellationContext?.best?.predictedBoxPx){
         constellationBox = constellationContext.best.predictedBoxPx;
@@ -9946,7 +10018,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         result = firstAttempt; method='bbox'; stageUsed.value = lineInfo.lineDiff; hintLocked = true;
       }
       if(!hintLocked){
-        const pads = isConfigMode() ? [4] : (visualRunActive ? [2,4,6] : [4,8,12]);
+        const pads = isConfigMode() ? [4] : (visualRunActive ? [2,4,6] : (keywordDegradedMode ? [4,8] : [4,8,12]));
         for(const pad of pads){
           const search = { x: basePx.x - pad, y: basePx.y - pad, w: basePx.w + pad*2, h: basePx.h + pad*2, page: basePx.page };
           const r = await attempt(search);
@@ -9966,10 +10038,11 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         }
       }
       if(!hintLocked && staticRun && !visualRunActive){
-        const verticalFactors = [0.5, 1, 1.5];
+        const verticalFactors = keywordDegradedMode ? [0.5, 1] : [0.5, 1, 1.5];
         for(const factor of verticalFactors){
           for(const dir of [-1,1]){
             const delta = basePx.h * factor * dir;
+            if(keywordDegradedMode && Math.abs(delta) > 24){ continue; }
             const vy = Math.max(0, basePx.y + delta);
             const vh = basePx.h;
             const probe = { x: basePx.x - 2, y: vy, w: basePx.w + 4, h: vh, page: basePx.page };
@@ -11129,6 +11202,54 @@ async function flattenAcroFormAppearances(arrayBuffer){
   }
 }
 
+
+async function preloadAcroFormTokensFromBuffer(arrayBuffer){
+  if(!pdfjsLibRef?.getDocument || !bufferLikelyHasAcroForm(arrayBuffer)){
+    state.acroTokensByPage = {};
+    return { pages: 0, tokens: 0, loaded: false };
+  }
+  const data = toPdfData(arrayBuffer);
+  if(!data){
+    state.acroTokensByPage = {};
+    return { pages: 0, tokens: 0, loaded: false };
+  }
+  let loadingTask = null;
+  try {
+    loadingTask = pdfjsLibRef.getDocument({ data });
+    const doc = await loadingTask.promise;
+    const byPage = {};
+    let tokenCount = 0;
+    for(let pageNum=1; pageNum<=doc.numPages; pageNum++){
+      const page = await doc.getPage(pageNum);
+      const vpRaw = page.getViewport({ scale: BASE_PDF_SCALE });
+      const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height, pageNumber: pageNum };
+      const annotations = await page.getAnnotations({ intent: 'display' });
+      const tokens = [];
+      for(const ann of (annotations || [])){
+        if(!ann || ann.subtype !== 'Widget') continue;
+        const value = normalizeAcroFieldValue(ann.fieldValue ?? ann.buttonValue ?? ann.defaultFieldValue ?? ann.richTextValue ?? '');
+        if(!value) continue;
+        const box = annotationRectToTokenBox(ann.rect, vp);
+        if(!box) continue;
+        tokens.push(...splitAcroValueIntoTokens(value, box, pageNum, ann));
+      }
+      byPage[pageNum] = tokens;
+      tokenCount += tokens.length;
+    }
+    state.acroTokensByPage = byPage;
+    if(tokenCount){
+      logStaticDebug('acroform prepass', { pages: Object.keys(byPage).length, tokens: tokenCount });
+    }
+    return { pages: Object.keys(byPage).length, tokens: tokenCount, loaded: true };
+  } catch(err){
+    console.warn('AcroForm prepass failed', err);
+    state.acroTokensByPage = {};
+    return { pages: 0, tokens: 0, loaded: false, error: err?.message || String(err) };
+  } finally {
+    try { await loadingTask?.destroy?.(); } catch(_err) {}
+  }
+}
+
 function toPdfData(buffer){
   if(!buffer) return null;
   if(buffer instanceof Uint8Array) return buffer;
@@ -11185,6 +11306,9 @@ async function openFile(file){
   state.currentFileId = hashHex;
   fileMeta[state.currentFileId] = { fileName: state.currentFileName };
   rawStore.clear(state.currentFileId);
+  state.currentTokenSourceByPage = {};
+  state.acroTokensByPage = {};
+  state.pdfTextTokenCountByPage = {};
   const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
 
@@ -11208,6 +11332,7 @@ async function openFile(file){
   els.imgCanvas.style.display = 'none';
   els.pdfCanvas.style.display = 'block';
   try {
+    await preloadAcroFormTokensFromBuffer(arrayBuffer);
     const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
     await debugCompareFlattenOutputs(arrayBuffer, pdfBuffer);
     const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
@@ -11235,6 +11360,8 @@ function cleanupDoc(){
   state.tokensByPage = [];
   state.tessTokensByPage = {};
   state.tessTokensByPageBBox = {};
+  state.acroTokensByPage = {};
+  state.pdfTextTokenCountByPage = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -11324,6 +11451,7 @@ async function prepareRunDocument(file){
     }
   }
 
+  await preloadAcroFormTokensFromBuffer(arrayBuffer);
   const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
   const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
   state.pdf = await loadingTask.promise;
@@ -11338,8 +11466,12 @@ async function prepareRunDocument(file){
     const rawTokens = await readTokensForPage(page, vp);
     // pdf.js text items may be non-extensible in some browsers; clone before annotating
     const tokens = rawTokens.map(t => ({ ...t, page: i }));
-    state.tokensByPage[i] = tokens;
-    await buildKeywordIndexForPage(i, tokens, vp);
+    if(!state.pdfTextTokenCountByPage) state.pdfTextTokenCountByPage = {};
+    state.pdfTextTokenCountByPage[i] = tokens.length;
+    const acroTokens = await readAcroFormTokensForPage(i, page, vp);
+    const mergedTokens = mergePdfAndAcroTokens(tokens, acroTokens);
+    state.tokensByPage[i] = mergedTokens;
+    await buildKeywordIndexForPage(i, mergedTokens, vp);
     if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
     totalH += vp.height;
   }
@@ -12171,6 +12303,101 @@ async function maybePatchAnyFieldText({ text, fieldKey, boxPx, pageNum, pageCanv
 }
 
 /* ----------------------- Text Extraction ------------------------- */
+
+function normalizeAcroFieldValue(value){
+  if(value === null || value === undefined) return '';
+  const text = Array.isArray(value) ? value.join(' ') : String(value);
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function annotationRectToTokenBox(rect, viewport){
+  if(!Array.isArray(rect) || rect.length < 4 || !viewport) return null;
+  try {
+    const converted = typeof viewport.convertToViewportRectangle === 'function'
+      ? viewport.convertToViewportRectangle(rect)
+      : rect;
+    if(!Array.isArray(converted) || converted.length < 4) return null;
+    const x0 = Math.min(converted[0], converted[2]);
+    const y0 = Math.min(converted[1], converted[3]);
+    const x1 = Math.max(converted[0], converted[2]);
+    const y1 = Math.max(converted[1], converted[3]);
+    const w = Math.max(0, x1 - x0);
+    const h = Math.max(0, y1 - y0);
+    if(!Number.isFinite(x0) || !Number.isFinite(y0) || w <= 0 || h <= 0) return null;
+    return { x: x0, y: y0, w, h };
+  } catch(err){
+    console.warn('AcroForm rectangle conversion failed', err);
+    return null;
+  }
+}
+
+function splitAcroValueIntoTokens(valueText, box, pageNum, annotation = null){
+  if(!valueText || !box) return [];
+  const lines = valueText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const parts = lines.length ? lines : [valueText];
+  const lineH = Math.max(8, box.h / parts.length);
+  return parts.map((line, idx) => ({
+    text: line,
+    raw: line,
+    x: box.x,
+    y: box.y + Math.min(box.h - lineH, idx * lineH),
+    w: box.w,
+    h: Math.min(box.h, lineH),
+    page: pageNum,
+    source: 'acroform',
+    acroFieldName: annotation?.fieldName || annotation?.alternativeText || '',
+    acroFieldType: annotation?.fieldType || annotation?.checkBox || ''
+  }));
+}
+
+async function readAcroFormTokensForPage(pageNum, pageObj=null, vp=null){
+  if(state.isImage || !state.pdf) return [];
+  if(state.acroTokensByPage?.[pageNum]) return state.acroTokensByPage[pageNum];
+  let page = pageObj;
+  let viewport = vp;
+  if(!page) page = await state.pdf.getPage(pageNum);
+  if(!viewport) viewport = state.pageViewports?.[pageNum-1] || page.getViewport({ scale: BASE_PDF_SCALE });
+  let annotations = [];
+  try {
+    annotations = await page.getAnnotations({ intent: 'display' });
+  } catch(err){
+    console.warn('AcroForm annotation read failed', err);
+    annotations = [];
+  }
+  const tokens = [];
+  for(const ann of (annotations || [])){
+    if(!ann || ann.subtype !== 'Widget') continue;
+    const value = normalizeAcroFieldValue(ann.fieldValue ?? ann.buttonValue ?? ann.defaultFieldValue ?? ann.richTextValue ?? '');
+    if(!value) continue;
+    const box = annotationRectToTokenBox(ann.rect, viewport);
+    if(!box) continue;
+    tokens.push(...splitAcroValueIntoTokens(value, box, pageNum, ann));
+  }
+  if(!state.acroTokensByPage) state.acroTokensByPage = {};
+  state.acroTokensByPage[pageNum] = tokens;
+  if(tokens.length){
+    logStaticDebug(`acroform page=${pageNum}`, { tokens: tokens.length, sample: tokens.slice(0, 3).map(t => t.text) });
+  }
+  return tokens;
+}
+
+function mergePdfAndAcroTokens(pdfTokens=[], acroTokens=[]){
+  if(!Array.isArray(acroTokens) || !acroTokens.length) return (pdfTokens || []).slice();
+  const merged = (pdfTokens || []).slice();
+  for(const tok of acroTokens){
+    const duplicate = merged.some(existing =>
+      (existing.text || '').trim() === (tok.text || '').trim()
+      && Math.abs((existing.x || 0) - (tok.x || 0)) < 1
+      && Math.abs((existing.y || 0) - (tok.y || 0)) < 1
+      && Math.abs((existing.w || 0) - (tok.w || 0)) < 1
+      && Math.abs((existing.h || 0) - (tok.h || 0)) < 1
+      && (existing.page || 1) === (tok.page || 1)
+    );
+    if(!duplicate) merged.push({ ...tok });
+  }
+  return merged;
+}
+
 async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null){
   if(state.tokensByPage[pageNum]) return state.tokensByPage[pageNum];
   let tokens = [];
@@ -12192,8 +12419,12 @@ async function ensureTokensForPage(pageNum, pageObj=null, vp=null, canvasEl=null
 
   tokens = await readTokensForPage(pageObj, vp);
   tokens.forEach(t => { t.page = pageNum; });
-  state.tokensByPage[pageNum] = tokens;
-  return tokens;
+  if(!state.pdfTextTokenCountByPage) state.pdfTextTokenCountByPage = {};
+  state.pdfTextTokenCountByPage[pageNum] = tokens.length;
+  const acroTokens = await readAcroFormTokensForPage(pageNum, pageObj, vp);
+  const merged = mergePdfAndAcroTokens(tokens, acroTokens);
+  state.tokensByPage[pageNum] = merged;
+  return merged;
 }
 
 async function ensureTesseractTokensForPage(pageNum, canvasEl=null){
@@ -12210,7 +12441,10 @@ function getPageViewport(pageNum){
 
 function getTokenSourceInfoForPage(pageNum){
   return {
-    pdfTokenCount: Array.isArray(state.tokensByPage?.[pageNum]) ? state.tokensByPage[pageNum].length : 0,
+    pdfTokenCount: Number.isFinite(state.pdfTextTokenCountByPage?.[pageNum])
+      ? state.pdfTextTokenCountByPage[pageNum]
+      : (Array.isArray(state.tokensByPage?.[pageNum]) ? state.tokensByPage[pageNum].length : 0),
+    acroTokenCount: Array.isArray(state.acroTokensByPage?.[pageNum]) ? state.acroTokensByPage[pageNum].length : 0,
     tessTokenCount: Array.isArray(state.tessTokensByPage?.[pageNum]) ? state.tessTokensByPage[pageNum].length : 0
   };
 }
@@ -16781,12 +17015,25 @@ async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'aut
 
   if(wantPdf){
     const pdfTokens = await ensureTokensForPage(page);
-    return buildResult(pdfTokens, 'pdfjs', 'pdfjs', 'preferred_pdfjs');
+    const sourceInfo = getTokenSourceInfoForPage(page);
+    const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
+    const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
+    const reason = tokenSource === 'acroform' ? 'preferred_pdfjs_with_acroform_overlay' : 'preferred_pdfjs';
+    return buildResult(pdfTokens, engineUsed, tokenSource, reason);
   }
 
   const pdfTokens = await ensureTokensForPage(page);
+  const sourceInfo = getTokenSourceInfoForPage(page);
   if(Array.isArray(pdfTokens) && pdfTokens.length){
-    return buildResult(pdfTokens, 'pdfjs', 'pdfjs', 'pdf_tokens_available');
+    const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
+    const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
+    const reason = tokenSource === 'acroform' ? 'acroform_tokens_available' : 'pdf_tokens_available';
+    return buildResult(pdfTokens, engineUsed, tokenSource, reason);
+  }
+
+  if(sourceInfo.acroTokenCount > 0){
+    const acroTokens = Array.isArray(state.acroTokensByPage?.[page]) ? state.acroTokensByPage[page] : [];
+    return buildResult(acroTokens, 'acroform', 'acroform', 'acroform_tokens_available_without_pdf_text', 'pdfjs');
   }
 
   const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
@@ -18080,8 +18327,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           if(!tokens.length){
             const tokenResolution = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'auto', mode: 'run' });
             tokens = tokenResolution.tokens || [];
+            if(!state.currentTokenSourceByPage) state.currentTokenSourceByPage = {};
+            state.currentTokenSourceByPage[targetPage] = tokenResolution.tokenSource || null;
+            if(Array.isArray(state.keywordIndexByPage?.[targetPage])) state.keywordIndexByPage[targetPage] = null;
           }
           const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
+          if(!state.currentTokenSourceByPage) state.currentTokenSourceByPage = {};
+          if(!state.currentTokenSourceByPage[targetPage]) state.currentTokenSourceByPage[targetPage] = (state.tokensByPage[targetPage]?.length ? 'pdfjs' : null);
           const configMask = placement?.configMask || normalizeConfigMask(spec);
           const bboxArr = placement?.bbox || spec.bbox;
           const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
@@ -18094,9 +18346,14 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
               tokens = tokensWithinArea(tokens, scopedArea.box);
             }
           }
-          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope };
+          const pageKeywordMatches = (()=>{
+            const matches = state.keywordIndexByPage?.[targetPage];
+            return Array.isArray(matches) ? matches.length : null;
+          })();
+          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope, configBox: spec.configBox || spec.rawBox || null, rawBox: spec.rawBox || null, runtime: { tokenSource: state.currentTokenSourceByPage?.[targetPage] || null, resolverReason: null, keywordMatchCount: pageKeywordMatches } };
           if(areaScope){ fieldSpec.areaBoxPx = areaScope.box; fieldSpec.areaScope = areaScope; }
           state.snappedPx = null; state.snappedText = '';
+          fieldSpec.runtime = { ...(fieldSpec.runtime || {}), tokenSource: fieldSpec.runtime?.tokenSource || state.currentTokenSourceByPage?.[targetPage] || null };
           let result = await extractFieldValue(fieldSpec, tokens, targetViewport);
           // Half-filled PDF fallback: template labels live in the PDF text layer
           // (supporting constellation/keyword matching) but user-filled values do not.
@@ -18107,6 +18364,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           if(!result?.value && !state.isImage && (state.tokensByPage[targetPage] || []).length > 0){
             const tessRes = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'tesseract', mode: 'run' });
             if(tessRes.tokenCount > 0){
+              fieldSpec.runtime = { ...(fieldSpec.runtime || {}), tokenSource: tessRes.tokenSource || 'tesseract-bbox', resolverReason: tessRes.resolverReason || null, keywordMatchCount: fieldSpec.runtime?.keywordMatchCount ?? null };
+              if(Array.isArray(state.keywordIndexByPage?.[targetPage])) state.keywordIndexByPage[targetPage] = null;
               const tessResult = await extractFieldValue(fieldSpec, tessRes.tokens, targetViewport);
               if(tessResult?.value){ result = tessResult; }
             }
