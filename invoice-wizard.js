@@ -11252,8 +11252,11 @@ async function preloadAcroFormTokensFromBuffer(arrayBuffer){
 
 function toPdfData(buffer){
   if(!buffer) return null;
-  if(buffer instanceof Uint8Array) return buffer;
-  if(buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  // pdf.js may transfer ownership of typed-array buffers to its worker thread.
+  // Always clone here so any caller can safely reuse the original bytes for
+  // follow-up passes (e.g., AcroForm prepass + flatten + main load).
+  if(buffer instanceof Uint8Array) return new Uint8Array(buffer);
+  if(buffer instanceof ArrayBuffer) return new Uint8Array(buffer.slice(0));
   return null;
 }
 
