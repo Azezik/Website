@@ -4893,17 +4893,26 @@ function overlayFlagsEqual(a,b){
   return ['boxes','rings','matches','ocr','featureGraph','textGraph'].every(k => !!a[k] === !!b[k]);
 }
 
+function isWrokitVisionGraphDebugEnabled(){
+  return isConfigMode()
+    && getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION
+    && (!!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked);
+}
+
 function getWrokitVisionDebugMaps(pageNum){
-  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION || !WrokitVisionEngine?.buildMaps) return null;
+  if(!isWrokitVisionGraphDebugEnabled() || !WrokitVisionEngine?.buildMaps) return null;
   if(!state.currentFileId) return null;
   const page = Number.isFinite(pageNum) ? pageNum : state.pageNum;
-  const viewport = state.pageViewports?.[page - 1] || null;
+  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
   if(!viewport) return null;
   const pdfTokens = state.tokensByPage?.[page] || [];
   const tessTokens = state.tessTokensByPageBBox?.[page] || state.tessTokensByPage?.[page] || [];
   const tokenSource = pdfTokens.length ? 'pdfjs' : (tessTokens.length ? 'tesseract-bbox' : 'none');
   const tokens = pdfTokens.length ? pdfTokens : tessTokens;
-  if(!tokens.length) return null;
+  if(!tokens.length){
+    queueWrokitVisionDebugMapBuild(page);
+    return null;
+  }
   const viewportW = Number(viewport.width || viewport.w || 0);
   const viewportH = Number(viewport.height || viewport.h || 0);
   const first = tokens[0] || {};
@@ -4914,6 +4923,35 @@ function getWrokitVisionDebugMaps(pageNum){
     state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
+}
+
+function queueWrokitVisionDebugMapBuild(pageNum){
+  if(!isWrokitVisionGraphDebugEnabled()) return;
+  if(!state.currentFileId) return;
+  const page = Math.max(1, Number(pageNum) || state.pageNum || 1);
+  if(state.wrokitVisionGraphLoadingByPage?.[page]) return;
+  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!viewport) return;
+  state.wrokitVisionGraphLoadingByPage[page] = true;
+  Promise.resolve().then(async ()=>{
+    try {
+      const tokenResolution = await resolveExtractionTokensForField({
+        pageNum: page,
+        preferredEngine: 'auto',
+        mode: 'config'
+      });
+      const tokenSource = tokenResolution?.tokenSource || null;
+      if(tokenSource === 'tesseract-bbox'){
+        state.tessTokensByPageBBox = state.tessTokensByPageBBox || {};
+        state.tessTokensByPageBBox[page] = Array.isArray(tokenResolution.tokens) ? tokenResolution.tokens : [];
+      }
+    } catch(err){
+      console.warn('WrokitVision debug map token build failed', { page, err });
+    } finally {
+      delete state.wrokitVisionGraphLoadingByPage[page];
+      drawOverlay();
+    }
+  });
 }
 
 
@@ -14676,7 +14714,9 @@ function paintOverlay(ctx, options = {}){
     }
 
     if((featureGraphOn || textGraphOn) && !maps){
-      const status = 'No graph tokens found for this page';
+      const status = graphLoading
+        ? 'Building graph tokens for this page…'
+        : 'No graph tokens found for this page';
       ctx.save();
       ctx.fillStyle = 'rgba(17,24,39,0.8)';
       ctx.fillRect(8, 8, 280, 24);
