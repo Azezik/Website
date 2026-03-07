@@ -4895,25 +4895,15 @@ function overlayFlagsEqual(a,b){
 
 function getWrokitVisionDebugMaps(pageNum){
   if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION || !WrokitVisionEngine?.buildMaps) return null;
+  if(!state.currentFileId) return null;
   const page = Number.isFinite(pageNum) ? pageNum : state.pageNum;
+  const viewport = state.pageViewports?.[page - 1] || null;
+  if(!viewport) return null;
   const pdfTokens = state.tokensByPage?.[page] || [];
   const tessTokens = state.tessTokensByPageBBox?.[page] || state.tessTokensByPage?.[page] || [];
   const tokenSource = pdfTokens.length ? 'pdfjs' : (tessTokens.length ? 'tesseract-bbox' : 'none');
   const tokens = pdfTokens.length ? pdfTokens : tessTokens;
-  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
-  if(!tokens.length || !viewport){
-    if(!pdfTokens.length && !tessTokens.length && !state.wrokitVisionGraphLoadingByPage?.[page] && typeof ensureTesseractTokensForPageWithBBox === 'function'){
-      if(!state.wrokitVisionGraphLoadingByPage) state.wrokitVisionGraphLoadingByPage = {};
-      state.wrokitVisionGraphLoadingByPage[page] = true;
-      ensureTesseractTokensForPageWithBBox(page)
-        .catch(err => console.warn('[wrokit-vision][debug-graphs] tesseract preload failed', err))
-        .finally(() => {
-          if(state.wrokitVisionGraphLoadingByPage) state.wrokitVisionGraphLoadingByPage[page] = false;
-          drawOverlay();
-        });
-    }
-    return null;
-  }
+  if(!tokens.length) return null;
   const viewportW = Number(viewport.width || viewport.w || 0);
   const viewportH = Number(viewport.height || viewport.h || 0);
   const first = tokens[0] || {};
@@ -4925,6 +4915,7 @@ function getWrokitVisionDebugMaps(pageNum){
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
 }
+
 
 function median(values){
   if(!values?.length) return 0;
@@ -14651,8 +14642,8 @@ function paintOverlay(ctx, options = {}){
       ctx.restore();
     }
 
-    if((featureGraphOn || textGraphOn) && (graphLoading || !maps)){
-      const status = graphLoading ? 'Building WrokitVision graph overlay…' : 'No graph tokens found for this page';
+    if((featureGraphOn || textGraphOn) && !maps){
+      const status = 'No graph tokens found for this page';
       ctx.save();
       ctx.fillStyle = 'rgba(17,24,39,0.8)';
       ctx.fillRect(8, 8, 280, 24);
