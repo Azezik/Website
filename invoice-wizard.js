@@ -479,6 +479,10 @@ const els = {
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  showFeatureGraphToggle: document.getElementById('show-feature-graph-toggle'),
+  showTextGraphToggle: document.getElementById('show-text-graph-toggle'),
+  wrokitVisionFeatureGraphWrap: document.getElementById('wrokitvision-feature-graph-wrap'),
+  wrokitVisionTextGraphWrap: document.getElementById('wrokitvision-text-graph-wrap'),
   rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
   ocrTraceToggle: document.getElementById('ocr-trace-toggle'),
@@ -656,7 +660,15 @@ function resolveFieldEngineType(fieldSpec){
 
 function syncExtractionEngineUI(){
   if(!els.extractionEngineSelect) return;
-  els.extractionEngineSelect.value = getConfiguredEngineType();
+  const activeEngine = getConfiguredEngineType();
+  els.extractionEngineSelect.value = activeEngine;
+  const isVision = activeEngine === ENGINE_KIND.WROKIT_VISION;
+  if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = isVision ? 'flex' : 'none';
+  if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = isVision ? 'flex' : 'none';
+  if(!isVision){
+    if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = false;
+    if(els.showTextGraphToggle) els.showTextGraphToggle.checked = false;
+  }
 }
 
 function normalizeWizardId(raw){
@@ -1695,6 +1707,7 @@ let state = {
   staticDebugLogs,
   pageRenderReady: [],
   currentTraceId: null,
+  wrokitVisionDebugMapCache: {},
   selectedRunId: '',
   lastSnapshotManifestId: '',
   snapshotPanels: { activePage: null },
@@ -4844,17 +4857,35 @@ function getPageViewportSize(page){
 function getOverlayFlags(){
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
+  const visionOn = getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION;
   return {
     boxes: !!els.showBoxesToggle?.checked,
     rings: ringsOn,
     matches: matchesOn,
-    ocr: !!els.showOcrBoxesToggle?.checked
+    ocr: !!els.showOcrBoxesToggle?.checked,
+    featureGraph: visionOn && !!els.showFeatureGraphToggle?.checked,
+    textGraph: visionOn && !!els.showTextGraphToggle?.checked
   };
 }
 
 function overlayFlagsEqual(a,b){
   if(!a || !b) return false;
-  return ['boxes','rings','matches','ocr'].every(k => !!a[k] === !!b[k]);
+  return ['boxes','rings','matches','ocr','featureGraph','textGraph'].every(k => !!a[k] === !!b[k]);
+}
+
+function getWrokitVisionDebugMaps(pageNum){
+  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION || !WrokitVisionEngine?.buildMaps) return null;
+  const page = Number.isFinite(pageNum) ? pageNum : state.pageNum;
+  const tokens = state.tokensByPage?.[page] || [];
+  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!tokens.length || !viewport) return null;
+  const viewportW = Number(viewport.width || viewport.w || 0);
+  const viewportH = Number(viewport.height || viewport.h || 0);
+  const cacheKey = [state.currentFileId || 'doc', page, tokens.length, viewportW, viewportH].join(':');
+  if(!state.wrokitVisionDebugMapCache[cacheKey]){
+    state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport);
+  }
+  return state.wrokitVisionDebugMapCache[cacheKey] || null;
 }
 
 function median(values){
@@ -11528,6 +11559,7 @@ function cleanupDoc(){
   state.tessTokensByPageBBox = {};
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
+  state.wrokitVisionDebugMapCache = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -14409,6 +14441,8 @@ function paintOverlay(ctx, options = {}){
   const ringsOn = !!flags.rings;
   const matchesOn = !!flags.matches;
   const ocrOn = !!flags.ocr;
+  const featureGraphOn = !!flags.featureGraph;
+  const textGraphOn = !!flags.textGraph;
   const targetPage = pageFilter || state.pageNum;
   const offsetForPage = (page) => ((state.pageOffsets[(page||1)-1] || 0) / scaleY) - offsetY;
 
@@ -14516,6 +14550,61 @@ function paintOverlay(ctx, options = {}){
 
   if(layoutFirst){ drawLayout(); drawBoxes(); }
   else { drawBoxes(); drawLayout(); }
+
+  if((featureGraphOn || textGraphOn) && (!pageFilter || targetPage === pageFilter)){
+    const maps = getWrokitVisionDebugMaps(targetPage);
+    const offPx = offsetForPage(targetPage);
+    if(textGraphOn && maps?.textMap?.nodes?.length){
+      const tNodes = maps.textMap.nodes;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(56,189,248,0.45)';
+      ctx.lineWidth = 1;
+      for(const edge of maps.textMap.edges || []){
+        const from = tNodes[edge.from];
+        const to = tNodes[edge.to];
+        if(!from || !to) continue;
+        ctx.beginPath();
+        ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
+        ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(14,165,233,0.75)';
+      const radius = Math.max(1, 2 / Math.max(scaleX, scaleY));
+      for(const node of tNodes){
+        const cx = (node.cx || (node.x + node.w / 2)) / scaleX;
+        const cy = ((node.cy || (node.y + node.h / 2)) / scaleY) + offPx;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    if(featureGraphOn && maps?.structuralGraph?.nodes?.length){
+      const structuralNodes = maps.structuralGraph.nodes;
+      const structuralById = new Map(structuralNodes.map(n => [n.id, n]));
+      ctx.save();
+      ctx.strokeStyle = 'rgba(251,146,60,0.75)';
+      ctx.fillStyle = 'rgba(251,146,60,0.14)';
+      ctx.lineWidth = 1.2;
+      for(const node of structuralNodes){
+        if(!Number.isFinite(node?.x) || !Number.isFinite(node?.y) || !Number.isFinite(node?.w) || !Number.isFinite(node?.h)) continue;
+        ctx.fillRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
+        ctx.strokeRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
+      }
+      ctx.strokeStyle = 'rgba(249,115,22,0.45)';
+      for(const edge of maps.structuralGraph.edges || []){
+        const from = structuralById.get(edge.from);
+        const to = structuralById.get(edge.to);
+        if(!from || !to) continue;
+        ctx.beginPath();
+        ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
+        ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
 
   if(ringsOn && state.profile?.fields){
     ctx.strokeStyle = 'rgba(255,105,180,0.7)';
@@ -14951,6 +15040,8 @@ function describeOverlayFlags(flags){
   if(flags?.rings) parts.push('rings');
   if(flags?.matches) parts.push('match points');
   if(flags?.ocr) parts.push('OCR boxes');
+  if(flags?.featureGraph) parts.push('feature graph');
+  if(flags?.textGraph) parts.push('text graph');
   return parts.length ? parts.join(', ') : 'no overlays';
 }
 
@@ -17468,6 +17559,8 @@ els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); draw
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.showFeatureGraphToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.showTextGraphToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
 els.ocrTraceToggle?.addEventListener('change', ()=>{
   state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
   if(state.ocrTrace.enabled){

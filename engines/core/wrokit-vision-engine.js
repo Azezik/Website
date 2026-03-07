@@ -20,12 +20,101 @@
     invoice_total: ['grand total','amount due','balance due','total']
   };
 
+  const MAGIC_HINT = {
+    ANY: 'any',
+    TEXT: 'text',
+    NUMERIC: 'numeric',
+    DATE: 'date'
+  };
+
   function cleanText(text){
     return String(text || '').replace(/\s+/g, ' ').replace(/[#:]+$/g, '').trim();
   }
 
   function dedupeRepeats(text){
     return String(text || '').replace(/\b(.+?)\s+\1\b/gi, '$1').trim();
+  }
+
+  function resolveFieldTypeHint(fieldSpec){
+    const rawMagic = String(fieldSpec?.magicDataType || fieldSpec?.magicType || '').toLowerCase();
+    const key = String(fieldSpec?.fieldKey || '').toLowerCase();
+    if(rawMagic.includes('date') || key.includes('date')) return MAGIC_HINT.DATE;
+    if(rawMagic.includes('text')) return MAGIC_HINT.TEXT;
+    if(rawMagic.includes('num') || rawMagic.includes('money') || rawMagic.includes('currency')) return MAGIC_HINT.NUMERIC;
+    if(/\b(?:invoice_number|quantity|qty|amount|subtotal|total|tax|discount|price|unit_price|invoice_total)\b/.test(key)) return MAGIC_HINT.NUMERIC;
+    return MAGIC_HINT.ANY;
+  }
+
+  function applySubstitutions(text, map){
+    return String(text || '').split('').map(ch => {
+      const mapped = map[ch] ?? map[ch.toUpperCase()] ?? null;
+      return mapped || ch;
+    }).join('');
+  }
+
+  function normalizeNumericValue(raw){
+    const original = String(raw || '');
+    let next = original.trim();
+    const corrections = [];
+    const hasParensNegative = /^\(.*\)$/.test(next);
+    if(hasParensNegative){
+      next = `-${next.slice(1, -1)}`;
+      corrections.push('parens-negative');
+    }
+    const digitized = applySubstitutions(next, { O:'0', Q:'0', D:'0', I:'1', L:'1', '|':'1', S:'5', B:'8', Z:'2' });
+    if(digitized !== next){
+      next = digitized;
+      corrections.push('ocr-digit-substitution');
+    }
+    const numericChunks = next.match(/-?\d[\d,]*(?:\.\d+)?/g) || [];
+    if(numericChunks.length){
+      numericChunks.sort((a,b)=> b.replace(/\D/g, '').length - a.replace(/\D/g, '').length);
+      next = numericChunks[0];
+      corrections.push('numeric-chunk-select');
+    }
+    const stripped = next.replace(/[^\d.,\-]/g, '');
+    if(stripped !== next){
+      next = stripped;
+      corrections.push('numeric-strip');
+    }
+    if((next.match(/-/g) || []).length > 1){
+      next = `${next.startsWith('-') ? '-' : ''}${next.replace(/-/g, '')}`;
+      corrections.push('minus-collapse');
+    }
+    const negative = next.startsWith('-') ? '-' : '';
+    let body = next.replace(/-/g, '').replace(/,/g, '');
+    const dotIdx = body.indexOf('.');
+    if(dotIdx >= 0){
+      body = `${body.slice(0, dotIdx + 1)}${body.slice(dotIdx + 1).replace(/\./g, '')}`;
+    }
+    next = `${negative}${body}`;
+    return { value: next.trim(), corrections };
+  }
+
+  function normalizeDateValue(raw){
+    const original = String(raw || '').trim();
+    let cleaned = applySubstitutions(original, { O:'0', I:'1', L:'1', S:'5', B:'8' }).replace(/[^\dA-Za-z/\-. ,]/g, '');
+    const corrections = cleaned !== original ? ['date-ocr-substitution'] : [];
+    const hit = cleaned.match(/\b\d{1,4}[\/\-.]\d{1,2}[\/\-.]\d{1,4}\b/);
+    if(hit){
+      cleaned = hit[0];
+      corrections.push('date-chunk-select');
+    }
+    return { value: cleaned.trim(), corrections };
+  }
+
+  function applyTypeAwareCleaning(value, fieldSpec){
+    const cleaned = dedupeRepeats(cleanText(value));
+    const kind = resolveFieldTypeHint(fieldSpec);
+    if(kind === MAGIC_HINT.NUMERIC){
+      const numeric = normalizeNumericValue(cleaned);
+      return { value: numeric.value || cleaned, correctionsApplied: numeric.corrections };
+    }
+    if(kind === MAGIC_HINT.DATE){
+      const date = normalizeDateValue(cleaned);
+      return { value: date.value || cleaned, correctionsApplied: date.corrections };
+    }
+    return { value: cleaned, correctionsApplied: [] };
   }
 
   function expandBox(base, pad){
@@ -125,14 +214,16 @@
   function resolveFallback(fieldSpec, candidates, boxPx){
     if(candidates.length){
       const winner = candidates[0];
+      const cleaned = applyTypeAwareCleaning(winner.text, fieldSpec);
       return {
-        value: winner.text,
+        value: cleaned.value,
         raw: winner.raw,
         confidence: Math.max(0.2, Math.min(0.55, winner.score / 2.5)),
         boxPx,
         tokens: winner.tokens,
         method: 'wrokit-vision-fallback',
         engine: 'wrokit_vision',
+        correctionsApplied: cleaned.correctionsApplied || [],
         lowConfidence: true
       };
     }
@@ -212,8 +303,9 @@
         const winner = ranked[0];
         const confidence = Math.max(0.2, Math.min(0.96, winner.score / 2.4));
         if(confidence >= 0.64){
+          const cleaned = applyTypeAwareCleaning(winner.text, fieldSpec);
           return {
-            value: winner.text,
+            value: cleaned.value,
             raw: winner.raw,
             confidence,
             boxPx: scope,
@@ -221,6 +313,7 @@
             method: pad ? 'wrokit-vision-micro-expansion' : 'wrokit-vision-in-box',
             engine: 'wrokit_vision',
             geometryId: geometryId || profile?.geometryId || null,
+            correctionsApplied: cleaned.correctionsApplied || [],
             lowConfidence: false
           };
         }
