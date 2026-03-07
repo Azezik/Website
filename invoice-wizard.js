@@ -4941,9 +4941,12 @@ function queueWrokitVisionDebugMapBuild(pageNum){
         mode: 'config'
       });
       const tokenSource = tokenResolution?.tokenSource || null;
+      const resolvedTokens = Array.isArray(tokenResolution.tokens) ? tokenResolution.tokens : [];
       if(tokenSource === 'tesseract-bbox'){
         state.tessTokensByPageBBox = state.tessTokensByPageBBox || {};
-        state.tessTokensByPageBBox[page] = Array.isArray(tokenResolution.tokens) ? tokenResolution.tokens : [];
+        state.tessTokensByPageBBox[page] = resolvedTokens;
+      } else if(resolvedTokens.length && !state.tokensByPage?.[page]?.length){
+        state.tokensByPage[page] = resolvedTokens;
       }
     } catch(err){
       console.warn('WrokitVision debug map token build failed', { page, err });
@@ -14713,13 +14716,16 @@ function paintOverlay(ctx, options = {}){
       ctx.restore();
     }
 
-    if((featureGraphOn || textGraphOn) && !maps){
+    const mapsEmpty = !maps || (!maps.textMap?.nodes?.length && !maps.structuralGraph?.nodes?.length);
+    if((featureGraphOn || textGraphOn) && mapsEmpty){
       const status = graphLoading
         ? 'Building graph tokens for this page…'
-        : 'No graph tokens found for this page';
+        : (maps && !maps.textMap && !maps.structuralGraph)
+          ? 'Graph engine loaded but map builder unavailable (WrokitVisionMaps missing)'
+          : 'No graph tokens found for this page';
       ctx.save();
       ctx.fillStyle = 'rgba(17,24,39,0.8)';
-      ctx.fillRect(8, 8, 280, 24);
+      ctx.fillRect(8, 8, ctx.measureText(status).width + 16, 24);
       ctx.fillStyle = '#fde68a';
       ctx.font = '12px monospace';
       ctx.fillText(status, 12, 24);
