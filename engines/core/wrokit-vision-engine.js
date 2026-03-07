@@ -5,6 +5,7 @@
     root.WrokitVisionEngine = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function(){
+  const MapTools = (typeof self !== 'undefined' ? self : this).WrokitVisionMaps || null;
   const LABEL_HINTS = {
     store_name: ['vendor','seller','company','store','business'],
     department: ['department','division'],
@@ -147,7 +148,32 @@
     };
   }
 
-  function extractScalar({ fieldSpec, tokens, boxPx }){
+  function buildMaps(tokens, viewport){
+    if(!MapTools) return { textMap: null, structuralGraph: null };
+    const textMap = MapTools.buildTextMap(tokens || [], viewport || null);
+    const structuralGraph = MapTools.buildStructuralGraph(tokens || [], viewport || null, textMap);
+    return { textMap, structuralGraph };
+  }
+
+  function structuralBoost(line, structuralGraph){
+    const nodes = structuralGraph?.nodes || [];
+    if(!nodes.length) return 0;
+    const lx = line.tokens.reduce((sum, tok)=> sum + ((tok.x || 0) + ((tok.w || 0) / 2)), 0) / Math.max(1, line.tokens.length);
+    const ly = line.cy || 0;
+    let nearest = Infinity;
+    let stability = 0;
+    for(const n of nodes){
+      const d = Math.abs((n.cx || 0) - lx) + Math.abs((n.cy || 0) - ly);
+      if(d < nearest){
+        nearest = d;
+        stability = Number(n.stabilityScore) || 0;
+      }
+    }
+    if(!Number.isFinite(nearest)) return 0;
+    return Math.max(0, Math.min(0.45, (stability * 0.35) + Math.max(0, 0.2 - (nearest / 2200))));
+  }
+
+  function extractScalar({ fieldSpec, tokens, boxPx, viewport, runtimeMaps, profile, geometryId }){
     if(!boxPx){
       return { value: '', raw: '', confidence: 0.1, boxPx: null, tokens: [], method:'wrokit-vision-no-box', engine:'wrokit_vision', lowConfidence:true };
     }
@@ -157,13 +183,29 @@
     let lastCandidates = [];
     let lastScope = boxPx;
 
+    const mapBundle = runtimeMaps || buildMaps(tokens || [], viewport || fieldSpec?.wrokitVisionConfig?.viewport || null);
+    const fieldCfg = fieldSpec?.wrokitVisionConfig || null;
+    const profileCfg = (profile?.fields || []).find(f => f?.fieldKey === fieldSpec?.fieldKey)?.wrokitVisionConfig || null;
+    const cfg = fieldCfg || profileCfg;
+    const neighborhood = cfg?.neighborhoods || null;
+
     for(const pad of pads){
       const scope = pad ? expandBox(boxPx, pad) : boxPx;
       lastScope = scope;
       const scoped = tokensInBox(tokens || [], scope, 0.25);
       const lines = groupByLines(scoped).filter(line => !!line.text);
       const ranked = lines
-        .map(line => buildCandidate(fieldSpec, line, centerX, centerY))
+        .map(line => {
+          const cand = buildCandidate(fieldSpec, line, centerX, centerY);
+          cand.score += structuralBoost(line, mapBundle?.structuralGraph);
+          if(neighborhood?.textNeighbors?.length){
+            const lower = String(cand.text || '').toLowerCase();
+            if(neighborhood.textNeighbors.some(n => lower.includes(String(n?.text || '').toLowerCase()))){
+              cand.score += 0.16;
+            }
+          }
+          return cand;
+        })
         .sort((a,b)=> b.score - a.score);
       lastCandidates = ranked;
       if(ranked[0]){
@@ -178,6 +220,7 @@
             tokens: winner.tokens,
             method: pad ? 'wrokit-vision-micro-expansion' : 'wrokit-vision-in-box',
             engine: 'wrokit_vision',
+            geometryId: geometryId || profile?.geometryId || null,
             lowConfidence: false
           };
         }
@@ -187,13 +230,19 @@
     return resolveFallback(fieldSpec, lastCandidates, lastScope);
   }
 
-  function registerField({ step, normBox, page, rawBox, viewport }){
+  function registerField({ step, normBox, page, rawBox, viewport, tokens, profile, geometryId }){
+    const maps = buildMaps(tokens || [], viewport || null);
+    const neighborhoods = (MapTools && rawBox)
+      ? MapTools.captureFieldNeighborhood(rawBox, maps.textMap, maps.structuralGraph)
+      : { textNeighbors: [], structuralNeighbors: [] };
+
     return {
       schema: 'wrokit_vision/v1',
       method: 'bbox-first-micro-expansion',
       fieldKey: step?.fieldKey || null,
       labelHints: LABEL_HINTS[step?.fieldKey] || [],
       page,
+      geometryId: geometryId || profile?.geometryId || null,
       bbox: {
         x0: normBox?.x0n,
         y0: normBox?.y0n,
@@ -201,12 +250,30 @@
         y1: (normBox?.y0n || 0) + (normBox?.hN || 0)
       },
       viewport: viewport ? { width: viewport.width || viewport.w || 0, height: viewport.height || viewport.h || 0 } : null,
-      rawBox: rawBox ? { x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h } : null
+      rawBox: rawBox ? { x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h } : null,
+      neighborhoods,
+      mapStats: {
+        textNodes: maps.textMap?.nodeCount || 0,
+        structuralNodes: maps.structuralGraph?.nodeCount || 0
+      }
+    };
+  }
+
+  function createSeedArtifacts({ tokens, viewport }){
+    const maps = buildMaps(tokens || [], viewport || null);
+    const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
+    return {
+      generatedAt: Date.now(),
+      profileVersion: 11,
+      seedStructuralGraph: maps.structuralGraph || null,
+      seedTextGraphSummary: summary || null
     };
   }
 
   return {
     registerField,
-    extractScalar
+    extractScalar,
+    buildMaps,
+    createSeedArtifacts
   };
 });
