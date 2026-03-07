@@ -1727,6 +1727,7 @@ let state = {
   pageRenderReady: [],
   currentTraceId: null,
   wrokitVisionDebugMapCache: {},
+  wrokitVisionGraphLoadingByPage: {},
   selectedRunId: '',
   lastSnapshotManifestId: '',
   snapshotPanels: { activePage: null },
@@ -11588,6 +11589,7 @@ function cleanupDoc(){
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionGraphLoadingByPage = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
   state.pageOffsets = [];
@@ -14582,6 +14584,7 @@ function paintOverlay(ctx, options = {}){
   if((featureGraphOn || textGraphOn) && (!pageFilter || targetPage === pageFilter)){
     const maps = getWrokitVisionDebugMaps(targetPage);
     const offPx = offsetForPage(targetPage);
+    const graphLoading = !!state.wrokitVisionGraphLoadingByPage?.[targetPage];
     if(textGraphOn && maps?.textMap?.nodes?.length){
       const tNodes = maps.textMap.nodes;
       ctx.save();
