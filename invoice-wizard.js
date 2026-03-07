@@ -1733,6 +1733,7 @@ let state = {
   snapshotPanels: { activePage: null },
   overlayPinned: false,
   overlayMetrics: null,
+  overlayGraphStatusText: '',
   isExtracting: false,
   extractionTrigger: null,
   pendingSelection: null,
@@ -2138,6 +2139,7 @@ function clearTransientStateLocal(){
   state.pendingSelection = null; state.matchPoints = [];
   state.snappedLineMetrics = null;
   state.overlayMetrics = null; state.overlayPinned = false;
+  state.overlayGraphStatusText = '';
   state.pdf = null; state.isImage = false;
   state.pageNum = 1; state.numPages = 0;
   state.viewport = { w:0, h:0, scale:1 };
@@ -4893,17 +4895,26 @@ function overlayFlagsEqual(a,b){
   return ['boxes','rings','matches','ocr','featureGraph','textGraph'].every(k => !!a[k] === !!b[k]);
 }
 
+function isWrokitVisionGraphDebugEnabled(){
+  return isConfigMode()
+    && getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION
+    && (!!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked);
+}
+
 function getWrokitVisionDebugMaps(pageNum){
-  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION || !WrokitVisionEngine?.buildMaps) return null;
+  if(!isWrokitVisionGraphDebugEnabled() || !WrokitVisionEngine?.buildMaps) return null;
   if(!state.currentFileId) return null;
   const page = Number.isFinite(pageNum) ? pageNum : state.pageNum;
-  const viewport = state.pageViewports?.[page - 1] || null;
+  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
   if(!viewport) return null;
   const pdfTokens = state.tokensByPage?.[page] || [];
   const tessTokens = state.tessTokensByPageBBox?.[page] || state.tessTokensByPage?.[page] || [];
   const tokenSource = pdfTokens.length ? 'pdfjs' : (tessTokens.length ? 'tesseract-bbox' : 'none');
   const tokens = pdfTokens.length ? pdfTokens : tessTokens;
-  if(!tokens.length) return null;
+  if(!tokens.length){
+    queueWrokitVisionDebugMapBuild(page);
+    return null;
+  }
   const viewportW = Number(viewport.width || viewport.w || 0);
   const viewportH = Number(viewport.height || viewport.h || 0);
   const first = tokens[0] || {};
@@ -4914,6 +4925,35 @@ function getWrokitVisionDebugMaps(pageNum){
     state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
+}
+
+function queueWrokitVisionDebugMapBuild(pageNum){
+  if(!isWrokitVisionGraphDebugEnabled()) return;
+  if(!state.currentFileId) return;
+  const page = Math.max(1, Number(pageNum) || state.pageNum || 1);
+  if(state.wrokitVisionGraphLoadingByPage?.[page]) return;
+  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!viewport) return;
+  state.wrokitVisionGraphLoadingByPage[page] = true;
+  Promise.resolve().then(async ()=>{
+    try {
+      const tokenResolution = await resolveExtractionTokensForField({
+        pageNum: page,
+        preferredEngine: 'auto',
+        mode: 'config'
+      });
+      const tokenSource = tokenResolution?.tokenSource || null;
+      if(tokenSource === 'tesseract-bbox'){
+        state.tessTokensByPageBBox = state.tessTokensByPageBBox || {};
+        state.tessTokensByPageBBox[page] = Array.isArray(tokenResolution.tokens) ? tokenResolution.tokens : [];
+      }
+    } catch(err){
+      console.warn('WrokitVision debug map token build failed', { page, err });
+    } finally {
+      delete state.wrokitVisionGraphLoadingByPage[page];
+      drawOverlay();
+    }
+  });
 }
 
 
@@ -11355,7 +11395,9 @@ function updateOverlayHud(){
   const m = state.overlayMetrics || {};
   const boxCss = m.cssBox ? ` cssBox:[${sn(m.cssBox.x)},${sn(m.cssBox.y)},${sn(m.cssBox.w)},${sn(m.cssBox.h)}]` : '';
   const boxPx = m.pxBox ? ` pxBox:[${sn(m.pxBox.x)},${sn(m.pxBox.y)},${sn(m.pxBox.w)},${sn(m.pxBox.h)}]` : '';
-  els.overlayHud.textContent = `pin:${m.pin?1:0} css:${sn(m.cssW)}×${sn(m.cssH)} px:${sn(m.pxW)}×${sn(m.pxH)} dpr:${sn(m.dpr)}${boxCss}${boxPx}`;
+  const metrics = `pin:${m.pin?1:0} css:${sn(m.cssW)}×${sn(m.cssH)} px:${sn(m.pxW)}×${sn(m.pxH)} dpr:${sn(m.dpr)}${boxCss}${boxPx}`;
+  const graphStatus = String(state.overlayGraphStatusText || '').trim();
+  els.overlayHud.textContent = graphStatus ? `${metrics}\n${graphStatus}` : metrics;
 }
 
 function applySelectionFromCss(startCss, endCss, opts={}){
@@ -14487,6 +14529,7 @@ function paintOverlay(ctx, options = {}){
   const featureGraphOn = !!flags.featureGraph;
   const textGraphOn = !!flags.textGraph;
   const targetPage = pageFilter || state.pageNum;
+  state.overlayGraphStatusText = '';
   const offsetForPage = (page) => ((state.pageOffsets[(page||1)-1] || 0) / scaleY) - offsetY;
 
   ctx.clearRect(0,0,ctx.canvas.width, ctx.canvas.height);
@@ -14598,6 +14641,9 @@ function paintOverlay(ctx, options = {}){
     const maps = getWrokitVisionDebugMaps(targetPage);
     const offPx = offsetForPage(targetPage);
     const graphLoading = !!state.wrokitVisionGraphLoadingByPage?.[targetPage];
+    const textNodeCount = Array.isArray(maps?.textMap?.nodes) ? maps.textMap.nodes.length : 0;
+    const structuralNodeCount = Array.isArray(maps?.structuralGraph?.nodes) ? maps.structuralGraph.nodes.length : 0;
+    const hasGraphNodes = (textGraphOn && textNodeCount > 0) || (featureGraphOn && structuralNodeCount > 0);
     const projectGraphNode = (node)=>{
       if(!node || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.w) || !Number.isFinite(node.h)) return null;
       const transformed = applyTransform({ x: node.x, y: node.y, w: node.w, h: node.h, page: targetPage });
@@ -14675,13 +14721,25 @@ function paintOverlay(ctx, options = {}){
       ctx.restore();
     }
 
-    if((featureGraphOn || textGraphOn) && !maps){
-      const status = 'No graph tokens found for this page';
+    if((featureGraphOn || textGraphOn) && !hasGraphNodes){
+      const pdfTokenCount = Array.isArray(state.tokensByPage?.[targetPage]) ? state.tokensByPage[targetPage].length : 0;
+      const tessTokenCount = Array.isArray(state.tessTokensByPageBBox?.[targetPage])
+        ? state.tessTokensByPageBBox[targetPage].length
+        : (Array.isArray(state.tessTokensByPage?.[targetPage]) ? state.tessTokensByPage[targetPage].length : 0);
+      const status = graphLoading
+        ? 'Building graph tokens for this page…'
+        : 'No graph tokens found for this page';
+      state.overlayGraphStatusText = `${status} p${targetPage} pdf:${pdfTokenCount} tess:${tessTokenCount} textNodes:${textNodeCount} featureNodes:${structuralNodeCount}`;
       ctx.save();
-      ctx.fillStyle = 'rgba(17,24,39,0.8)';
-      ctx.fillRect(8, 8, 280, 24);
-      ctx.fillStyle = '#fde68a';
-      ctx.font = '12px monospace';
+      const statusW = Math.min(Math.max(420, Math.round((status.length + 8) * 7.2)), Math.max(420, Math.round((ctx.canvas?.width || 420) * 0.85)));
+      const statusH = 30;
+      ctx.fillStyle = 'rgba(15,23,42,0.88)';
+      ctx.strokeStyle = graphLoading ? 'rgba(59,130,246,0.9)' : 'rgba(251,191,36,0.9)';
+      ctx.lineWidth = Math.max(1, 1.5 / Math.max(scaleX, scaleY));
+      ctx.fillRect(8, 8, statusW, statusH);
+      ctx.strokeRect(8.5, 8.5, statusW - 1, statusH - 1);
+      ctx.fillStyle = graphLoading ? '#dbeafe' : '#fde68a';
+      ctx.font = '14px "IBM Plex Mono", monospace';
       ctx.fillText(status, 12, 24);
       ctx.restore();
     }
@@ -15014,6 +15072,7 @@ function drawOverlay(){
   syncOverlay();
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
   paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });
+  updateOverlayHud();
 }
 
 function renderCropAuditPanel(){
