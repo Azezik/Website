@@ -3593,7 +3593,7 @@ window.dumpMaster = function(){
 };
 
 /* ---------- Profile versioning & persistence helpers ---------- */
-const PROFILE_VERSION = 10;
+const PROFILE_VERSION = 11;
 const PATTERN_BUNDLE_VERSION = 3;
 const PATTERN_STORE_KEY_PREFIX = 'wiz.patternBundle';
 const migrations = {
@@ -3750,6 +3750,19 @@ const migrations = {
     p.engineType = normalizeEngineType(p.engineType || p.engine || ENGINE_KIND.LEGACY);
     (p.fields || []).forEach(field => {
       field.engineType = normalizeEngineType(field.engineType || p.engineType);
+    });
+  },
+  10: p => {
+    p.wrokitVision = p.wrokitVision || {};
+    p.wrokitVision.geometryArtifacts = p.wrokitVision.geometryArtifacts || {};
+    p.wrokitVision.runtimePolicies = p.wrokitVision.runtimePolicies || {
+      microExpansionPads: [0, 4, 8, 12, 16],
+      neverNullBestCandidate: true
+    };
+    (p.fields || []).forEach(field => {
+      if(field?.engineType === ENGINE_KIND.WROKIT_VISION){
+        field.wrokitVisionConfig = field.wrokitVisionConfig || null;
+      }
     });
   }
 };
@@ -6855,6 +6868,13 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
       rowBandHeightPx: 18,
       columns: {},
       rowAnchor: null
+    },
+    wrokitVision: {
+      geometryArtifacts: {},
+      runtimePolicies: {
+        microExpansionPads: [0, 4, 8, 12, 16],
+        neverNullBestCandidate: true
+      }
     }
   };
   if(state.profile){
@@ -6917,6 +6937,9 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
   state.profile.tableHints = state.profile.tableHints || { headerLandmarks: ['sku_header','description_hdr','qty_header','price_header'], rowBandHeightPx: 18, columns: {}, rowAnchor: null };
   state.profile.tableHints.columns = state.profile.tableHints.columns || {};
   if(state.profile.tableHints.rowAnchor === undefined){ state.profile.tableHints.rowAnchor = null; }
+  state.profile.wrokitVision = state.profile.wrokitVision || {};
+  state.profile.wrokitVision.geometryArtifacts = state.profile.wrokitVision.geometryArtifacts || {};
+  state.profile.wrokitVision.runtimePolicies = state.profile.wrokitVision.runtimePolicies || { microExpansionPads: [0,4,8,12,16], neverNullBestCandidate: true };
   const templateConfig = template?.masterDbConfig || null;
   state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
   ensureConfiguredFlag(state.profile);
@@ -8217,6 +8240,27 @@ function updatePrompt(){
   els.questionText.textContent = step?.prompt || 'Highlight field';
 }
 
+function ensureWrokitVisionSeedGraphForCurrentGeometry(){
+  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION) return;
+  ensureProfile(currentWizardId(), currentGeometryId());
+  if(!state.profile) return;
+  const geometryId = state.activeGeometryId || currentGeometryId() || DEFAULT_GEOMETRY_ID;
+  state.profile.wrokitVision = state.profile.wrokitVision || {};
+  const artifacts = state.profile.wrokitVision.geometryArtifacts = state.profile.wrokitVision.geometryArtifacts || {};
+  if(artifacts[geometryId]?.seedStructuralGraph) return;
+  const page = state.pageNum || 1;
+  const pageTokens = state.tokensByPage?.[page] || [];
+  const vp = state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!pageTokens.length || !WrokitVisionEngine?.createSeedArtifacts) return;
+  artifacts[geometryId] = {
+    ...(artifacts[geometryId] || {}),
+    geometryId,
+    profileVersion: PROFILE_VERSION,
+    ...WrokitVisionEngine.createSeedArtifacts({ tokens: pageTokens, viewport: vp })
+  };
+  profileStore.saveProfile(state.username, state.docType, state.profile);
+}
+
 function goToStep(idx){
   const max = state.steps.length - 1;
   state.stepIdx = Math.max(0, Math.min(idx, max));
@@ -8224,6 +8268,7 @@ function goToStep(idx){
   els.confirmBtn.disabled = false;
   els.skipBtn.disabled = false;
   updatePrompt();
+  ensureWrokitVisionSeedGraphForCurrentGeometry();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = ''; state.snappedLineMetrics = null; state.matchPoints=[]; drawOverlay();
 }
 
@@ -9164,8 +9209,29 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       ? applyTransform(toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}))
       : null);
     if(resolvedBox){
+      let runtimeMaps = null;
+      if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
+        const runtimeMapCache = state.wrokitVisionRuntimeCache || (state.wrokitVisionRuntimeCache = {});
+        const runtimeCacheKey = `${fieldSpec.page || state.pageNum || 1}:${state.activeGeometryId || currentGeometryId() || 'default'}`;
+        runtimeMaps = runtimeMapCache[runtimeCacheKey] || null;
+        if(!runtimeMapCache[runtimeCacheKey] && WrokitVisionEngine?.buildMaps){
+          runtimeMapCache[runtimeCacheKey] = WrokitVisionEngine.buildMaps(Array.isArray(tokens) ? tokens : [], viewportPx || null);
+          runtimeMaps = runtimeMapCache[runtimeCacheKey] || null;
+        }
+      }
+      const enginePayload = {
+        fieldSpec,
+        tokens: Array.isArray(tokens) ? tokens : [],
+        boxPx: resolvedBox,
+        viewport: viewportPx,
+        profile: state.profile,
+        geometryId: state.activeGeometryId || currentGeometryId()
+      };
+      if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
+        enginePayload.runtimeMaps = runtimeMaps;
+      }
       const engineResult = EngineRegistry?.extractScalar
-        ? EngineRegistry.extractScalar(fieldEngineType, { fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox })
+        ? EngineRegistry.extractScalar(fieldEngineType, enginePayload)
         : (AIExtractionEngine?.extractScalar ? AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox }) : null);
       if(engineResult){
         return {
@@ -15837,6 +15903,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(extras.aiConfig){
     entry.aiConfig = clonePlain(extras.aiConfig);
   }
+  if(extras.wrokitVisionConfig){
+    entry.wrokitVisionConfig = clonePlain(extras.wrokitVisionConfig);
+  }
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
     entry.pageIndex = (page || 1) - 1;
@@ -17570,6 +17639,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     ? computeKeywordRelationsForConfig(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH)
     : null;
   const pageTokens = state.tokensByPage[state.pageNum] || tokens || [];
+  ensureWrokitVisionSeedGraphForCurrentGeometry();
   const keywordConstellation = (step.type === 'static' && KeywordConstellation?.captureConstellation)
     ? KeywordConstellation.captureConstellation(step.fieldKey, storedBoxPx, normBox, state.pageNum, canvasW, canvasH, pageTokens, {})
     : null;
@@ -17580,7 +17650,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     normBox,
     page: state.pageNum,
     rawBox: rawBoxData,
-    viewport: vp
+    viewport: vp,
+    tokens: pageTokens,
+    profile: state.profile,
+    geometryId: state.activeGeometryId || currentGeometryId()
   };
   const engineOwnedConfig = EngineRegistry?.registerFieldConfig
     ? EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload)
