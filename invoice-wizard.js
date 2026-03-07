@@ -483,6 +483,7 @@ const els = {
   showTextGraphToggle: document.getElementById('show-text-graph-toggle'),
   wrokitVisionFeatureGraphWrap: document.getElementById('wrokitvision-feature-graph-wrap'),
   wrokitVisionTextGraphWrap: document.getElementById('wrokitvision-text-graph-wrap'),
+  wrokitVisionGraphControls: document.getElementById('wrokitvision-graph-controls'),
   rawDataToggle:  document.getElementById('raw-data-toggle'),
   showRawToggle: document.getElementById('show-raw-toggle'),
   ocrTraceToggle: document.getElementById('ocr-trace-toggle'),
@@ -663,6 +664,7 @@ function syncExtractionEngineUI(){
   const activeEngine = getConfiguredEngineType();
   els.extractionEngineSelect.value = activeEngine;
   const isVision = activeEngine === ENGINE_KIND.WROKIT_VISION;
+  if(els.wrokitVisionGraphControls) els.wrokitVisionGraphControls.style.display = isVision ? 'flex' : 'none';
   if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = isVision ? 'flex' : 'none';
   if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = isVision ? 'flex' : 'none';
   if(!isVision){
