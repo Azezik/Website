@@ -11444,8 +11444,10 @@ async function preloadAcroFormTokensFromBuffer(arrayBuffer){
     let tokenCount = 0;
     for(let pageNum=1; pageNum<=doc.numPages; pageNum++){
       const page = await doc.getPage(pageNum);
-      const vpRaw = page.getViewport({ scale: BASE_PDF_SCALE });
-      const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height, pageNumber: pageNum };
+      const vp = page.getViewport({ scale: BASE_PDF_SCALE });
+      vp.w = vp.width;
+      vp.h = vp.height;
+      vp.pageNumber = pageNum;
       const annotations = await page.getAnnotations({ intent: 'display' });
       const tokens = [];
       for(const ann of (annotations || [])){
@@ -11595,6 +11597,7 @@ function cleanupDoc(){
   state.pageOffsets = [];
   state.pageRenderPromises = [];
   state.pageRenderReady = [];
+  state.pageTransform = { scale: 1, rotation: 0 };
   state.lineLayout = null;
   clearCropThumbs();
   state.selectionPx = null; state.snappedPx = null; state.snappedText = '';
@@ -11687,8 +11690,10 @@ async function prepareRunDocument(file){
   let totalH = 0;
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vpRaw = page.getViewport({ scale });
-    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height, pageNumber: i };
+    const vp = page.getViewport({ scale });
+    vp.w = vp.width;
+    vp.h = vp.height;
+    vp.pageNumber = i;
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     const rawTokens = await readTokensForPage(page, vp);
@@ -11749,8 +11754,9 @@ async function renderAllPages(){
   const pageCanvases = [];
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
-    const vpRaw = page.getViewport({ scale });
-    const vp = { ...vpRaw, w: vpRaw.width, h: vpRaw.height };
+    const vp = page.getViewport({ scale });
+    vp.w = vp.width;
+    vp.h = vp.height;
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
     maxW = Math.max(maxW, vp.width);
@@ -12541,14 +12547,21 @@ function normalizeAcroFieldValue(value){
 function annotationRectToTokenBox(rect, viewport){
   if(!Array.isArray(rect) || rect.length < 4 || !viewport) return null;
   try {
-    const converted = typeof viewport.convertToViewportRectangle === 'function'
-      ? viewport.convertToViewportRectangle(rect)
-      : rect;
+    let converted = null;
+    if(typeof viewport.convertToViewportRectangle === 'function'){
+      converted = viewport.convertToViewportRectangle(rect);
+    } else if(typeof viewport.convertToViewportPoint === 'function'){
+      const p0 = viewport.convertToViewportPoint(rect[0], rect[1]);
+      const p1 = viewport.convertToViewportPoint(rect[2], rect[3]);
+      if(Array.isArray(p0) && Array.isArray(p1)) converted = [p0[0], p0[1], p1[0], p1[1]];
+    }
     if(!Array.isArray(converted) || converted.length < 4) return null;
-    const x0 = Math.min(converted[0], converted[2]);
-    const y0 = Math.min(converted[1], converted[3]);
-    const x1 = Math.max(converted[0], converted[2]);
-    const y1 = Math.max(converted[1], converted[3]);
+    const pageW = Math.max(1, Number(viewport.width ?? viewport.w ?? 1));
+    const pageH = Math.max(1, Number(viewport.height ?? viewport.h ?? 1));
+    const x0 = Math.max(0, Math.min(pageW, Math.min(converted[0], converted[2])));
+    const y0 = Math.max(0, Math.min(pageH, Math.min(converted[1], converted[3])));
+    const x1 = Math.max(0, Math.min(pageW, Math.max(converted[0], converted[2])));
+    const y1 = Math.max(0, Math.min(pageH, Math.max(converted[1], converted[3])));
     const w = Math.max(0, x1 - x0);
     const h = Math.max(0, y1 - y0);
     if(!Number.isFinite(x0) || !Number.isFinite(y0) || w <= 0 || h <= 0) return null;
@@ -14585,8 +14598,23 @@ function paintOverlay(ctx, options = {}){
     const maps = getWrokitVisionDebugMaps(targetPage);
     const offPx = offsetForPage(targetPage);
     const graphLoading = !!state.wrokitVisionGraphLoadingByPage?.[targetPage];
+    const projectGraphNode = (node)=>{
+      if(!node || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.w) || !Number.isFinite(node.h)) return null;
+      const transformed = applyTransform({ x: node.x, y: node.y, w: node.w, h: node.h, page: targetPage });
+      if(!transformed) return null;
+      const cx = Number.isFinite(node.cx) ? (node.cx - node.x) : (node.w / 2);
+      const cy = Number.isFinite(node.cy) ? (node.cy - node.y) : (node.h / 2);
+      return {
+        x: transformed.x,
+        y: transformed.y,
+        w: transformed.w,
+        h: transformed.h,
+        cx: transformed.x + (cx * (transformed.w / Math.max(1, node.w))),
+        cy: transformed.y + (cy * (transformed.h / Math.max(1, node.h)))
+      };
+    };
     if(textGraphOn && maps?.textMap?.nodes?.length){
-      const tNodes = maps.textMap.nodes;
+      const tNodes = maps.textMap.nodes.map(projectGraphNode);
       ctx.save();
       ctx.strokeStyle = 'rgba(6,182,212,0.7)';
       ctx.lineWidth = 1.05;
@@ -14613,17 +14641,22 @@ function paintOverlay(ctx, options = {}){
 
     if(featureGraphOn && maps?.structuralGraph?.nodes?.length){
       const structuralNodes = maps.structuralGraph.nodes;
-      const structuralById = new Map(structuralNodes.map(n => [n.id, n]));
+      const projectedById = new Map();
+      for(const node of structuralNodes){
+        const projected = projectGraphNode(node);
+        if(projected) projectedById.set(node.id, projected);
+      }
       ctx.save();
       ctx.strokeStyle = 'rgba(234,88,12,0.95)';
       ctx.fillStyle = 'rgba(249,115,22,0.12)';
       ctx.lineWidth = 1.35;
       for(const node of structuralNodes){
-        if(!Number.isFinite(node?.x) || !Number.isFinite(node?.y) || !Number.isFinite(node?.w) || !Number.isFinite(node?.h)) continue;
-        ctx.fillRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
-        ctx.strokeRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
-        const labelX = (node.x / scaleX) + 2;
-        const labelY = (node.y / scaleY) + offPx + 10;
+        const projected = projectedById.get(node.id);
+        if(!projected) continue;
+        ctx.fillRect(projected.x / scaleX, (projected.y / scaleY) + offPx, projected.w / scaleX, projected.h / scaleY);
+        ctx.strokeRect(projected.x / scaleX, (projected.y / scaleY) + offPx, projected.w / scaleX, projected.h / scaleY);
+        const labelX = (projected.x / scaleX) + 2;
+        const labelY = (projected.y / scaleY) + offPx + 10;
         ctx.fillStyle = 'rgba(194,65,12,0.95)';
         ctx.font = '10px monospace';
         ctx.fillText(String(node.id || '').slice(0, 14), labelX, labelY);
@@ -14631,8 +14664,8 @@ function paintOverlay(ctx, options = {}){
       }
       ctx.strokeStyle = 'rgba(194,65,12,0.55)';
       for(const edge of maps.structuralGraph.edges || []){
-        const from = structuralById.get(edge.from);
-        const to = structuralById.get(edge.to);
+        const from = projectedById.get(edge.from);
+        const to = projectedById.get(edge.to);
         if(!from || !to) continue;
         ctx.beginPath();
         ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
