@@ -14688,31 +14688,63 @@ function paintOverlay(ctx, options = {}){
         if(projected) projectedById.set(node.id, projected);
       }
       ctx.save();
-      ctx.strokeStyle = 'rgba(234,88,12,0.95)';
-      ctx.fillStyle = 'rgba(249,115,22,0.12)';
       ctx.lineWidth = 1.35;
+      // Draw nodes: sections as dashed outlines, blocks as solid
       for(const node of structuralNodes){
         const projected = projectedById.get(node.id);
         if(!projected) continue;
-        ctx.fillRect(projected.x / scaleX, (projected.y / scaleY) + offPx, projected.w / scaleX, projected.h / scaleY);
-        ctx.strokeRect(projected.x / scaleX, (projected.y / scaleY) + offPx, projected.w / scaleX, projected.h / scaleY);
-        const labelX = (projected.x / scaleX) + 2;
-        const labelY = (projected.y / scaleY) + offPx + 10;
-        ctx.fillStyle = 'rgba(194,65,12,0.95)';
-        ctx.font = '10px monospace';
-        ctx.fillText(String(node.id || '').slice(0, 14), labelX, labelY);
-        ctx.fillStyle = 'rgba(249,115,22,0.12)';
+        const rx = projected.x / scaleX;
+        const ry = (projected.y / scaleY) + offPx;
+        const rw = projected.w / scaleX;
+        const rh = projected.h / scaleY;
+        if(node.type === 'section'){
+          ctx.strokeStyle = 'rgba(220,38,38,0.85)';
+          ctx.fillStyle = 'rgba(239,68,68,0.06)';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 3]);
+        } else {
+          ctx.strokeStyle = 'rgba(234,88,12,0.95)';
+          ctx.fillStyle = 'rgba(249,115,22,0.10)';
+          ctx.lineWidth = 1.35;
+          ctx.setLineDash([]);
+        }
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.setLineDash([]);
+        const labelX = rx + 2;
+        const labelY = ry + (node.type === 'section' ? 12 : 10);
+        ctx.fillStyle = node.type === 'section' ? 'rgba(185,28,28,0.95)' : 'rgba(194,65,12,0.95)';
+        ctx.font = node.type === 'section' ? 'bold 10px monospace' : '10px monospace';
+        ctx.fillText(String(node.id || '').slice(0, 18), labelX, labelY);
       }
-      ctx.strokeStyle = 'rgba(194,65,12,0.55)';
+      // Draw edges: color by type
       for(const edge of maps.structuralGraph.edges || []){
         const from = projectedById.get(edge.from);
         const to = projectedById.get(edge.to);
         if(!from || !to) continue;
+        if(edge.type === 'contains'){
+          ctx.strokeStyle = 'rgba(185,28,28,0.35)';
+          ctx.setLineDash([3, 4]);
+          ctx.lineWidth = 1;
+        } else if(edge.type === 'adjacent_v'){
+          ctx.strokeStyle = 'rgba(234,88,12,0.7)';
+          ctx.setLineDash([]);
+          ctx.lineWidth = 1.5;
+        } else if(edge.type === 'adjacent_h'){
+          ctx.strokeStyle = 'rgba(251,146,60,0.7)';
+          ctx.setLineDash([]);
+          ctx.lineWidth = 1.5;
+        } else {
+          ctx.strokeStyle = 'rgba(194,65,12,0.45)';
+          ctx.setLineDash([]);
+          ctx.lineWidth = 1;
+        }
         ctx.beginPath();
         ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
         ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
         ctx.stroke();
       }
+      ctx.setLineDash([]);
       ctx.restore();
     }
 
