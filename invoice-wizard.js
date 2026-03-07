@@ -652,11 +652,28 @@ function getProfileEngineType(profile){
 }
 
 function resolveFieldEngineType(fieldSpec){
+  const configuredEngine = getConfiguredEngineType();
+  if(isRunMode() && (configuredEngine === ENGINE_KIND.WROKIT_VISION || configuredEngine === ENGINE_KIND.AI_ALGO)){
+    return configuredEngine;
+  }
   const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
   if(fieldEngine !== ENGINE_KIND.LEGACY || String(fieldSpec?.engineType || '').toLowerCase() === ENGINE_KIND.LEGACY){
     return fieldEngine;
   }
   return getProfileEngineType(state.profile);
+}
+
+function applyEngineSelectionToProfile(profile, engineType, opts = {}){
+  if(!profile) return;
+  const normalizedEngine = normalizeEngineType(engineType);
+  const { updateFields = true } = opts;
+  profile.engineType = normalizedEngine;
+  if(updateFields){
+    (profile.fields || []).forEach(field => {
+      if(!field) return;
+      field.engineType = normalizedEngine;
+    });
+  }
 }
 
 function syncExtractionEngineUI(){
@@ -1451,7 +1468,7 @@ async function captureVisualRunConfig(){
     viewport: clonePlain(vp),
     normBox: clonePlain(normBox)
   });
-  if(state.profile){ state.profile.engineType = activeConfigEngine; }
+  applyEngineSelectionToProfile(state.profile, activeConfigEngine, { updateFields: true });
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   const savedField = state.profile?.fields?.find(f => f.fieldKey === step.fieldKey) || null;
   console.info('[visual-run][config] saved field geometry', {
@@ -4877,18 +4894,27 @@ function overlayFlagsEqual(a,b){
 
 function getWrokitVisionDebugMaps(pageNum){
   if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION || !WrokitVisionEngine?.buildMaps) return null;
+  if(!state.currentFileId) return null;
   const page = Number.isFinite(pageNum) ? pageNum : state.pageNum;
-  const tokens = state.tokensByPage?.[page] || [];
-  const viewport = state.pageViewports?.[page - 1] || state.viewport || null;
-  if(!tokens.length || !viewport) return null;
+  const viewport = state.pageViewports?.[page - 1] || null;
+  if(!viewport) return null;
+  const pdfTokens = state.tokensByPage?.[page] || [];
+  const tessTokens = state.tessTokensByPageBBox?.[page] || state.tessTokensByPage?.[page] || [];
+  const tokenSource = pdfTokens.length ? 'pdfjs' : (tessTokens.length ? 'tesseract-bbox' : 'none');
+  const tokens = pdfTokens.length ? pdfTokens : tessTokens;
+  if(!tokens.length) return null;
   const viewportW = Number(viewport.width || viewport.w || 0);
   const viewportH = Number(viewport.height || viewport.h || 0);
-  const cacheKey = [state.currentFileId || 'doc', page, tokens.length, viewportW, viewportH].join(':');
+  const first = tokens[0] || {};
+  const last = tokens[tokens.length - 1] || {};
+  const tokenSignature = `${tokens.length}:${Math.round(first.x || 0)}:${Math.round(first.y || 0)}:${Math.round(last.x || 0)}:${Math.round(last.y || 0)}:${String(first.text || '').slice(0,12)}:${String(last.text || '').slice(0,12)}`;
+  const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature].join(':');
   if(!state.wrokitVisionDebugMapCache[cacheKey]){
     state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
 }
+
 
 function median(values){
   if(!values?.length) return 0;
@@ -14559,8 +14585,8 @@ function paintOverlay(ctx, options = {}){
     if(textGraphOn && maps?.textMap?.nodes?.length){
       const tNodes = maps.textMap.nodes;
       ctx.save();
-      ctx.strokeStyle = 'rgba(56,189,248,0.45)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(6,182,212,0.7)';
+      ctx.lineWidth = 1.05;
       for(const edge of maps.textMap.edges || []){
         const from = tNodes[edge.from];
         const to = tNodes[edge.to];
@@ -14570,8 +14596,8 @@ function paintOverlay(ctx, options = {}){
         ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
         ctx.stroke();
       }
-      ctx.fillStyle = 'rgba(14,165,233,0.75)';
-      const radius = Math.max(1, 2 / Math.max(scaleX, scaleY));
+      ctx.fillStyle = 'rgba(2,132,199,0.96)';
+      const radius = Math.max(1.75, 2.8 / Math.max(scaleX, scaleY));
       for(const node of tNodes){
         const cx = (node.cx || (node.x + node.w / 2)) / scaleX;
         const cy = ((node.cy || (node.y + node.h / 2)) / scaleY) + offPx;
@@ -14586,15 +14612,21 @@ function paintOverlay(ctx, options = {}){
       const structuralNodes = maps.structuralGraph.nodes;
       const structuralById = new Map(structuralNodes.map(n => [n.id, n]));
       ctx.save();
-      ctx.strokeStyle = 'rgba(251,146,60,0.75)';
-      ctx.fillStyle = 'rgba(251,146,60,0.14)';
-      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = 'rgba(234,88,12,0.95)';
+      ctx.fillStyle = 'rgba(249,115,22,0.12)';
+      ctx.lineWidth = 1.35;
       for(const node of structuralNodes){
         if(!Number.isFinite(node?.x) || !Number.isFinite(node?.y) || !Number.isFinite(node?.w) || !Number.isFinite(node?.h)) continue;
         ctx.fillRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
         ctx.strokeRect(node.x / scaleX, (node.y / scaleY) + offPx, node.w / scaleX, node.h / scaleY);
+        const labelX = (node.x / scaleX) + 2;
+        const labelY = (node.y / scaleY) + offPx + 10;
+        ctx.fillStyle = 'rgba(194,65,12,0.95)';
+        ctx.font = '10px monospace';
+        ctx.fillText(String(node.id || '').slice(0, 14), labelX, labelY);
+        ctx.fillStyle = 'rgba(249,115,22,0.12)';
       }
-      ctx.strokeStyle = 'rgba(249,115,22,0.45)';
+      ctx.strokeStyle = 'rgba(194,65,12,0.55)';
       for(const edge of maps.structuralGraph.edges || []){
         const from = structuralById.get(edge.from);
         const to = structuralById.get(edge.to);
@@ -14604,6 +14636,17 @@ function paintOverlay(ctx, options = {}){
         ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
         ctx.stroke();
       }
+      ctx.restore();
+    }
+
+    if((featureGraphOn || textGraphOn) && !maps){
+      const status = 'No graph tokens found for this page';
+      ctx.save();
+      ctx.fillStyle = 'rgba(17,24,39,0.8)';
+      ctx.fillRect(8, 8, 280, 24);
+      ctx.fillStyle = '#fde68a';
+      ctx.font = '12px monospace';
+      ctx.fillText(status, 12, 24);
       ctx.restore();
     }
   }
@@ -17572,7 +17615,9 @@ els.ocrTraceToggle?.addEventListener('change', ()=>{
 els.extractionEngineSelect?.addEventListener('change', ()=>{
   state.selectedEngineType = normalizeEngineType(els.extractionEngineSelect.value);
   persistExtractionEnginePreference(state.selectedEngineType);
+  applyEngineSelectionToProfile(state.profile, state.selectedEngineType, { updateFields: isConfigMode() });
   syncExtractionEngineUI();
+  drawOverlay();
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
@@ -17793,7 +17838,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       }
     }
   }
-  if(state.profile){ state.profile.engineType = activeConfigEngine; }
+  applyEngineSelectionToProfile(state.profile, activeConfigEngine, { updateFields: true });
   upsertFieldInProfile(step, normBox, value, confidence, state.pageNum, extras, raw, corrections, fieldTokens, rawBoxData);
   ensureAnchorFor(step.fieldKey);
   state.currentLineItems = await extractLineItems(state.profile);
@@ -18521,7 +18566,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         fields: profileFieldDiagnostics
       });
     }
-    const runtimeEngineType = getProfileEngineType(activeProfile || state.profile);
+    const runtimeEngineType = isRunMode() ? getConfiguredEngineType() : getProfileEngineType(activeProfile || state.profile);
     const runExtractionEngine = getRuntimeExtractionEngine(runtimeEngineType);
     if(!runExtractionEngine?.orchestrate){
       throw new Error('EngineExtraction.orchestrate is unavailable');
