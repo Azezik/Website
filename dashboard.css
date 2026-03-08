@@ -401,12 +401,11 @@ body.skin-v2.doc-dashboard {
   content: 'Upload a document to preview it here.';
 }
 
-.viewer canvas,
-.viewer img,
-.viewer .overlay {
-  width: 100%;
-  height: auto;
+.viewer canvas.docCanvas,
+.viewer img.docCanvas {
   display: block;
+  max-width: 100%;
+  height: auto;
 }
 
 .docCanvas {
@@ -417,7 +416,9 @@ body.skin-v2.doc-dashboard {
 
 .overlay {
   position: absolute;
-  inset: 0;
+  left: 0;
+  top: 0;
+  /* width/height/left/top overridden by JS via syncOverlay() */
   z-index: 2;
   pointer-events: auto;
   touch-action: none;

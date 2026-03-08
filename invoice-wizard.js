@@ -9306,9 +9306,13 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const fieldEngineType = resolveFieldEngineType(fieldSpec);
   if(ftype === 'static' && fieldEngineType !== ENGINE_KIND.LEGACY){
-    const resolvedBox = state.snappedPx || (fieldSpec.bbox
-      ? applyTransform(toPx(viewportPx,{x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page}))
-      : null);
+    let resolvedBox = state.snappedPx || null;
+    if(!resolvedBox && fieldSpec.bbox){
+      const viewportDims = getViewportDimensions(viewportPx);
+      const rawBox = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      const adjusted = adjustBoxForHeightMismatch(rawBox, fieldSpec, viewportDims);
+      resolvedBox = applyTransform(adjusted.boxPx || rawBox);
+    }
     if(resolvedBox){
       let runtimeMaps = null;
       if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
@@ -11584,13 +11588,21 @@ async function openFile(file){
   if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
+    // Revoke any previously held blob URL before creating a new one
+    if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
     const url = URL.createObjectURL(file);
+    state._pendingBlobUrl = url;
     await renderImage(url);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     const tokens = await ensureTokensForPage(1);
     await buildKeywordIndexForPage(1, tokens);
+    // OCR is done — safe to revoke the blob URL now
+    if(state._pendingBlobUrl === url){
+      URL.revokeObjectURL(url);
+      state._pendingBlobUrl = null;
+    }
     if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
     else await calibrateIfNeeded();
     drawOverlay();
@@ -11626,12 +11638,15 @@ async function openFile(file){
   }
 }
 function cleanupDoc(){
+  // Revoke any pending blob URL from image uploads
+  if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} state._pendingBlobUrl = null; }
   state.tokensByPage = [];
   state.tessTokensByPage = {};
   state.tessTokensByPageBBox = {};
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionRuntimeCache = {};
   state.wrokitVisionGraphLoadingByPage = {};
   state.keywordIndexByPage = {};
   state.pageViewports = [];
@@ -11707,12 +11722,19 @@ async function prepareRunDocument(file){
       state.viewport = { w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageViewports[0] = { width: imgMeta.width, height: imgMeta.height, w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageOffsets[0] = 0;
+      if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
       const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
+      state._pendingBlobUrl = blobUrl;
       await renderImage(blobUrl);
       state.pageNum = 1; state.numPages = 1;
       if(els.pageControls) els.pageControls.style.display = 'none';
       const tokens = await ensureTokensForPage(1, null, state.pageViewports[0], els.imgCanvas);
       await buildKeywordIndexForPage(1, tokens, state.pageViewports[0]);
+      // OCR is done — safe to revoke the blob URL now
+      if(state._pendingBlobUrl === blobUrl){
+        URL.revokeObjectURL(blobUrl);
+        state._pendingBlobUrl = null;
+      }
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
       return { type:'image' };
@@ -11768,9 +11790,13 @@ async function renderImage(url){
       syncOverlay();
       state.overlayPinned = isOverlayPinned();
       state.viewport = { w: img.width, h: img.height, scale };
+      state.pageViewports[0] = { width: img.width, height: img.height, w: img.width, h: img.height, scale };
+      state.pageOffsets[0] = 0;
       state.pageRenderReady[0] = true;
       refreshCropAuditThumbs();
-      URL.revokeObjectURL(url);
+      // Do NOT revoke the blob URL here — Tesseract.js may still need it
+      // when it processes the image for OCR.  The URL will be revoked when
+      // the next file is opened (see state._pendingBlobUrl).
       resolve();
     };
     img.onerror = (err) => {
@@ -14513,6 +14539,7 @@ function getScaleFactors(){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!src) return { scaleX:1, scaleY:1 };
   const rect = src.getBoundingClientRect();
+  if(!rect.width || !rect.height) return { scaleX:1, scaleY:1 };
   const scaleX = src.width / rect.width;
   const scaleY = src.height / rect.height;
   return { scaleX, scaleY };
@@ -17376,6 +17403,15 @@ async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
   const canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || els.imgCanvas;
   if(!canvas){ return []; }
   const opts = { tessedit_pageseg_mode: 6, oem: 1 };
+  // Tesseract.js returns bounding boxes in the image's natural/intrinsic pixel
+  // coordinate space.  When the image is displayed at a scaled-down size (e.g.
+  // capped at 980px width), the viewport uses the display dimensions.  We must
+  // scale Tesseract coords into the display coordinate space so they match.
+  let coordScale = 1;
+  if(canvas === els.imgCanvas && canvas.naturalWidth && canvas.width){
+    coordScale = canvas.width / canvas.naturalWidth;
+    // coordScale < 1 means img wider than 980px → Tesseract coords are larger than viewport
+  }
   try{
     const { data } = await TesseractRef.recognize(canvas, 'eng', opts);
     const tokens = (data.words || []).map(w => {
@@ -17383,6 +17419,10 @@ async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
       if(!raw) return null;
       const { text: corrected, corrections } = applyOcrCorrections(raw);
       const bbox = getTesseractWordBBox(w);
+      const sx = bbox.x * coordScale;
+      const sy = bbox.y * coordScale;
+      const sw = bbox.w * coordScale;
+      const sh = bbox.h * coordScale;
       // OCR trace hook: token-time corrections from full-page Tesseract.
       traceTokenCorrection({
         raw,
@@ -17390,7 +17430,7 @@ async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
         corrections,
         source: 'tesseract_fullpage',
         pageIndex: pageNum - 1,
-        box: { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h, page: pageNum }
+        box: { x: sx, y: sy, w: sw, h: sh, page: pageNum }
       });
       return {
         raw,
@@ -17398,10 +17438,10 @@ async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
         text: corrected,
         correctionsApplied: corrections,
         confidence: (w.confidence || 0) / 100,
-        x: bbox.x,
-        y: bbox.y,
-        w: bbox.w,
-        h: bbox.h,
+        x: sx,
+        y: sy,
+        w: sw,
+        h: sh,
         page: pageNum
       };
     }).filter(Boolean);
