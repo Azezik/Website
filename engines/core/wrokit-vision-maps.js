@@ -100,50 +100,7 @@
     };
   }
 
-  /* ── Spatial clustering (DBSCAN-style) ──────────────────────────── */
-
-  function boxEdgeDist(a, b){
-    // Minimum edge-to-edge distance between two bounding boxes
-    const dx = Math.max(0, Math.max(a.x, b.x) - Math.min(a.x + a.w, b.x + b.w));
-    const dy = Math.max(0, Math.max(a.y, b.y) - Math.min(a.y + a.h, b.y + b.h));
-    return Math.hypot(dx, dy);
-  }
-
-  function dbscanCluster(items, eps, minPts){
-    // items: [{x,y,w,h,...}]  uses edge-to-edge box distance
-    const n = items.length;
-    const labels = new Int16Array(n).fill(-2); // -2 = unvisited
-    let clusterId = 0;
-    for(let i = 0; i < n; i++){
-      if(labels[i] !== -2) continue;
-      const neighbors = rangeQuery(items, i, eps);
-      if(neighbors.length < minPts){ labels[i] = -1; continue; } // noise
-      labels[i] = clusterId;
-      const seed = neighbors.slice();
-      for(let s = 0; s < seed.length; s++){
-        const q = seed[s];
-        if(labels[q] === -1) labels[q] = clusterId; // border point
-        if(labels[q] !== -2) continue;
-        labels[q] = clusterId;
-        const qn = rangeQuery(items, q, eps);
-        if(qn.length >= minPts){
-          for(const r of qn){ if(!seed.includes(r)) seed.push(r); }
-        }
-      }
-      clusterId++;
-    }
-    return { labels, clusterCount: clusterId };
-  }
-
-  function rangeQuery(items, idx, eps){
-    const p = items[idx];
-    const result = [];
-    for(let j = 0; j < items.length; j++){
-      if(j === idx) continue;
-      if(boxEdgeDist(p, items[j]) <= eps) result.push(j);
-    }
-    return result;
-  }
+  /* ── Geometry helpers ────────────────────────────────────────────── */
 
   function boundingBox(items){
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -163,188 +120,475 @@
   }
 
   function boxGap(a, b){
-    // signed gap: positive = separated, negative = overlapping
     const gapX = Math.max(a.x, b.x) - Math.min(a.x + a.w, b.x + b.w);
     const gapY = Math.max(a.y, b.y) - Math.min(a.y + a.h, b.y + b.h);
     return { gapX, gapY };
   }
 
-  /* ── Region-based structural graph ─────────────────────────────── */
+  /* ── Pixel-level image analysis ────────────────────────────────── */
 
-  function buildStructuralGraph(tokens, viewport, textMap){
+  function sobelEdges(gray, w, h){
+    // Returns Uint8Array where 1 = edge pixel, 0 = not
+    const out = new Uint8Array(w * h);
+    for(let y = 1; y < h - 1; y++){
+      for(let x = 1; x < w - 1; x++){
+        const i = y * w + x;
+        const gx = -gray[i-w-1] - 2*gray[i-1] - gray[i+w-1]
+                  + gray[i-w+1] + 2*gray[i+1] + gray[i+w+1];
+        const gy = -gray[i-w-1] - 2*gray[i-w] - gray[i-w+1]
+                  + gray[i+w-1] + 2*gray[i+w] + gray[i+w+1];
+        const g = Math.sqrt(gx*gx + gy*gy);
+        out[i] = g > 80 ? 1 : 0;
+      }
+    }
+    return out;
+  }
+
+  function buildTextMask2D(textMap, w, h, dilate){
+    // Binary mask: 1 = text region, 0 = non-text
+    const mask = new Uint8Array(w * h);
+    const pad = dilate || 3;
+    for(const n of (textMap?.nodes || [])){
+      const x0 = Math.max(0, Math.floor(n.x) - pad);
+      const y0 = Math.max(0, Math.floor(n.y) - pad);
+      const x1 = Math.min(w, Math.ceil(n.x + n.w) + pad);
+      const y1 = Math.min(h, Math.ceil(n.y + n.h) + pad);
+      for(let y = y0; y < y1; y++){
+        const row = y * w;
+        for(let x = x0; x < x1; x++) mask[row + x] = 1;
+      }
+    }
+    return mask;
+  }
+
+  function detectStructuralLines(edges, textMask2D, w, h){
+    // Scan for horizontal and vertical runs of edge pixels outside text mask
+    const hLines = [];
+    const vLines = [];
+    const minHLen = Math.max(20, w * 0.08); // min 8% of width
+    const minVLen = Math.max(15, h * 0.05); // min 5% of height
+
+    // Horizontal line scan
+    for(let y = 0; y < h; y++){
+      let runStart = -1;
+      let runLen = 0;
+      for(let x = 0; x <= w; x++){
+        const i = y * w + x;
+        const isEdge = x < w && edges[i] === 1 && textMask2D[i] === 0;
+        if(isEdge){
+          if(runStart < 0) runStart = x;
+          runLen++;
+        } else {
+          if(runLen >= minHLen){
+            hLines.push({ x1: runStart, y1: y, x2: runStart + runLen, y2: y, len: runLen });
+          }
+          runStart = -1;
+          runLen = 0;
+        }
+      }
+    }
+
+    // Vertical line scan
+    for(let x = 0; x < w; x++){
+      let runStart = -1;
+      let runLen = 0;
+      for(let y = 0; y <= h; y++){
+        const i = y * w + x;
+        const isEdge = y < h && edges[i] === 1 && textMask2D[i] === 0;
+        if(isEdge){
+          if(runStart < 0) runStart = y;
+          runLen++;
+        } else {
+          if(runLen >= minVLen){
+            vLines.push({ x1: x, y1: runStart, x2: x, y2: runStart + runLen, len: runLen });
+          }
+          runStart = -1;
+          runLen = 0;
+        }
+      }
+    }
+
+    // Merge collinear segments that are nearly aligned
+    const mergedH = mergeLines(hLines, 'h', 4, minHLen * 0.5);
+    const mergedV = mergeLines(vLines, 'v', 4, minVLen * 0.5);
+
+    return { hLines: mergedH, vLines: mergedV };
+  }
+
+  function mergeLines(lines, orientation, alignTol, gapTol){
+    if(!lines.length) return lines;
+    // Sort by perpendicular coordinate, then by parallel start
+    const sorted = lines.slice().sort((a, b) => {
+      const perpA = orientation === 'h' ? a.y1 : a.x1;
+      const perpB = orientation === 'h' ? b.y1 : b.x1;
+      if(Math.abs(perpA - perpB) > alignTol) return perpA - perpB;
+      const paraA = orientation === 'h' ? a.x1 : a.y1;
+      const paraB = orientation === 'h' ? b.x1 : b.y1;
+      return paraA - paraB;
+    });
+    const merged = [sorted[0]];
+    for(let i = 1; i < sorted.length; i++){
+      const prev = merged[merged.length - 1];
+      const cur = sorted[i];
+      const perpPrev = orientation === 'h' ? prev.y1 : prev.x1;
+      const perpCur = orientation === 'h' ? cur.y1 : cur.x1;
+      const prevEnd = orientation === 'h' ? prev.x2 : prev.y2;
+      const curStart = orientation === 'h' ? cur.x1 : cur.y1;
+      const curEnd = orientation === 'h' ? cur.x2 : cur.y2;
+      if(Math.abs(perpPrev - perpCur) <= alignTol && curStart - prevEnd <= gapTol){
+        // Extend previous line
+        if(orientation === 'h'){
+          prev.x2 = Math.max(prev.x2, curEnd);
+          prev.y1 = Math.round((perpPrev + perpCur) / 2);
+          prev.y2 = prev.y1;
+        } else {
+          prev.y2 = Math.max(prev.y2, curEnd);
+          prev.x1 = Math.round((perpPrev + perpCur) / 2);
+          prev.x2 = prev.x1;
+        }
+        prev.len = orientation === 'h' ? (prev.x2 - prev.x1) : (prev.y2 - prev.y1);
+      } else {
+        merged.push(cur);
+      }
+    }
+    return merged;
+  }
+
+  function detectWhitespaceCorridors(tokens, vpW, vpH){
+    if(!tokens.length) return { hCorridors: [], vCorridors: [] };
+    // Compute median token height for gap threshold
+    const heights = tokens.map(t => t.h).sort((a,b) => a - b);
+    const medH = heights[Math.floor(heights.length / 2)] || 12;
+    const gapThreshold = medH * 2;
+
+    // Horizontal corridors: find vertical gaps between rows of tokens
+    // Project tokens onto Y axis as intervals, find gaps
+    const yIntervals = tokens.map(t => ({ y0: t.y, y1: t.y + t.h }))
+      .sort((a,b) => a.y0 - b.y0);
+    const hCorridors = findGaps(yIntervals, 'y0', 'y1', gapThreshold, vpH);
+
+    // Vertical corridors: find horizontal gaps
+    const xIntervals = tokens.map(t => ({ x0: t.x, x1: t.x + t.w }))
+      .sort((a,b) => a.x0 - b.x0);
+    const vCorridors = findGaps(xIntervals, 'x0', 'x1', gapThreshold, vpW);
+
+    return { hCorridors, vCorridors };
+  }
+
+  function findGaps(intervals, startKey, endKey, minGap, maxExtent){
+    // Sweep line to find gaps in coverage
+    const gaps = [];
+    let covered = 0;
+    for(const iv of intervals){
+      const start = iv[startKey];
+      const end = iv[endKey];
+      if(start > covered + minGap){
+        gaps.push({ start: covered, end: start, size: start - covered });
+      }
+      covered = Math.max(covered, end);
+    }
+    if(maxExtent - covered > minGap){
+      gaps.push({ start: covered, end: maxExtent, size: maxExtent - covered });
+    }
+    return gaps;
+  }
+
+  function buildRegionsFromLines(hLines, vLines, hCorridors, vCorridors, vpW, vpH){
+    // Combine detected lines and whitespace corridors into boundary coordinates
+    // Horizontal boundaries (Y coordinates that separate rows)
+    const hBounds = new Set([0, vpH]);
+    for(const l of hLines) hBounds.add(l.y1);
+    for(const c of hCorridors) hBounds.add(Math.round((c.start + c.end) / 2));
+
+    // Vertical boundaries (X coordinates that separate columns)
+    const vBounds = new Set([0, vpW]);
+    for(const l of vLines) vBounds.add(l.x1);
+    for(const c of vCorridors) vBounds.add(Math.round((c.start + c.end) / 2));
+
+    const ys = Array.from(hBounds).sort((a,b) => a - b);
+    const xs = Array.from(vBounds).sort((a,b) => a - b);
+
+    // Build grid cells
+    const cells = [];
+    for(let r = 0; r < ys.length - 1; r++){
+      for(let c = 0; c < xs.length - 1; c++){
+        const x = xs[c], y = ys[r];
+        const w = xs[c+1] - xs[c], h = ys[r+1] - ys[r];
+        // Skip very thin slivers
+        if(w < 5 || h < 5) continue;
+        // Skip cells smaller than 0.5% of viewport
+        if(w * h < vpW * vpH * 0.005) continue;
+        cells.push({ x, y, w, h, row: r, col: c });
+      }
+    }
+
+    return cells;
+  }
+
+  function mergeAdjacentCells(cells, hLines, vLines, vpW, vpH){
+    // Merge adjacent cells that have no separating structural line between them
+    // Build a lookup for which line boundaries exist
+    const hLineSet = new Set();
+    for(const l of hLines){
+      // Mark the Y coordinate as a firm boundary within the line's X range
+      hLineSet.add(`${l.y1}:${Math.floor(l.x1 / 10)}:${Math.ceil(l.x2 / 10)}`);
+    }
+    const vLineSet = new Set();
+    for(const l of vLines){
+      vLineSet.add(`${l.x1}:${Math.floor(l.y1 / 10)}:${Math.ceil(l.y2 / 10)}`);
+    }
+
+    function hasHLine(y, x0, x1){
+      for(const l of hLines){
+        if(Math.abs(l.y1 - y) <= 3 && l.x1 <= x0 + 5 && l.x2 >= x1 - 5) return true;
+      }
+      return false;
+    }
+    function hasVLine(x, y0, y1){
+      for(const l of vLines){
+        if(Math.abs(l.x1 - x) <= 3 && l.y1 <= y0 + 5 && l.y2 >= y1 - 5) return true;
+      }
+      return false;
+    }
+
+    // Union-Find for merging
+    const parent = cells.map((_, i) => i);
+    function find(i){ return parent[i] === i ? i : (parent[i] = find(parent[i])); }
+    function union(a, b){ parent[find(a)] = find(b); }
+
+    // Build spatial index: row,col → cell index
+    const byCR = new Map();
+    cells.forEach((c, i) => byCR.set(`${c.row}:${c.col}`, i));
+
+    for(let i = 0; i < cells.length; i++){
+      const c = cells[i];
+      // Try merge with cell below (same col, next row)
+      const belowIdx = byCR.get(`${c.row+1}:${c.col}`);
+      if(belowIdx !== undefined){
+        const below = cells[belowIdx];
+        // The boundary between them is at c.y + c.h
+        if(!hasHLine(c.y + c.h, c.x, c.x + c.w)){
+          union(i, belowIdx);
+        }
+      }
+      // Try merge with cell to right (same row, next col)
+      const rightIdx = byCR.get(`${c.row}:${c.col+1}`);
+      if(rightIdx !== undefined){
+        const right = cells[rightIdx];
+        if(!hasVLine(c.x + c.w, c.y, c.y + c.h)){
+          union(i, rightIdx);
+        }
+      }
+    }
+
+    // Group by root
+    const groups = new Map();
+    for(let i = 0; i < cells.length; i++){
+      const root = find(i);
+      if(!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(cells[i]);
+    }
+
+    // Compute merged regions
+    const regions = [];
+    for(const [, group] of groups){
+      const box = boundingBox(group);
+      // Filter out very small merged regions
+      if(box.w * box.h < vpW * vpH * 0.008) continue;
+      // Filter out regions covering >90% of page
+      if(box.w * box.h > vpW * vpH * 0.90) continue;
+      regions.push(box);
+    }
+
+    return regions;
+  }
+
+  /* ── Region-based structural graph (pixel-driven) ──────────────── */
+
+  function buildStructuralGraph(tokens, viewport, textMap, imageData){
     const vpW = Math.max(1, Number(viewport?.width || viewport?.w) || 1);
     const vpH = Math.max(1, Number(viewport?.height || viewport?.h) || 1);
     const normalized = (Array.isArray(tokens) ? tokens : [])
       .map(tok => normToken(tok, viewport)).filter(n => n.text);
-    const textMask = buildTextInfluenceMask(textMap || buildTextMap(tokens, viewport));
+    const tm = textMap || buildTextMap(tokens, viewport);
+    const textMask = buildTextInfluenceMask(tm);
 
-    if(!normalized.length){
-      return {
-        version: 2, background: estimateBackground(textMap), textMask,
-        nodeCount: 0, edgeCount: 0, nodes: [], edges: []
+    const emptyResult = {
+      version: 3, background: estimateBackground(tm), textMask,
+      nodeCount: 0, edgeCount: 0, nodes: [], edges: [],
+      _method: 'none'
+    };
+
+    // imageData: { gray: Uint8Array, width: N, height: N }
+    // gray = single-channel luminance values (0-255)
+    const hasPixels = imageData && imageData.gray && imageData.width && imageData.height;
+
+    if(!hasPixels && !normalized.length) return emptyResult;
+
+    let regionNodes;
+
+    if(hasPixels){
+      // ═══ PIXEL-BASED PATH: detect structure from image geometry ═══
+      const imgW = imageData.width;
+      const imgH = imageData.height;
+      const gray = imageData.gray;
+
+      // Phase 1: Build text mask at image resolution
+      // Scale token coordinates if image size differs from viewport
+      const scaleX = imgW / vpW;
+      const scaleY = imgH / vpH;
+      const scaledTextMap = {
+        nodes: (tm?.nodes || []).map(n => ({
+          x: n.x * scaleX, y: n.y * scaleY,
+          w: n.w * scaleX, h: n.h * scaleY
+        }))
       };
-    }
+      const textMask2D = buildTextMask2D(scaledTextMap, imgW, imgH, Math.ceil(4 * scaleX));
 
-    // ── Step 1: Compute adaptive epsilon from median token dimensions ──
-    const heights = normalized.map(t => t.h).sort((a,b) => a - b);
-    const widths  = normalized.map(t => t.w).sort((a,b) => a - b);
-    const medH = heights[Math.floor(heights.length / 2)] || 12;
-    const medW = widths[Math.floor(widths.length / 2)] || 40;
-    // eps ~ 2x median line height: tokens within ~2 line heights cluster together
-    const eps = Math.max(medH * 2.5, medW * 0.8, 15);
+      // Phase 2: Edge detection with text suppression
+      const edges = sobelEdges(gray, imgW, imgH);
 
-    // ── Step 2: DBSCAN cluster tokens into blocks ──
-    const { labels, clusterCount } = dbscanCluster(normalized, eps, 2);
+      // Phase 3: Detect structural lines (non-text edges only)
+      const { hLines: rawHLines, vLines: rawVLines } = detectStructuralLines(edges, textMask2D, imgW, imgH);
 
-    // Collect clusters
-    const clusters = new Array(clusterCount).fill(null).map(() => []);
-    const noise = [];
-    for(let i = 0; i < normalized.length; i++){
-      if(labels[i] >= 0) clusters[labels[i]].push(normalized[i]);
-      else noise.push(normalized[i]);
-    }
+      // Scale lines back to viewport coordinates
+      const hLines = rawHLines.map(l => ({
+        x1: l.x1 / scaleX, y1: l.y1 / scaleY,
+        x2: l.x2 / scaleX, y2: l.y2 / scaleY,
+        len: l.len / scaleX
+      }));
+      const vLines = rawVLines.map(l => ({
+        x1: l.x1 / scaleX, y1: l.y1 / scaleY,
+        x2: l.x2 / scaleX, y2: l.y2 / scaleY,
+        len: l.len / scaleY
+      }));
 
-    // ── Step 3: Build block-level nodes (leaf regions) ──
-    const blockNodes = [];
-    for(let c = 0; c < clusters.length; c++){
-      const toks = clusters[c];
-      if(!toks.length) continue;
-      const box = boundingBox(toks);
-      // Skip tiny regions (< 0.15% of viewport area)
-      if((box.w * box.h) < (vpW * vpH * 0.0015)) continue;
-      const textOverlapScore = scoreTextOverlap(box, textMask);
-      blockNodes.push({
-        id: `block_${blockNodes.length}`,
-        type: 'block',
-        ...box,
-        cx: box.x + box.w / 2,
-        cy: box.y + box.h / 2,
-        tokenCount: toks.length,
-        orientation: box.w >= box.h ? 'horizontal' : 'vertical',
-        contrastScore: Math.max(0.2, Math.min(1, toks.length / 6)),
-        textOverlapScore,
-        stabilityScore: Math.max(0.05, 1 - (textOverlapScore * 0.65)),
-        depth: 0
+      // Phase 4: Whitespace corridor detection (from tokens)
+      const { hCorridors, vCorridors } = detectWhitespaceCorridors(normalized, vpW, vpH);
+
+      // Phase 5: Build grid regions from lines + corridors
+      const cells = buildRegionsFromLines(hLines, vLines, hCorridors, vCorridors, vpW, vpH);
+
+      // Phase 6: Merge cells that have no structural line between them
+      const regions = mergeAdjacentCells(cells, hLines, vLines, vpW, vpH);
+
+      // Build region nodes
+      regionNodes = regions.map((r, idx) => {
+        const textOverlapScore = scoreTextOverlap(r, textMask);
+        // Count tokens inside this region
+        const tokensInside = normalized.filter(t =>
+          t.cx >= r.x && t.cx <= r.x + r.w && t.cy >= r.y && t.cy <= r.y + r.h
+        ).length;
+        return {
+          id: `panel_${idx}`,
+          type: 'panel',
+          ...r,
+          cx: r.x + r.w / 2,
+          cy: r.y + r.h / 2,
+          tokenCount: tokensInside,
+          orientation: r.w >= r.h ? 'horizontal' : 'vertical',
+          contrastScore: Math.max(0.2, Math.min(1, (r.w * r.h) / (vpW * vpH * 0.15))),
+          textOverlapScore,
+          stabilityScore: Math.max(0.1, 1 - (textOverlapScore * 0.5)),
+          depth: 0
+        };
       });
+
+    } else {
+      // ═══ FALLBACK: whitespace-corridor-only approach ═══
+      // When no pixel data available, use whitespace gaps as structural signals
+      const { hCorridors, vCorridors } = detectWhitespaceCorridors(normalized, vpW, vpH);
+
+      // Build boundary set from whitespace only
+      const cells = buildRegionsFromLines([], [], hCorridors, vCorridors, vpW, vpH);
+      // Without structural lines, cells can't be merged intelligently — use as-is
+      regionNodes = cells
+        .filter(c => c.w * c.h >= vpW * vpH * 0.01) // min 1% of viewport
+        .filter(c => c.w * c.h <= vpW * vpH * 0.90)
+        .map((r, idx) => {
+          const textOverlapScore = scoreTextOverlap(r, textMask);
+          const tokensInside = normalized.filter(t =>
+            t.cx >= r.x && t.cx <= r.x + r.w && t.cy >= r.y && t.cy <= r.y + r.h
+          ).length;
+          return {
+            id: `region_${idx}`,
+            type: 'region',
+            ...r,
+            cx: r.x + r.w / 2,
+            cy: r.y + r.h / 2,
+            tokenCount: tokensInside,
+            orientation: r.w >= r.h ? 'horizontal' : 'vertical',
+            contrastScore: Math.max(0.2, Math.min(1, tokensInside / 8)),
+            textOverlapScore,
+            stabilityScore: Math.max(0.05, 1 - (textOverlapScore * 0.65)),
+            depth: 0
+          };
+        });
     }
 
-    // ── Step 4: Merge nearby blocks into section regions (second tier) ──
-    // Use a larger epsilon to group blocks into sections
-    const sectionEps = eps * 3;
-    const sectionClustering = blockNodes.length >= 2
-      ? dbscanCluster(blockNodes, sectionEps, 2)
-      : { labels: new Int16Array(blockNodes.length).fill(-1), clusterCount: 0 };
+    if(!regionNodes.length) return emptyResult;
 
-    const sectionNodes = [];
-    for(let s = 0; s < sectionClustering.clusterCount; s++){
-      const memberBlocks = [];
-      for(let i = 0; i < blockNodes.length; i++){
-        if(sectionClustering.labels[i] === s) memberBlocks.push(blockNodes[i]);
-      }
-      if(memberBlocks.length < 2) continue; // single-block sections not useful
-      const box = boundingBox(memberBlocks);
-      // Skip sections that are essentially the whole page (>85% area)
-      if((box.w * box.h) > (vpW * vpH * 0.85)) continue;
-      const textOverlapScore = scoreTextOverlap(box, textMask);
-      const totalTokens = memberBlocks.reduce((s, b) => s + b.tokenCount, 0);
-      sectionNodes.push({
-        id: `section_${sectionNodes.length}`,
-        type: 'section',
-        ...box,
-        cx: box.x + box.w / 2,
-        cy: box.y + box.h / 2,
-        tokenCount: totalTokens,
-        childBlockCount: memberBlocks.length,
-        orientation: box.w >= box.h ? 'horizontal' : 'vertical',
-        contrastScore: Math.max(0.2, Math.min(1, totalTokens / 12)),
-        textOverlapScore,
-        stabilityScore: Math.max(0.05, 1 - (textOverlapScore * 0.65)),
-        depth: 1,
-        _memberBlockIds: memberBlocks.map(b => b.id)
-      });
-    }
+    // ── Build containment hierarchy ──
+    // Sort by area descending so larger regions are checked first
+    regionNodes.sort((a, b) => (b.w * b.h) - (a.w * a.h));
 
-    // ── Step 5: Assemble all region nodes ──
-    const allNodes = [...sectionNodes, ...blockNodes];
-
-    // ── Step 6: Build typed edges ──
     const edges = [];
 
-    // 6a: Containment edges — section contains block
-    for(const sec of sectionNodes){
-      for(const bid of sec._memberBlockIds){
-        edges.push({ from: sec.id, to: bid, type: 'contains', dist: 0 });
-      }
-    }
-
-    // 6b: Adjacency edges between sibling blocks (blocks within same section or nearby)
-    for(let i = 0; i < blockNodes.length; i++){
-      const a = blockNodes[i];
-      // Find nearest neighbor in each cardinal direction (up to 2 per direction)
-      let bestUp = null, bestDown = null, bestLeft = null, bestRight = null;
-      let dUp = Infinity, dDown = Infinity, dLeft = Infinity, dRight = Infinity;
-
-      for(let j = 0; j < blockNodes.length; j++){
-        if(i === j) continue;
-        const b = blockNodes[j];
-        const { gapX, gapY } = boxGap(a, b);
-
-        // Horizontal overlap → vertically adjacent
-        if(gapX < 0){
-          const vDist = Math.abs(b.cy - a.cy);
-          if(b.cy < a.cy && vDist < dUp){ dUp = vDist; bestUp = b; }
-          if(b.cy > a.cy && vDist < dDown){ dDown = vDist; bestDown = b; }
-        }
-        // Vertical overlap → horizontally adjacent
-        if(gapY < 0){
-          const hDist = Math.abs(b.cx - a.cx);
-          if(b.cx < a.cx && hDist < dLeft){ dLeft = hDist; bestLeft = b; }
-          if(b.cx > a.cx && hDist < dRight){ dRight = hDist; bestRight = b; }
-        }
-      }
-
-      // Only add each adjacency once (from lower id → higher id)
-      for(const [neighbor, adjType] of [
-        [bestUp, 'adjacent_v'], [bestDown, 'adjacent_v'],
-        [bestLeft, 'adjacent_h'], [bestRight, 'adjacent_h']
-      ]){
-        if(!neighbor) continue;
-        const fromId = a.id < neighbor.id ? a.id : neighbor.id;
-        const toId = a.id < neighbor.id ? neighbor.id : a.id;
-        const already = edges.some(e => e.from === fromId && e.to === toId && e.type === adjType);
-        if(!already){
-          const dx = (neighbor.cx - a.cx) / vpW;
-          const dy = (neighbor.cy - a.cy) / vpH;
-          edges.push({ from: fromId, to: toId, type: adjType, dx, dy, dist: Math.hypot(dx, dy) });
+    // Containment: if a region fully contains another, add an edge
+    for(let i = 0; i < regionNodes.length; i++){
+      const outer = regionNodes[i];
+      for(let j = i + 1; j < regionNodes.length; j++){
+        const inner = regionNodes[j];
+        if(boxContains(outer, inner)){
+          // Only add if no intermediate container exists
+          let hasCloserParent = false;
+          for(let k = i + 1; k < j; k++){
+            if(boxContains(regionNodes[k], inner) && boxContains(outer, regionNodes[k])){
+              hasCloserParent = true;
+              break;
+            }
+          }
+          if(!hasCloserParent){
+            edges.push({ from: outer.id, to: inner.id, type: 'contains', dist: 0 });
+            inner.depth = (outer.depth || 0) + 1;
+          }
         }
       }
     }
 
-    // 6c: Adjacency edges between sections
-    for(let i = 0; i < sectionNodes.length; i++){
-      const a = sectionNodes[i];
-      for(let j = i + 1; j < sectionNodes.length; j++){
-        const b = sectionNodes[j];
+    // Adjacency: sibling regions (same depth, no containment) that share a boundary
+    for(let i = 0; i < regionNodes.length; i++){
+      const a = regionNodes[i];
+      for(let j = i + 1; j < regionNodes.length; j++){
+        const b = regionNodes[j];
+        if(a.depth !== b.depth) continue;
         const { gapX, gapY } = boxGap(a, b);
-        const adjType = (gapX < 0) ? 'adjacent_v' : (gapY < 0) ? 'adjacent_h' : null;
+        // Must be close but not overlapping significantly
+        if(gapX > 20 && gapY > 20) continue;
+        const overlap = Math.max(0, -gapX) * Math.max(0, -gapY);
+        const smallerArea = Math.min(a.w * a.h, b.w * b.h);
+        if(overlap > smallerArea * 0.5) continue; // too much overlap = nested, not adjacent
+
+        let adjType = null;
+        if(gapX < 0 && Math.abs(gapY) <= 20) adjType = 'adjacent_v';
+        else if(gapY < 0 && Math.abs(gapX) <= 20) adjType = 'adjacent_h';
         if(!adjType) continue;
+
         const dx = (b.cx - a.cx) / vpW;
         const dy = (b.cy - a.cy) / vpH;
         edges.push({ from: a.id, to: b.id, type: adjType, dx, dy, dist: Math.hypot(dx, dy) });
       }
     }
 
-    // Clean up internal helper fields
-    for(const n of sectionNodes) delete n._memberBlockIds;
-
     return {
-      version: 2,
-      background: estimateBackground(textMap),
+      version: 3,
+      background: estimateBackground(tm),
       textMask,
-      nodeCount: allNodes.length,
+      nodeCount: regionNodes.length,
       edgeCount: edges.length,
-      nodes: allNodes,
-      edges
+      nodes: regionNodes,
+      edges,
+      _method: hasPixels ? 'pixel' : 'whitespace'
     };
   }
 
