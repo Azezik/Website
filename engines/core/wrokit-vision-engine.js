@@ -239,10 +239,14 @@
     };
   }
 
-  function buildMaps(tokens, viewport){
+  function buildMaps(tokens, viewport, imageData){
     if(!MapTools) return { textMap: null, structuralGraph: null };
     const textMap = MapTools.buildTextMap(tokens || [], viewport || null);
-    const structuralGraph = MapTools.buildStructuralGraph(tokens || [], viewport || null, textMap);
+    // Pass imageData (optional) so buildStructuralGraph can also build the
+    // visual region layer when pixel data is available.
+    const structuralGraph = MapTools.buildStructuralGraph(
+      tokens || [], viewport || null, textMap, imageData || null
+    );
     return { textMap, structuralGraph };
   }
 
@@ -285,10 +289,41 @@
       lastScope = scope;
       const scoped = tokensInBox(tokens || [], scope, 0.25);
       const lines = groupByLines(scoped).filter(line => !!line.text);
+
+      // ── Visual region context boost ──────────────────────────────────────
+      // When the configured field had a recorded visual region context (primary
+      // region properties + relative position), compare it to the region the
+      // current bbox scope falls in.  Similarity across three signals gives a
+      // small confidence boost — the boost is uniform across all candidates in
+      // this scope (it reflects bbox placement, not line content).
+      let vrBoost = 0;
+      const savedVrc = neighborhood?.visualRegionContext;
+      if(MapTools?.locateBboxInVisualRegions && savedVrc?.primary
+          && mapBundle?.structuralGraph?.visualRegionLayer?.regions?.length){
+        const curCtx = MapTools.locateBboxInVisualRegions(scope, mapBundle.structuralGraph.visualRegionLayer);
+        if(curCtx?.primary){
+          const sv = savedVrc.primary;
+          const cu = curCtx.primary;
+          // Luminance similarity: same brightness surface
+          const lumSim  = 1 - Math.abs(sv.meanLuminance - cu.meanLuminance);
+          // Area-fraction similarity: region is roughly the same size on page
+          const areaSim = Math.max(0, 1 - Math.abs(sv.areaFraction - cu.areaFraction) * 4);
+          // Relative-position similarity within region (where the bbox sits)
+          const posSim  = (savedVrc.relativePos && curCtx.relativePos)
+            ? Math.max(0, 1 - (
+                Math.abs(savedVrc.relativePos.rx - curCtx.relativePos.rx) +
+                Math.abs(savedVrc.relativePos.ry - curCtx.relativePos.ry)
+              ) * 2)
+            : 0.5;
+          vrBoost = lumSim * areaSim * posSim * 0.18;
+        }
+      }
+
       const ranked = lines
         .map(line => {
           const cand = buildCandidate(fieldSpec, line, centerX, centerY);
           cand.score += structuralBoost(line, mapBundle?.structuralGraph);
+          cand.score += vrBoost;
           if(neighborhood?.textNeighbors?.length){
             const lower = String(cand.text || '').toLowerCase();
             if(neighborhood.textNeighbors.some(n => lower.includes(String(n?.text || '').toLowerCase()))){
@@ -323,11 +358,14 @@
     return resolveFallback(fieldSpec, lastCandidates, lastScope);
   }
 
-  function registerField({ step, normBox, page, rawBox, viewport, tokens, profile, geometryId }){
-    const maps = buildMaps(tokens || [], viewport || null);
+  function registerField({ step, normBox, page, rawBox, viewport, tokens, profile, geometryId, imageData }){
+    // imageData: optional { gray: Uint8Array, width, height } — when provided,
+    // the visual region layer is built and the field's neighbourhood will include
+    // visualRegionContext (region membership + relative position).
+    const maps = buildMaps(tokens || [], viewport || null, imageData || null);
     const neighborhoods = (MapTools && rawBox)
       ? MapTools.captureFieldNeighborhood(rawBox, maps.textMap, maps.structuralGraph)
-      : { textNeighbors: [], structuralNeighbors: [] };
+      : { textNeighbors: [], structuralNeighbors: [], visualRegionContext: null };
 
     return {
       schema: 'wrokit_vision/v1',
