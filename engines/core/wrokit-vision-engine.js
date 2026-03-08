@@ -6,6 +6,16 @@
   }
 })(typeof self !== 'undefined' ? self : this, function(){
   const MapTools = (typeof self !== 'undefined' ? self : this).WrokitVisionMaps || null;
+  const Precompute = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/precompute/precompute-orchestrator.js');
+      }
+    } catch(_err){
+      return null;
+    }
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionPrecompute || null;
+  })();
   const LABEL_HINTS = {
     store_name: ['vendor','seller','company','store','business'],
     department: ['department','division'],
@@ -390,14 +400,23 @@
     };
   }
 
-  function createSeedArtifacts({ tokens, viewport }){
+  function createSeedArtifacts({ tokens, viewport, page = 1, geometryId = null }){
     const maps = buildMaps(tokens || [], viewport || null);
     const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
+    const precomputedStructuralMap = Precompute?.buildPrecomputedStructuralMap
+      ? Precompute.buildPrecomputedStructuralMap({
+          tokens: tokens || [],
+          viewport: viewport || null,
+          page,
+          geometryId
+        })
+      : null;
     return {
       generatedAt: Date.now(),
       profileVersion: 11,
       seedStructuralGraph: maps.structuralGraph || null,
-      seedTextGraphSummary: summary || null
+      seedTextGraphSummary: summary || null,
+      precomputedStructuralMap
     };
   }
 
