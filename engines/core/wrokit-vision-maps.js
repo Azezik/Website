@@ -53,10 +53,7 @@
       .map(tok => normToken(tok, viewport))
       .filter(tok => !!tok.text.trim());
 
-    // Assign stable ids before edge building so edges can reference by id.
-    const sorted = nodes.slice().sort((a,b)=> (a.cy - b.cy) || (a.cx - b.cx))
-      .map((n, i) => ({ id: `tok_${i}`, type: 'token', ...n }));
-
+    const sorted = nodes.slice().sort((a,b)=> (a.cy - b.cy) || (a.cx - b.cx));
     const edges = [];
     for(let i=0;i<sorted.length;i++){
       const a = sorted[i];
@@ -67,17 +64,11 @@
         const adx = Math.abs(dx);
         const ady = Math.abs(dy);
         if(ady <= 0.015 && adx <= 0.35){
-          const dist = Math.hypot(dx,dy);
-          edges.push({ source: a.id, target: b.id, type:'same_line', dx, dy, dist,
-            weight: Math.max(0, 1 - dist / 0.35), rationale: 'tokens share horizontal baseline' });
+          edges.push({ from:i, to:j, type:'same_line', dx, dy, dist: Math.hypot(dx,dy) });
         } else if(adx <= 0.06 && ady <= 0.2){
-          const dist = Math.hypot(dx,dy);
-          edges.push({ source: a.id, target: b.id, type:'vertical_near', dx, dy, dist,
-            weight: Math.max(0, 1 - dist / 0.25), rationale: 'tokens are vertically adjacent' });
+          edges.push({ from:i, to:j, type:'vertical_near', dx, dy, dist: Math.hypot(dx,dy) });
         } else if(adx <= 0.25 && ady <= 0.12){
-          const dist = Math.hypot(dx,dy);
-          edges.push({ source: a.id, target: b.id, type:'near', dx, dy, dist,
-            weight: Math.max(0, 1 - dist / 0.28), rationale: 'tokens are spatially near' });
+          edges.push({ from:i, to:j, type:'near', dx, dy, dist: Math.hypot(dx,dy) });
         }
       }
     }
@@ -741,22 +732,9 @@
         const tokensInside = normalized.filter(t =>
           t.cx >= r.x && t.cx <= r.x + r.w && t.cy >= r.y && t.cy <= r.y + r.h
         ).length;
-        const contrastScore = Math.max(0.2, Math.min(1, (r.w * r.h) / (vpW * vpH * 0.15)));
-        const stabilityScore = Math.max(0.1, 1 - (textOverlapScore * 0.5));
         return {
           id: `panel_${idx}`,
           type: 'panel',
-          // ── Spec-required typed fields (StructuralRegionNode contract) ──────────
-          // polygon: axis-aligned quad stub — replace with real polygon when
-          //          non-axis-aligned region detection is introduced (Phase 2+).
-          polygon: [{ x: r.x, y: r.y }, { x: r.x + r.w, y: r.y },
-                    { x: r.x + r.w, y: r.y + r.h }, { x: r.x, y: r.y + r.h }],
-          surfaceTypeCandidate: 'panel',
-          visualStats: { contrastScore, edgeDensity: 0, textureMeter: 0 },
-          textDensity: { tokenCount: tokensInside, textOverlapScore },
-          confidence: Math.max(0.1, Math.min(0.9, 1 - textOverlapScore * 0.4)),
-          provenance: ['pixel-edge-detection', 'whitespace-corridor'],
-          // ── Backward-compatible geometry and legacy score fields ──────────────
           ...r,
           cx: r.x + r.w / 2,
           cy: r.y + r.h / 2,
@@ -764,9 +742,9 @@
           ...pageSpaceNorm(r, vpW, vpH),
           tokenCount: tokensInside,
           orientation: r.w >= r.h ? 'horizontal' : 'vertical',
-          contrastScore,
+          contrastScore: Math.max(0.2, Math.min(1, (r.w * r.h) / (vpW * vpH * 0.15))),
           textOverlapScore,
-          stabilityScore,
+          stabilityScore: Math.max(0.1, 1 - (textOverlapScore * 0.5)),
           depth: 0
         };
       });
@@ -787,20 +765,9 @@
           const tokensInside = normalized.filter(t =>
             t.cx >= r.x && t.cx <= r.x + r.w && t.cy >= r.y && t.cy <= r.y + r.h
           ).length;
-          const contrastScore = Math.max(0.2, Math.min(1, tokensInside / 8));
-          const stabilityScore = Math.max(0.05, 1 - (textOverlapScore * 0.65));
           return {
             id: `region_${idx}`,
             type: 'region',
-            // ── Spec-required typed fields (StructuralRegionNode contract) ──────────
-            polygon: [{ x: r.x, y: r.y }, { x: r.x + r.w, y: r.y },
-                      { x: r.x + r.w, y: r.y + r.h }, { x: r.x, y: r.y + r.h }],
-            surfaceTypeCandidate: 'unknown',
-            visualStats: { contrastScore, edgeDensity: 0, textureMeter: 0 },
-            textDensity: { tokenCount: tokensInside, textOverlapScore },
-            confidence: Math.max(0.1, Math.min(0.9, 1 - textOverlapScore * 0.5)),
-            provenance: ['whitespace-corridor'],
-            // ── Backward-compatible geometry and legacy score fields ──────────────
             ...r,
             cx: r.x + r.w / 2,
             cy: r.y + r.h / 2,
@@ -808,9 +775,9 @@
             ...pageSpaceNorm(r, vpW, vpH),
             tokenCount: tokensInside,
             orientation: r.w >= r.h ? 'horizontal' : 'vertical',
-            contrastScore,
+            contrastScore: Math.max(0.2, Math.min(1, tokensInside / 8)),
             textOverlapScore,
-            stabilityScore,
+            stabilityScore: Math.max(0.05, 1 - (textOverlapScore * 0.65)),
             depth: 0
           };
         });
@@ -839,8 +806,7 @@
             }
           }
           if(!hasCloserParent){
-            edges.push({ source: outer.id, target: inner.id, type: 'CONTAINS', dist: 0,
-              weight: 1.0, rationale: 'region fully contains subregion' });
+            edges.push({ from: outer.id, to: inner.id, type: 'contains', dist: 0 });
             inner.depth = (outer.depth || 0) + 1;
           }
         }
@@ -861,16 +827,13 @@
         if(overlap > smallerArea * 0.5) continue; // too much overlap = nested, not adjacent
 
         let adjType = null;
-        if(gapX < 0 && Math.abs(gapY) <= 20) adjType = 'ADJACENT_V';
-        else if(gapY < 0 && Math.abs(gapX) <= 20) adjType = 'ADJACENT_H';
+        if(gapX < 0 && Math.abs(gapY) <= 20) adjType = 'adjacent_v';
+        else if(gapY < 0 && Math.abs(gapX) <= 20) adjType = 'adjacent_h';
         if(!adjType) continue;
 
         const dx = (b.cx - a.cx) / vpW;
         const dy = (b.cy - a.cy) / vpH;
-        const adjDist = Math.hypot(dx, dy);
-        edges.push({ source: a.id, target: b.id, type: adjType, dx, dy, dist: adjDist,
-          weight: Math.max(0, 1 - adjDist * 4),
-          rationale: adjType === 'ADJACENT_V' ? 'regions share vertical boundary' : 'regions share horizontal boundary' });
+        edges.push({ from: a.id, to: b.id, type: adjType, dx, dy, dist: Math.hypot(dx, dy) });
       }
     }
 
@@ -926,20 +889,11 @@
     if(!fieldBox) return { textNeighbors: [], structuralNeighbors: [], visualRegionContext: null };
 
     const bboxCx = fieldBox.x + fieldBox.w / 2;
-    const bboxCy = fieldBox.y + fieldBox.h / 2;
-    // Normalize bbox centre to [0,1] using the same viewport that built the graph.
-    // Previous code divided bboxCx by (fieldBox.x + fieldBox.w) — a pixel/pixel
-    // ratio relative to the bbox right edge, not the viewport — causing a
-    // dimensional mismatch against n.ncx which is viewport-normalized.
-    const vpW = structuralGraph?._viewport?.width || 1;
-    const vpH = structuralGraph?._viewport?.height || 1;
-    const bboxCxN = clamp01(bboxCx / vpW);
-    const bboxCyN = clamp01(bboxCy / vpH);
 
     const textNeighbors = (textMap?.nodes || [])
       .filter(n => intersectArea(fieldBox, { x:n.x, y:n.y, w:n.w, h:n.h }) > 0)
       .slice(0, 28)
-      .map(n => ({ text: n.text, dx: n.ncx - bboxCxN, dy: n.ncy - bboxCyN }));
+      .map(n => ({ text: n.text, dx: n.ncx - (bboxCx / Math.max(1, fieldBox.x + fieldBox.w)), dy: n.ncy }));
 
     const structuralNeighbors = (structuralGraph?.nodes || [])
       .map(n => ({
