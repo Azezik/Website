@@ -196,10 +196,10 @@
     const cy = line.cy || centerY;
     const distance = Math.abs(cx - centerX) + Math.abs(cy - centerY);
 
-    let score = 0;
-    if(hints.some(h => lower.includes(h))) score += 1.1;
-    score += scoreFieldFormat(fieldKey, line.text);
-    score += Math.max(0, 1 - (distance / 550));
+    const labelHint = hints.some(h => lower.includes(h)) ? 1.1 : 0;
+    const formatScore = scoreFieldFormat(fieldKey, line.text);
+    const distanceScore = Math.max(0, 1 - (distance / 550));
+    const score = labelHint + formatScore + distanceScore;
 
     return {
       text: line.text,
@@ -207,7 +207,9 @@
       tokens: line.tokens,
       cx,
       cy,
-      score
+      score,
+      // ScoreBreakdown: inspectable per-signal contributions (spec §Local Relevance Resolution)
+      scoreBreakdown: { labelHint, formatScore, distanceScore, structuralBoost: 0, vrBoost: 0, neighborBoost: 0, total: score }
     };
   }
 
@@ -322,14 +324,19 @@
       const ranked = lines
         .map(line => {
           const cand = buildCandidate(fieldSpec, line, centerX, centerY);
-          cand.score += structuralBoost(line, mapBundle?.structuralGraph);
+          const sb = structuralBoost(line, mapBundle?.structuralGraph);
+          cand.score += sb;
+          cand.scoreBreakdown.structuralBoost = sb;
           cand.score += vrBoost;
+          cand.scoreBreakdown.vrBoost = vrBoost;
           if(neighborhood?.textNeighbors?.length){
             const lower = String(cand.text || '').toLowerCase();
             if(neighborhood.textNeighbors.some(n => lower.includes(String(n?.text || '').toLowerCase()))){
               cand.score += 0.16;
+              cand.scoreBreakdown.neighborBoost = 0.16;
             }
           }
+          cand.scoreBreakdown.total = cand.score;
           return cand;
         })
         .sort((a,b)=> b.score - a.score);
@@ -390,8 +397,10 @@
     };
   }
 
-  function createSeedArtifacts({ tokens, viewport }){
-    const maps = buildMaps(tokens || [], viewport || null);
+  function createSeedArtifacts({ tokens, viewport, imageData }){
+    // imageData: optional { gray: Uint8Array, width, height } — required for the
+    // visual region layer and pixel-driven structural graph (spec Stage A).
+    const maps = buildMaps(tokens || [], viewport || null, imageData || null);
     const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
     return {
       generatedAt: Date.now(),
