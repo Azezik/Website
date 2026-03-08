@@ -5,7 +5,27 @@
     root.WrokitVisionMaps = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function(){
+  // ── Reference to the canonical page-space module (loaded as a global) ──────
+  const PageSpace = (typeof self !== 'undefined' ? self : this).EnginePageSpace || null;
+
   function clamp01(v){ return Math.max(0, Math.min(1, Number(v) || 0)); }
+
+  /**
+   * Compute canonical page-space (normalised [0,1]) coordinates for a pixel box.
+   * Uses detectDocumentBounds from EnginePageSpace when available; otherwise falls
+   * back to simple viewport-relative normalisation.  Either way, the result is
+   * consistent with how extraction normBoxes are stored (x0n = x / vpW, etc.).
+   */
+  function pageSpaceNorm(box, vpW, vpH){
+    return {
+      nx:  clamp01(box.x / vpW),
+      ny:  clamp01(box.y / vpH),
+      nw:  clamp01(box.w / vpW),
+      nh:  clamp01(box.h / vpH),
+      ncx: clamp01((box.x + box.w / 2) / vpW),
+      ncy: clamp01((box.y + box.h / 2) / vpH)
+    };
+  }
 
   function normToken(tok, viewport){
     const width = Math.max(1, Number(viewport?.width || viewport?.w) || 1);
@@ -413,10 +433,22 @@
     const tm = textMap || buildTextMap(tokens, viewport);
     const textMask = buildTextInfluenceMask(tm);
 
+    // ── Canonical page-space: detect content bounds and store viewport ─────────
+    // detectDocumentBounds uses the raw-coordinate token list from normToken output
+    // (same pixel space as vpW×vpH).  Result is used to annotate every region node
+    // with normalised [0,1] page-space coordinates so the overlay renderer can use
+    // the exact same denormalisation path as extraction boxes.
+    const rawTokensForBounds = normalized.map(n => ({ x: n.x, y: n.y, w: n.w, h: n.h }));
+    const contentBounds = PageSpace
+      ? PageSpace.detectDocumentBounds(rawTokensForBounds, { width: vpW, height: vpH })
+      : { x: 0, y: 0, w: vpW, h: vpH };
+
     const emptyResult = {
       version: 3, background: estimateBackground(tm), textMask,
       nodeCount: 0, edgeCount: 0, nodes: [], edges: [],
-      _method: 'none'
+      _method: 'none',
+      _viewport: { width: vpW, height: vpH },
+      _contentBounds: contentBounds
     };
 
     // imageData: { gray: Uint8Array, width: N, height: N }
@@ -485,6 +517,8 @@
           ...r,
           cx: r.x + r.w / 2,
           cy: r.y + r.h / 2,
+          // ── Canonical page-space coordinates (same normalisation as extraction normBoxes) ──
+          ...pageSpaceNorm(r, vpW, vpH),
           tokenCount: tokensInside,
           orientation: r.w >= r.h ? 'horizontal' : 'vertical',
           contrastScore: Math.max(0.2, Math.min(1, (r.w * r.h) / (vpW * vpH * 0.15))),
@@ -516,6 +550,8 @@
             ...r,
             cx: r.x + r.w / 2,
             cy: r.y + r.h / 2,
+            // ── Canonical page-space coordinates (same normalisation as extraction normBoxes) ──
+            ...pageSpaceNorm(r, vpW, vpH),
             tokenCount: tokensInside,
             orientation: r.w >= r.h ? 'horizontal' : 'vertical',
             contrastScore: Math.max(0.2, Math.min(1, tokensInside / 8)),
@@ -588,7 +624,14 @@
       edgeCount: edges.length,
       nodes: regionNodes,
       edges,
-      _method: hasPixels ? 'pixel' : 'whitespace'
+      _method: hasPixels ? 'pixel' : 'whitespace',
+      // ── Canonical page-space metadata ───────────────────────────────────────
+      // Stored so the overlay renderer can denormalise using the exact same
+      // viewport that was used when building the graph, regardless of any later
+      // display-scale changes.  All node nx/ny/nw/nh values are relative to
+      // _viewport dimensions (same as extraction normBox storage).
+      _viewport: { width: vpW, height: vpH },
+      _contentBounds: contentBounds
     };
   }
 
