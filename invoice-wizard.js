@@ -14762,12 +14762,15 @@ function paintOverlay(ctx, options = {}){
 
     if(textGraphOn && maps?.textMap?.nodes?.length){
       const tNodes = maps.textMap.nodes.map(projectGraphNode);
+      // Build id→projected-node lookup so edges can reference nodes by typed id
+      // (spec-compliant edge schema uses source/target string ids, not array indices).
+      const tNodeMap = new Map(maps.textMap.nodes.map((n, i) => [n.id ?? i, tNodes[i]]));
       ctx.save();
       ctx.strokeStyle = 'rgba(6,182,212,0.7)';
       ctx.lineWidth = 1.05;
       for(const edge of maps.textMap.edges || []){
-        const from = tNodes[edge.from];
-        const to = tNodes[edge.to];
+        const from = tNodeMap.get(edge.source);
+        const to = tNodeMap.get(edge.target);
         if(!from || !to) continue;
         ctx.beginPath();
         ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
@@ -14823,20 +14826,20 @@ function paintOverlay(ctx, options = {}){
         ctx.font = node.type === 'section' ? 'bold 10px monospace' : '10px monospace';
         ctx.fillText(String(node.id || '').slice(0, 18), labelX, labelY);
       }
-      // Draw edges: color by type
+      // Draw edges: color by type (edge.source/target are spec-compliant node ids)
       for(const edge of maps.structuralGraph.edges || []){
-        const from = projectedById.get(edge.from);
-        const to = projectedById.get(edge.to);
+        const from = projectedById.get(edge.source);
+        const to = projectedById.get(edge.target);
         if(!from || !to) continue;
-        if(edge.type === 'contains'){
+        if(edge.type === 'CONTAINS'){
           ctx.strokeStyle = 'rgba(185,28,28,0.35)';
           ctx.setLineDash([3, 4]);
           ctx.lineWidth = 1;
-        } else if(edge.type === 'adjacent_v'){
+        } else if(edge.type === 'ADJACENT_V'){
           ctx.strokeStyle = 'rgba(234,88,12,0.7)';
           ctx.setLineDash([]);
           ctx.lineWidth = 1.5;
-        } else if(edge.type === 'adjacent_h'){
+        } else if(edge.type === 'ADJACENT_H'){
           ctx.strokeStyle = 'rgba(251,146,60,0.7)';
           ctx.setLineDash([]);
           ctx.lineWidth = 1.5;
