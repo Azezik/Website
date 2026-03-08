@@ -4918,9 +4918,31 @@ function getWrokitVisionDebugMaps(pageNum){
   const first = tokens[0] || {};
   const last = tokens[tokens.length - 1] || {};
   const tokenSignature = `${tokens.length}:${Math.round(first.x || 0)}:${Math.round(first.y || 0)}:${Math.round(last.x || 0)}:${Math.round(last.y || 0)}:${String(first.text || '').slice(0,12)}:${String(last.text || '').slice(0,12)}`;
-  const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature].join(':');
+
+  // ── Extract gray pixel data for the visual region layer ──────────────────
+  // ensureGrayCanvas() returns a pre-built single-channel (R=G=B) canvas for
+  // this page.  We pull a Uint8Array of luminance values from it so that
+  // buildMaps → buildStructuralGraph → buildVisualRegionLayer can run the
+  // tolerance-based flood-fill region algorithm.
+  let imageData = null;
+  try {
+    const grayCanvas = ensureGrayCanvas(page);
+    if(grayCanvas && grayCanvas.width > 0 && grayCanvas.height > 0){
+      const gctx = grayCanvas.getContext('2d');
+      const raw  = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
+      // The canvas is already grayscale (R=G=B); take the R channel as lum.
+      const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
+      for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
+      imageData = { gray, width: grayCanvas.width, height: grayCanvas.height };
+    }
+  } catch(_){ /* canvas not yet ready — imageData stays null */ }
+
+  // Include whether pixel data was available so the cache is invalidated once
+  // the gray canvas becomes ready (avoids serving a pixel-less entry forever).
+  const hasImg = !!imageData;
+  const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature, hasImg ? 'img' : 'noimg'].join(':');
   if(!state.wrokitVisionDebugMapCache[cacheKey]){
-    state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport);
+    state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport, imageData);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
 }
@@ -14832,7 +14854,46 @@ function paintOverlay(ctx, options = {}){
       ctx.restore();
     }
 
-    const mapsEmpty = !maps || (!maps.textMap?.nodes?.length && !maps.structuralGraph?.nodes?.length);
+    // ── Visual region layer (feature graph toggle) ────────────────────────
+    // Renders the flood-fill visual regions produced by buildVisualRegionLayer().
+    // Each region is a broad, tolerant luminance zone — distinctly visualised in
+    // emerald so it's easy to tell apart from the structural graph (orange) and
+    // the text graph (cyan).
+    //
+    // Label format:  vr_N  AA%  lum:LL  fill:FF
+    //   AA% = what fraction of the page this region covers
+    //   LL  = mean luminance (0 = black, 100 = white)
+    //   FF  = fill ratio (how solid vs. irregular the shape is)
+    if(featureGraphOn && maps?.structuralGraph?.visualRegionLayer?.regions?.length){
+      const vrRegions = maps.structuralGraph.visualRegionLayer.regions;
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      for(const region of vrRegions){
+        const projected = projectGraphNode(region);
+        if(!projected) continue;
+        const rx = projected.x / scaleX;
+        const ry = (projected.y / scaleY) + offPx;
+        const rw = projected.w / scaleX;
+        const rh = projected.h / scaleY;
+        const fillAlpha = Math.min(0.14, 0.05 + (region.fillRatio ?? 0.8) * 0.08);
+        ctx.fillStyle   = `rgba(16,185,129,${fillAlpha.toFixed(3)})`;
+        ctx.strokeStyle = 'rgba(16,185,129,0.65)';
+        ctx.setLineDash([5, 5]);
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.setLineDash([]);
+        // Label
+        const areaPct = Math.round((region.areaFraction ?? 0) * 100);
+        const lumPct  = Math.round((region.meanLuminance ?? 0) * 100);
+        const fillPct = Math.round((region.fillRatio ?? 0) * 100);
+        ctx.fillStyle = 'rgba(5,150,105,0.95)';
+        ctx.font      = '9px monospace';
+        ctx.fillText(`${region.id}  ${areaPct}%  lum:${lumPct}  fill:${fillPct}`, rx + 3, ry + 10);
+      }
+      ctx.restore();
+    }
+
+    const mapsEmpty = !maps || (!maps.textMap?.nodes?.length && !maps.structuralGraph?.nodes?.length && !maps.structuralGraph?.visualRegionLayer?.regions?.length);
     if((featureGraphOn || textGraphOn) && mapsEmpty){
       const status = graphLoading
         ? 'Building graph tokens for this page…'
