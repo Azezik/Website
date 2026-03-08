@@ -423,6 +423,227 @@
     return regions;
   }
 
+  /* ── Visual region layer: tolerance-based connected-component grouping ── */
+
+  /**
+   * Builds a general-purpose visual region layer from raw image luminance data.
+   *
+   * Algorithm (classical CV, no ML):
+   *   1. Downsample image to a coarse 64×48 grid.  Each cell stores mean luminance.
+   *   2. Run a Union-Find connected-components pass on the grid.  Two adjacent cells
+   *      are merged when their mean luminance difference ≤ TOLERANCE (30 / 255).
+   *      This gives "magic-wand / paint-bucket" behaviour: large surfaces of similar
+   *      brightness merge into one component; sharp contrast boundaries keep regions
+   *      separate.
+   *   3. Discard components covering < 2 % of the grid (noise / fine detail).
+   *   4. Convert surviving components into viewport-space region descriptors with
+   *      bounding-box, area fraction, mean luminance, fill ratio, and normalised
+   *      coordinates.  Regions are sorted by area (largest first).
+   *
+   * The result is lightweight and works on any uploaded image, not just documents.
+   *
+   * @param {object} imageData  { gray: Uint8Array, width: number, height: number }
+   * @param {number} vpW        Viewport width in pixels
+   * @param {number} vpH        Viewport height in pixels
+   * @returns {{ version:number, regions:Array, gridW:number, gridH:number }}
+   */
+  function buildVisualRegionLayer(imageData, vpW, vpH){
+    if(!imageData || !imageData.gray || !imageData.width || !imageData.height){
+      return { version: 1, regions: [], gridW: 0, gridH: 0 };
+    }
+
+    const imgW = imageData.width;
+    const imgH = imageData.height;
+    const gray = imageData.gray;
+
+    // Coarse grid – 64 cols × 48 rows (3072 cells, trivially fast)
+    const GW = 64;
+    const GH = 48;
+    const cellW = imgW / GW;
+    const cellH = imgH / GH;
+
+    // ── Step 1: Mean luminance per grid cell ──────────────────────────────
+    const lum = new Float32Array(GW * GH);
+    for(let gy = 0; gy < GH; gy++){
+      for(let gx = 0; gx < GW; gx++){
+        const px0 = Math.floor(gx * cellW);
+        const py0 = Math.floor(gy * cellH);
+        const px1 = Math.min(imgW, Math.ceil((gx + 1) * cellW));
+        const py1 = Math.min(imgH, Math.ceil((gy + 1) * cellH));
+        let sum = 0, cnt = 0;
+        for(let py = py0; py < py1; py++){
+          const row = py * imgW;
+          for(let px = px0; px < px1; px++){ sum += gray[row + px]; cnt++; }
+        }
+        lum[gy * GW + gx] = cnt ? sum / cnt : 0;
+      }
+    }
+
+    // ── Step 2: Union-Find connected components ───────────────────────────
+    // Merge adjacent cells (4-connected) when |lum_a – lum_b| ≤ TOLERANCE.
+    // TOLERANCE = 30 out of 255 (~12 %) — broad enough to absorb texture
+    // variation within a surface, strict enough to respect visual boundaries.
+    const TOLERANCE = 30;
+
+    const parent = new Int32Array(GW * GH);
+    for(let i = 0; i < parent.length; i++) parent[i] = i;
+
+    function find(i){
+      // Iterative path-halving
+      while(parent[i] !== i){ parent[i] = parent[parent[i]]; i = parent[i]; }
+      return i;
+    }
+    function union(a, b){
+      const ra = find(a), rb = find(b);
+      if(ra !== rb) parent[ra] = rb;
+    }
+
+    for(let gy = 0; gy < GH; gy++){
+      for(let gx = 0; gx < GW; gx++){
+        const i   = gy * GW + gx;
+        const li  = lum[i];
+        // Right
+        if(gx + 1 < GW){
+          const j = i + 1;
+          if(Math.abs(li - lum[j]) <= TOLERANCE) union(i, j);
+        }
+        // Below
+        if(gy + 1 < GH){
+          const j = i + GW;
+          if(Math.abs(li - lum[j]) <= TOLERANCE) union(i, j);
+        }
+      }
+    }
+
+    // ── Step 3: Collect components ────────────────────────────────────────
+    const compMap = new Map();
+    for(let gy = 0; gy < GH; gy++){
+      for(let gx = 0; gx < GW; gx++){
+        const i    = gy * GW + gx;
+        const root = find(i);
+        if(!compMap.has(root)){
+          compMap.set(root, { cnt: 0, lumSum: 0, minGx: gx, maxGx: gx, minGy: gy, maxGy: gy });
+        }
+        const c = compMap.get(root);
+        c.cnt++;
+        c.lumSum += lum[i];
+        if(gx < c.minGx) c.minGx = gx;
+        if(gx > c.maxGx) c.maxGx = gx;
+        if(gy < c.minGy) c.minGy = gy;
+        if(gy > c.maxGy) c.maxGy = gy;
+      }
+    }
+
+    // ── Step 4: Filter small components, build region descriptors ─────────
+    const totalCells = GW * GH;
+    const minCells   = Math.ceil(totalCells * 0.02); // 2 % minimum
+    const scaleX     = vpW / GW;
+    const scaleY     = vpH / GH;
+
+    const regions = [];
+    for(const [, comp] of compMap){
+      if(comp.cnt < minCells) continue;
+
+      const x  = comp.minGx * scaleX;
+      const y  = comp.minGy * scaleY;
+      const w  = (comp.maxGx + 1) * scaleX - x;
+      const h  = (comp.maxGy + 1) * scaleY - y;
+      // fillRatio: actual cells / bounding-box cells  (1 = solid rectangle)
+      const bbCells       = (comp.maxGx - comp.minGx + 1) * (comp.maxGy - comp.minGy + 1);
+      const areaFraction  = comp.cnt / totalCells;
+      const meanLuminance = (comp.lumSum / comp.cnt) / 255; // normalised [0,1]
+      const fillRatio     = comp.cnt / Math.max(1, bbCells);
+
+      regions.push({
+        x, y, w, h,
+        cx: x + w / 2,
+        cy: y + h / 2,
+        nx:  clamp01(x / vpW),
+        ny:  clamp01(y / vpH),
+        nw:  clamp01(w / vpW),
+        nh:  clamp01(h / vpH),
+        ncx: clamp01((x + w / 2) / vpW),
+        ncy: clamp01((y + h / 2) / vpH),
+        cellCount:     comp.cnt,
+        areaFraction,
+        meanLuminance,
+        fillRatio,
+        orientation: w >= h ? 'horizontal' : 'vertical'
+      });
+    }
+
+    // Sort by area descending and assign stable IDs
+    regions.sort((a, b) => b.cellCount - a.cellCount);
+    regions.forEach((r, i) => { r.id = `vr_${i}`; });
+
+    return { version: 1, regions, gridW: GW, gridH: GH };
+  }
+
+  /**
+   * Given a pixel-space bounding box and a visual region layer, returns:
+   *  - primary: the smallest region whose bounding box contains the bbox centre
+   *             (falls back to nearest region by centroid distance)
+   *  - memberIds: IDs of every region whose bounding box overlaps the bbox
+   *  - relativePos: { rx, ry } — normalised position of bbox centre inside
+   *                 the primary region (0 = left/top edge, 1 = right/bottom)
+   *
+   * These descriptors let you say "this field lives near the top-left of a
+   * large dark region" and use that as a matching signal on future uploads.
+   */
+  function locateBboxInVisualRegions(bbox, visualRegionLayer){
+    const regions = visualRegionLayer?.regions;
+    if(!bbox || !regions || !regions.length){
+      return { primary: null, memberIds: [], relativePos: null };
+    }
+
+    const bxc = bbox.x + bbox.w / 2;
+    const byc = bbox.y + bbox.h / 2;
+
+    // Most specific (smallest areaFraction) region whose bbox contains the centre
+    let primary = null;
+    for(const r of regions){
+      if(bxc >= r.x && bxc <= r.x + r.w && byc >= r.y && byc <= r.y + r.h){
+        if(!primary || r.areaFraction < primary.areaFraction) primary = r;
+      }
+    }
+
+    // Fallback: nearest region by centroid Manhattan distance
+    if(!primary){
+      let best = Infinity;
+      for(const r of regions){
+        const d = Math.abs(bxc - r.cx) + Math.abs(byc - r.cy);
+        if(d < best){ best = d; primary = r; }
+      }
+    }
+
+    // All regions whose bounding box overlaps the bbox at all
+    const memberIds = regions.filter(r => {
+      const ox = Math.max(0, Math.min(bbox.x + bbox.w, r.x + r.w) - Math.max(bbox.x, r.x));
+      const oy = Math.max(0, Math.min(bbox.y + bbox.h, r.y + r.h) - Math.max(bbox.y, r.y));
+      return ox * oy > 0;
+    }).map(r => r.id);
+
+    const relativePos = primary ? {
+      rx: clamp01((bxc - primary.x) / Math.max(1, primary.w)),
+      ry: clamp01((byc - primary.y) / Math.max(1, primary.h))
+    } : null;
+
+    return {
+      primary: primary ? {
+        id:           primary.id,
+        nx:           primary.nx,  ny:  primary.ny,
+        nw:           primary.nw,  nh:  primary.nh,
+        ncx:          primary.ncx, ncy: primary.ncy,
+        areaFraction: primary.areaFraction,
+        meanLuminance:primary.meanLuminance,
+        fillRatio:    primary.fillRatio,
+        orientation:  primary.orientation
+      } : null,
+      memberIds,
+      relativePos
+    };
+  }
+
   /* ── Region-based structural graph (pixel-driven) ──────────────── */
 
   function buildStructuralGraph(tokens, viewport, textMap, imageData){
@@ -616,6 +837,14 @@
       }
     }
 
+    // ── Visual region layer (pixel path only) ──────────────────────────────
+    // Built once here and attached to the structural graph so downstream code
+    // (captureFieldNeighborhood, extractScalar) can reference it without a
+    // separate call.  Only available when imageData was supplied.
+    const visualRegionLayer = hasPixels
+      ? buildVisualRegionLayer(imageData, vpW, vpH)
+      : { version: 1, regions: [], gridW: 0, gridH: 0 };
+
     return {
       version: 3,
       background: estimateBackground(tm),
@@ -624,6 +853,7 @@
       edgeCount: edges.length,
       nodes: regionNodes,
       edges,
+      visualRegionLayer,
       _method: hasPixels ? 'pixel' : 'whitespace',
       // ── Canonical page-space metadata ───────────────────────────────────────
       // Stored so the overlay renderer can denormalise using the exact same
@@ -641,12 +871,29 @@
     return ox * oy;
   }
 
+  /**
+   * Captures the structural and visual neighbourhood of a configured field box.
+   *
+   * Returns three kinds of context that are persisted in the field's wrokitVisionConfig
+   * and used for matching on future uploads:
+   *
+   *   textNeighbors         – OCR tokens that overlap the bbox (local text structure)
+   *   structuralNeighbors   – nearby structural-graph panel/region nodes
+   *   visualRegionContext   – which visual region the bbox sits in, and the bbox's
+   *                           relative position within that region
+   *
+   * The visual region context is derived from structuralGraph.visualRegionLayer,
+   * which is built by buildVisualRegionLayer() when pixel data is available.
+   */
   function captureFieldNeighborhood(fieldBox, textMap, structuralGraph){
-    if(!fieldBox) return { textNeighbors: [], structuralNeighbors: [] };
+    if(!fieldBox) return { textNeighbors: [], structuralNeighbors: [], visualRegionContext: null };
+
+    const bboxCx = fieldBox.x + fieldBox.w / 2;
+
     const textNeighbors = (textMap?.nodes || [])
       .filter(n => intersectArea(fieldBox, { x:n.x, y:n.y, w:n.w, h:n.h }) > 0)
       .slice(0, 28)
-      .map(n => ({ text: n.text, dx: n.ncx - ((fieldBox.x + fieldBox.w/2) / Math.max(1, fieldBox.x + fieldBox.w)), dy: n.ncy }));
+      .map(n => ({ text: n.text, dx: n.ncx - (bboxCx / Math.max(1, fieldBox.x + fieldBox.w)), dy: n.ncy }));
 
     const structuralNeighbors = (structuralGraph?.nodes || [])
       .map(n => ({
@@ -654,14 +901,24 @@
         type: n.type,
         cx: n.cx,
         cy: n.cy,
-        distance: Math.abs((n.cx || 0) - (fieldBox.x + fieldBox.w/2)) + Math.abs((n.cy || 0) - (fieldBox.y + fieldBox.h/2)),
+        distance: Math.abs((n.cx || 0) - bboxCx) + Math.abs((n.cy || 0) - (fieldBox.y + fieldBox.h/2)),
         stabilityScore: n.stabilityScore,
         textOverlapScore: n.textOverlapScore
       }))
       .sort((a,b)=> a.distance - b.distance)
       .slice(0, 10);
 
-    return { textNeighbors, structuralNeighbors };
+    // ── Visual region context ──────────────────────────────────────────────
+    // Locate the bbox within the visual region layer that was built alongside
+    // the structural graph (pixel path).  This records which broad visual
+    // surface/zone the configured field lives in and where inside that region
+    // it sits — both become matching signals on future uploads.
+    const visualRegionLayer = structuralGraph?.visualRegionLayer;
+    const visualRegionContext = (visualRegionLayer && visualRegionLayer.regions && visualRegionLayer.regions.length)
+      ? locateBboxInVisualRegions(fieldBox, visualRegionLayer)
+      : null;
+
+    return { textNeighbors, structuralNeighbors, visualRegionContext };
   }
 
   function summarizeTextMap(textMap){
@@ -678,6 +935,8 @@
     buildTextInfluenceMask,
     buildStructuralGraph,
     captureFieldNeighborhood,
-    summarizeTextMap
+    summarizeTextMap,
+    buildVisualRegionLayer,
+    locateBboxInVisualRegions
   };
 });
