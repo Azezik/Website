@@ -14666,21 +14666,78 @@ function paintOverlay(ctx, options = {}){
     const maps = getWrokitVisionDebugMaps(targetPage);
     const offPx = offsetForPage(targetPage);
     const graphLoading = !!state.wrokitVisionGraphLoadingByPage?.[targetPage];
-    const projectGraphNode = (node)=>{
-      if(!node || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.w) || !Number.isFinite(node.h)) return null;
-      const transformed = applyTransform({ x: node.x, y: node.y, w: node.w, h: node.h, page: targetPage });
+
+    // ── Canonical page-space rendering helpers ────────────────────────────────
+    //
+    // All graph geometry is stored in the graph's own coordinate space (recorded
+    // in structuralGraph._viewport).  To render it correctly, regardless of any
+    // later display-scale changes, we:
+    //   1. Read the NORMALISED [0,1] coordinates (nx/ny/nw/nh) from the node.
+    //   2. Denormalise using the CURRENT page viewport dimensions (same path as
+    //      extraction normBoxes → denormalizeBox → applyTransform → / scaleX).
+    //   3. Apply any active page transform (scale/rotation).
+    //   4. Divide by scaleX/scaleY to get CSS-pixel draw coordinates.
+    //
+    // This matches exactly how extraction boxes are rendered, establishing a
+    // single canonical coordinate system for the entire pipeline.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Current viewport for the target page (same reference used by extraction).
+    const renderVp = state.pageViewports[targetPage - 1] || state.viewport || {};
+    const renderVpW = Math.max(1, Number(renderVp.width ?? renderVp.w) || 1);
+    const renderVpH = Math.max(1, Number(renderVp.height ?? renderVp.h) || 1);
+
+    /**
+     * Project a graph node into CSS-pixel draw space via the canonical path:
+     *   nx * renderVpW  →  applyTransform  →  / scaleX
+     *
+     * Falls back gracefully to raw x/y if the node has no normalised coords.
+     */
+    const projectGraphNode = (node) => {
+      if(!node) return null;
+
+      // Resolve pixel coordinates in the CURRENT viewport space.
+      // Prefer normalised page-space coordinates (set by wrokit-vision-maps)
+      // so the rendering is decoupled from which pixel scale was used when
+      // building the graph.
+      let px, py, pw, ph;
+      if(Number.isFinite(node.nx) && Number.isFinite(node.ny) &&
+         Number.isFinite(node.nw) && Number.isFinite(node.nh)){
+        // Canonical path: denormalise from page-space using the current viewport.
+        px = node.nx * renderVpW;
+        py = node.ny * renderVpH;
+        pw = node.nw * renderVpW;
+        ph = node.nh * renderVpH;
+      } else {
+        // Fallback: use raw pixel coordinates (legacy nodes without page-space).
+        if(!Number.isFinite(node.x) || !Number.isFinite(node.y) ||
+           !Number.isFinite(node.w) || !Number.isFinite(node.h)) return null;
+        px = node.x; py = node.y; pw = node.w; ph = node.h;
+      }
+
+      // Apply any active page transform (scale / rotation).
+      const transformed = applyTransform({ x: px, y: py, w: pw, h: ph, page: targetPage });
       if(!transformed) return null;
-      const cx = Number.isFinite(node.cx) ? (node.cx - node.x) : (node.w / 2);
-      const cy = Number.isFinite(node.cy) ? (node.cy - node.y) : (node.h / 2);
+
+      // Compute centre offset (in the pre-transform box) then re-apply scale.
+      const cxOff = Number.isFinite(node.ncx) ? (node.ncx * renderVpW - px) :
+                    Number.isFinite(node.cx)   ? (node.cx - (Number.isFinite(node.nx) ? px : node.x)) :
+                    pw / 2;
+      const cyOff = Number.isFinite(node.ncy) ? (node.ncy * renderVpH - py) :
+                    Number.isFinite(node.cy)   ? (node.cy - (Number.isFinite(node.ny) ? py : node.y)) :
+                    ph / 2;
+      const wRatio = transformed.w / Math.max(1, pw);
+      const hRatio = transformed.h / Math.max(1, ph);
       return {
-        x: transformed.x,
-        y: transformed.y,
-        w: transformed.w,
-        h: transformed.h,
-        cx: transformed.x + (cx * (transformed.w / Math.max(1, node.w))),
-        cy: transformed.y + (cy * (transformed.h / Math.max(1, node.h)))
+        x:  transformed.x,
+        y:  transformed.y,
+        w:  transformed.w,
+        h:  transformed.h,
+        cx: transformed.x + cxOff * wRatio,
+        cy: transformed.y + cyOff * hRatio
       };
     };
+
     if(textGraphOn && maps?.textMap?.nodes?.length){
       const tNodes = maps.textMap.nodes.map(projectGraphNode);
       ctx.save();
