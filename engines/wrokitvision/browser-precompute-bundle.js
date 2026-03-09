@@ -58,6 +58,9 @@
       geometry: {
         bbox,
         polygon: Array.isArray(geometry?.polygon) ? geometry.polygon : toPolygonFromBox(bbox),
+        contour: Array.isArray(geometry?.contour) ? geometry.contour : null,
+        hull: Array.isArray(geometry?.hull) ? geometry.hull : null,
+        rotatedRect: geometry?.rotatedRect || null,
         orientation: Number(orientation) || Number(geometry?.orientation) || 0
       },
       confidence: clamp01(confidence),
@@ -172,7 +175,7 @@
         const bbox = ensureBBox(tok);
         return createTextTokenNode({
           id: idFactory('txt_tok'),
-          geometry: { bbox },
+          geometry: { bbox, contour: rectContourFromBbox(bbox), hull: rectContourFromBbox(bbox), rotatedRect: rotatedRectFromBbox(bbox) },
           confidence: Number(tok.confidence ?? tok.ocrConfidence ?? 0.75),
           provenance: { stage: 'text-detection', detector: 'ocr-ingest', page, sourceTokenId: tok.id || null },
           text: tok.text,
@@ -333,7 +336,7 @@
       const padY = Math.max(2, box.h * 0.25);
       regions.push(createStructuralRegionNode({
         id: idFactory('region'),
-        geometry: { bbox: { x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) } },
+        geometry: { bbox: { x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) }, contour: rectContourFromBbox({ x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) }), hull: rectContourFromBbox({ x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) }), rotatedRect: rotatedRectFromBbox({ x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) }) },
         confidence: line.confidence,
         provenance: { stage: 'region-proposals', detector: 'line-envelope', sourceType: 'ocr', sourceLineId: line.id },
         features: { sourceLineId: line.id, sourceTokenCount: line.tokenIds?.length || 0 },
@@ -345,7 +348,7 @@
       const pageTextBounds = unionBbox(textLines.map(l => l.geometry?.bbox || {}));
       regions.push(createStructuralRegionNode({
         id: idFactory('region'),
-        geometry: { bbox: pageTextBounds },
+        geometry: { bbox: pageTextBounds, contour: rectContourFromBbox(pageTextBounds), hull: rectContourFromBbox(pageTextBounds), rotatedRect: rotatedRectFromBbox(pageTextBounds) },
         confidence: 0.65,
         provenance: { stage: 'region-proposals', detector: 'text-hull', sourceType: 'ocr' },
         features: { aggregatedLineCount: textLines.length },
@@ -357,7 +360,7 @@
     if(viewport?.width && viewport?.height){
       regions.push(createStructuralRegionNode({
         id: idFactory('region'),
-        geometry: { bbox: { x: 0, y: 0, w: viewport.width, h: viewport.height } },
+        geometry: { bbox: { x: 0, y: 0, w: viewport.width, h: viewport.height }, contour: rectContourFromBbox({ x: 0, y: 0, w: viewport.width, h: viewport.height }), hull: rectContourFromBbox({ x: 0, y: 0, w: viewport.width, h: viewport.height }), rotatedRect: rotatedRectFromBbox({ x: 0, y: 0, w: viewport.width, h: viewport.height }) },
         confidence: 0.45,
         provenance: { stage: 'region-proposals', detector: 'page-frame', sourceType: 'layout' },
         features: { viewportArea: viewport.width * viewport.height },
@@ -456,9 +459,9 @@
         const isLarge = area > 40000;
         const textDensity = Number(region.textDensity) || 0;
         const isPanel = isLarge && textDensity < 0.35;
-        const surfaceType = isPanel ? 'panel' : (textDensity > 0.55 ? 'text_dense_surface' : 'mixed_surface');
+        const surfaceType = textDensity > 0.55 ? 'text_dense_surface' : 'region_surface';
         const confidence = Math.max(0.25, Math.min(0.95, (Number(region.confidence) || 0.5) * 0.8 + (isLarge ? 0.15 : 0)));
-        return createSurfaceCandidate({ id: idFactory('surface'), geometry: { bbox: box }, confidence, provenance: { stage: 'surface-candidates', detector: 'region-surface-heuristic', sourceRegionId: region.id }, surfaceType, features: { regionArea: area, textDensity }, supportingRegionIds: [region.id] });
+        return createSurfaceCandidate({ id: idFactory('surface'), geometry: { bbox: box }, confidence, provenance: { stage: 'surface-candidates', detector: 'region-surface-heuristic', sourceRegionId: region.id }, surfaceType, features: { regionArea: area, textDensity, panelLike: isPanel }, supportingRegionIds: [region.id] });
       })
       .filter(c => c.features.regionArea > 2000);
   }

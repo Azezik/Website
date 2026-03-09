@@ -7,6 +7,32 @@ function clamp(value, min, max){
   return Math.max(min, Math.min(max, value));
 }
 
+
+function rectContourFromBbox(bbox = {}){
+  const x = Number(bbox.x) || 0;
+  const y = Number(bbox.y) || 0;
+  const w = Math.max(0, Number(bbox.w) || 0);
+  const h = Math.max(0, Number(bbox.h) || 0);
+  return [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h },
+    { x, y: y + h }
+  ];
+}
+
+function rotatedRectFromBbox(bbox = {}){
+  const x = Number(bbox.x) || 0;
+  const y = Number(bbox.y) || 0;
+  const w = Math.max(0, Number(bbox.w) || 0);
+  const h = Math.max(0, Number(bbox.h) || 0);
+  return {
+    center: { x: x + (w / 2), y: y + (h / 2) },
+    size: { w, h },
+    angleDeg: 0
+  };
+}
+
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
     return [];
@@ -79,7 +105,7 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
       };
       proposals.push(createStructuralRegionNode({
         id: idFactory('region'),
-        geometry: { bbox },
+        geometry: { bbox, contour: rectContourFromBbox(bbox), hull: rectContourFromBbox(bbox), rotatedRect: rotatedRectFromBbox(bbox) },
         confidence: 0.58,
         provenance: {
           stage: 'region-proposals',
@@ -106,9 +132,10 @@ function detectRegionProposals({ textLines = [], viewport, idFactory, imageData 
     const box = ensureBBox(line.geometry?.bbox || {});
     const padX = Math.max(4, box.h * 0.5);
     const padY = Math.max(2, box.h * 0.25);
+    const lineBbox = { x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) };
     regions.push(createStructuralRegionNode({
       id: idFactory('region'),
-      geometry: { bbox: { x: box.x - padX, y: box.y - padY, w: box.w + (padX * 2), h: box.h + (padY * 2) } },
+      geometry: { bbox: lineBbox, contour: rectContourFromBbox(lineBbox), hull: rectContourFromBbox(lineBbox), rotatedRect: rotatedRectFromBbox(lineBbox) },
       confidence: line.confidence,
       provenance: { stage: 'region-proposals', detector: 'line-envelope', sourceType: 'ocr', sourceLineId: line.id },
       features: { sourceLineId: line.id, sourceTokenCount: line.tokenIds?.length || 0 },
@@ -121,7 +148,7 @@ function detectRegionProposals({ textLines = [], viewport, idFactory, imageData 
     const pageTextBounds = unionBbox(textLines.map(line => line.geometry?.bbox || {}));
     regions.push(createStructuralRegionNode({
       id: idFactory('region'),
-      geometry: { bbox: pageTextBounds },
+      geometry: { bbox: pageTextBounds, contour: rectContourFromBbox(pageTextBounds), hull: rectContourFromBbox(pageTextBounds), rotatedRect: rotatedRectFromBbox(pageTextBounds) },
       confidence: 0.65,
       provenance: { stage: 'region-proposals', detector: 'text-hull', sourceType: 'ocr' },
       features: { aggregatedLineCount: textLines.length },
@@ -133,9 +160,10 @@ function detectRegionProposals({ textLines = [], viewport, idFactory, imageData 
   regions.push(...detectConnectedVisualProposals({ imageData, viewport, idFactory }));
 
   if(viewport?.width && viewport?.height){
+    const pageBox = { x: 0, y: 0, w: viewport.width, h: viewport.height };
     regions.push(createStructuralRegionNode({
       id: idFactory('region'),
-      geometry: { bbox: { x: 0, y: 0, w: viewport.width, h: viewport.height } },
+      geometry: { bbox: pageBox, contour: rectContourFromBbox(pageBox), hull: rectContourFromBbox(pageBox), rotatedRect: rotatedRectFromBbox(pageBox) },
       confidence: 0.45,
       provenance: { stage: 'region-proposals', detector: 'page-frame', sourceType: 'layout' },
       features: { viewportArea: viewport.width * viewport.height },

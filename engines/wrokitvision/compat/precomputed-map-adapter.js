@@ -20,6 +20,29 @@
     };
   }
 
+
+
+  function normalizeGeometry(region){
+    const geometry = region?.geometry || {};
+    const bbox = geometry?.bbox || {};
+    const normalizedBBox = {
+      x: Number(bbox.x) || 0,
+      y: Number(bbox.y) || 0,
+      w: Math.max(0, Number(bbox.w) || 0),
+      h: Math.max(0, Number(bbox.h) || 0)
+    };
+    if(Array.isArray(geometry.contour) && geometry.contour.length >= 3){
+      return { kind: 'contour', points: geometry.contour, bbox: normalizedBBox };
+    }
+    if(Array.isArray(geometry.hull) && geometry.hull.length >= 3){
+      return { kind: 'hull', points: geometry.hull, bbox: normalizedBBox };
+    }
+    if(geometry.rotatedRect?.center){
+      return { kind: 'rotated_rect', rotatedRect: geometry.rotatedRect, bbox: normalizedBBox };
+    }
+    return { kind: 'bbox', bbox: normalizedBBox };
+  }
+
   function toLegacyTextNode(token, viewport){
     const bbox = token?.geometry?.bbox || {};
     const x = Number(bbox.x) || 0;
@@ -57,7 +80,9 @@
 
     return {
       id: region?.id || null,
-      type: region?.surfaceTypeCandidate || 'region',
+      type: 'region_surface',
+      derivedPanelClass: region?.surfaceTypeCandidate === 'panel' ? 'panel' : null,
+      surfaceTypeCandidate: region?.surfaceTypeCandidate || 'unknown',
       x,
       y,
       w,
@@ -74,7 +99,8 @@
       orientation: (region?.geometry?.orientation || 0) > 0 ? 'rotated' : (w >= h ? 'horizontal' : 'vertical'),
       textOverlapScore: clamp01(textDensity),
       stabilityScore: clamp01((confidence * 0.8) + ((1 - textDensity) * 0.2)),
-      provenance: region?.provenance || null
+      provenance: region?.provenance || null,
+      geometry: normalizeGeometry(region)
     };
   }
 
@@ -99,12 +125,15 @@
         meanLuminance: Number.isFinite(meanLuminance) ? clamp01(meanLuminance) : 0.5,
         fillRatio: 1,
         orientation: node.orientation,
-        provenance: node.provenance || null
+        provenance: node.provenance || null,
+        geometry: node.geometry || { kind: 'bbox', bbox: { x: node.x, y: node.y, w: node.w, h: node.h } }
       };
     });
 
     return {
-      version: 1,
+      version: 2,
+      role: 'geometry-faithful-debug',
+      bboxLayerRole: 'compatibility-bbox-debug',
       regions,
       gridW: Math.max(1, Math.round(viewport.width / 16)),
       gridH: Math.max(1, Math.round(viewport.height / 16))

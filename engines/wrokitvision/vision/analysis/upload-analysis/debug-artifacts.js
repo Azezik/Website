@@ -1,7 +1,53 @@
 'use strict';
 
+function ensureBbox(bbox = {}){
+  return {
+    x: Number(bbox.x) || 0,
+    y: Number(bbox.y) || 0,
+    w: Math.max(0, Number(bbox.w) || 0),
+    h: Math.max(0, Number(bbox.h) || 0)
+  };
+}
+
+function toGeometryShape(region){
+  const geometry = region?.geometry || {};
+  const bbox = ensureBbox(geometry.bbox || {});
+  if(Array.isArray(geometry.contour) && geometry.contour.length >= 3){
+    return { kind: 'contour', points: geometry.contour, bbox };
+  }
+  if(Array.isArray(geometry.hull) && geometry.hull.length >= 3){
+    return { kind: 'hull', points: geometry.hull, bbox };
+  }
+  if(geometry.rotatedRect?.center){
+    return { kind: 'rotated_rect', rotatedRect: geometry.rotatedRect, bbox };
+  }
+  return { kind: 'bbox', bbox };
+}
+
 function buildRegionProposalOverlay(regionNodes = []){
-  return { layer: 'region-proposals', count: regionNodes.length, items: regionNodes };
+  return {
+    layer: 'region-proposals-bbox-debug',
+    role: 'compatibility-bbox-debug',
+    count: regionNodes.length,
+    items: regionNodes
+  };
+}
+
+function buildRegionGeometryOverlay(regionNodes = []){
+  const items = regionNodes.map((region) => ({
+    id: region?.id || null,
+    provenance: region?.provenance || null,
+    confidence: Number(region?.confidence) || 0,
+    surfaceTypeCandidate: region?.surfaceTypeCandidate || 'unknown',
+    geometry: toGeometryShape(region)
+  }));
+
+  return {
+    layer: 'region-geometry-truth',
+    role: 'geometry-faithful-debug',
+    count: items.length,
+    items
+  };
 }
 
 function buildRegionGraphOverlay(regionGraph = { nodes: [], edges: [] }){
@@ -30,6 +76,7 @@ function buildSurfaceCandidateOverlay(surfaceCandidates = []){
 
 module.exports = {
   buildRegionProposalOverlay,
+  buildRegionGeometryOverlay,
   buildRegionGraphOverlay,
   buildTextTokenOverlay,
   buildTextLineOverlay,

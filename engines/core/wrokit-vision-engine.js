@@ -650,7 +650,7 @@
           imageData: imageData || null
         })
       : null;
-    const maps = buildMaps(tokens || [], viewport || null, null, precomputedStructuralMap);
+    const maps = buildMaps(tokens || [], viewport || null, imageData || null, precomputedStructuralMap);
     const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
     return {
       generatedAt: Date.now(),

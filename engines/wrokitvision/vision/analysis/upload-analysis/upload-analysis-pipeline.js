@@ -13,6 +13,7 @@ const { buildTextGraph } = require('../../text/text-graph/build-text-graph');
 const { detectSurfaceCandidates } = require('../../surfaces/surface-candidates/detect-surface-candidates');
 const {
   buildRegionProposalOverlay,
+  buildRegionGeometryOverlay,
   buildRegionGraphOverlay,
   buildTextTokenOverlay,
   buildTextLineOverlay,
@@ -53,6 +54,7 @@ function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = 
 
   const debugArtifacts = {
     regionProposalsOverlay: buildRegionProposalOverlay(regionNodes),
+    regionGeometryOverlay: buildRegionGeometryOverlay(regionNodes),
     regionGraphOverlay: buildRegionGraphOverlay(regionGraph),
     textTokensOverlay: buildTextTokenOverlay(textTokens),
     textLinesOverlay: buildTextLineOverlay(textLines),

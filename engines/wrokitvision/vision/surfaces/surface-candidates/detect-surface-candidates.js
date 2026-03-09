@@ -10,7 +10,7 @@ function detectSurfaceCandidates(regionNodes = [], { idFactory } = {}){
       const isLarge = area > 40000;
       const textDensity = Number(region.textDensity) || 0;
       const isPanel = isLarge && textDensity < 0.35;
-      const surfaceType = isPanel ? 'panel' : (textDensity > 0.55 ? 'text_dense_surface' : 'mixed_surface');
+      const surfaceType = textDensity > 0.55 ? 'text_dense_surface' : 'region_surface';
       const confidence = Math.max(0.25, Math.min(0.95, (Number(region.confidence) || 0.5) * 0.8 + (isLarge ? 0.15 : 0)));
       return createSurfaceCandidate({
         id: idFactory('surface'),
@@ -18,7 +18,7 @@ function detectSurfaceCandidates(regionNodes = [], { idFactory } = {}){
         confidence,
         provenance: { stage: 'surface-candidates', detector: 'region-surface-heuristic', sourceRegionId: region.id },
         surfaceType,
-        features: { regionArea: area, textDensity },
+        features: { regionArea: area, textDensity, panelLike: isPanel },
         supportingRegionIds: [region.id]
       });
     })
