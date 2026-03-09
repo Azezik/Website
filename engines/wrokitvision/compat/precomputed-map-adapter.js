@@ -104,6 +104,17 @@ function buildVisualRegionLayer(regionNodes, viewport){
   };
 }
 
+// Remap a typed graph edge (sourceNodeId/targetNodeId/edgeType) to the legacy
+// format (from/to/type) expected by the overlay renderer.
+function toLegacyEdge(edge){
+  return {
+    from: edge.sourceNodeId || edge.from || null,
+    to:   edge.targetNodeId || edge.to   || null,
+    type: edge.edgeType     || edge.type || 'unknown',
+    weight: typeof edge.weight === 'number' ? edge.weight : 1
+  };
+}
+
 function adaptPrecomputedStructuralMapToLegacyMaps(precomputedStructuralMap, fallbackTokens = [], fallbackViewport = null){
   const analysis = precomputedStructuralMap?.uploadedImageAnalysis || {};
   const viewport = normalizeViewport(analysis.viewport || fallbackViewport || null);
@@ -130,7 +141,11 @@ function adaptPrecomputedStructuralMapToLegacyMaps(precomputedStructuralMap, fal
     }));
 
   const regionNodes = (analysis.regionNodes || []).map(region => toLegacyStructuralNode(region, viewport));
-  const regionEdges = Array.isArray(analysis.regionGraph?.edges) ? analysis.regionGraph.edges : [];
+  // Remap typed edges (sourceNodeId/targetNodeId/edgeType) → legacy (from/to/type)
+  // so the overlay renderer can resolve edge endpoints by node id.
+  const regionEdges = Array.isArray(analysis.regionGraph?.edges)
+    ? analysis.regionGraph.edges.map(toLegacyEdge)
+    : [];
 
   return {
     source: 'precomputed-structural-map',
