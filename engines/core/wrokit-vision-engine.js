@@ -16,6 +16,16 @@
     }
     return (typeof self !== 'undefined' ? self : this).WrokitVisionPrecompute || null;
   })();
+  const PrecomputedCompat = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/compat/precomputed-map-adapter.js');
+      }
+    } catch(_err){
+      return null;
+    }
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionPrecomputedCompat || null;
+  })();
   const LABEL_HINTS = {
     store_name: ['vendor','seller','company','store','business'],
     department: ['department','division'],
@@ -249,7 +259,25 @@
     };
   }
 
-  function buildMaps(tokens, viewport, imageData){
+  function resolvePrecomputedArtifact({ precomputedStructuralMap, profile, geometryId, page, fieldSpec }){
+    if(precomputedStructuralMap?.uploadedImageAnalysis) return precomputedStructuralMap;
+    const fieldCfgArtifact = fieldSpec?.wrokitVisionConfig?.precomputedStructuralMap;
+    if(fieldCfgArtifact?.uploadedImageAnalysis) return fieldCfgArtifact;
+
+    const resolvedGeometryId = geometryId || profile?.geometryId || null;
+    const resolvedPage = Number(page || fieldSpec?.page || 1);
+    const artifacts = profile?.wrokitVision?.geometryArtifacts || {};
+    const artifact = artifacts?.[resolvedGeometryId]?.precomputedStructuralMap;
+    if(artifact?.uploadedImageAnalysis && Number(artifact.page || resolvedPage) === resolvedPage){
+      return artifact;
+    }
+    return null;
+  }
+
+  function buildMaps(tokens, viewport, imageData, precomputedStructuralMap){
+    if(precomputedStructuralMap?.uploadedImageAnalysis && PrecomputedCompat?.adaptPrecomputedStructuralMapToLegacyMaps){
+      return PrecomputedCompat.adaptPrecomputedStructuralMapToLegacyMaps(precomputedStructuralMap, tokens || [], viewport || null);
+    }
     if(!MapTools) return { textMap: null, structuralGraph: null };
     const textMap = MapTools.buildTextMap(tokens || [], viewport || null);
     // Pass imageData (optional) so buildStructuralGraph can also build the
@@ -278,7 +306,7 @@
     return Math.max(0, Math.min(0.45, (stability * 0.35) + Math.max(0, 0.2 - (nearest / 2200))));
   }
 
-  function extractScalar({ fieldSpec, tokens, boxPx, viewport, runtimeMaps, profile, geometryId }){
+  function extractScalar({ fieldSpec, tokens, boxPx, viewport, runtimeMaps, profile, geometryId, precomputedStructuralMap }){
     if(!boxPx){
       return { value: '', raw: '', confidence: 0.1, boxPx: null, tokens: [], method:'wrokit-vision-no-box', engine:'wrokit_vision', lowConfidence:true };
     }
@@ -288,7 +316,19 @@
     let lastCandidates = [];
     let lastScope = boxPx;
 
-    const mapBundle = runtimeMaps || buildMaps(tokens || [], viewport || fieldSpec?.wrokitVisionConfig?.viewport || null);
+    const canonicalPrecomputed = resolvePrecomputedArtifact({
+      precomputedStructuralMap: precomputedStructuralMap || runtimeMaps?.precomputedStructuralMap,
+      profile,
+      geometryId,
+      page: fieldSpec?.page,
+      fieldSpec
+    });
+    const mapBundle = runtimeMaps || buildMaps(
+      tokens || [],
+      viewport || fieldSpec?.wrokitVisionConfig?.viewport || null,
+      null,
+      canonicalPrecomputed
+    );
     const fieldCfg = fieldSpec?.wrokitVisionConfig || null;
     const profileCfg = (profile?.fields || []).find(f => f?.fieldKey === fieldSpec?.fieldKey)?.wrokitVisionConfig || null;
     const cfg = fieldCfg || profileCfg;
@@ -368,11 +408,18 @@
     return resolveFallback(fieldSpec, lastCandidates, lastScope);
   }
 
-  function registerField({ step, normBox, page, rawBox, viewport, tokens, profile, geometryId, imageData }){
+  function registerField({ step, normBox, page, rawBox, viewport, tokens, profile, geometryId, imageData, precomputedStructuralMap }){
     // imageData: optional { gray: Uint8Array, width, height } — when provided,
     // the visual region layer is built and the field's neighbourhood will include
     // visualRegionContext (region membership + relative position).
-    const maps = buildMaps(tokens || [], viewport || null, imageData || null);
+    const canonicalPrecomputed = resolvePrecomputedArtifact({
+      precomputedStructuralMap,
+      profile,
+      geometryId,
+      page,
+      fieldSpec: step
+    });
+    const maps = buildMaps(tokens || [], viewport || null, imageData || null, canonicalPrecomputed);
     const neighborhoods = (MapTools && rawBox)
       ? MapTools.captureFieldNeighborhood(rawBox, maps.textMap, maps.structuralGraph)
       : { textNeighbors: [], structuralNeighbors: [], visualRegionContext: null };
@@ -396,21 +443,31 @@
       mapStats: {
         textNodes: maps.textMap?.nodeCount || 0,
         structuralNodes: maps.structuralGraph?.nodeCount || 0
-      }
+      },
+      precomputedStructuralMapRef: canonicalPrecomputed
+        ? {
+            schema: canonicalPrecomputed.schema || null,
+            version: canonicalPrecomputed.version || null,
+            geometryId: canonicalPrecomputed.geometryId || null,
+            page: canonicalPrecomputed.page || page || null,
+            generatedAt: canonicalPrecomputed.generatedAt || null
+          }
+        : null
     };
   }
 
-  function createSeedArtifacts({ tokens, viewport, page = 1, geometryId = null }){
-    const maps = buildMaps(tokens || [], viewport || null);
-    const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
+  function createSeedArtifacts({ tokens, viewport, page = 1, geometryId = null, imageData = null }){
     const precomputedStructuralMap = Precompute?.buildPrecomputedStructuralMap
       ? Precompute.buildPrecomputedStructuralMap({
           tokens: tokens || [],
           viewport: viewport || null,
           page,
-          geometryId
+          geometryId,
+          imageData: imageData || null
         })
       : null;
+    const maps = buildMaps(tokens || [], viewport || null, null, precomputedStructuralMap);
+    const summary = MapTools?.summarizeTextMap ? MapTools.summarizeTextMap(maps.textMap) : null;
     return {
       generatedAt: Date.now(),
       profileVersion: 11,

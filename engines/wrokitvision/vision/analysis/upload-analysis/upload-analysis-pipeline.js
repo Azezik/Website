@@ -29,7 +29,7 @@ function createIdFactory(seed = 'analysis'){
   };
 }
 
-function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = null, analysisId = null } = {}){
+function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = null, analysisId = null, imageData = null } = {}){
   const resolvedViewport = viewport ? {
     width: Number(viewport.width || viewport.w || 0),
     height: Number(viewport.height || viewport.h || 0)
@@ -43,7 +43,8 @@ function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = 
   const proposalRegions = detectRegionProposals({
     textLines,
     viewport: resolvedViewport,
-    idFactory
+    idFactory,
+    imageData
   });
   const regionNodes = computeRegionFeatures(proposalRegions, textTokens);
   const regionGraph = buildRegionGraph(regionNodes, { idFactory });
