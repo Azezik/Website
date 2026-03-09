@@ -52,6 +52,9 @@ function createStructuralRegionNode({ id, geometry, confidence, provenance, feat
     geometry: {
       bbox,
       polygon: Array.isArray(geometry?.polygon) ? geometry.polygon : toPolygonFromBox(bbox),
+      contour: Array.isArray(geometry?.contour) ? geometry.contour : null,
+      hull: Array.isArray(geometry?.hull) ? geometry.hull : null,
+      rotatedRect: geometry?.rotatedRect || null,
       orientation: Number(orientation) || Number(geometry?.orientation) || 0
     },
     confidence: clamp01(confidence),
