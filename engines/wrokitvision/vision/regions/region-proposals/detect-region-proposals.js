@@ -2,10 +2,7 @@
 
 const { createStructuralRegionNode, ensureBBox } = require('../../types');
 const { unionBbox } = require('../../text/text-grouping/group-text-lines');
-
-function clamp(value, min, max){
-  return Math.max(min, Math.min(max, value));
-}
+const { buildAtomicVisualSegments } = require('./atomic-visual-segmentation');
 
 function rectContourFromBbox(bbox = {}){
   const x = Number(bbox.x) || 0;
@@ -65,192 +62,6 @@ function convexHull(points = []){
   return lower.concat(upper);
 }
 
-function orientedRectFromMoments(points = [], fallbackBbox = {}){
-  if(!points.length) return rotatedRectFromBbox(fallbackBbox);
-  let mx = 0;
-  let my = 0;
-  for(const p of points){
-    mx += p.x;
-    my += p.y;
-  }
-  mx /= points.length;
-  my /= points.length;
-  let xx = 0;
-  let yy = 0;
-  let xy = 0;
-  for(const p of points){
-    const dx = p.x - mx;
-    const dy = p.y - my;
-    xx += dx * dx;
-    yy += dy * dy;
-    xy += dx * dy;
-  }
-  xx /= Math.max(1, points.length);
-  yy /= Math.max(1, points.length);
-  xy /= Math.max(1, points.length);
-  const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
-  const cosA = Math.cos(angle);
-  const sinA = Math.sin(angle);
-  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-  for(const p of points){
-    const dx = p.x - mx;
-    const dy = p.y - my;
-    const u = (dx * cosA) + (dy * sinA);
-    const v = (-dx * sinA) + (dy * cosA);
-    if(u < minU) minU = u;
-    if(u > maxU) maxU = u;
-    if(v < minV) minV = v;
-    if(v > maxV) maxV = v;
-  }
-  const w = Math.max(1, maxU - minU);
-  const h = Math.max(1, maxV - minV);
-  return {
-    center: { x: mx, y: my },
-    size: { w, h },
-    angleDeg: angle * (180 / Math.PI)
-  };
-}
-
-function sobelBinary(gray, width, height, threshold = 80){
-  const edges = new Uint8Array(width * height);
-  for(let y = 1; y < height - 1; y++){
-    for(let x = 1; x < width - 1; x++){
-      const i = y * width + x;
-      const gx = -gray[i-width-1] - 2 * gray[i-1] - gray[i+width-1]
-               + gray[i-width+1] + 2 * gray[i+1] + gray[i+width+1];
-      const gy = -gray[i-width-1] - 2 * gray[i-width] - gray[i-width+1]
-               + gray[i+width-1] + 2 * gray[i+width] + gray[i+width+1];
-      const g = Math.sqrt(gx * gx + gy * gy);
-      edges[i] = g > threshold ? 1 : 0;
-    }
-  }
-  return edges;
-}
-
-function buildOrderedBoundaryContour(boundaryPixels = [], sx = 1, sy = 1){
-  if(!Array.isArray(boundaryPixels) || boundaryPixels.length < 3) return [];
-
-  let cx = 0;
-  let cy = 0;
-  for(const p of boundaryPixels){
-    cx += p.x;
-    cy += p.y;
-  }
-  cx /= Math.max(1, boundaryPixels.length);
-  cy /= Math.max(1, boundaryPixels.length);
-
-  const bucketCount = clamp(Math.round(Math.sqrt(boundaryPixels.length) * 2), 24, 96);
-  const buckets = Array.from({ length: bucketCount }, () => null);
-  const fullTurn = Math.PI * 2;
-
-  for(const p of boundaryPixels){
-    const dx = p.x - cx;
-    const dy = p.y - cy;
-    const angle = Math.atan2(dy, dx);
-    const norm = (angle + Math.PI) / fullTurn;
-    const bucketIdx = clamp(Math.floor(norm * bucketCount), 0, bucketCount - 1);
-    const dist2 = (dx * dx) + (dy * dy);
-    const prev = buckets[bucketIdx];
-    if(!prev || dist2 > prev.dist2){
-      buckets[bucketIdx] = { p, dist2, angle };
-    }
-  }
-
-  return buckets
-    .filter(Boolean)
-    .sort((a, b) => a.angle - b.angle)
-    .map(({ p }) => ({ x: p.x * sx, y: p.y * sy }));
-}
-
-function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densityThreshold = 0.28 } = {}){
-  if(!edges || !width || !height) return false;
-  if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
-  let hits = 0;
-  let samples = 0;
-
-  if(x0 !== x1){
-    const bx = Math.max(x0, x1);
-    for(let dy = -1; dy <= 1; dy++){
-      const sy = y0 + dy;
-      if(bx < 0 || bx >= width || sy < 0 || sy >= height) continue;
-      samples += 1;
-      if(edges[(sy * width) + bx]) hits += 1;
-    }
-  } else {
-    const by = Math.max(y0, y1);
-    for(let dx = -1; dx <= 1; dx++){
-      const sx = x0 + dx;
-      if(sx < 0 || sx >= width || by < 0 || by >= height) continue;
-      samples += 1;
-      if(edges[(by * width) + sx]) hits += 1;
-    }
-  }
-
-  if(samples <= 0) return false;
-  return (hits / samples) >= densityThreshold;
-}
-
-function resolveRgbChannels(imageData, expectedLength){
-  if(!imageData || expectedLength <= 0) return null;
-  const r = imageData.r;
-  const g = imageData.g;
-  const b = imageData.b;
-  if(r?.length === expectedLength && g?.length === expectedLength && b?.length === expectedLength){
-    return { r, g, b };
-  }
-  const rgba = imageData.rgba || imageData.data;
-  if(!rgba || rgba.length < expectedLength * 4) return null;
-  const rr = new Uint8Array(expectedLength);
-  const gg = new Uint8Array(expectedLength);
-  const bb = new Uint8Array(expectedLength);
-  for(let i = 0, j = 0; i < expectedLength; i++, j += 4){
-    rr[i] = rgba[j] || 0;
-    gg[i] = rgba[j + 1] || 0;
-    bb[i] = rgba[j + 2] || 0;
-  }
-  return { r: rr, g: gg, b: bb };
-}
-
-function colorDistance(a, b){
-  const dr = (a.r || 0) - (b.r || 0);
-  const dg = (a.g || 0) - (b.g || 0);
-  const db = (a.b || 0) - (b.b || 0);
-  return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
-}
-
-function hasStrongLocalColorBarrier({ rgb, width, height, x0, y0, x1, y1, distanceThreshold = 38 } = {}){
-  if(!rgb || !width || !height) return false;
-  if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
-  const aIdx = (y0 * width) + x0;
-  const bIdx = (y1 * width) + x1;
-  const baseA = { r: rgb.r[aIdx], g: rgb.g[aIdx], b: rgb.b[aIdx] };
-  const baseB = { r: rgb.r[bIdx], g: rgb.g[bIdx], b: rgb.b[bIdx] };
-  if(colorDistance(baseA, baseB) >= distanceThreshold) return true;
-
-  const offsets = x0 !== x1 ? [
-    { ax: x0, ay: y0 - 1, bx: x1, by: y1 - 1 },
-    { ax: x0, ay: y0 + 1, bx: x1, by: y1 + 1 }
-  ] : [
-    { ax: x0 - 1, ay: y0, bx: x1 - 1, by: y1 },
-    { ax: x0 + 1, ay: y0, bx: x1 + 1, by: y1 }
-  ];
-
-  let hits = 0;
-  let samples = 0;
-  for(const pair of offsets){
-    if(pair.ax < 0 || pair.ax >= width || pair.ay < 0 || pair.ay >= height) continue;
-    if(pair.bx < 0 || pair.bx >= width || pair.by < 0 || pair.by >= height) continue;
-    const ai = (pair.ay * width) + pair.ax;
-    const bi = (pair.by * width) + pair.bx;
-    const ca = { r: rgb.r[ai], g: rgb.g[ai], b: rgb.b[ai] };
-    const cb = { r: rgb.r[bi], g: rgb.g[bi], b: rgb.b[bi] };
-    samples += 1;
-    if(colorDistance(ca, cb) >= distanceThreshold) hits += 1;
-  }
-
-  return samples > 0 && (hits / samples) >= 0.5;
-}
-
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
     return [];
@@ -258,123 +69,31 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
 
   const width = Number(imageData.width) || 0;
   const height = Number(imageData.height) || 0;
-  if(width <= 2 || height <= 2) return [];
-
-  const gray = imageData.gray;
-  const rgb = resolveRgbChannels(imageData, gray.length);
-  const edges = sobelBinary(gray, width, height, 80);
-  let sum = 0;
-  for(let i = 0; i < gray.length; i++) sum += gray[i];
-  const mean = sum / Math.max(1, gray.length);
-
-  const threshold = clamp(Math.round(mean * 0.82), 22, 220);
-  let meanColor = null;
-  if(rgb){
-    let sumR = 0;
-    let sumG = 0;
-    let sumB = 0;
-    for(let i = 0; i < gray.length; i++){
-      sumR += rgb.r[i];
-      sumG += rgb.g[i];
-      sumB += rgb.b[i];
-    }
-    const denom = Math.max(1, gray.length);
-    meanColor = {
-      r: sumR / denom,
-      g: sumG / denom,
-      b: sumB / denom
-    };
-  }
-  const colorSeedThreshold = 30;
-  const mask = new Uint8Array(width * height);
-  for(let i = 0; i < gray.length; i++){
-    const luminanceHit = gray[i] <= threshold;
-    const colorHit = meanColor
-      ? colorDistance({ r: rgb.r[i], g: rgb.g[i], b: rgb.b[i] }, meanColor) >= colorSeedThreshold
-      : false;
-    mask[i] = (luminanceHit || colorHit) ? 1 : 0;
-  }
-
-  const visited = new Uint8Array(width * height);
   const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
   const maxArea = Math.floor((width * height) * 0.75);
   const sx = viewport.width / width;
   const sy = viewport.height / height;
   const proposals = [];
+  const segmented = buildAtomicVisualSegments({ imageData });
+  if(!segmented) return proposals;
 
-  for(let y = 0; y < height; y++){
-    for(let x = 0; x < width; x++){
-      const start = y * width + x;
-      if(mask[start] !== 1 || visited[start]) continue;
-
-      const q = [start];
-      visited[start] = 1;
-      let head = 0;
-      let area = 0;
-      let x0 = x, y0 = y, x1 = x, y1 = y;
-      const pixels = [];
-      const boundaryPixels = [];
-
-      while(head < q.length){
-        const idx = q[head++];
-        const cx = idx % width;
-        const cy = (idx / width) | 0;
-        area += 1;
-        pixels.push({ x: cx, y: cy });
-        if(cx < x0) x0 = cx;
-        if(cy < y0) y0 = cy;
-        if(cx > x1) x1 = cx;
-        if(cy > y1) y1 = cy;
-
-        const neighbors = [
-          { ni: idx - 1, nx: cx - 1, ny: cy },
-          { ni: idx + 1, nx: cx + 1, ny: cy },
-          { ni: idx - width, nx: cx, ny: cy - 1 },
-          { ni: idx + width, nx: cx, ny: cy + 1 }
-        ];
-        let isBoundary = false;
-        for(const { ni, nx, ny } of neighbors){
-          if(nx < 0 || nx >= width || ny < 0 || ny >= height){
-            isBoundary = true;
-            continue;
-          }
-          if(mask[ni] !== 1){
-            isBoundary = true;
-            continue;
-          }
-          if(hasStrongLocalEdgeBarrier({ edges, width, height, x0: cx, y0: cy, x1: nx, y1: ny })){
-            isBoundary = true;
-            continue;
-          }
-          if(hasStrongLocalColorBarrier({ rgb, width, height, x0: cx, y0: cy, x1: nx, y1: ny })){
-            isBoundary = true;
-            continue;
-          }
-          if(visited[ni]) continue;
-          visited[ni] = 1;
-          q.push(ni);
-        }
-        if(isBoundary) boundaryPixels.push({ x: cx, y: cy });
-      }
-
+  for(const merged of segmented.mergedRegions){
+      const area = merged.area;
       if(area < minArea || area > maxArea) continue;
-      const bw = x1 - x0 + 1;
-      const bh = y1 - y0 + 1;
+      const bw = merged.x1 - merged.x0 + 1;
+      const bh = merged.y1 - merged.y0 + 1;
       if(bw < 10 || bh < 10) continue;
 
       const bbox = {
-        x: x0 * sx,
-        y: y0 * sy,
+        x: merged.x0 * sx,
+        y: merged.y0 * sy,
         w: bw * sx,
         h: bh * sy
       };
 
-      const contour = buildOrderedBoundaryContour(boundaryPixels, sx, sy);
-      const hull = convexHull(contour.length >= 3 ? contour : rectContourFromBbox(bbox));
-      const rotatedRect = orientedRectFromMoments(
-        pixels.length > 1200 ? pixels.filter((_, idx) => idx % Math.ceil(pixels.length / 1200) === 0).map(p => ({ x: p.x * sx, y: p.y * sy })) : pixels.map(p => ({ x: p.x * sx, y: p.y * sy })),
-        bbox
-      );
+      const contour = rectContourFromBbox(bbox);
+      const hull = convexHull(contour);
+      const rotatedRect = rotatedRectFromBbox(bbox);
 
       proposals.push(createStructuralRegionNode({
         id: idFactory('region'),
@@ -387,21 +106,19 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
         confidence: 0.62,
         provenance: {
           stage: 'region-proposals',
-          detector: 'connected-components-threshold',
+          detector: 'atomic-region-merge',
           sourceType: 'visual'
         },
         features: {
-          source: 'visual-connected-components',
+          source: 'visual-atomic-region-merge',
           pixelArea: area,
-          imageThreshold: threshold,
-          colorSeedThreshold: meanColor ? colorSeedThreshold : null,
-          colorAwareBarrier: Boolean(rgb),
-          boundaryComplexity: boundaryPixels.length / Math.max(1, area)
+          atomicRegionCount: merged.atomicCount,
+          atomicSeedCount: segmented.atomicCount,
+          boundaryFirst: true
         },
         surfaceTypeCandidate: 'visual_component',
         textDensity: 0
       }));
-    }
   }
 
   return proposals;
