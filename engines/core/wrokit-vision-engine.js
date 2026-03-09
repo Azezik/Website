@@ -34,7 +34,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.SelectionAssociation || null;
   })();
   const LocalRelevance = (function(){
     try {
@@ -44,7 +44,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.LocalRelevance || null;
   })();
   const LocalSubgraph = (function(){
     try {
@@ -54,7 +54,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.LocalSubgraph || null;
   })();
   const LocalStructure = (function(){
     try {
@@ -64,7 +64,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.LocalStructure || null;
   })();
   const LocalFrame = (function(){
     try {
@@ -74,7 +74,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.LocalFrame || null;
   })();
 
   const FieldMatcher = (function(){
@@ -85,7 +85,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.FieldMatcher || null;
   })();
   const FieldSignature = (function(){
     try {
@@ -95,7 +95,7 @@
     } catch(_err){
       return null;
     }
-    return null;
+    return (typeof self !== 'undefined' ? self : this).WrokitVisionFieldPipeline?.FieldSignature || null;
   })();
 
   const LABEL_HINTS = {
