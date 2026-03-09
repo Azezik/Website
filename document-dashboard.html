@@ -630,6 +630,12 @@
   <script src="engines/core/extraction-engine.js"></script>
   <script src="engines/core/ai-extraction-engine.js"></script>
   <script src="engines/core/wrokit-vision-maps.js"></script>
+  <!-- Typed structural-mapping pipeline for the browser (sets WrokitVisionPrecompute global).
+       Must load before wrokit-vision-engine.js which captures the global at module init. -->
+  <script src="engines/wrokitvision/browser-precompute-bundle.js"></script>
+  <!-- Compat adapter translates typed artifacts to legacy overlay format
+       (sets WrokitVisionPrecomputedCompat global). Same requirement on load order. -->
+  <script src="engines/wrokitvision/compat/precomputed-map-adapter.js"></script>
   <script src="engines/core/wrokit-vision-engine.js"></script>
   <script src="engines/core/engine-registry.js"></script>
   <script src="invoice-wizard.js"></script>

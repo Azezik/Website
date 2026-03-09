@@ -4938,29 +4938,16 @@ function getWrokitVisionDebugMaps(pageNum){
   } catch(_){ /* canvas not yet ready — imageData stays null */ }
 
   // ── Resolve precomputed structural artifact for this page ────────────────
-  // The visualization must read from the typed structural artifact
-  // (uploadedImageAnalysis.regionNodes, regionGraph, textTokens) rather than
-  // rebuilding from raw tokens via the legacy MapTools path.  We scan
-  // state.profile.wrokitVision.geometryArtifacts for a precomputed map whose
-  // page matches the current page (or has no page constraint).
-  let precomputedStructuralMap = null;
-  try {
-    const geometryArtifacts = state.profile?.wrokitVision?.geometryArtifacts || {};
-    for(const gId of Object.keys(geometryArtifacts)){
-      const candidate = geometryArtifacts[gId]?.precomputedStructuralMap;
-      if(candidate?.uploadedImageAnalysis){
-        if(candidate.page == null || Number(candidate.page) === page){
-          precomputedStructuralMap = candidate;
-          break;
-        }
-      }
-    }
-  } catch(_){ /* profile not yet populated — fall back to live build */ }
+  // Use the canonical lookup (same function used by the extraction path) so
+  // the debug visualization reads from the identical artifact.  Returns null
+  // if the precomputed map has not yet been built for this page/geometry.
+  const precomputedStructuralMap = getWrokitVisionPrecomputedForPage(page);
 
   // Include whether pixel data was available so the cache is invalidated once
   // the gray canvas becomes ready (avoids serving a pixel-less entry forever).
-  // Also include a short artifact fingerprint so the cache is invalidated when
-  // the precomputed map changes (e.g. after a new geometry upload).
+  // Include the artifact fingerprint so a newly built precomputed map triggers
+  // a fresh render (old cacheKey without the fingerprint would still be served
+  // from state.wrokitVisionDebugMapCache otherwise).
   const hasImg = !!imageData;
   const artifactKey = precomputedStructuralMap
     ? `pcm:${precomputedStructuralMap.geometryId || 'x'}:${precomputedStructuralMap.generatedAt || 0}`
@@ -4968,7 +4955,9 @@ function getWrokitVisionDebugMaps(pageNum){
   const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature, hasImg ? 'img' : 'noimg', artifactKey].join(':');
   if(!state.wrokitVisionDebugMapCache[cacheKey]){
     // Pass precomputedStructuralMap as the 4th argument so buildMaps routes
-    // through the typed compat adapter instead of the legacy MapTools path.
+    // through the typed compat adapter (WrokitVisionPrecomputedCompat) instead
+    // of the legacy MapTools path.  Both globals are now loaded by
+    // document-dashboard.html before wrokit-vision-engine.js.
     state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport, imageData, precomputedStructuralMap);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
@@ -14825,6 +14814,22 @@ function paintOverlay(ctx, options = {}){
     }
 
     if(featureGraphOn && maps?.structuralGraph?.nodes?.length){
+      // ── Data-source badge ─────────────────────────────────────────────────
+      // Confirms at a glance which pipeline path produced the overlay data.
+      // 'precomputed-structural-map' = typed artifact via compat adapter.
+      // 'legacy-maptools'            = legacy MapTools.buildStructuralGraph.
+      const graphSource = maps.source || 'legacy-maptools';
+      const isTyped = graphSource === 'precomputed-structural-map';
+      ctx.save();
+      const badge = isTyped ? '\u25cf typed-artifact' : '\u25cf legacy-maptools';
+      ctx.font = 'bold 9px monospace';
+      const bw = ctx.measureText(badge).width + 10;
+      ctx.fillStyle = isTyped ? 'rgba(5,150,105,0.85)' : 'rgba(180,83,9,0.85)';
+      ctx.fillRect(6, 6, bw, 16);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(badge, 11, 17);
+      ctx.restore();
+
       const structuralNodes = maps.structuralGraph.nodes;
       const projectedById = new Map();
       for(const node of structuralNodes){
@@ -14833,7 +14838,13 @@ function paintOverlay(ctx, options = {}){
       }
       ctx.save();
       ctx.lineWidth = 1.35;
-      // Draw nodes: sections as dashed outlines, blocks as solid
+      // Draw nodes.  Color scheme encodes surfaceTypeCandidate / legacy type:
+      //   page_surface  → light dashed grey (lowest priority, page boundary)
+      //   text_cluster  → blue dashed (OCR hull)
+      //   text_strip    → cyan solid (one per OCR text line)
+      //   visual_component → purple solid (non-OCR connected component)
+      //   section / text_dense_surface → red dashed (structural section)
+      //   everything else → orange solid (block / generic region)
       for(const node of structuralNodes){
         const projected = projectedById.get(node.id);
         if(!projected) continue;
@@ -14841,7 +14852,28 @@ function paintOverlay(ctx, options = {}){
         const ry = (projected.y / scaleY) + offPx;
         const rw = projected.w / scaleX;
         const rh = projected.h / scaleY;
-        if(node.type === 'section'){
+        const t = node.type || '';
+        if(t === 'page_surface'){
+          ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+          ctx.fillStyle = 'rgba(148,163,184,0.03)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([10, 6]);
+        } else if(t === 'text_cluster'){
+          ctx.strokeStyle = 'rgba(37,99,235,0.8)';
+          ctx.fillStyle = 'rgba(59,130,246,0.06)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([6, 3]);
+        } else if(t === 'text_strip'){
+          ctx.strokeStyle = 'rgba(6,182,212,0.75)';
+          ctx.fillStyle = 'rgba(6,182,212,0.06)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([]);
+        } else if(t === 'visual_component'){
+          ctx.strokeStyle = 'rgba(124,58,237,0.85)';
+          ctx.fillStyle = 'rgba(139,92,246,0.08)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([]);
+        } else if(t === 'section' || t === 'text_dense_surface'){
           ctx.strokeStyle = 'rgba(220,38,38,0.85)';
           ctx.fillStyle = 'rgba(239,68,68,0.06)';
           ctx.lineWidth = 2;
@@ -14855,11 +14887,20 @@ function paintOverlay(ctx, options = {}){
         ctx.fillRect(rx, ry, rw, rh);
         ctx.strokeRect(rx, ry, rw, rh);
         ctx.setLineDash([]);
+        // Label: show type and provenance source so the data path is inspectable.
+        const prov = node.provenance?.sourceType || node.provenance?.detector || '';
+        const labelText = prov ? `${t}|${prov}` : (t || String(node.id || '').slice(0, 14));
+        const isSection = t === 'section' || t === 'text_dense_surface';
         const labelX = rx + 2;
-        const labelY = ry + (node.type === 'section' ? 12 : 10);
-        ctx.fillStyle = node.type === 'section' ? 'rgba(185,28,28,0.95)' : 'rgba(194,65,12,0.95)';
-        ctx.font = node.type === 'section' ? 'bold 10px monospace' : '10px monospace';
-        ctx.fillText(String(node.id || '').slice(0, 18), labelX, labelY);
+        const labelY = ry + (isSection ? 12 : 10);
+        ctx.fillStyle = t === 'page_surface' ? 'rgba(100,116,139,0.85)'
+          : t === 'text_cluster'    ? 'rgba(29,78,216,0.9)'
+          : t === 'text_strip'      ? 'rgba(8,145,178,0.9)'
+          : t === 'visual_component'? 'rgba(109,40,217,0.9)'
+          : isSection               ? 'rgba(185,28,28,0.95)'
+          : 'rgba(194,65,12,0.95)';
+        ctx.font = isSection ? 'bold 9px monospace' : '9px monospace';
+        ctx.fillText(labelText.slice(0, 26), labelX, labelY);
       }
       // Draw edges: color by type
       for(const edge of maps.structuralGraph.edges || []){
