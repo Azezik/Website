@@ -270,48 +270,8 @@
     });
   }
 
-  // ── detect-region-proposals.js ────────────────────────────────────────────
-  function sobelBinary(gray, width, height, threshold = 80){
-    const edges = new Uint8Array(width * height);
-    for(let y = 1; y < height - 1; y++){
-      for(let x = 1; x < width - 1; x++){
-        const i = y * width + x;
-        const gx = -gray[i-width-1] - 2 * gray[i-1] - gray[i+width-1]
-                 + gray[i-width+1] + 2 * gray[i+1] + gray[i+width+1];
-        const gy = -gray[i-width-1] - 2 * gray[i-width] - gray[i-width+1]
-                 + gray[i+width-1] + 2 * gray[i+width] + gray[i+width+1];
-        const g = Math.sqrt(gx * gx + gy * gy);
-        edges[i] = g > threshold ? 1 : 0;
-      }
-    }
-    return edges;
-  }
-
-  function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densityThreshold = 0.34 } = {}){
-    if(!edges || !width || !height) return false;
-    if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
-    let hits = 0;
-    let samples = 0;
-    if(x0 !== x1){
-      const bx = Math.max(x0, x1);
-      for(let dy = -1; dy <= 1; dy++){
-        const sy = y0 + dy;
-        if(bx < 0 || bx >= width || sy < 0 || sy >= height) continue;
-        samples += 1;
-        if(edges[(sy * width) + bx]) hits += 1;
-      }
-    } else {
-      const by = Math.max(y0, y1);
-      for(let dx = -1; dx <= 1; dx++){
-        const sx = x0 + dx;
-        if(sx < 0 || sx >= width || by < 0 || by >= height) continue;
-        samples += 1;
-        if(edges[(by * width) + sx]) hits += 1;
-      }
-    }
-    if(samples <= 0) return false;
-    return (hits / samples) >= densityThreshold;
-  }
+  // ── atomic-visual-segmentation.js (inlined) ──────────────────────────────
+  function clampInt(value, min, max){ return Math.max(min, Math.min(max, value)); }
 
   function resolveRgbChannels(imageData, expectedLength){
     if(!imageData || expectedLength <= 0) return null;
@@ -332,98 +292,279 @@
     return { r: rr, g: gg, b: bb };
   }
 
-  function colorDistance(a, b){
-    const dr = (a.r || 0) - (b.r || 0);
-    const dg = (a.g || 0) - (b.g || 0);
-    const db = (a.b || 0) - (b.b || 0);
-    return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
-  }
-
-  function hasStrongLocalColorBarrier({ rgb, width, height, x0, y0, x1, y1, distanceThreshold = 38 } = {}){
-    if(!rgb || !width || !height) return false;
-    if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
-    const aIdx = (y0 * width) + x0;
-    const bIdx = (y1 * width) + x1;
-    if(colorDistance({ r: rgb.r[aIdx], g: rgb.g[aIdx], b: rgb.b[aIdx] }, { r: rgb.r[bIdx], g: rgb.g[bIdx], b: rgb.b[bIdx] }) >= distanceThreshold){
-      return true;
+  function sobelStrength(gray, width, height){
+    const out = new Uint16Array(width * height);
+    for(let y = 1; y < height - 1; y++){
+      for(let x = 1; x < width - 1; x++){
+        const i = y * width + x;
+        const gx = -gray[i-width-1] - 2 * gray[i-1] - gray[i+width-1]
+                 + gray[i-width+1] + 2 * gray[i+1] + gray[i+width+1];
+        const gy = -gray[i-width-1] - 2 * gray[i-width] - gray[i-width+1]
+                 + gray[i+width-1] + 2 * gray[i+width] + gray[i+width+1];
+        out[i] = Math.min(1020, Math.round(Math.sqrt((gx * gx) + (gy * gy))));
+      }
     }
-    return false;
+    return out;
   }
 
+  function localVariance(gray, width, height){
+    const variance = new Uint16Array(width * height);
+    for(let y = 1; y < height - 1; y++){
+      for(let x = 1; x < width - 1; x++){
+        const i = y * width + x;
+        let sum = 0;
+        let sumSq = 0;
+        for(let oy = -1; oy <= 1; oy++){
+          for(let ox = -1; ox <= 1; ox++){
+            const v = gray[(y + oy) * width + (x + ox)];
+            sum += v;
+            sumSq += v * v;
+          }
+        }
+        const mean = sum / 9;
+        variance[i] = clampInt(Math.round(sumSq / 9 - mean * mean), 0, 255);
+      }
+    }
+    return variance;
+  }
+
+  function colorGradient(rgb, width, height){
+    if(!rgb) return null;
+    const out = new Uint16Array(width * height);
+    for(let y = 1; y < height - 1; y++){
+      for(let x = 1; x < width - 1; x++){
+        const i = y * width + x;
+        const right = i + 1;
+        const down = i + width;
+        const drx = rgb.r[right] - rgb.r[i];
+        const dgx = rgb.g[right] - rgb.g[i];
+        const dbx = rgb.b[right] - rgb.b[i];
+        const dry = rgb.r[down] - rgb.r[i];
+        const dgy = rgb.g[down] - rgb.g[i];
+        const dby = rgb.b[down] - rgb.b[i];
+        out[i] = clampInt(Math.round(Math.sqrt((drx*drx)+(dgx*dgx)+(dbx*dbx)+(dry*dry)+(dgy*dgy)+(dby*dby))/2), 0, 255);
+      }
+    }
+    return out;
+  }
+
+  function buildBoundaryEvidence({ gray, rgb, width, height }){
+    const edge = sobelStrength(gray, width, height);
+    const variance = localVariance(gray, width, height);
+    const color = colorGradient(rgb, width, height);
+    const evidence = new Uint8Array(width * height);
+    for(let i = 0; i < evidence.length; i++){
+      const edgeNorm = edge[i] / 1020;
+      const colorNorm = color ? color[i] / 255 : 0;
+      const varNorm = variance[i] / 255;
+      evidence[i] = clampInt(Math.round((edgeNorm * 0.58 + colorNorm * 0.30 + varNorm * 0.12) * 255), 0, 255);
+    }
+    return evidence;
+  }
+
+  function chooseAtomicSeeds(boundaryEvidence, width, height){
+    const seeds = [];
+    const stride = clampInt(Math.round(Math.sqrt((width * height) / 3200)), 4, 9);
+    for(let sy = 0; sy < height; sy += stride){
+      for(let sx = 0; sx < width; sx += stride){
+        let bestIdx = (sy * width) + sx;
+        let bestScore = 999;
+        const yMax = Math.min(height, sy + stride);
+        const xMax = Math.min(width, sx + stride);
+        for(let y = sy; y < yMax; y++){
+          for(let x = sx; x < xMax; x++){
+            const idx = (y * width) + x;
+            const score = boundaryEvidence[idx];
+            if(score < bestScore){ bestScore = score; bestIdx = idx; }
+          }
+        }
+        seeds.push(bestIdx);
+      }
+    }
+    return Array.from(new Set(seeds));
+  }
+
+  function buildAtomicRegions({ gray, rgb, width, height }){
+    const boundaryEvidence = buildBoundaryEvidence({ gray, rgb, width, height });
+    const labels = new Int32Array(width * height);
+    labels.fill(-1);
+    const seeds = chooseAtomicSeeds(boundaryEvidence, width, height);
+    const buckets = Array.from({ length: 256 }, () => []);
+    for(let regionId = 0; regionId < seeds.length; regionId++){
+      const idx = seeds[regionId];
+      labels[idx] = regionId;
+      buckets[boundaryEvidence[idx]].push(idx);
+    }
+    const hardBarrier = 206;
+    for(let score = 0; score < buckets.length; score++){
+      const queue = buckets[score];
+      for(let qi = 0; qi < queue.length; qi++){
+        const idx = queue[qi];
+        const rid = labels[idx];
+        if(rid < 0) continue;
+        const x = idx % width;
+        const y = (idx / width) | 0;
+        const nbrs = [idx - 1, idx + 1, idx - width, idx + width];
+        for(const ni of nbrs){
+          const nx = ni % width;
+          const ny = (ni / width) | 0;
+          if(nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          if(Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+          if(labels[ni] !== -1) continue;
+          const link = Math.max(boundaryEvidence[idx], boundaryEvidence[ni]);
+          if(link >= hardBarrier) continue;
+          labels[ni] = rid;
+          buckets[link].push(ni);
+        }
+      }
+    }
+    for(let i = 0; i < labels.length; i++){
+      if(labels[i] !== -1) continue;
+      const x = i % width;
+      const y = (i / width) | 0;
+      const nbrs = [i - 1, i + 1, i - width, i + width];
+      let assigned = -1;
+      for(const ni of nbrs){
+        const nx = ni % width;
+        const ny = (ni / width) | 0;
+        if(nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        if(Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        if(labels[ni] >= 0){ assigned = labels[ni]; break; }
+      }
+      labels[i] = assigned >= 0 ? assigned : 0;
+    }
+    const regions = [];
+    for(let i = 0; i < seeds.length; i++){
+      regions.push({ id: i, area: 0, sumGray: 0, sumR: 0, sumG: 0, sumB: 0, x0: width, y0: height, x1: 0, y1: 0 });
+    }
+    for(let i = 0; i < labels.length; i++){
+      const rid = labels[i];
+      const x = i % width;
+      const y = (i / width) | 0;
+      const r = regions[rid];
+      r.area += 1;
+      r.sumGray += gray[i];
+      r.sumR += rgb ? rgb.r[i] : gray[i];
+      r.sumG += rgb ? rgb.g[i] : gray[i];
+      r.sumB += rgb ? rgb.b[i] : gray[i];
+      if(x < r.x0) r.x0 = x;
+      if(y < r.y0) r.y0 = y;
+      if(x > r.x1) r.x1 = x;
+      if(y > r.y1) r.y1 = y;
+    }
+    return { labels, regions, boundaryEvidence };
+  }
+
+  function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }){
+    const adjacency = new Map();
+    const keyOf = (a, b) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+    for(let y = 0; y < height; y++){
+      for(let x = 0; x < width; x++){
+        const idx = y * width + x;
+        const a = labels[idx];
+        if(x + 1 < width){
+          const b = labels[idx + 1];
+          if(a !== b){
+            const k = keyOf(a, b);
+            const rec = adjacency.get(k) || { a: Math.min(a,b), b: Math.max(a,b), border: 0, edge: 0 };
+            rec.border += 1;
+            rec.edge += Math.max(boundaryEvidence[idx], boundaryEvidence[idx + 1]);
+            adjacency.set(k, rec);
+          }
+        }
+        if(y + 1 < height){
+          const b = labels[idx + width];
+          if(a !== b){
+            const k = keyOf(a, b);
+            const rec = adjacency.get(k) || { a: Math.min(a,b), b: Math.max(a,b), border: 0, edge: 0 };
+            rec.border += 1;
+            rec.edge += Math.max(boundaryEvidence[idx], boundaryEvidence[idx + width]);
+            adjacency.set(k, rec);
+          }
+        }
+      }
+    }
+    const parent = Int32Array.from({ length: regions.length }, (_, i) => i);
+    const find = (x) => { while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    const union = (a, b) => { const ra = find(a); const rb = find(b); if(ra !== rb) parent[rb] = ra; };
+    for(const rec of adjacency.values()){
+      const ra = regions[rec.a];
+      const rb = regions[rec.b];
+      if(!ra || !rb || !ra.area || !rb.area) continue;
+      const edgeMean = rec.edge / Math.max(1, rec.border);
+      const grayDelta = Math.abs((ra.sumGray / ra.area) - (rb.sumGray / rb.area));
+      const colorDelta = Math.hypot(
+        (ra.sumR / ra.area) - (rb.sumR / rb.area),
+        (ra.sumG / ra.area) - (rb.sumG / rb.area),
+        (ra.sumB / ra.area) - (rb.sumB / rb.area)
+      );
+      const mergeScore = (edgeMean * 0.6) + (grayDelta * 0.25) + (colorDelta * 0.15);
+      if(mergeScore <= 74) union(rec.a, rec.b);
+    }
+    const merged = new Map();
+    for(let rid = 0; rid < regions.length; rid++){
+      const region = regions[rid];
+      if(!region.area) continue;
+      const root = find(rid);
+      const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0 };
+      agg.area += region.area;
+      agg.atomicCount += 1;
+      if(region.x0 < agg.x0) agg.x0 = region.x0;
+      if(region.y0 < agg.y0) agg.y0 = region.y0;
+      if(region.x1 > agg.x1) agg.x1 = region.x1;
+      if(region.y1 > agg.y1) agg.y1 = region.y1;
+      merged.set(root, agg);
+    }
+    return Array.from(merged.values());
+  }
+
+  function buildAtomicVisualSegments({ imageData }){
+    if(!imageData?.gray || !imageData.width || !imageData.height) return null;
+    const width = Number(imageData.width) || 0;
+    const height = Number(imageData.height) || 0;
+    if(width <= 2 || height <= 2) return null;
+    const gray = imageData.gray;
+    const rgb = resolveRgbChannels(imageData, gray.length);
+    const atomic = buildAtomicRegions({ gray, rgb, width, height });
+    const merged = mergeAtomicRegions({ ...atomic, width, height });
+    return { width, height, atomicCount: atomic.regions.length, mergedRegions: merged };
+  }
+
+  // ── detect-region-proposals.js ────────────────────────────────────────────
   function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
     if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height) return [];
     const width = Number(imageData.width) || 0;
     const height = Number(imageData.height) || 0;
     if(width <= 2 || height <= 2) return [];
-    const gray = imageData.gray;
-    const rgb = resolveRgbChannels(imageData, gray.length);
-    const edges = sobelBinary(gray, width, height, 80);
-    let sum = 0;
-    for(let i = 0; i < gray.length; i++) sum += gray[i];
-    const mean = sum / Math.max(1, gray.length);
-    const threshold = Math.max(22, Math.min(220, Math.round(mean * 0.82)));
-    let meanColor = null;
-    if(rgb){
-      let sumR = 0, sumG = 0, sumB = 0;
-      for(let i = 0; i < gray.length; i++){
-        sumR += rgb.r[i];
-        sumG += rgb.g[i];
-        sumB += rgb.b[i];
-      }
-      const denom = Math.max(1, gray.length);
-      meanColor = { r: sumR / denom, g: sumG / denom, b: sumB / denom };
-    }
-    const colorSeedThreshold = 30;
-    const mask = new Uint8Array(width * height);
-    for(let i = 0; i < gray.length; i++){
-      const luminanceHit = gray[i] <= threshold;
-      const colorHit = meanColor ? colorDistance({ r: rgb.r[i], g: rgb.g[i], b: rgb.b[i] }, meanColor) >= colorSeedThreshold : false;
-      mask[i] = (luminanceHit || colorHit) ? 1 : 0;
-    }
-    const visited = new Uint8Array(width * height);
     const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
     const maxArea = Math.floor((width * height) * 0.75);
     const sx = viewport.width / width;
     const sy = viewport.height / height;
     const proposals = [];
-    for(let y = 0; y < height; y++){
-      for(let x = 0; x < width; x++){
-        const start = y * width + x;
-        if(mask[start] !== 1 || visited[start]) continue;
-        const q = [start];
-        visited[start] = 1;
-        let head = 0;
-        let area = 0;
-        let x0 = x, y0 = y, x1 = x, y1 = y;
-        while(head < q.length){
-          const idx = q[head++];
-          const cx = idx % width;
-          const cy = (idx / width) | 0;
-          area += 1;
-          if(cx < x0) x0 = cx; if(cy < y0) y0 = cy; if(cx > x1) x1 = cx; if(cy > y1) y1 = cy;
-          const neighbors = [idx - 1, idx + 1, idx - width, idx + width];
-          for(const ni of neighbors){
-            if(ni < 0 || ni >= mask.length || visited[ni] || mask[ni] !== 1) continue;
-            const nx = ni % width; const ny = (ni / width) | 0;
-            if(Math.abs(nx - cx) + Math.abs(ny - cy) !== 1) continue;
-            if(hasStrongLocalEdgeBarrier({ edges, width, height, x0: cx, y0: cy, x1: nx, y1: ny })) continue;
-            if(hasStrongLocalColorBarrier({ rgb, width, height, x0: cx, y0: cy, x1: nx, y1: ny })) continue;
-            visited[ni] = 1; q.push(ni);
-          }
-        }
-        if(area < minArea || area > maxArea) continue;
-        const bw = x1 - x0 + 1; const bh = y1 - y0 + 1;
-        if(bw < 10 || bh < 10) continue;
-        proposals.push(createStructuralRegionNode({
-          id: idFactory('region'),
-          geometry: { bbox: { x: x0 * sx, y: y0 * sy, w: bw * sx, h: bh * sy } },
-          confidence: 0.58,
-          provenance: { stage: 'region-proposals', detector: 'connected-components-threshold', sourceType: 'visual' },
-          features: { source: 'visual-connected-components', pixelArea: area, imageThreshold: threshold, colorSeedThreshold: meanColor ? colorSeedThreshold : null, colorAwareBarrier: Boolean(rgb) },
-          surfaceTypeCandidate: 'visual_component',
-          textDensity: 0
-        }));
-      }
+    const segmented = buildAtomicVisualSegments({ imageData });
+    if(!segmented) return proposals;
+    for(const merged of segmented.mergedRegions){
+      const area = merged.area;
+      if(area < minArea || area > maxArea) continue;
+      const bw = merged.x1 - merged.x0 + 1;
+      const bh = merged.y1 - merged.y0 + 1;
+      if(bw < 10 || bh < 10) continue;
+      const bbox = { x: merged.x0 * sx, y: merged.y0 * sy, w: bw * sx, h: bh * sy };
+      proposals.push(createStructuralRegionNode({
+        id: idFactory('region'),
+        geometry: { bbox },
+        confidence: 0.62,
+        provenance: { stage: 'region-proposals', detector: 'atomic-region-merge', sourceType: 'visual' },
+        features: {
+          source: 'visual-atomic-region-merge',
+          pixelArea: area,
+          atomicRegionCount: merged.atomicCount,
+          atomicSeedCount: segmented.atomicCount,
+          boundaryFirst: true
+        },
+        surfaceTypeCandidate: 'visual_component',
+        textDensity: 0
+      }));
     }
     return proposals;
   }
