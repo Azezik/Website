@@ -447,7 +447,53 @@
    * @param {number} vpH        Viewport height in pixels
    * @returns {{ version:number, regions:Array, gridW:number, gridH:number }}
    */
-  function buildVisualRegionLayer(imageData, vpW, vpH){
+  
+  function orientedRectFromPoints(points = [], fallback = null){
+    if(!Array.isArray(points) || points.length < 2){
+      if(fallback) return {
+        center: { x: fallback.x + fallback.w / 2, y: fallback.y + fallback.h / 2 },
+        size: { w: fallback.w, h: fallback.h },
+        angleDeg: 0
+      };
+      return null;
+    }
+    let mx = 0, my = 0;
+    for(const p of points){ mx += p.x; my += p.y; }
+    mx /= points.length;
+    my /= points.length;
+    let xx = 0, yy = 0, xy = 0;
+    for(const p of points){
+      const dx = p.x - mx;
+      const dy = p.y - my;
+      xx += dx * dx;
+      yy += dy * dy;
+      xy += dx * dy;
+    }
+    xx /= Math.max(1, points.length);
+    yy /= Math.max(1, points.length);
+    xy /= Math.max(1, points.length);
+    const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for(const p of points){
+      const dx = p.x - mx;
+      const dy = p.y - my;
+      const u = (dx * cosA) + (dy * sinA);
+      const v = (-dx * sinA) + (dy * cosA);
+      if(u < minU) minU = u;
+      if(u > maxU) maxU = u;
+      if(v < minV) minV = v;
+      if(v > maxV) maxV = v;
+    }
+    return {
+      center: { x: mx, y: my },
+      size: { w: Math.max(1, maxU - minU), h: Math.max(1, maxV - minV) },
+      angleDeg: angle * (180 / Math.PI)
+    };
+  }
+
+function buildVisualRegionLayer(imageData, vpW, vpH){
     if(!imageData || !imageData.gray || !imageData.width || !imageData.height){
       return { version: 1, regions: [], gridW: 0, gridH: 0 };
     }
@@ -522,11 +568,12 @@
         const i    = gy * GW + gx;
         const root = find(i);
         if(!compMap.has(root)){
-          compMap.set(root, { cnt: 0, lumSum: 0, minGx: gx, maxGx: gx, minGy: gy, maxGy: gy });
+          compMap.set(root, { cnt: 0, lumSum: 0, minGx: gx, maxGx: gx, minGy: gy, maxGy: gy, cells: [] });
         }
         const c = compMap.get(root);
         c.cnt++;
         c.lumSum += lum[i];
+        c.cells.push({ gx, gy });
         if(gx < c.minGx) c.minGx = gx;
         if(gx > c.maxGx) c.maxGx = gx;
         if(gy < c.minGy) c.minGy = gy;
@@ -553,6 +600,11 @@
       const areaFraction  = comp.cnt / totalCells;
       const meanLuminance = (comp.lumSum / comp.cnt) / 255; // normalised [0,1]
       const fillRatio     = comp.cnt / Math.max(1, bbCells);
+      const points = comp.cells.map(cell => ({
+        x: (cell.gx + 0.5) * scaleX,
+        y: (cell.gy + 0.5) * scaleY
+      }));
+      const rotatedRect = orientedRectFromPoints(points, { x, y, w, h });
 
       regions.push({
         x, y, w, h,
@@ -568,7 +620,12 @@
         areaFraction,
         meanLuminance,
         fillRatio,
-        orientation: w >= h ? 'horizontal' : 'vertical'
+        orientation: w >= h ? 'horizontal' : 'vertical',
+        geometry: {
+          kind: 'rotated_rect',
+          rotatedRect,
+          bbox: { x, y, w, h }
+        }
       });
     }
 
@@ -590,6 +647,35 @@
    * These descriptors let you say "this field lives near the top-left of a
    * large dark region" and use that as a matching signal on future uploads.
    */
+
+  function visualRegionToNode(region, idx, vpW, vpH, textMask){
+    const box = {
+      x: Number(region?.x) || 0,
+      y: Number(region?.y) || 0,
+      w: Math.max(0, Number(region?.w) || 0),
+      h: Math.max(0, Number(region?.h) || 0)
+    };
+    const textOverlapScore = scoreTextOverlap(box, textMask);
+    const fillRatio = Number(region?.fillRatio);
+    const areaFraction = Number(region?.areaFraction);
+    return {
+      id: region?.id || `visual_region_${idx}`,
+      type: 'visual_region',
+      ...box,
+      cx: box.x + box.w / 2,
+      cy: box.y + box.h / 2,
+      ...pageSpaceNorm(box, vpW, vpH),
+      tokenCount: 0,
+      orientation: region?.orientation || (box.w >= box.h ? 'horizontal' : 'vertical'),
+      contrastScore: Math.max(0.2, Math.min(1, 1 - (Number(region?.meanLuminance) || 0))),
+      textOverlapScore,
+      stabilityScore: Math.max(0.2, (Number.isFinite(fillRatio) ? fillRatio : 0.6) * 0.75 + (Number.isFinite(areaFraction) ? Math.min(0.25, areaFraction) : 0.15)),
+      depth: 0,
+      geometry: region?.geometry || null,
+      source: 'visual-region-layer'
+    };
+  }
+
   function locateBboxInVisualRegions(bbox, visualRegionLayer){
     const regions = visualRegionLayer?.regions;
     if(!bbox || !regions || !regions.length){
@@ -678,6 +764,10 @@
 
     if(!hasPixels && !normalized.length) return emptyResult;
 
+    const visualRegionLayer = hasPixels
+      ? buildVisualRegionLayer(imageData, vpW, vpH)
+      : { version: 1, regions: [], gridW: 0, gridH: 0 };
+
     let regionNodes;
 
     if(hasPixels){
@@ -725,10 +815,9 @@
       // Phase 6: Merge cells that have no structural line between them
       const regions = mergeAdjacentCells(cells, hLines, vLines, vpW, vpH);
 
-      // Build region nodes
-      regionNodes = regions.map((r, idx) => {
+      // Build structural region nodes from grid-cells (kept as compatibility layer).
+      const panelNodes = regions.map((r, idx) => {
         const textOverlapScore = scoreTextOverlap(r, textMask);
-        // Count tokens inside this region
         const tokensInside = normalized.filter(t =>
           t.cx >= r.x && t.cx <= r.x + r.w && t.cy >= r.y && t.cy <= r.y + r.h
         ).length;
@@ -738,16 +827,30 @@
           ...r,
           cx: r.x + r.w / 2,
           cy: r.y + r.h / 2,
-          // ── Canonical page-space coordinates (same normalisation as extraction normBoxes) ──
           ...pageSpaceNorm(r, vpW, vpH),
           tokenCount: tokensInside,
           orientation: r.w >= r.h ? 'horizontal' : 'vertical',
           contrastScore: Math.max(0.2, Math.min(1, (r.w * r.h) / (vpW * vpH * 0.15))),
           textOverlapScore,
           stabilityScore: Math.max(0.1, 1 - (textOverlapScore * 0.5)),
-          depth: 0
+          depth: 0,
+          source: 'panel-grid'
         };
       });
+
+      const visualNodes = (visualRegionLayer.regions || []).map((region, idx) =>
+        visualRegionToNode(region, idx, vpW, vpH, textMask)
+      );
+
+      // Visual-first: keep geometry-driven nodes as primary structure.
+      // Retain a reduced panel set as compatibility/debug where it adds detail.
+      const panelLimit = Math.max(2, Math.floor(visualNodes.length * 0.5));
+      const reducedPanels = panelNodes
+        .filter(node => (node.w * node.h) <= (vpW * vpH * 0.6))
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))
+        .slice(0, panelLimit);
+
+      regionNodes = [...visualNodes, ...reducedPanels];
 
     } else {
       // ═══ FALLBACK: whitespace-corridor-only approach ═══
@@ -836,14 +939,6 @@
         edges.push({ from: a.id, to: b.id, type: adjType, dx, dy, dist: Math.hypot(dx, dy) });
       }
     }
-
-    // ── Visual region layer (pixel path only) ──────────────────────────────
-    // Built once here and attached to the structural graph so downstream code
-    // (captureFieldNeighborhood, extractScalar) can reference it without a
-    // separate call.  Only available when imageData was supplied.
-    const visualRegionLayer = hasPixels
-      ? buildVisualRegionLayer(imageData, vpW, vpH)
-      : { version: 1, regions: [], gridW: 0, gridH: 0 };
 
     return {
       version: 3,
