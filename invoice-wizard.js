@@ -1727,6 +1727,7 @@ let state = {
   pageRenderReady: [],
   currentTraceId: null,
   wrokitVisionDebugMapCache: {},
+  wrokitVisionLivePrecomputedByPage: {},
   wrokitVisionGraphLoadingByPage: {},
   selectedRunId: '',
   lastSnapshotManifestId: '',
@@ -4915,9 +4916,7 @@ function getWrokitVisionDebugMaps(pageNum){
   }
   const viewportW = Number(viewport.width || viewport.w || 0);
   const viewportH = Number(viewport.height || viewport.h || 0);
-  const first = tokens[0] || {};
-  const last = tokens[tokens.length - 1] || {};
-  const tokenSignature = `${tokens.length}:${Math.round(first.x || 0)}:${Math.round(first.y || 0)}:${Math.round(last.x || 0)}:${Math.round(last.y || 0)}:${String(first.text || '').slice(0,12)}:${String(last.text || '').slice(0,12)}`;
+  const tokenSignature = tokenSignatureForCache(tokens);
 
   // ── Extract gray pixel data for the visual region layer ──────────────────
   // NOTE: live WrokitVision map-building currently consumes grayscale luminance
@@ -4929,7 +4928,7 @@ function getWrokitVisionDebugMaps(pageNum){
   // Use the canonical lookup (same function used by the extraction path) so
   // the debug visualization reads from the identical artifact.  Returns null
   // if the precomputed map has not yet been built for this page/geometry.
-  const precomputedStructuralMap = getWrokitVisionPrecomputedForPage(page);
+  const precomputedStructuralMap = getPreferredWrokitVisionPrecomputedForPage(page, tokens, viewport);
 
   // Include whether pixel data was available so the cache is invalidated once
   // the gray canvas becomes ready (avoids serving a pixel-less entry forever).
@@ -8377,6 +8376,66 @@ function getWrokitVisionPrecomputedForPage(pageNum){
   return artifact;
 }
 
+function tokenSignatureForCache(tokens = []){
+  if(!Array.isArray(tokens) || !tokens.length) return 'empty';
+  const first = tokens[0] || {};
+  const last = tokens[tokens.length - 1] || {};
+  return `${tokens.length}:${Math.round(first.x || 0)}:${Math.round(first.y || 0)}:${Math.round(last.x || 0)}:${Math.round(last.y || 0)}:${String(first.text || '').slice(0,12)}:${String(last.text || '').slice(0,12)}`;
+}
+
+function getWrokitVisionLivePrecomputedForPage(pageNum, tokens = [], viewport = null){
+  if(!isConfigMode()) return null;
+  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION) return null;
+  if(!WrokitVisionEngine?.createSeedArtifacts) return null;
+
+  const page = Math.max(1, Number(pageNum) || state.pageNum || 1);
+  const geometryId = state.activeGeometryId || currentGeometryId() || DEFAULT_GEOMETRY_ID;
+  const vp = viewport || state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!vp) return null;
+
+  const pageTokens = Array.isArray(tokens) && tokens.length
+    ? tokens
+    : (state.tokensByPage?.[page] || state.tessTokensByPageBBox?.[page] || state.tessTokensByPage?.[page] || []);
+  if(!pageTokens.length) return null;
+
+  const imageData = getPageGrayImageData(page);
+  const viewportW = Number(vp.width || vp.w || 0);
+  const viewportH = Number(vp.height || vp.h || 0);
+  const cacheKey = [
+    state.currentFileId || 'doc',
+    geometryId,
+    page,
+    viewportW,
+    viewportH,
+    tokenSignatureForCache(pageTokens),
+    imageData ? (computeImageContentHash(page) || 'img') : 'noimg'
+  ].join(':');
+
+  const liveCache = state.wrokitVisionLivePrecomputedByPage || (state.wrokitVisionLivePrecomputedByPage = {});
+  const cached = liveCache[page];
+  if(cached?.cacheKey === cacheKey && cached?.artifact?.uploadedImageAnalysis){
+    return cached.artifact;
+  }
+
+  const seed = WrokitVisionEngine.createSeedArtifacts({
+    tokens: pageTokens,
+    viewport: vp,
+    page,
+    geometryId,
+    imageData
+  });
+  const artifact = seed?.precomputedStructuralMap || null;
+  if(!artifact?.uploadedImageAnalysis) return null;
+
+  liveCache[page] = { cacheKey, artifact };
+  return artifact;
+}
+
+function getPreferredWrokitVisionPrecomputedForPage(pageNum, tokens = [], viewport = null){
+  return getWrokitVisionLivePrecomputedForPage(pageNum, tokens, viewport)
+    || getWrokitVisionPrecomputedForPage(pageNum);
+}
+
 function computeImageContentHash(page){
   // Fast content fingerprint: sample a sparse grid of pixel values from the
   // gray canvas.  Different images produce different hashes; identical images
@@ -8440,7 +8499,9 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
   };
   // Clear in-memory debug map cache so the overlay re-renders with fresh data.
   state.wrokitVisionDebugMapCache = {};
-  profileStore.saveProfile(state.username, state.docType, state.profile);
+  // Do not persist transient config-upload map artifacts on every step change.
+  // These are upload-scoped runtime aids and are saved with the profile through
+  // the normal explicit wizard-save flow.
 }
 
 function goToStep(idx){
@@ -9434,7 +9495,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         const runtimeCacheKey = `${fieldSpec.page || state.pageNum || 1}:${state.activeGeometryId || currentGeometryId() || 'default'}`;
         runtimeMaps = runtimeMapCache[runtimeCacheKey] || null;
         if(!runtimeMapCache[runtimeCacheKey] && WrokitVisionEngine?.buildMaps){
-          runtimeMapCache[runtimeCacheKey] = WrokitVisionEngine.buildMaps(Array.isArray(tokens) ? tokens : [], viewportPx || null);
+          const precomputedStructuralMap = getPreferredWrokitVisionPrecomputedForPage(fieldSpec.page || state.pageNum || 1, Array.isArray(tokens) ? tokens : [], viewportPx || null);
+          runtimeMapCache[runtimeCacheKey] = WrokitVisionEngine.buildMaps(Array.isArray(tokens) ? tokens : [], viewportPx || null, null, precomputedStructuralMap);
           runtimeMaps = runtimeMapCache[runtimeCacheKey] || null;
         }
       }
@@ -9448,7 +9510,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       };
       if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
         enginePayload.runtimeMaps = runtimeMaps;
-        enginePayload.precomputedStructuralMap = getWrokitVisionPrecomputedForPage(fieldSpec.page || state.pageNum || 1);
+        enginePayload.precomputedStructuralMap = getPreferredWrokitVisionPrecomputedForPage(fieldSpec.page || state.pageNum || 1, Array.isArray(tokens) ? tokens : [], viewportPx || null);
       }
       const engineResult = EngineRegistry?.extractScalar
         ? EngineRegistry.extractScalar(fieldEngineType, enginePayload)
@@ -11761,6 +11823,7 @@ function cleanupDoc(){
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionLivePrecomputedByPage = {};
   state.wrokitVisionRuntimeCache = {};
   state.wrokitVisionGraphLoadingByPage = {};
   state.keywordIndexByPage = {};
