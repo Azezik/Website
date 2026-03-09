@@ -1,0 +1,288 @@
+'use strict';
+
+function clamp(value, min, max){
+  return Math.max(min, Math.min(max, value));
+}
+
+function resolveRgbChannels(imageData, expectedLength){
+  if(!imageData || expectedLength <= 0) return null;
+  const r = imageData.r;
+  const g = imageData.g;
+  const b = imageData.b;
+  if(r?.length === expectedLength && g?.length === expectedLength && b?.length === expectedLength){
+    return { r, g, b };
+  }
+  const rgba = imageData.rgba || imageData.data;
+  if(!rgba || rgba.length < expectedLength * 4) return null;
+  const rr = new Uint8Array(expectedLength);
+  const gg = new Uint8Array(expectedLength);
+  const bb = new Uint8Array(expectedLength);
+  for(let i = 0, j = 0; i < expectedLength; i++, j += 4){
+    rr[i] = rgba[j] || 0;
+    gg[i] = rgba[j + 1] || 0;
+    bb[i] = rgba[j + 2] || 0;
+  }
+  return { r: rr, g: gg, b: bb };
+}
+
+function sobelStrength(gray, width, height){
+  const out = new Uint16Array(width * height);
+  for(let y = 1; y < height - 1; y++){
+    for(let x = 1; x < width - 1; x++){
+      const i = y * width + x;
+      const gx = -gray[i-width-1] - 2 * gray[i-1] - gray[i+width-1]
+               + gray[i-width+1] + 2 * gray[i+1] + gray[i+width+1];
+      const gy = -gray[i-width-1] - 2 * gray[i-width] - gray[i-width+1]
+               + gray[i+width-1] + 2 * gray[i+width] + gray[i+width+1];
+      out[i] = Math.min(1020, Math.round(Math.sqrt((gx * gx) + (gy * gy))));
+    }
+  }
+  return out;
+}
+
+function localVariance(gray, width, height){
+  const variance = new Uint16Array(width * height);
+  for(let y = 1; y < height - 1; y++){
+    for(let x = 1; x < width - 1; x++){
+      const i = y * width + x;
+      let sum = 0;
+      let sumSq = 0;
+      for(let oy = -1; oy <= 1; oy++){
+        for(let ox = -1; ox <= 1; ox++){
+          const v = gray[(y + oy) * width + (x + ox)];
+          sum += v;
+          sumSq += v * v;
+        }
+      }
+      const mean = sum / 9;
+      const varVal = (sumSq / 9) - (mean * mean);
+      variance[i] = clamp(Math.round(Math.sqrt(Math.max(0, varVal)) * 4), 0, 255);
+    }
+  }
+  return variance;
+}
+
+function colorGradient(rgb, width, height){
+  if(!rgb) return null;
+  const out = new Uint16Array(width * height);
+  for(let y = 1; y < height - 1; y++){
+    for(let x = 1; x < width - 1; x++){
+      const i = y * width + x;
+      const right = i + 1;
+      const down = i + width;
+      const drx = rgb.r[right] - rgb.r[i];
+      const dgx = rgb.g[right] - rgb.g[i];
+      const dbx = rgb.b[right] - rgb.b[i];
+      const dry = rgb.r[down] - rgb.r[i];
+      const dgy = rgb.g[down] - rgb.g[i];
+      const dby = rgb.b[down] - rgb.b[i];
+      out[i] = clamp(Math.round(Math.sqrt((drx * drx) + (dgx * dgx) + (dbx * dbx) + (dry * dry) + (dgy * dgy) + (dby * dby)) / 2), 0, 255);
+    }
+  }
+  return out;
+}
+
+function buildBoundaryEvidence({ gray, rgb, width, height }){
+  const edge = sobelStrength(gray, width, height);
+  const variance = localVariance(gray, width, height);
+  const color = colorGradient(rgb, width, height);
+  const evidence = new Uint8Array(width * height);
+  for(let i = 0; i < evidence.length; i++){
+    const edgeNorm = edge[i] / 1020;
+    const colorNorm = color ? color[i] / 255 : 0;
+    const varNorm = variance[i] / 255;
+    evidence[i] = clamp(Math.round((edgeNorm * 0.58 + colorNorm * 0.30 + varNorm * 0.12) * 255), 0, 255);
+  }
+  return evidence;
+}
+
+function chooseAtomicSeeds(boundaryEvidence, width, height){
+  const seeds = [];
+  const stride = clamp(Math.round(Math.sqrt((width * height) / 3200)), 4, 9);
+  for(let sy = 0; sy < height; sy += stride){
+    for(let sx = 0; sx < width; sx += stride){
+      let bestIdx = (sy * width) + sx;
+      let bestScore = 999;
+      const yMax = Math.min(height, sy + stride);
+      const xMax = Math.min(width, sx + stride);
+      for(let y = sy; y < yMax; y++){
+        for(let x = sx; x < xMax; x++){
+          const idx = (y * width) + x;
+          const score = boundaryEvidence[idx];
+          if(score < bestScore){
+            bestScore = score;
+            bestIdx = idx;
+          }
+        }
+      }
+      seeds.push(bestIdx);
+    }
+  }
+  return Array.from(new Set(seeds));
+}
+
+function buildAtomicRegions({ gray, rgb, width, height }){
+  const boundaryEvidence = buildBoundaryEvidence({ gray, rgb, width, height });
+  const labels = new Int32Array(width * height);
+  labels.fill(-1);
+
+  const seeds = chooseAtomicSeeds(boundaryEvidence, width, height);
+  const buckets = Array.from({ length: 256 }, () => []);
+  for(let regionId = 0; regionId < seeds.length; regionId++){
+    const idx = seeds[regionId];
+    labels[idx] = regionId;
+    buckets[boundaryEvidence[idx]].push(idx);
+  }
+
+  const hardBarrier = 206;
+  for(let score = 0; score < buckets.length; score++){
+    const queue = buckets[score];
+    for(let qi = 0; qi < queue.length; qi++){
+      const idx = queue[qi];
+      const rid = labels[idx];
+      if(rid < 0) continue;
+      const x = idx % width;
+      const y = (idx / width) | 0;
+      const nbrs = [idx - 1, idx + 1, idx - width, idx + width];
+      for(const ni of nbrs){
+        const nx = ni % width;
+        const ny = (ni / width) | 0;
+        if(nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        if(Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        if(labels[ni] !== -1) continue;
+        const link = Math.max(boundaryEvidence[idx], boundaryEvidence[ni]);
+        if(link >= hardBarrier) continue;
+        labels[ni] = rid;
+        buckets[link].push(ni);
+      }
+    }
+  }
+
+  // Assign leftovers to nearest labeled neighbor (keeps partition total).
+  for(let i = 0; i < labels.length; i++){
+    if(labels[i] !== -1) continue;
+    const x = i % width;
+    const y = (i / width) | 0;
+    const nbrs = [i - 1, i + 1, i - width, i + width];
+    let assigned = -1;
+    for(const ni of nbrs){
+      const nx = ni % width;
+      const ny = (ni / width) | 0;
+      if(nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+      if(Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+      if(labels[ni] >= 0){ assigned = labels[ni]; break; }
+    }
+    labels[i] = assigned >= 0 ? assigned : 0;
+  }
+
+  const regions = [];
+  for(let i = 0; i < seeds.length; i++){
+    regions.push({ id: i, area: 0, sumGray: 0, sumR: 0, sumG: 0, sumB: 0, x0: width, y0: height, x1: 0, y1: 0 });
+  }
+  for(let i = 0; i < labels.length; i++){
+    const rid = labels[i];
+    const x = i % width;
+    const y = (i / width) | 0;
+    const r = regions[rid];
+    r.area += 1;
+    r.sumGray += gray[i];
+    r.sumR += rgb ? rgb.r[i] : gray[i];
+    r.sumG += rgb ? rgb.g[i] : gray[i];
+    r.sumB += rgb ? rgb.b[i] : gray[i];
+    if(x < r.x0) r.x0 = x;
+    if(y < r.y0) r.y0 = y;
+    if(x > r.x1) r.x1 = x;
+    if(y > r.y1) r.y1 = y;
+  }
+  return { labels, regions, boundaryEvidence };
+}
+
+function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }){
+  const adjacency = new Map();
+  const keyOf = (a, b) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
+  for(let y = 0; y < height; y++){
+    for(let x = 0; x < width; x++){
+      const idx = y * width + x;
+      const a = labels[idx];
+      if(x + 1 < width){
+        const b = labels[idx + 1];
+        if(a !== b){
+          const k = keyOf(a, b);
+          const rec = adjacency.get(k) || { a: Math.min(a, b), b: Math.max(a, b), border: 0, edge: 0 };
+          rec.border += 1;
+          rec.edge += Math.max(boundaryEvidence[idx], boundaryEvidence[idx + 1]);
+          adjacency.set(k, rec);
+        }
+      }
+      if(y + 1 < height){
+        const b = labels[idx + width];
+        if(a !== b){
+          const k = keyOf(a, b);
+          const rec = adjacency.get(k) || { a: Math.min(a, b), b: Math.max(a, b), border: 0, edge: 0 };
+          rec.border += 1;
+          rec.edge += Math.max(boundaryEvidence[idx], boundaryEvidence[idx + width]);
+          adjacency.set(k, rec);
+        }
+      }
+    }
+  }
+
+  const parent = Int32Array.from({ length: regions.length }, (_, i) => i);
+  const find = (x) => {
+    while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  };
+  const union = (a, b) => {
+    const ra = find(a); const rb = find(b);
+    if(ra !== rb) parent[rb] = ra;
+  };
+
+  for(const rec of adjacency.values()){
+    const ra = regions[rec.a];
+    const rb = regions[rec.b];
+    if(!ra || !rb || !ra.area || !rb.area) continue;
+    const edgeMean = rec.edge / Math.max(1, rec.border);
+    const grayDelta = Math.abs((ra.sumGray / ra.area) - (rb.sumGray / rb.area));
+    const colorDelta = Math.hypot(
+      (ra.sumR / ra.area) - (rb.sumR / rb.area),
+      (ra.sumG / ra.area) - (rb.sumG / rb.area),
+      (ra.sumB / ra.area) - (rb.sumB / rb.area)
+    );
+    const mergeScore = (edgeMean * 0.6) + (grayDelta * 0.25) + (colorDelta * 0.15);
+    if(mergeScore <= 74) union(rec.a, rec.b);
+  }
+
+  const merged = new Map();
+  for(let rid = 0; rid < regions.length; rid++){
+    const region = regions[rid];
+    if(!region.area) continue;
+    const root = find(rid);
+    const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0, edgeSum: 0 };
+    agg.area += region.area;
+    agg.atomicCount += 1;
+    if(region.x0 < agg.x0) agg.x0 = region.x0;
+    if(region.y0 < agg.y0) agg.y0 = region.y0;
+    if(region.x1 > agg.x1) agg.x1 = region.x1;
+    if(region.y1 > agg.y1) agg.y1 = region.y1;
+    merged.set(root, agg);
+  }
+
+  return Array.from(merged.values());
+}
+
+function buildAtomicVisualSegments({ imageData }){
+  if(!imageData?.gray || !imageData.width || !imageData.height) return null;
+  const width = Number(imageData.width) || 0;
+  const height = Number(imageData.height) || 0;
+  if(width <= 2 || height <= 2) return null;
+  const gray = imageData.gray;
+  const rgb = resolveRgbChannels(imageData, gray.length);
+  const atomic = buildAtomicRegions({ gray, rgb, width, height });
+  const merged = mergeAtomicRegions({ ...atomic, width, height });
+  return { width, height, atomicCount: atomic.regions.length, mergedRegions: merged };
+}
+
+module.exports = {
+  buildAtomicVisualSegments
+};
