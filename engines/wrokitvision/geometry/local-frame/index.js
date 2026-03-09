@@ -23,6 +23,26 @@ function normalizeAngleDeg(angle){
   return ((n % 360) + 360) % 360;
 }
 
+function circularMeanAngleDeg(angles){
+  const normalized = (Array.isArray(angles) ? angles : [])
+    .map((value) => normalizeAngleDeg(value))
+    .filter((value) => value != null);
+  if(!normalized.length) return null;
+
+  const vectorSum = normalized.reduce((acc, angleDeg) => {
+    const radians = angleDeg * (Math.PI / 180);
+    acc.sin += Math.sin(radians);
+    acc.cos += Math.cos(radians);
+    return acc;
+  }, { sin: 0, cos: 0 });
+
+  const meanSin = vectorSum.sin / normalized.length;
+  const meanCos = vectorSum.cos / normalized.length;
+  if(Math.abs(meanSin) < 1e-9 && Math.abs(meanCos) < 1e-9) return normalized[0];
+
+  return normalizeAngleDeg(Math.atan2(meanSin, meanCos) * (180 / Math.PI));
+}
+
 function estimateLocalCoordinateFrame({ resolvedLocalSubgraph, localStructure } = {}){
   const seed = resolvedLocalSubgraph?.selectionSeed || null;
   const seedBox = seed?.bbox || { x: 0, y: 0, w: 0, h: 0 };
@@ -39,13 +59,13 @@ function estimateLocalCoordinateFrame({ resolvedLocalSubgraph, localStructure } 
   let evidenceSource = 'fallback-seed-axis';
 
   if(lineAngles.length){
-    rotationAngle = lineAngles.reduce((sum, value) => sum + value, 0) / lineAngles.length;
+    rotationAngle = circularMeanAngleDeg(lineAngles);
     evidenceSource = 'text-line-orientation';
   } else if(localStructure?.containingBlock?.orientation != null){
     rotationAngle = Number(localStructure.containingBlock.orientation) || 0;
     evidenceSource = 'containing-block-orientation';
   } else if(regionAngles.length){
-    rotationAngle = regionAngles.reduce((sum, value) => sum + value, 0) / regionAngles.length;
+    rotationAngle = circularMeanAngleDeg(regionAngles);
     evidenceSource = 'region-orientation';
   }
 

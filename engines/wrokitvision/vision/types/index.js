@@ -311,6 +311,74 @@ function createLocalCoordinateFrame({
   };
 }
 
+
+function createMatchScoreBreakdown({ totalScore, weightedScore, confidence, signals, weights, rationale, ambiguity } = {}){
+  return {
+    totalScore: Number(totalScore) || 0,
+    weightedScore: Number(weightedScore) || 0,
+    confidence: clamp01(confidence),
+    signals: signals || {},
+    weights: weights || {},
+    rationale: rationale || createScoreBreakdown(),
+    ambiguity: ambiguity || null
+  };
+}
+
+function createMatchCandidate({
+  candidateId,
+  nodeIds,
+  localStructureRefs,
+  regionRef,
+  blockRef,
+  lineRef,
+  tokenRefs,
+  localCoordinateComparison,
+  scoreBreakdown,
+  extractedValueCandidates,
+  debug
+} = {}){
+  return {
+    candidateId: candidateId || null,
+    nodeIds: Array.isArray(nodeIds) ? nodeIds : [],
+    localStructureRefs: localStructureRefs || {},
+    regionRef: regionRef || null,
+    blockRef: blockRef || null,
+    lineRef: lineRef || null,
+    tokenRefs: Array.isArray(tokenRefs) ? tokenRefs : [],
+    localCoordinateComparison: localCoordinateComparison || {},
+    scoreBreakdown: scoreBreakdown || createMatchScoreBreakdown(),
+    extractedValueCandidates: Array.isArray(extractedValueCandidates) ? extractedValueCandidates : [],
+    debug: debug || {}
+  };
+}
+
+function createFieldMatchResult({
+  fieldKey,
+  selectedCandidate,
+  candidates,
+  extractedValueCandidates,
+  value,
+  confidence,
+  rationale,
+  fallback,
+  ambiguity,
+  debug
+} = {}){
+  return {
+    schema: 'wrokitvision/field-match-result/v1',
+    fieldKey: fieldKey || null,
+    selectedCandidate: selectedCandidate || null,
+    candidates: Array.isArray(candidates) ? candidates : [],
+    extractedValueCandidates: Array.isArray(extractedValueCandidates) ? extractedValueCandidates : [],
+    value: value == null ? '' : String(value),
+    confidence: clamp01(confidence),
+    rationale: rationale || createScoreBreakdown(),
+    fallback: fallback || null,
+    ambiguity: ambiguity || null,
+    debug: debug || {}
+  };
+}
+
 function createFieldSignatureComponent({ componentType, nodeId, nodeType, role, text, normalizedText, geometry, relationship, confidence, rationale } = {}){
   return {
     componentType: componentType || 'unknown',
@@ -381,5 +449,8 @@ module.exports = {
   createLocalStructure,
   createLocalCoordinateFrame,
   createFieldSignature,
-  createFieldSignatureComponent
+  createFieldSignatureComponent,
+  createMatchScoreBreakdown,
+  createMatchCandidate,
+  createFieldMatchResult
 };
