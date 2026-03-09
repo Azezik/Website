@@ -13,7 +13,18 @@ const WrokitVisionEngine = require('../engines/core/wrokit-vision-engine');
   ];
   const viewport = { width: 800, height: 1000 };
 
-  const precomputed = buildPrecomputedStructuralMap({ tokens, viewport, page: 1, geometryId: 'geom_1' });
+  const gray = new Uint8Array(viewport.width * viewport.height).fill(245);
+  for(let y = 120; y < 300; y++){
+    for(let x = 420; x < 760; x++) gray[(y * viewport.width) + x] = 30;
+  }
+
+  const precomputed = buildPrecomputedStructuralMap({
+    tokens,
+    viewport,
+    page: 1,
+    geometryId: 'geom_1',
+    imageData: { gray, width: viewport.width, height: viewport.height }
+  });
   const analysis = precomputed.uploadedImageAnalysis;
 
   assert.ok(analysis, 'precompute should return uploaded image analysis');
@@ -25,6 +36,7 @@ const WrokitVisionEngine = require('../engines/core/wrokit-vision-engine');
   assert.ok(analysis.regionGraph && Array.isArray(analysis.regionGraph.edges), 'region graph is present');
   assert.ok(analysis.textGraph && Array.isArray(analysis.textGraph.edges), 'text graph is present');
   assert.ok(analysis.debugArtifacts?.regionProposalsOverlay, 'debug overlay exists');
+  assert.ok(analysis.regionNodes.some(node => node?.provenance?.sourceType === 'visual'), 'region proposals include non-OCR visual provenance');
 
   const seedArtifacts = WrokitVisionEngine.createSeedArtifacts({ tokens, viewport, page: 1, geometryId: 'geom_1' });
   assert.ok(seedArtifacts.precomputedStructuralMap, 'seed artifacts include precomputed map for phase 1 foundation');

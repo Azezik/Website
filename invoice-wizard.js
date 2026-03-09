@@ -8363,6 +8363,16 @@ function updatePrompt(){
   els.questionText.textContent = step?.prompt || 'Highlight field';
 }
 
+
+function getWrokitVisionPrecomputedForPage(pageNum){
+  const geometryId = state.activeGeometryId || currentGeometryId() || DEFAULT_GEOMETRY_ID;
+  const artifacts = state.profile?.wrokitVision?.geometryArtifacts || {};
+  const artifact = artifacts?.[geometryId]?.precomputedStructuralMap || null;
+  if(!artifact) return null;
+  if(Number(artifact.page || pageNum || 1) !== Number(pageNum || 1)) return null;
+  return artifact;
+}
+
 function ensureWrokitVisionSeedGraphForCurrentGeometry(){
   if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION) return;
   ensureProfile(currentWizardId(), currentGeometryId());
@@ -9356,6 +9366,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       };
       if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
         enginePayload.runtimeMaps = runtimeMaps;
+        enginePayload.precomputedStructuralMap = getWrokitVisionPrecomputedForPage(fieldSpec.page || state.pageNum || 1);
       }
       const engineResult = EngineRegistry?.extractScalar
         ? EngineRegistry.extractScalar(fieldEngineType, enginePayload)
@@ -18065,7 +18076,8 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     viewport: vp,
     tokens: pageTokens,
     profile: state.profile,
-    geometryId: state.activeGeometryId || currentGeometryId()
+    geometryId: state.activeGeometryId || currentGeometryId(),
+    precomputedStructuralMap: getWrokitVisionPrecomputedForPage(state.pageNum)
   };
   const engineOwnedConfig = EngineRegistry?.registerFieldConfig
     ? EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload)
