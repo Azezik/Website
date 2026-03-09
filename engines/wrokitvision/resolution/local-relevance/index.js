@@ -30,11 +30,65 @@ function contains(a, b){
   return a.x <= b.x && a.y <= b.y && (a.x + a.w) >= (b.x + b.w) && (a.y + a.h) >= (b.y + b.h);
 }
 
-function orientationSignal(seedBox, box){
-  return (seedBox.w >= seedBox.h) === (box.w >= box.h) ? 1 : 0.4;
+function normalizeAngleDeg(angle){
+  const n = Number(angle);
+  if(!Number.isFinite(n)) return null;
+  const normalized = ((n % 360) + 360) % 360;
+  return normalized;
 }
 
-function scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineById, blockById, regionById } = {}){
+function smallestAngularDifferenceDeg(a, b){
+  const an = normalizeAngleDeg(a);
+  const bn = normalizeAngleDeg(b);
+  if(an == null || bn == null) return null;
+  const diff = Math.abs(an - bn);
+  return Math.min(diff, 360 - diff);
+}
+
+function estimateSeedOrientation({ selectionContext, lineById, blockById } = {}){
+  const lineAngles = (selectionContext?.nearestLineIds || [])
+    .map(id => lineById.get(id))
+    .map(node => normalizeAngleDeg(node?.geometry?.orientation))
+    .filter(v => v != null);
+  if(lineAngles.length){
+    return {
+      orientation: lineAngles.reduce((sum, value) => sum + value, 0) / lineAngles.length,
+      source: 'nearest_lines'
+    };
+  }
+  const blockAngles = (selectionContext?.nearestBlockIds || [])
+    .map(id => blockById.get(id))
+    .map(node => normalizeAngleDeg(node?.geometry?.orientation))
+    .filter(v => v != null);
+  if(blockAngles.length){
+    return {
+      orientation: blockAngles.reduce((sum, value) => sum + value, 0) / blockAngles.length,
+      source: 'nearest_blocks'
+    };
+  }
+  return {
+    orientation: null,
+    source: 'unavailable'
+  };
+}
+
+function orientationSignal(seedOrientation, candidateOrientation){
+  const angularDifference = smallestAngularDifferenceDeg(seedOrientation, candidateOrientation);
+  if(angularDifference == null){
+    return {
+      score: 0.5,
+      angularDifference: null,
+      source: 'fallback-neutral'
+    };
+  }
+  return {
+    score: Math.max(0, 1 - (angularDifference / 180)),
+    angularDifference,
+    source: 'orientation-angle'
+  };
+}
+
+function scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineById, blockById, regionById, seedOrientationMeta } = {}){
   const box = ensureBBox(node?.geometry?.bbox || {});
   const overlap = iou(seedBox, box);
   const distance = distanceSignal(seedBox, box, viewport);
@@ -69,7 +123,7 @@ function scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineBy
     return 0;
   })();
 
-  const align = orientationSignal(seedBox, box);
+  const alignMeta = orientationSignal(seedOrientationMeta?.orientation, node?.geometry?.orientation);
   const provenance = Number(node?.provenance?.weight) || 0.5;
   const confidence = Number(node?.confidence);
   const textConfidence = Number.isFinite(confidence) ? confidence : 0.5;
@@ -81,7 +135,10 @@ function scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineBy
     sharedParentRegion,
     topology: Math.max(0, Math.min(1, topology)),
     adjacency,
-    alignment: align,
+    alignment: alignMeta.score,
+    alignmentAngleDelta: alignMeta.angularDifference,
+    alignmentSource: alignMeta.source,
+    seedOrientation: seedOrientationMeta?.orientation,
     provenance,
     textConfidence
   };
@@ -121,11 +178,12 @@ function scoreLocalRelevance({ canonicalPrecomputed, selectionSeed, selectionCon
   const lineById = new Map((analysis.textLines || []).map(n => [n.id, n]));
   const blockById = new Map((analysis.textBlocks || []).map(n => [n.id, n]));
   const regionById = new Map((analysis.regionNodes || []).map(n => [n.id, n]));
+  const seedOrientationMeta = estimateSeedOrientation({ selectionContext, lineById, blockById });
 
   const allScores = [];
   const gather = (nodes, nodeType) => {
     (Array.isArray(nodes) ? nodes : []).forEach((node) => {
-      allScores.push(scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineById, blockById, regionById }));
+      allScores.push(scoreNode({ node, nodeType, seedBox, viewport, selectionContext, lineById, blockById, regionById, seedOrientationMeta }));
     });
   };
 
