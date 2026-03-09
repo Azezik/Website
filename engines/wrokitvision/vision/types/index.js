@@ -173,6 +173,85 @@ function createUploadedImageAnalysis({
   };
 }
 
+function createSelectionSeed({ bbox, polygon, normalized, page, imageRef, fieldMeta } = {}){
+  return {
+    bbox: ensureBBox(bbox || {}),
+    polygon: Array.isArray(polygon) ? polygon : null,
+    normalized: normalized || null,
+    page: Number(page) || 1,
+    imageRef: imageRef || null,
+    fieldMeta: fieldMeta || null
+  };
+}
+
+function createSelectionContext({
+  overlappingTokenIds,
+  nearestLineIds,
+  nearestBlockIds,
+  intersectingRegionIds,
+  containingRegionIds,
+  nearbySurfaceCandidateIds,
+  artifactRefs
+} = {}){
+  return {
+    overlappingTokenIds: Array.isArray(overlappingTokenIds) ? overlappingTokenIds : [],
+    nearestLineIds: Array.isArray(nearestLineIds) ? nearestLineIds : [],
+    nearestBlockIds: Array.isArray(nearestBlockIds) ? nearestBlockIds : [],
+    intersectingRegionIds: Array.isArray(intersectingRegionIds) ? intersectingRegionIds : [],
+    containingRegionIds: Array.isArray(containingRegionIds) ? containingRegionIds : [],
+    nearbySurfaceCandidateIds: Array.isArray(nearbySurfaceCandidateIds) ? nearbySurfaceCandidateIds : [],
+    artifactRefs: artifactRefs || {}
+  };
+}
+
+function createNodeRelevanceScore({ nodeId, nodeType, score, retained, scoreComponents, provenance } = {}){
+  return {
+    nodeId: nodeId || null,
+    nodeType: nodeType || 'unknown',
+    score: Number(score) || 0,
+    retained: !!retained,
+    scoreComponents: scoreComponents || {},
+    provenance: provenance || null
+  };
+}
+
+function createSelectionAssociationResult({ selectionSeed, selectionContext } = {}){
+  return {
+    selectionSeed: selectionSeed || createSelectionSeed(),
+    selectionContext: selectionContext || createSelectionContext()
+  };
+}
+
+function createResolvedLocalSubgraph({
+  selectionSeed,
+  selectionContext,
+  retainedTextTokenNodes,
+  retainedTextLineNodes,
+  retainedTextBlockNodes,
+  retainedRegionNodes,
+  retainedSurfaceCandidates,
+  retainedTypedEdges,
+  relevanceScores,
+  inferredParentChain,
+  neighborhoodMeta,
+  rejectedNodeIds
+} = {}){
+  return {
+    selectionSeed: selectionSeed || null,
+    selectionContext: selectionContext || null,
+    retainedTextTokenNodes: Array.isArray(retainedTextTokenNodes) ? retainedTextTokenNodes : [],
+    retainedTextLineNodes: Array.isArray(retainedTextLineNodes) ? retainedTextLineNodes : [],
+    retainedTextBlockNodes: Array.isArray(retainedTextBlockNodes) ? retainedTextBlockNodes : [],
+    retainedRegionNodes: Array.isArray(retainedRegionNodes) ? retainedRegionNodes : [],
+    retainedSurfaceCandidates: Array.isArray(retainedSurfaceCandidates) ? retainedSurfaceCandidates : [],
+    retainedTypedEdges: Array.isArray(retainedTypedEdges) ? retainedTypedEdges : [],
+    relevanceScores: Array.isArray(relevanceScores) ? relevanceScores : [],
+    inferredParentChain: Array.isArray(inferredParentChain) ? inferredParentChain : [],
+    neighborhoodMeta: neighborhoodMeta || {},
+    rejectedNodeIds: Array.isArray(rejectedNodeIds) ? rejectedNodeIds : []
+  };
+}
+
 module.exports = {
   createUploadedImageAnalysis,
   createStructuralRegionNode,
@@ -182,5 +261,10 @@ module.exports = {
   createSurfaceCandidate,
   createGraphEdge,
   createScoreBreakdown,
-  ensureBBox
+  ensureBBox,
+  createSelectionSeed,
+  createSelectionContext,
+  createResolvedLocalSubgraph,
+  createSelectionAssociationResult,
+  createNodeRelevanceScore
 };
