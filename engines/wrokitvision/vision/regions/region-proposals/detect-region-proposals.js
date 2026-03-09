@@ -127,7 +127,42 @@ function sobelBinary(gray, width, height, threshold = 80){
   return edges;
 }
 
-function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densityThreshold = 0.34 } = {}){
+function buildOrderedBoundaryContour(boundaryPixels = [], sx = 1, sy = 1){
+  if(!Array.isArray(boundaryPixels) || boundaryPixels.length < 3) return [];
+
+  let cx = 0;
+  let cy = 0;
+  for(const p of boundaryPixels){
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= Math.max(1, boundaryPixels.length);
+  cy /= Math.max(1, boundaryPixels.length);
+
+  const bucketCount = clamp(Math.round(Math.sqrt(boundaryPixels.length) * 2), 24, 96);
+  const buckets = Array.from({ length: bucketCount }, () => null);
+  const fullTurn = Math.PI * 2;
+
+  for(const p of boundaryPixels){
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    const angle = Math.atan2(dy, dx);
+    const norm = (angle + Math.PI) / fullTurn;
+    const bucketIdx = clamp(Math.floor(norm * bucketCount), 0, bucketCount - 1);
+    const dist2 = (dx * dx) + (dy * dy);
+    const prev = buckets[bucketIdx];
+    if(!prev || dist2 > prev.dist2){
+      buckets[bucketIdx] = { p, dist2, angle };
+    }
+  }
+
+  return buckets
+    .filter(Boolean)
+    .sort((a, b) => a.angle - b.angle)
+    .map(({ p }) => ({ x: p.x * sx, y: p.y * sy }));
+}
+
+function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densityThreshold = 0.28 } = {}){
   if(!edges || !width || !height) return false;
   if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
   let hits = 0;
@@ -246,12 +281,7 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
         h: bh * sy
       };
 
-      const sampleStep = Math.max(1, Math.floor(boundaryPixels.length / 200));
-      const contour = [];
-      for(let i = 0; i < boundaryPixels.length; i += sampleStep){
-        const bp = boundaryPixels[i];
-        contour.push({ x: bp.x * sx, y: bp.y * sy });
-      }
+      const contour = buildOrderedBoundaryContour(boundaryPixels, sx, sy);
       const hull = convexHull(contour.length >= 3 ? contour : rectContourFromBbox(bbox));
       const rotatedRect = orientedRectFromMoments(
         pixels.length > 1200 ? pixels.filter((_, idx) => idx % Math.ceil(pixels.length / 1200) === 0).map(p => ({ x: p.x * sx, y: p.y * sy })) : pixels.map(p => ({ x: p.x * sx, y: p.y * sy })),
