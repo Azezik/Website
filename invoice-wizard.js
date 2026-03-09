@@ -4937,12 +4937,39 @@ function getWrokitVisionDebugMaps(pageNum){
     }
   } catch(_){ /* canvas not yet ready — imageData stays null */ }
 
+  // ── Resolve precomputed structural artifact for this page ────────────────
+  // The visualization must read from the typed structural artifact
+  // (uploadedImageAnalysis.regionNodes, regionGraph, textTokens) rather than
+  // rebuilding from raw tokens via the legacy MapTools path.  We scan
+  // state.profile.wrokitVision.geometryArtifacts for a precomputed map whose
+  // page matches the current page (or has no page constraint).
+  let precomputedStructuralMap = null;
+  try {
+    const geometryArtifacts = state.profile?.wrokitVision?.geometryArtifacts || {};
+    for(const gId of Object.keys(geometryArtifacts)){
+      const candidate = geometryArtifacts[gId]?.precomputedStructuralMap;
+      if(candidate?.uploadedImageAnalysis){
+        if(candidate.page == null || Number(candidate.page) === page){
+          precomputedStructuralMap = candidate;
+          break;
+        }
+      }
+    }
+  } catch(_){ /* profile not yet populated — fall back to live build */ }
+
   // Include whether pixel data was available so the cache is invalidated once
   // the gray canvas becomes ready (avoids serving a pixel-less entry forever).
+  // Also include a short artifact fingerprint so the cache is invalidated when
+  // the precomputed map changes (e.g. after a new geometry upload).
   const hasImg = !!imageData;
-  const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature, hasImg ? 'img' : 'noimg'].join(':');
+  const artifactKey = precomputedStructuralMap
+    ? `pcm:${precomputedStructuralMap.geometryId || 'x'}:${precomputedStructuralMap.generatedAt || 0}`
+    : 'nopcm';
+  const cacheKey = [state.currentFileId || 'doc', page, tokenSource, viewportW, viewportH, tokenSignature, hasImg ? 'img' : 'noimg', artifactKey].join(':');
   if(!state.wrokitVisionDebugMapCache[cacheKey]){
-    state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport, imageData);
+    // Pass precomputedStructuralMap as the 4th argument so buildMaps routes
+    // through the typed compat adapter instead of the legacy MapTools path.
+    state.wrokitVisionDebugMapCache[cacheKey] = WrokitVisionEngine.buildMaps(tokens, viewport, imageData, precomputedStructuralMap);
   }
   return state.wrokitVisionDebugMapCache[cacheKey] || null;
 }
