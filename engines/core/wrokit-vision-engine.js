@@ -76,6 +76,17 @@
     }
     return null;
   })();
+
+  const FieldMatcher = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/matching/field-matcher');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
   const FieldSignature = (function(){
     try {
       if(typeof require === 'function'){
@@ -406,6 +417,34 @@
     const profileCfg = (profile?.fields || []).find(f => f?.fieldKey === fieldSpec?.fieldKey)?.wrokitVisionConfig || null;
     const cfg = fieldCfg || profileCfg;
     const neighborhood = cfg?.neighborhoods || null;
+
+    const fieldSignature = cfg?.fieldSignature || cfg?.selectionResolution?.fieldSignature || null;
+    if(FieldMatcher?.matchFieldSignature && fieldSignature && canonicalPrecomputed){
+      const matchResult = FieldMatcher.matchFieldSignature({
+        fieldKey: fieldSpec?.fieldKey || null,
+        fieldSignature,
+        canonicalPrecomputed
+      });
+      const selected = matchResult?.selectedCandidate || null;
+      if(selected){
+        const chosen = (selected.extractedValueCandidates || [])[0] || null;
+        const selectedLine = selected.lineRef || null;
+        const cleaned = applyTypeAwareCleaning(chosen?.text || selectedLine?.text || '', fieldSpec);
+        return {
+          value: cleaned.value,
+          raw: chosen?.text || selectedLine?.text || '',
+          confidence: Math.max(0.2, Math.min(0.98, Number(matchResult?.confidence) || 0)),
+          boxPx: (selectedLine?.geometry?.bbox || boxPx),
+          tokens: (tokens || []).filter(tok => (selectedLine?.tokenIds || []).includes(tok?.id)),
+          method: 'wrokit-vision-field-signature-match',
+          engine: 'wrokit_vision',
+          geometryId: geometryId || profile?.geometryId || null,
+          correctionsApplied: cleaned.correctionsApplied || [],
+          lowConfidence: (Number(matchResult?.confidence) || 0) < 0.5,
+          matching: matchResult
+        };
+      }
+    }
 
     for(const pad of pads){
       const scope = pad ? expandBox(boxPx, pad) : boxPx;
