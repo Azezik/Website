@@ -4920,22 +4920,10 @@ function getWrokitVisionDebugMaps(pageNum){
   const tokenSignature = `${tokens.length}:${Math.round(first.x || 0)}:${Math.round(first.y || 0)}:${Math.round(last.x || 0)}:${Math.round(last.y || 0)}:${String(first.text || '').slice(0,12)}:${String(last.text || '').slice(0,12)}`;
 
   // ── Extract gray pixel data for the visual region layer ──────────────────
-  // ensureGrayCanvas() returns a pre-built single-channel (R=G=B) canvas for
-  // this page.  We pull a Uint8Array of luminance values from it so that
-  // buildMaps → buildStructuralGraph → buildVisualRegionLayer can run the
-  // tolerance-based flood-fill region algorithm.
-  let imageData = null;
-  try {
-    const grayCanvas = ensureGrayCanvas(page);
-    if(grayCanvas && grayCanvas.width > 0 && grayCanvas.height > 0){
-      const gctx = grayCanvas.getContext('2d');
-      const raw  = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
-      // The canvas is already grayscale (R=G=B); take the R channel as lum.
-      const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
-      for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
-      imageData = { gray, width: grayCanvas.width, height: grayCanvas.height };
-    }
-  } catch(_){ /* canvas not yet ready — imageData stays null */ }
+  // NOTE: live WrokitVision map-building currently consumes grayscale luminance
+  // only ({ gray, width, height }). Full RGB pixels are available earlier via
+  // the source canvas render, but are collapsed by ensureGrayCanvas().
+  const imageData = getPageGrayImageData(page);
 
   // ── Resolve precomputed structural artifact for this page ────────────────
   // Use the canonical lookup (same function used by the extraction path) so
@@ -8405,7 +8393,13 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
     ...(artifacts[geometryId] || {}),
     geometryId,
     profileVersion: PROFILE_VERSION,
-    ...WrokitVisionEngine.createSeedArtifacts({ tokens: pageTokens, viewport: vp })
+    ...WrokitVisionEngine.createSeedArtifacts({
+      tokens: pageTokens,
+      viewport: vp,
+      page,
+      geometryId,
+      imageData: getPageGrayImageData(page)
+    })
   };
   profileStore.saveProfile(state.username, state.docType, state.profile);
 }
@@ -8488,6 +8482,20 @@ function ensureGrayCanvas(page){
   ctx.putImageData(img,0,0);
   state.grayCanvases[page]=canvas;
   return canvas;
+}
+
+function getPageGrayImageData(page){
+  try {
+    const grayCanvas = ensureGrayCanvas(page);
+    if(!grayCanvas || grayCanvas.width <= 0 || grayCanvas.height <= 0) return null;
+    const gctx = grayCanvas.getContext('2d');
+    const raw = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
+    const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
+    for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
+    return { gray, width: grayCanvas.width, height: grayCanvas.height };
+  } catch(_){
+    return null;
+  }
 }
 
 function sobelEdges(data, w, h){
@@ -14945,8 +14953,62 @@ function paintOverlay(ctx, options = {}){
     //   FF  = fill ratio (how solid vs. irregular the shape is)
     if(featureGraphOn && maps?.structuralGraph?.visualRegionLayer?.regions?.length){
       const vrRegions = maps.structuralGraph.visualRegionLayer.regions;
+      const projectPoint = (pt) => {
+        if(!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
+        const transformed = applyTransform({ x: pt.x, y: pt.y, w: 0, h: 0, page: targetPage });
+        if(!transformed) return null;
+        return { x: transformed.x / scaleX, y: (transformed.y / scaleY) + offPx };
+      };
+      const drawGeometryPath = (region) => {
+        const geom = region?.geometry || null;
+        if(!geom) return false;
+        const points = Array.isArray(geom.points) && geom.points.length >= 3 ? geom.points : null;
+        if(points){
+          const projectedPts = points.map(projectPoint).filter(Boolean);
+          if(projectedPts.length >= 3){
+            ctx.beginPath();
+            ctx.moveTo(projectedPts[0].x, projectedPts[0].y);
+            for(let i = 1; i < projectedPts.length; i++) ctx.lineTo(projectedPts[i].x, projectedPts[i].y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            return true;
+          }
+        }
+        if(geom.kind === 'rotated_rect' && geom.rotatedRect?.center && geom.rotatedRect?.size){
+          const rr = geom.rotatedRect;
+          const cx = Number(rr.center.x) || 0;
+          const cy = Number(rr.center.y) || 0;
+          const w = Math.max(0, Number(rr.size.w) || 0);
+          const h = Math.max(0, Number(rr.size.h) || 0);
+          const angle = (Number(rr.angleDeg) || 0) * (Math.PI / 180);
+          if(w > 0 && h > 0){
+            const hw = w / 2;
+            const hh = h / 2;
+            const corners = [
+              { x: -hw, y: -hh }, { x: hw, y: -hh },
+              { x: hw, y: hh }, { x: -hw, y: hh }
+            ].map(c => ({
+              x: cx + (c.x * Math.cos(angle)) - (c.y * Math.sin(angle)),
+              y: cy + (c.x * Math.sin(angle)) + (c.y * Math.cos(angle))
+            }));
+            const projectedPts = corners.map(projectPoint).filter(Boolean);
+            if(projectedPts.length === 4){
+              ctx.beginPath();
+              ctx.moveTo(projectedPts[0].x, projectedPts[0].y);
+              for(let i = 1; i < projectedPts.length; i++) ctx.lineTo(projectedPts[i].x, projectedPts[i].y);
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+
       ctx.save();
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.7;
       for(const region of vrRegions){
         const projected = projectGraphNode(region);
         if(!projected) continue;
@@ -14954,13 +15016,24 @@ function paintOverlay(ctx, options = {}){
         const ry = (projected.y / scaleY) + offPx;
         const rw = projected.w / scaleX;
         const rh = projected.h / scaleY;
-        const fillAlpha = Math.min(0.14, 0.05 + (region.fillRatio ?? 0.8) * 0.08);
+        const fillAlpha = Math.min(0.16, 0.06 + (region.fillRatio ?? 0.8) * 0.08);
         ctx.fillStyle   = `rgba(16,185,129,${fillAlpha.toFixed(3)})`;
-        ctx.strokeStyle = 'rgba(16,185,129,0.65)';
-        ctx.setLineDash([5, 5]);
-        ctx.fillRect(rx, ry, rw, rh);
-        ctx.strokeRect(rx, ry, rw, rh);
-        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(16,185,129,0.72)';
+        const drewGeometry = drawGeometryPath(region);
+        if(!drewGeometry){
+          ctx.setLineDash([5, 5]);
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.strokeRect(rx, ry, rw, rh);
+          ctx.setLineDash([]);
+        } else {
+          // Keep compatibility bbox visible as a secondary debug cue only.
+          ctx.save();
+          ctx.setLineDash([2, 4]);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = 'rgba(5,150,105,0.32)';
+          ctx.strokeRect(rx, ry, rw, rh);
+          ctx.restore();
+        }
         // Label
         const areaPct = Math.round((region.areaFraction ?? 0) * 100);
         const lumPct  = Math.round((region.meanLuminance ?? 0) * 100);
