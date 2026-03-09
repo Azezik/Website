@@ -111,6 +111,50 @@ function orientedRectFromMoments(points = [], fallbackBbox = {}){
   };
 }
 
+function sobelBinary(gray, width, height, threshold = 80){
+  const edges = new Uint8Array(width * height);
+  for(let y = 1; y < height - 1; y++){
+    for(let x = 1; x < width - 1; x++){
+      const i = y * width + x;
+      const gx = -gray[i-width-1] - 2 * gray[i-1] - gray[i+width-1]
+               + gray[i-width+1] + 2 * gray[i+1] + gray[i+width+1];
+      const gy = -gray[i-width-1] - 2 * gray[i-width] - gray[i-width+1]
+               + gray[i+width-1] + 2 * gray[i+width] + gray[i+width+1];
+      const g = Math.sqrt(gx * gx + gy * gy);
+      edges[i] = g > threshold ? 1 : 0;
+    }
+  }
+  return edges;
+}
+
+function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densityThreshold = 0.34 } = {}){
+  if(!edges || !width || !height) return false;
+  if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
+  let hits = 0;
+  let samples = 0;
+
+  if(x0 !== x1){
+    const bx = Math.max(x0, x1);
+    for(let dy = -1; dy <= 1; dy++){
+      const sy = y0 + dy;
+      if(bx < 0 || bx >= width || sy < 0 || sy >= height) continue;
+      samples += 1;
+      if(edges[(sy * width) + bx]) hits += 1;
+    }
+  } else {
+    const by = Math.max(y0, y1);
+    for(let dx = -1; dx <= 1; dx++){
+      const sx = x0 + dx;
+      if(sx < 0 || sx >= width || by < 0 || by >= height) continue;
+      samples += 1;
+      if(edges[(by * width) + sx]) hits += 1;
+    }
+  }
+
+  if(samples <= 0) return false;
+  return (hits / samples) >= densityThreshold;
+}
+
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
     return [];
@@ -121,6 +165,7 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(width <= 2 || height <= 2) return [];
 
   const gray = imageData.gray;
+  const edges = sobelBinary(gray, width, height, 80);
   let sum = 0;
   for(let i = 0; i < gray.length; i++) sum += gray[i];
   const mean = sum / Math.max(1, gray.length);
@@ -175,6 +220,10 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
             continue;
           }
           if(mask[ni] !== 1){
+            isBoundary = true;
+            continue;
+          }
+          if(hasStrongLocalEdgeBarrier({ edges, width, height, x0: cx, y0: cy, x1: nx, y1: ny })){
             isBoundary = true;
             continue;
           }

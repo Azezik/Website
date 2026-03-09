@@ -501,6 +501,7 @@ function buildVisualRegionLayer(imageData, vpW, vpH){
     const imgW = imageData.width;
     const imgH = imageData.height;
     const gray = imageData.gray;
+    const edges = sobelEdges(gray, imgW, imgH);
 
     // Coarse grid – 64 cols × 48 rows (3072 cells, trivially fast)
     const GW = 64;
@@ -534,6 +535,41 @@ function buildVisualRegionLayer(imageData, vpW, vpH){
     const parent = new Int32Array(GW * GH);
     for(let i = 0; i < parent.length; i++) parent[i] = i;
 
+    function hasStrongEdgeBarrierBetweenCells(gx, gy, direction){
+      const EDGE_DENSITY_BLOCK = 0.28;
+      let hits = 0;
+      let samples = 0;
+
+      if(direction === 'right'){
+        const borderX = Math.max(0, Math.min(imgW - 1, Math.round((gx + 1) * cellW)));
+        const y0 = Math.max(0, Math.floor(gy * cellH));
+        const y1 = Math.min(imgH - 1, Math.ceil((gy + 1) * cellH) - 1);
+        for(let y = y0; y <= y1; y++){
+          for(let dx = -1; dx <= 1; dx++){
+            const sx = borderX + dx;
+            if(sx < 0 || sx >= imgW) continue;
+            samples += 1;
+            if(edges[(y * imgW) + sx]) hits += 1;
+          }
+        }
+      } else if(direction === 'down'){
+        const borderY = Math.max(0, Math.min(imgH - 1, Math.round((gy + 1) * cellH)));
+        const x0 = Math.max(0, Math.floor(gx * cellW));
+        const x1 = Math.min(imgW - 1, Math.ceil((gx + 1) * cellW) - 1);
+        for(let x = x0; x <= x1; x++){
+          for(let dy = -1; dy <= 1; dy++){
+            const sy = borderY + dy;
+            if(sy < 0 || sy >= imgH) continue;
+            samples += 1;
+            if(edges[(sy * imgW) + x]) hits += 1;
+          }
+        }
+      }
+
+      if(samples <= 0) return false;
+      return (hits / samples) >= EDGE_DENSITY_BLOCK;
+    }
+
     function find(i){
       // Iterative path-halving
       while(parent[i] !== i){ parent[i] = parent[parent[i]]; i = parent[i]; }
@@ -551,12 +587,16 @@ function buildVisualRegionLayer(imageData, vpW, vpH){
         // Right
         if(gx + 1 < GW){
           const j = i + 1;
-          if(Math.abs(li - lum[j]) <= TOLERANCE) union(i, j);
+          if(Math.abs(li - lum[j]) <= TOLERANCE && !hasStrongEdgeBarrierBetweenCells(gx, gy, 'right')){
+            union(i, j);
+          }
         }
         // Below
         if(gy + 1 < GH){
           const j = i + GW;
-          if(Math.abs(li - lum[j]) <= TOLERANCE) union(i, j);
+          if(Math.abs(li - lum[j]) <= TOLERANCE && !hasStrongEdgeBarrierBetweenCells(gx, gy, 'down')){
+            union(i, j);
+          }
         }
       }
     }
