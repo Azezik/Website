@@ -26,6 +26,37 @@
     }
     return (typeof self !== 'undefined' ? self : this).WrokitVisionPrecomputedCompat || null;
   })();
+  const SelectionAssociation = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/selection/selection-association');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
+  const LocalRelevance = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/resolution/local-relevance');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
+  const LocalSubgraph = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/resolution/local-subgraph');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
+
   const LABEL_HINTS = {
     store_name: ['vendor','seller','company','store','business'],
     department: ['department','division'],
@@ -260,15 +291,27 @@
   }
 
   function resolvePrecomputedArtifact({ precomputedStructuralMap, profile, geometryId, page, fieldSpec }){
-    if(precomputedStructuralMap?.uploadedImageAnalysis) return precomputedStructuralMap;
+    const resolvedPage = Number(page || fieldSpec?.page || 1);
+
+    if(precomputedStructuralMap?.uploadedImageAnalysis){
+      if(precomputedStructuralMap.page == null || Number(precomputedStructuralMap.page) === resolvedPage){
+        return precomputedStructuralMap;
+      }
+      return null;
+    }
+
     const fieldCfgArtifact = fieldSpec?.wrokitVisionConfig?.precomputedStructuralMap;
-    if(fieldCfgArtifact?.uploadedImageAnalysis) return fieldCfgArtifact;
+    if(fieldCfgArtifact?.uploadedImageAnalysis){
+      if(fieldCfgArtifact.page == null || Number(fieldCfgArtifact.page) === resolvedPage){
+        return fieldCfgArtifact;
+      }
+      return null;
+    }
 
     const resolvedGeometryId = geometryId || profile?.geometryId || null;
-    const resolvedPage = Number(page || fieldSpec?.page || 1);
     const artifacts = profile?.wrokitVision?.geometryArtifacts || {};
     const artifact = artifacts?.[resolvedGeometryId]?.precomputedStructuralMap;
-    if(artifact?.uploadedImageAnalysis && Number(artifact.page || resolvedPage) === resolvedPage){
+    if(artifact?.uploadedImageAnalysis && artifact.page != null && Number(artifact.page) === resolvedPage){
       return artifact;
     }
     return null;
@@ -424,6 +467,39 @@
       ? MapTools.captureFieldNeighborhood(rawBox, maps.textMap, maps.structuralGraph)
       : { textNeighbors: [], structuralNeighbors: [], visualRegionContext: null };
 
+    const selectionSeed = (SelectionAssociation?.resolveSeed && rawBox)
+      ? SelectionAssociation.resolveSeed({
+          selection: { bbox: rawBox },
+          viewport: viewport || null,
+          page,
+          fieldMeta: { fieldKey: step?.fieldKey || null },
+          precomputedStructuralMap: canonicalPrecomputed
+        })
+      : null;
+
+    const selectionAssociation = (SelectionAssociation?.associateSelection && selectionSeed && canonicalPrecomputed)
+      ? SelectionAssociation.associateSelection({
+          selectionSeed,
+          canonicalPrecomputed
+        })
+      : null;
+
+    const localRelevance = (LocalRelevance?.scoreLocalRelevance && selectionAssociation && canonicalPrecomputed)
+      ? LocalRelevance.scoreLocalRelevance({
+          canonicalPrecomputed,
+          selectionSeed: selectionAssociation.selectionSeed,
+          selectionContext: selectionAssociation.selectionContext
+        })
+      : null;
+
+    const resolvedLocalSubgraph = (LocalSubgraph?.resolveLocalSubgraph && selectionAssociation && localRelevance && canonicalPrecomputed)
+      ? LocalSubgraph.resolveLocalSubgraph({
+          canonicalPrecomputed,
+          associationResult: selectionAssociation,
+          relevanceResult: localRelevance
+        })
+      : null;
+
     return {
       schema: 'wrokit_vision/v1',
       method: 'bbox-first-micro-expansion',
@@ -440,6 +516,18 @@
       viewport: viewport ? { width: viewport.width || viewport.w || 0, height: viewport.height || viewport.h || 0 } : null,
       rawBox: rawBox ? { x: rawBox.x, y: rawBox.y, w: rawBox.w, h: rawBox.h } : null,
       neighborhoods,
+      selectionResolution: resolvedLocalSubgraph
+        ? {
+            version: 1,
+            source: 'typed-canonical-precomputed',
+            selectionSeed: resolvedLocalSubgraph.selectionSeed,
+            selectionContext: resolvedLocalSubgraph.selectionContext,
+            relevanceScores: resolvedLocalSubgraph.relevanceScores,
+            retainedNodeIds: resolvedLocalSubgraph.relevanceScores.filter(s => s.retained).map(s => s.nodeId),
+            rejectedNodeIds: resolvedLocalSubgraph.rejectedNodeIds,
+            resolvedLocalSubgraph
+          }
+        : null,
       mapStats: {
         textNodes: maps.textMap?.nodeCount || 0,
         structuralNodes: maps.structuralGraph?.nodeCount || 0
