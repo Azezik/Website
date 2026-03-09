@@ -60,7 +60,7 @@ function hasSelfIntersection(points = []){
   });
 
   const visualRegions = seed.precomputedStructuralMap.uploadedImageAnalysis.regionNodes
-    .filter(region => region?.provenance?.detector === 'connected-components-threshold');
+    .filter(region => region?.provenance?.detector === 'atomic-region-merge');
 
   assert.ok(visualRegions.length > 0, 'expected at least one visual region proposal');
 
