@@ -68,15 +68,20 @@ function colorGradient(rgb, width, height){
   for(let y = 1; y < height - 1; y++){
     for(let x = 1; x < width - 1; x++){
       const i = y * width + x;
-      const right = i + 1;
-      const down = i + width;
-      const drx = rgb.r[right] - rgb.r[i];
-      const dgx = rgb.g[right] - rgb.g[i];
-      const dbx = rgb.b[right] - rgb.b[i];
-      const dry = rgb.r[down] - rgb.r[i];
-      const dgy = rgb.g[down] - rgb.g[i];
-      const dby = rgb.b[down] - rgb.b[i];
-      out[i] = clamp(Math.round(Math.sqrt((drx * drx) + (dgx * dgx) + (dbx * dbx) + (dry * dry) + (dgy * dgy) + (dby * dby)) / 2), 0, 255);
+      // Sobel on each channel, take max magnitude across R/G/B.
+      // This gives a strong response at color-only boundaries even when
+      // luminance is nearly identical across the edge.
+      let maxGrad = 0;
+      const channels = [rgb.r, rgb.g, rgb.b];
+      for(const ch of channels){
+        const gx = -ch[i-width-1] - 2*ch[i-1] - ch[i+width-1]
+                   + ch[i-width+1] + 2*ch[i+1] + ch[i+width+1];
+        const gy = -ch[i-width-1] - 2*ch[i-width] - ch[i-width+1]
+                   + ch[i+width-1] + 2*ch[i+width] + ch[i+width+1];
+        const grad = Math.sqrt((gx * gx) + (gy * gy));
+        if(grad > maxGrad) maxGrad = grad;
+      }
+      out[i] = Math.min(1020, Math.round(maxGrad));
     }
   }
   return out;
@@ -89,9 +94,11 @@ function buildBoundaryEvidence({ gray, rgb, width, height }){
   const evidence = new Uint8Array(width * height);
   for(let i = 0; i < evidence.length; i++){
     const edgeNorm = edge[i] / 1020;
-    const colorNorm = color ? color[i] / 255 : 0;
+    const colorNorm = color ? color[i] / 1020 : 0;
     const varNorm = variance[i] / 255;
-    evidence[i] = clamp(Math.round((edgeNorm * 0.58 + colorNorm * 0.30 + varNorm * 0.12) * 255), 0, 255);
+    // Rebalanced weights: color gets more influence so color-only contrasts
+    // produce meaningful boundary evidence even when luminance is similar.
+    evidence[i] = clamp(Math.round((edgeNorm * 0.44 + colorNorm * 0.42 + varNorm * 0.14) * 255), 0, 255);
   }
   return evidence;
 }
@@ -134,7 +141,9 @@ function buildAtomicRegions({ gray, rgb, width, height }){
     buckets[boundaryEvidence[idx]].push(idx);
   }
 
-  const hardBarrier = 206;
+  // Lowered hard barrier so weaker edges (edge-only and low-contrast scenes)
+  // can still stop region growth.  Previously 206 (~81%), now 155 (~61%).
+  const hardBarrier = 155;
   for(let score = 0; score < buckets.length; score++){
     const queue = buckets[score];
     for(let qi = 0; qi < queue.length; qi++){
@@ -197,6 +206,61 @@ function buildAtomicRegions({ gray, rgb, width, height }){
   return { labels, regions, boundaryEvidence };
 }
 
+/**
+ * Extract a simplified boundary contour for a merged region from the label map.
+ * Uses border-tracing: collects all pixels on the region boundary (those adjacent
+ * to a pixel of a different region or the image edge), then reduces the point set
+ * to a simplified polygon via angular sampling from the centroid.
+ */
+function extractRegionContour(labels, mergedRootIds, width, height, sx, sy){
+  const idSet = new Set(mergedRootIds);
+  const borderPixels = [];
+  const x0 = Math.max(0, Math.floor(mergedRootIds._x0 || 0));
+  const y0 = Math.max(0, Math.floor(mergedRootIds._y0 || 0));
+  const x1 = Math.min(width - 1, Math.ceil(mergedRootIds._x1 || width - 1));
+  const y1 = Math.min(height - 1, Math.ceil(mergedRootIds._y1 || height - 1));
+
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++){
+      const idx = y * width + x;
+      if(!idSet.has(labels[idx])) continue;
+      // Check if on region boundary
+      let isBorder = false;
+      if(x === 0 || x === width - 1 || y === 0 || y === height - 1){
+        isBorder = true;
+      } else {
+        const nbrs = [idx - 1, idx + 1, idx - width, idx + width];
+        for(const ni of nbrs){
+          if(!idSet.has(labels[ni])){ isBorder = true; break; }
+        }
+      }
+      if(isBorder) borderPixels.push({ x: x * sx, y: y * sy });
+    }
+  }
+
+  if(borderPixels.length < 3) return null;
+
+  // Simplify: sample boundary by angular bins from centroid
+  let cx = 0, cy = 0;
+  for(const p of borderPixels){ cx += p.x; cy += p.y; }
+  cx /= borderPixels.length;
+  cy /= borderPixels.length;
+
+  const NUM_BINS = 36;
+  const bins = new Array(NUM_BINS).fill(null);
+  for(const p of borderPixels){
+    const angle = Math.atan2(p.y - cy, p.x - cx);
+    const bin = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * NUM_BINS) % NUM_BINS;
+    const dist = Math.hypot(p.x - cx, p.y - cy);
+    if(!bins[bin] || dist > bins[bin].dist){
+      bins[bin] = { x: p.x, y: p.y, dist };
+    }
+  }
+
+  const contour = bins.filter(Boolean).map(b => ({ x: b.x, y: b.y }));
+  return contour.length >= 3 ? contour : null;
+}
+
 function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }){
   const adjacency = new Map();
   const keyOf = (a, b) => (a < b ? `${a}:${b}` : `${b}:${a}`);
@@ -249,8 +313,11 @@ function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }
       (ra.sumG / ra.area) - (rb.sumG / rb.area),
       (ra.sumB / ra.area) - (rb.sumB / rb.area)
     );
-    const mergeScore = (edgeMean * 0.6) + (grayDelta * 0.25) + (colorDelta * 0.15);
-    if(mergeScore <= 74) union(rec.a, rec.b);
+    // Color-dominant merge scoring: colorDelta gets 60% weight so regions that
+    // differ primarily in hue/saturation are kept separate even when luminance
+    // is nearly identical.  Lower threshold (28) prevents over-merging.
+    const mergeScore = (edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60);
+    if(mergeScore <= 28) union(rec.a, rec.b);
   }
 
   const merged = new Map();
@@ -258,9 +325,10 @@ function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }
     const region = regions[rid];
     if(!region.area) continue;
     const root = find(rid);
-    const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0, edgeSum: 0 };
+    const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0, rootIds: [] };
     agg.area += region.area;
     agg.atomicCount += 1;
+    agg.rootIds.push(rid);
     if(region.x0 < agg.x0) agg.x0 = region.x0;
     if(region.y0 < agg.y0) agg.y0 = region.y0;
     if(region.x1 > agg.x1) agg.x1 = region.x1;
@@ -268,7 +336,7 @@ function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }
     merged.set(root, agg);
   }
 
-  return Array.from(merged.values());
+  return { mergedRegions: Array.from(merged.values()), parent, find };
 }
 
 function buildAtomicVisualSegments({ imageData }){
@@ -279,10 +347,19 @@ function buildAtomicVisualSegments({ imageData }){
   const gray = imageData.gray;
   const rgb = resolveRgbChannels(imageData, gray.length);
   const atomic = buildAtomicRegions({ gray, rgb, width, height });
-  const merged = mergeAtomicRegions({ ...atomic, width, height });
-  return { width, height, atomicCount: atomic.regions.length, mergedRegions: merged };
+  const mergeResult = mergeAtomicRegions({ ...atomic, width, height });
+  return {
+    width,
+    height,
+    atomicCount: atomic.regions.length,
+    mergedRegions: mergeResult.mergedRegions,
+    labels: atomic.labels,
+    parent: mergeResult.parent,
+    find: mergeResult.find
+  };
 }
 
 module.exports = {
-  buildAtomicVisualSegments
+  buildAtomicVisualSegments,
+  extractRegionContour
 };

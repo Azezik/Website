@@ -270,6 +270,55 @@
     });
   }
 
+  // ── geometry helpers (from detect-region-proposals.js) ─────────────────────
+  function rectContourFromBbox(bbox){
+    bbox = bbox || {};
+    const x = Number(bbox.x) || 0;
+    const y = Number(bbox.y) || 0;
+    const w = Math.max(0, Number(bbox.w) || 0);
+    const h = Math.max(0, Number(bbox.h) || 0);
+    return [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+  }
+  function rotatedRectFromBbox(bbox){
+    bbox = bbox || {};
+    const x = Number(bbox.x) || 0;
+    const y = Number(bbox.y) || 0;
+    const w = Math.max(0, Number(bbox.w) || 0);
+    const h = Math.max(0, Number(bbox.h) || 0);
+    return { center: { x: x + (w / 2), y: y + (h / 2) }, size: { w, h }, angleDeg: 0 };
+  }
+  function crossProduct(o, a, b){
+    return ((a.x - o.x) * (b.y - o.y)) - ((a.y - o.y) * (b.x - o.x));
+  }
+  function convexHull(points){
+    if(!Array.isArray(points) || points.length < 3) return points || [];
+    const unique = [];
+    const seen = new Set();
+    for(const p of points){
+      if(!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const key = `${Math.round(p.x * 10)}:${Math.round(p.y * 10)}`;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      unique.push({ x: p.x, y: p.y });
+    }
+    if(unique.length < 3) return unique;
+    unique.sort((a, b) => (a.x - b.x) || (a.y - b.y));
+    const lower = [];
+    for(const p of unique){
+      while(lower.length >= 2 && crossProduct(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for(let i = unique.length - 1; i >= 0; i--){
+      const p = unique[i];
+      while(upper.length >= 2 && crossProduct(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
   // ── atomic-visual-segmentation.js (inlined) ──────────────────────────────
   function clampInt(value, min, max){ return Math.max(min, Math.min(max, value)); }
 
@@ -322,7 +371,8 @@
           }
         }
         const mean = sum / 9;
-        variance[i] = clampInt(Math.round(sumSq / 9 - mean * mean), 0, 255);
+        const varVal = (sumSq / 9) - (mean * mean);
+        variance[i] = clampInt(Math.round(Math.sqrt(Math.max(0, varVal)) * 4), 0, 255);
       }
     }
     return variance;
@@ -334,15 +384,18 @@
     for(let y = 1; y < height - 1; y++){
       for(let x = 1; x < width - 1; x++){
         const i = y * width + x;
-        const right = i + 1;
-        const down = i + width;
-        const drx = rgb.r[right] - rgb.r[i];
-        const dgx = rgb.g[right] - rgb.g[i];
-        const dbx = rgb.b[right] - rgb.b[i];
-        const dry = rgb.r[down] - rgb.r[i];
-        const dgy = rgb.g[down] - rgb.g[i];
-        const dby = rgb.b[down] - rgb.b[i];
-        out[i] = clampInt(Math.round(Math.sqrt((drx*drx)+(dgx*dgx)+(dbx*dbx)+(dry*dry)+(dgy*dgy)+(dby*dby))/2), 0, 255);
+        var maxGrad = 0;
+        var channels = [rgb.r, rgb.g, rgb.b];
+        for(var ci = 0; ci < channels.length; ci++){
+          var ch = channels[ci];
+          var gx = -ch[i-width-1] - 2*ch[i-1] - ch[i+width-1]
+                   + ch[i-width+1] + 2*ch[i+1] + ch[i+width+1];
+          var gy = -ch[i-width-1] - 2*ch[i-width] - ch[i-width+1]
+                   + ch[i+width-1] + 2*ch[i+width] + ch[i+width+1];
+          var grad = Math.sqrt((gx * gx) + (gy * gy));
+          if(grad > maxGrad) maxGrad = grad;
+        }
+        out[i] = Math.min(1020, Math.round(maxGrad));
       }
     }
     return out;
@@ -355,9 +408,9 @@
     const evidence = new Uint8Array(width * height);
     for(let i = 0; i < evidence.length; i++){
       const edgeNorm = edge[i] / 1020;
-      const colorNorm = color ? color[i] / 255 : 0;
+      const colorNorm = color ? color[i] / 1020 : 0;
       const varNorm = variance[i] / 255;
-      evidence[i] = clampInt(Math.round((edgeNorm * 0.58 + colorNorm * 0.30 + varNorm * 0.12) * 255), 0, 255);
+      evidence[i] = clampInt(Math.round((edgeNorm * 0.44 + colorNorm * 0.42 + varNorm * 0.14) * 255), 0, 255);
     }
     return evidence;
   }
@@ -395,7 +448,7 @@
       labels[idx] = regionId;
       buckets[boundaryEvidence[idx]].push(idx);
     }
-    const hardBarrier = 206;
+    const hardBarrier = 155;
     for(let score = 0; score < buckets.length; score++){
       const queue = buckets[score];
       for(let qi = 0; qi < queue.length; qi++){
@@ -498,24 +551,84 @@
         (ra.sumG / ra.area) - (rb.sumG / rb.area),
         (ra.sumB / ra.area) - (rb.sumB / rb.area)
       );
-      const mergeScore = (edgeMean * 0.6) + (grayDelta * 0.25) + (colorDelta * 0.15);
-      if(mergeScore <= 74) union(rec.a, rec.b);
+      const mergeScore = (edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60);
+      if(mergeScore <= 28) union(rec.a, rec.b);
     }
     const merged = new Map();
     for(let rid = 0; rid < regions.length; rid++){
       const region = regions[rid];
       if(!region.area) continue;
       const root = find(rid);
-      const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0 };
+      const agg = merged.get(root) || { area: 0, x0: width, y0: height, x1: 0, y1: 0, atomicCount: 0, rootIds: [] };
       agg.area += region.area;
       agg.atomicCount += 1;
+      agg.rootIds.push(rid);
       if(region.x0 < agg.x0) agg.x0 = region.x0;
       if(region.y0 < agg.y0) agg.y0 = region.y0;
       if(region.x1 > agg.x1) agg.x1 = region.x1;
       if(region.y1 > agg.y1) agg.y1 = region.y1;
       merged.set(root, agg);
     }
-    return Array.from(merged.values());
+    return { mergedRegions: Array.from(merged.values()), parent, find };
+  }
+
+  function extractRegionContour(labels, mergedRootIds, width, height, sx, sy){
+    const idSet = new Set(mergedRootIds);
+    const borderPixels = [];
+    const x0 = Math.max(0, Math.floor(mergedRootIds._x0 || 0));
+    const y0 = Math.max(0, Math.floor(mergedRootIds._y0 || 0));
+    const x1 = Math.min(width - 1, Math.ceil(mergedRootIds._x1 || width - 1));
+    const y1 = Math.min(height - 1, Math.ceil(mergedRootIds._y1 || height - 1));
+    for(let y = y0; y <= y1; y++){
+      for(let x = x0; x <= x1; x++){
+        const idx = y * width + x;
+        if(!idSet.has(labels[idx])) continue;
+        let isBorder = false;
+        if(x === 0 || x === width - 1 || y === 0 || y === height - 1){ isBorder = true; }
+        else {
+          const nbrs = [idx - 1, idx + 1, idx - width, idx + width];
+          for(const ni of nbrs){ if(!idSet.has(labels[ni])){ isBorder = true; break; } }
+        }
+        if(isBorder) borderPixels.push({ x: x * sx, y: y * sy });
+      }
+    }
+    if(borderPixels.length < 3) return null;
+    let cx = 0, cy = 0;
+    for(const p of borderPixels){ cx += p.x; cy += p.y; }
+    cx /= borderPixels.length; cy /= borderPixels.length;
+    const NUM_BINS = 36;
+    const bins = new Array(NUM_BINS).fill(null);
+    for(const p of borderPixels){
+      const angle = Math.atan2(p.y - cy, p.x - cx);
+      const bin = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * NUM_BINS) % NUM_BINS;
+      const dist = Math.hypot(p.x - cx, p.y - cy);
+      if(!bins[bin] || dist > bins[bin].dist) bins[bin] = { x: p.x, y: p.y, dist };
+    }
+    const contour = bins.filter(Boolean).map(b => ({ x: b.x, y: b.y }));
+    return contour.length >= 3 ? contour : null;
+  }
+
+  function orientedRectFromContour(contour, fallbackBbox){
+    if(!Array.isArray(contour) || contour.length < 3) return rotatedRectFromBbox(fallbackBbox);
+    let mx = 0, my = 0;
+    for(const p of contour){ mx += p.x; my += p.y; }
+    mx /= contour.length; my /= contour.length;
+    let xx = 0, yy = 0, xy = 0;
+    for(const p of contour){
+      const dx = p.x - mx; const dy = p.y - my;
+      xx += dx * dx; yy += dy * dy; xy += dx * dy;
+    }
+    xx /= contour.length; yy /= contour.length; xy /= contour.length;
+    const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const cosA = Math.cos(angle); const sinA = Math.sin(angle);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for(const p of contour){
+      const dx = p.x - mx; const dy = p.y - my;
+      const u = (dx * cosA) + (dy * sinA); const v = (-dx * sinA) + (dy * cosA);
+      if(u < minU) minU = u; if(u > maxU) maxU = u;
+      if(v < minV) minV = v; if(v > maxV) maxV = v;
+    }
+    return { center: { x: mx, y: my }, size: { w: Math.max(1, maxU - minU), h: Math.max(1, maxV - minV) }, angleDeg: angle * (180 / Math.PI) };
   }
 
   function buildAtomicVisualSegments({ imageData }){
@@ -526,8 +639,15 @@
     const gray = imageData.gray;
     const rgb = resolveRgbChannels(imageData, gray.length);
     const atomic = buildAtomicRegions({ gray, rgb, width, height });
-    const merged = mergeAtomicRegions({ ...atomic, width, height });
-    return { width, height, atomicCount: atomic.regions.length, mergedRegions: merged };
+    const mergeResult = mergeAtomicRegions({ ...atomic, width, height });
+    return {
+      width, height,
+      atomicCount: atomic.regions.length,
+      mergedRegions: mergeResult.mergedRegions,
+      labels: atomic.labels,
+      parent: mergeResult.parent,
+      find: mergeResult.find
+    };
   }
 
   // ── detect-region-proposals.js ────────────────────────────────────────────
@@ -550,9 +670,24 @@
       const bh = merged.y1 - merged.y0 + 1;
       if(bw < 10 || bh < 10) continue;
       const bbox = { x: merged.x0 * sx, y: merged.y0 * sy, w: bw * sx, h: bh * sy };
+
+      // Extract real contour from the label map when available
+      let contour = null;
+      if(segmented.labels && merged.rootIds && segmented.find){
+        const mergedIdSet = new Set();
+        for(const rid of merged.rootIds) mergedIdSet.add(segmented.find(rid));
+        mergedIdSet._x0 = merged.x0; mergedIdSet._y0 = merged.y0;
+        mergedIdSet._x1 = merged.x1; mergedIdSet._y1 = merged.y1;
+        contour = extractRegionContour(segmented.labels, mergedIdSet, width, height, sx, sy);
+      }
+      const fallbackContour = rectContourFromBbox(bbox);
+      const resolvedContour = (contour && contour.length >= 3) ? contour : fallbackContour;
+      const hull = convexHull(resolvedContour);
+      const rotatedRect = (contour && contour.length >= 3) ? orientedRectFromContour(contour, bbox) : rotatedRectFromBbox(bbox);
+
       proposals.push(createStructuralRegionNode({
         id: idFactory('region'),
-        geometry: { bbox },
+        geometry: { bbox, contour: resolvedContour, hull: hull.length >= 3 ? hull : fallbackContour, rotatedRect },
         confidence: 0.62,
         provenance: { stage: 'region-proposals', detector: 'atomic-region-merge', sourceType: 'visual' },
         features: {
@@ -560,7 +695,8 @@
           pixelArea: area,
           atomicRegionCount: merged.atomicCount,
           atomicSeedCount: segmented.atomicCount,
-          boundaryFirst: true
+          boundaryFirst: true,
+          hasRealContour: !!(contour && contour.length >= 3)
         },
         surfaceTypeCandidate: 'visual_component',
         textDensity: 0

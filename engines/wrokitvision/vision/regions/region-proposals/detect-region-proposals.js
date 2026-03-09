@@ -2,7 +2,7 @@
 
 const { createStructuralRegionNode, ensureBBox } = require('../../types');
 const { unionBbox } = require('../../text/text-grouping/group-text-lines');
-const { buildAtomicVisualSegments } = require('./atomic-visual-segmentation');
+const { buildAtomicVisualSegments, extractRegionContour } = require('./atomic-visual-segmentation');
 
 function rectContourFromBbox(bbox = {}){
   const x = Number(bbox.x) || 0;
@@ -62,6 +62,44 @@ function convexHull(points = []){
   return lower.concat(upper);
 }
 
+function orientedRectFromContour(contour, fallbackBbox){
+  if(!Array.isArray(contour) || contour.length < 3) return rotatedRectFromBbox(fallbackBbox);
+  let mx = 0, my = 0;
+  for(const p of contour){ mx += p.x; my += p.y; }
+  mx /= contour.length;
+  my /= contour.length;
+  let xx = 0, yy = 0, xy = 0;
+  for(const p of contour){
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    xx += dx * dx;
+    yy += dy * dy;
+    xy += dx * dy;
+  }
+  xx /= contour.length;
+  yy /= contour.length;
+  xy /= contour.length;
+  const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+  const cosA = Math.cos(angle);
+  const sinA = Math.sin(angle);
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for(const p of contour){
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    const u = (dx * cosA) + (dy * sinA);
+    const v = (-dx * sinA) + (dy * cosA);
+    if(u < minU) minU = u;
+    if(u > maxU) maxU = u;
+    if(v < minV) minV = v;
+    if(v > maxV) maxV = v;
+  }
+  return {
+    center: { x: mx, y: my },
+    size: { w: Math.max(1, maxU - minU), h: Math.max(1, maxV - minV) },
+    angleDeg: angle * (180 / Math.PI)
+  };
+}
+
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
     return [];
@@ -91,16 +129,34 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
         h: bh * sy
       };
 
-      const contour = rectContourFromBbox(bbox);
-      const hull = convexHull(contour);
-      const rotatedRect = rotatedRectFromBbox(bbox);
+      // Extract real contour from the label map when available
+      let contour = null;
+      if(segmented.labels && merged.rootIds && segmented.find){
+        const mergedIdSet = new Set();
+        for(const rid of merged.rootIds){
+          mergedIdSet.add(segmented.find(rid));
+        }
+        // Attach bbox hints for the scan range
+        mergedIdSet._x0 = merged.x0;
+        mergedIdSet._y0 = merged.y0;
+        mergedIdSet._x1 = merged.x1;
+        mergedIdSet._y1 = merged.y1;
+        contour = extractRegionContour(segmented.labels, mergedIdSet, width, height, sx, sy);
+      }
+
+      const fallbackContour = rectContourFromBbox(bbox);
+      const resolvedContour = (contour && contour.length >= 3) ? contour : fallbackContour;
+      const hull = convexHull(resolvedContour);
+      const rotatedRect = (contour && contour.length >= 3)
+        ? orientedRectFromContour(contour, bbox)
+        : rotatedRectFromBbox(bbox);
 
       proposals.push(createStructuralRegionNode({
         id: idFactory('region'),
         geometry: {
           bbox,
-          contour: contour.length >= 3 ? contour : rectContourFromBbox(bbox),
-          hull: hull.length >= 3 ? hull : rectContourFromBbox(bbox),
+          contour: resolvedContour,
+          hull: hull.length >= 3 ? hull : fallbackContour,
           rotatedRect
         },
         confidence: 0.62,
@@ -114,7 +170,8 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
           pixelArea: area,
           atomicRegionCount: merged.atomicCount,
           atomicSeedCount: segmented.atomicCount,
-          boundaryFirst: true
+          boundaryFirst: true,
+          hasRealContour: !!(contour && contour.length >= 3)
         },
         surfaceTypeCandidate: 'visual_component',
         textDensity: 0

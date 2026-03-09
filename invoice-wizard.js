@@ -8377,6 +8377,32 @@ function getWrokitVisionPrecomputedForPage(pageNum){
   return artifact;
 }
 
+function computeImageContentHash(page){
+  // Fast content fingerprint: sample a sparse grid of pixel values from the
+  // gray canvas.  Different images produce different hashes; identical images
+  // produce identical hashes.  This is NOT a cryptographic hash — it's a
+  // lightweight change-detection signal.
+  try {
+    const grayCanvas = state.grayCanvases?.[page];
+    if(!grayCanvas || grayCanvas.width <= 0 || grayCanvas.height <= 0) return null;
+    const ctx = grayCanvas.getContext('2d');
+    const w = grayCanvas.width;
+    const h = grayCanvas.height;
+    const raw = ctx.getImageData(0, 0, w, h);
+    const step = Math.max(1, Math.floor(Math.sqrt((w * h) / 256)));
+    let hash = 0;
+    for(let y = 0; y < h; y += step){
+      for(let x = 0; x < w; x += step){
+        const idx = (y * w + x) * 4;
+        hash = ((hash << 5) - hash + raw.data[idx]) | 0;
+      }
+    }
+    return `${w}x${h}:${(hash >>> 0).toString(36)}`;
+  } catch(_){
+    return null;
+  }
+}
+
 function ensureWrokitVisionSeedGraphForCurrentGeometry(){
   if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION) return;
   ensureProfile(currentWizardId(), currentGeometryId());
@@ -8384,8 +8410,18 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
   const geometryId = state.activeGeometryId || currentGeometryId() || DEFAULT_GEOMETRY_ID;
   state.profile.wrokitVision = state.profile.wrokitVision || {};
   const artifacts = state.profile.wrokitVision.geometryArtifacts = state.profile.wrokitVision.geometryArtifacts || {};
-  if(artifacts[geometryId]?.seedStructuralGraph) return;
   const page = state.pageNum || 1;
+
+  // Invalidate cached artifact when the uploaded image content changes.
+  // Previously, the artifact was keyed only by geometryId, meaning a new
+  // upload to the same wizard session would silently reuse the stale map.
+  const contentHash = computeImageContentHash(page);
+  const existing = artifacts[geometryId];
+  if(existing?.seedStructuralGraph){
+    if(!contentHash || existing._contentHash === contentHash) return;
+    // Content changed — clear stale artifact so it gets rebuilt below.
+  }
+
   const pageTokens = state.tokensByPage?.[page] || [];
   const vp = state.pageViewports?.[page - 1] || state.viewport || null;
   if(!pageTokens.length || !WrokitVisionEngine?.createSeedArtifacts) return;
@@ -8393,6 +8429,7 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
     ...(artifacts[geometryId] || {}),
     geometryId,
     profileVersion: PROFILE_VERSION,
+    _contentHash: contentHash,
     ...WrokitVisionEngine.createSeedArtifacts({
       tokens: pageTokens,
       viewport: vp,
@@ -8401,6 +8438,8 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
       imageData: getPageGrayImageData(page)
     })
   };
+  // Clear in-memory debug map cache so the overlay re-renders with fresh data.
+  state.wrokitVisionDebugMapCache = {};
   profileStore.saveProfile(state.username, state.docType, state.profile);
 }
 

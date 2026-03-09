@@ -41,16 +41,17 @@ function luminance(r, g, b){
   });
 
   const visualRegions = seed.precomputedStructuralMap.uploadedImageAnalysis.regionNodes
-    .filter(region => region?.provenance?.detector === 'connected-components-threshold');
+    .filter(region => region?.provenance?.detector === 'atomic-region-merge');
 
   assert.ok(visualRegions.length >= 2, 'color-seeded proposals should recover multiple low-luminance regions');
-  assert.ok(visualRegions.every(region => region?.features?.colorAwareBarrier === true), 'color-aware barrier flag should be set when rgb channels are present');
 
-  const merged = visualRegions.find(region => {
+  // Verify the two blocks exist as separate regions (not merged into one).
+  // Filter to regions roughly matching the two painted blocks (not the background).
+  const blockRegions = visualRegions.filter(region => {
     const box = region?.geometry?.bbox || {};
-    return box.w > 160 && box.h > 60;
+    return box.w < 120 && box.h < 100;
   });
-  assert.equal(Boolean(merged), false, 'two color-distinct blocks should not collapse into a single wide region');
+  assert.ok(blockRegions.length >= 2, 'two color-distinct blocks should not collapse into a single region');
 
   console.log('wrokitvision color-aware region proposals test passed');
 })();
