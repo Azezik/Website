@@ -56,6 +56,36 @@
     }
     return null;
   })();
+  const LocalStructure = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/resolution/local-structure');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
+  const LocalFrame = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/geometry/local-frame');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
+  const FieldSignature = (function(){
+    try {
+      if(typeof require === 'function'){
+        return require('../wrokitvision/signatures/field-signature');
+      }
+    } catch(_err){
+      return null;
+    }
+    return null;
+  })();
 
   const LABEL_HINTS = {
     store_name: ['vendor','seller','company','store','business'],
@@ -500,6 +530,29 @@
         })
       : null;
 
+    const localStructure = (LocalStructure?.reconstructLocalStructure && resolvedLocalSubgraph)
+      ? LocalStructure.reconstructLocalStructure({
+          resolvedLocalSubgraph
+        })
+      : null;
+
+    const localCoordinateFrame = (LocalFrame?.estimateLocalCoordinateFrame && resolvedLocalSubgraph && localStructure)
+      ? LocalFrame.estimateLocalCoordinateFrame({
+          resolvedLocalSubgraph,
+          localStructure
+        })
+      : null;
+
+    const fieldSignature = (FieldSignature?.buildFieldSignature && resolvedLocalSubgraph && localStructure && localCoordinateFrame)
+      ? FieldSignature.buildFieldSignature({
+          fieldMeta: { fieldKey: step?.fieldKey || null, fieldType: step?.fieldType || null },
+          selectionSeed: selectionAssociation?.selectionSeed || null,
+          resolvedLocalSubgraph,
+          localStructure,
+          localCoordinateFrame
+        })
+      : null;
+
     return {
       schema: 'wrokit_vision/v1',
       method: 'bbox-first-micro-expansion',
@@ -525,9 +578,13 @@
             relevanceScores: resolvedLocalSubgraph.relevanceScores,
             retainedNodeIds: resolvedLocalSubgraph.relevanceScores.filter(s => s.retained).map(s => s.nodeId),
             rejectedNodeIds: resolvedLocalSubgraph.rejectedNodeIds,
-            resolvedLocalSubgraph
+            resolvedLocalSubgraph,
+            localStructure,
+            localCoordinateFrame,
+            fieldSignature
           }
         : null,
+      fieldSignature,
       mapStats: {
         textNodes: maps.textMap?.nodeCount || 0,
         structuralNodes: maps.structuralGraph?.nodeCount || 0

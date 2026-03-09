@@ -252,6 +252,117 @@ function createResolvedLocalSubgraph({
   };
 }
 
+
+function createLocalStructure({
+  seed,
+  anchorTokenCandidates,
+  labelCandidates,
+  containingLine,
+  containingBlock,
+  containingRegionChain,
+  siblingNodes,
+  neighborhoodRoles,
+  structuralConfidence,
+  rationale,
+  debug
+} = {}){
+  return {
+    schema: 'wrokitvision/local-structure/v1',
+    seed: seed || null,
+    anchorTokenCandidates: Array.isArray(anchorTokenCandidates) ? anchorTokenCandidates : [],
+    labelCandidates: Array.isArray(labelCandidates) ? labelCandidates : [],
+    containingLine: containingLine || null,
+    containingBlock: containingBlock || null,
+    containingRegionChain: Array.isArray(containingRegionChain) ? containingRegionChain : [],
+    siblingNodes: siblingNodes || { tokens: [], lines: [], blocks: [], regions: [] },
+    neighborhoodRoles: neighborhoodRoles || {},
+    structuralConfidence: clamp01(structuralConfidence),
+    rationale: rationale || createScoreBreakdown(),
+    debug: debug || {}
+  };
+}
+
+function createLocalCoordinateFrame({
+  origin,
+  primaryAxis,
+  secondaryAxis,
+  rotationAngle,
+  skew,
+  transform,
+  rawGeometry,
+  confidence,
+  rationale,
+  evidence,
+  debug
+} = {}){
+  return {
+    schema: 'wrokitvision/local-coordinate-frame/v1',
+    origin: origin || { x: 0, y: 0 },
+    primaryAxis: primaryAxis || { x: 1, y: 0 },
+    secondaryAxis: secondaryAxis || { x: 0, y: 1 },
+    rotationAngle: Number(rotationAngle) || 0,
+    skew: skew || null,
+    transform: transform || { toLocal: null, toRaw: null },
+    rawGeometry: rawGeometry || {},
+    confidence: clamp01(confidence),
+    rationale: rationale || createScoreBreakdown(),
+    evidence: evidence || {},
+    debug: debug || {}
+  };
+}
+
+function createFieldSignatureComponent({ componentType, nodeId, nodeType, role, text, normalizedText, geometry, relationship, confidence, rationale } = {}){
+  return {
+    componentType: componentType || 'unknown',
+    nodeId: nodeId || null,
+    nodeType: nodeType || null,
+    role: role || null,
+    text: text == null ? null : String(text),
+    normalizedText: normalizedText == null ? null : String(normalizedText),
+    geometry: geometry || null,
+    relationship: relationship || null,
+    confidence: clamp01(confidence),
+    rationale: rationale || createScoreBreakdown()
+  };
+}
+
+function createFieldSignature({
+  fieldIdentity,
+  seed,
+  anchorTokens,
+  nearbyLabels,
+  structuralRelationships,
+  containingRegions,
+  siblingStructures,
+  localGeometry,
+  localCoordinateFrame,
+  graphRelationships,
+  components,
+  confidence,
+  rationale,
+  schemaVersion,
+  debug
+} = {}){
+  return {
+    schema: 'wrokitvision/field-signature/v1',
+    schemaVersion: Number(schemaVersion) || 1,
+    fieldIdentity: fieldIdentity || {},
+    seed: seed || null,
+    anchorTokens: Array.isArray(anchorTokens) ? anchorTokens : [],
+    nearbyLabels: Array.isArray(nearbyLabels) ? nearbyLabels : [],
+    structuralRelationships: structuralRelationships || {},
+    containingRegions: Array.isArray(containingRegions) ? containingRegions : [],
+    siblingStructures: siblingStructures || { lines: [], blocks: [], regions: [] },
+    localGeometry: localGeometry || {},
+    localCoordinateFrame: localCoordinateFrame || null,
+    graphRelationships: Array.isArray(graphRelationships) ? graphRelationships : [],
+    components: Array.isArray(components) ? components : [],
+    confidence: clamp01(confidence),
+    rationale: rationale || createScoreBreakdown(),
+    debug: debug || {}
+  };
+}
+
 module.exports = {
   createUploadedImageAnalysis,
   createStructuralRegionNode,
@@ -266,5 +377,9 @@ module.exports = {
   createSelectionContext,
   createResolvedLocalSubgraph,
   createSelectionAssociationResult,
-  createNodeRelevanceScore
+  createNodeRelevanceScore,
+  createLocalStructure,
+  createLocalCoordinateFrame,
+  createFieldSignature,
+  createFieldSignatureComponent
 };
