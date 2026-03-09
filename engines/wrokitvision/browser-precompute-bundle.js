@@ -313,19 +313,73 @@
     return (hits / samples) >= densityThreshold;
   }
 
+  function resolveRgbChannels(imageData, expectedLength){
+    if(!imageData || expectedLength <= 0) return null;
+    const r = imageData.r;
+    const g = imageData.g;
+    const b = imageData.b;
+    if(r?.length === expectedLength && g?.length === expectedLength && b?.length === expectedLength) return { r, g, b };
+    const rgba = imageData.rgba || imageData.data;
+    if(!rgba || rgba.length < expectedLength * 4) return null;
+    const rr = new Uint8Array(expectedLength);
+    const gg = new Uint8Array(expectedLength);
+    const bb = new Uint8Array(expectedLength);
+    for(let i = 0, j = 0; i < expectedLength; i++, j += 4){
+      rr[i] = rgba[j] || 0;
+      gg[i] = rgba[j + 1] || 0;
+      bb[i] = rgba[j + 2] || 0;
+    }
+    return { r: rr, g: gg, b: bb };
+  }
+
+  function colorDistance(a, b){
+    const dr = (a.r || 0) - (b.r || 0);
+    const dg = (a.g || 0) - (b.g || 0);
+    const db = (a.b || 0) - (b.b || 0);
+    return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
+  }
+
+  function hasStrongLocalColorBarrier({ rgb, width, height, x0, y0, x1, y1, distanceThreshold = 38 } = {}){
+    if(!rgb || !width || !height) return false;
+    if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
+    const aIdx = (y0 * width) + x0;
+    const bIdx = (y1 * width) + x1;
+    if(colorDistance({ r: rgb.r[aIdx], g: rgb.g[aIdx], b: rgb.b[aIdx] }, { r: rgb.r[bIdx], g: rgb.g[bIdx], b: rgb.b[bIdx] }) >= distanceThreshold){
+      return true;
+    }
+    return false;
+  }
+
   function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
     if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height) return [];
     const width = Number(imageData.width) || 0;
     const height = Number(imageData.height) || 0;
     if(width <= 2 || height <= 2) return [];
     const gray = imageData.gray;
+    const rgb = resolveRgbChannels(imageData, gray.length);
     const edges = sobelBinary(gray, width, height, 80);
     let sum = 0;
     for(let i = 0; i < gray.length; i++) sum += gray[i];
     const mean = sum / Math.max(1, gray.length);
     const threshold = Math.max(22, Math.min(220, Math.round(mean * 0.82)));
+    let meanColor = null;
+    if(rgb){
+      let sumR = 0, sumG = 0, sumB = 0;
+      for(let i = 0; i < gray.length; i++){
+        sumR += rgb.r[i];
+        sumG += rgb.g[i];
+        sumB += rgb.b[i];
+      }
+      const denom = Math.max(1, gray.length);
+      meanColor = { r: sumR / denom, g: sumG / denom, b: sumB / denom };
+    }
+    const colorSeedThreshold = 30;
     const mask = new Uint8Array(width * height);
-    for(let i = 0; i < gray.length; i++){ mask[i] = gray[i] <= threshold ? 1 : 0; }
+    for(let i = 0; i < gray.length; i++){
+      const luminanceHit = gray[i] <= threshold;
+      const colorHit = meanColor ? colorDistance({ r: rgb.r[i], g: rgb.g[i], b: rgb.b[i] }, meanColor) >= colorSeedThreshold : false;
+      mask[i] = (luminanceHit || colorHit) ? 1 : 0;
+    }
     const visited = new Uint8Array(width * height);
     const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
     const maxArea = Math.floor((width * height) * 0.75);
@@ -353,6 +407,7 @@
             const nx = ni % width; const ny = (ni / width) | 0;
             if(Math.abs(nx - cx) + Math.abs(ny - cy) !== 1) continue;
             if(hasStrongLocalEdgeBarrier({ edges, width, height, x0: cx, y0: cy, x1: nx, y1: ny })) continue;
+            if(hasStrongLocalColorBarrier({ rgb, width, height, x0: cx, y0: cy, x1: nx, y1: ny })) continue;
             visited[ni] = 1; q.push(ni);
           }
         }
@@ -364,7 +419,7 @@
           geometry: { bbox: { x: x0 * sx, y: y0 * sy, w: bw * sx, h: bh * sy } },
           confidence: 0.58,
           provenance: { stage: 'region-proposals', detector: 'connected-components-threshold', sourceType: 'visual' },
-          features: { source: 'visual-connected-components', pixelArea: area, imageThreshold: threshold },
+          features: { source: 'visual-connected-components', pixelArea: area, imageThreshold: threshold, colorSeedThreshold: meanColor ? colorSeedThreshold : null, colorAwareBarrier: Boolean(rgb) },
           surfaceTypeCandidate: 'visual_component',
           textDensity: 0
         }));

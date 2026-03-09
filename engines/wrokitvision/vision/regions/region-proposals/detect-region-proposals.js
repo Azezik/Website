@@ -190,6 +190,67 @@ function hasStrongLocalEdgeBarrier({ edges, width, height, x0, y0, x1, y1, densi
   return (hits / samples) >= densityThreshold;
 }
 
+function resolveRgbChannels(imageData, expectedLength){
+  if(!imageData || expectedLength <= 0) return null;
+  const r = imageData.r;
+  const g = imageData.g;
+  const b = imageData.b;
+  if(r?.length === expectedLength && g?.length === expectedLength && b?.length === expectedLength){
+    return { r, g, b };
+  }
+  const rgba = imageData.rgba || imageData.data;
+  if(!rgba || rgba.length < expectedLength * 4) return null;
+  const rr = new Uint8Array(expectedLength);
+  const gg = new Uint8Array(expectedLength);
+  const bb = new Uint8Array(expectedLength);
+  for(let i = 0, j = 0; i < expectedLength; i++, j += 4){
+    rr[i] = rgba[j] || 0;
+    gg[i] = rgba[j + 1] || 0;
+    bb[i] = rgba[j + 2] || 0;
+  }
+  return { r: rr, g: gg, b: bb };
+}
+
+function colorDistance(a, b){
+  const dr = (a.r || 0) - (b.r || 0);
+  const dg = (a.g || 0) - (b.g || 0);
+  const db = (a.b || 0) - (b.b || 0);
+  return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
+}
+
+function hasStrongLocalColorBarrier({ rgb, width, height, x0, y0, x1, y1, distanceThreshold = 38 } = {}){
+  if(!rgb || !width || !height) return false;
+  if(Math.abs(x1 - x0) + Math.abs(y1 - y0) !== 1) return false;
+  const aIdx = (y0 * width) + x0;
+  const bIdx = (y1 * width) + x1;
+  const baseA = { r: rgb.r[aIdx], g: rgb.g[aIdx], b: rgb.b[aIdx] };
+  const baseB = { r: rgb.r[bIdx], g: rgb.g[bIdx], b: rgb.b[bIdx] };
+  if(colorDistance(baseA, baseB) >= distanceThreshold) return true;
+
+  const offsets = x0 !== x1 ? [
+    { ax: x0, ay: y0 - 1, bx: x1, by: y1 - 1 },
+    { ax: x0, ay: y0 + 1, bx: x1, by: y1 + 1 }
+  ] : [
+    { ax: x0 - 1, ay: y0, bx: x1 - 1, by: y1 },
+    { ax: x0 + 1, ay: y0, bx: x1 + 1, by: y1 }
+  ];
+
+  let hits = 0;
+  let samples = 0;
+  for(const pair of offsets){
+    if(pair.ax < 0 || pair.ax >= width || pair.ay < 0 || pair.ay >= height) continue;
+    if(pair.bx < 0 || pair.bx >= width || pair.by < 0 || pair.by >= height) continue;
+    const ai = (pair.ay * width) + pair.ax;
+    const bi = (pair.by * width) + pair.bx;
+    const ca = { r: rgb.r[ai], g: rgb.g[ai], b: rgb.b[ai] };
+    const cb = { r: rgb.r[bi], g: rgb.g[bi], b: rgb.b[bi] };
+    samples += 1;
+    if(colorDistance(ca, cb) >= distanceThreshold) hits += 1;
+  }
+
+  return samples > 0 && (hits / samples) >= 0.5;
+}
+
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
     return [];
@@ -200,15 +261,38 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(width <= 2 || height <= 2) return [];
 
   const gray = imageData.gray;
+  const rgb = resolveRgbChannels(imageData, gray.length);
   const edges = sobelBinary(gray, width, height, 80);
   let sum = 0;
   for(let i = 0; i < gray.length; i++) sum += gray[i];
   const mean = sum / Math.max(1, gray.length);
 
   const threshold = clamp(Math.round(mean * 0.82), 22, 220);
+  let meanColor = null;
+  if(rgb){
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    for(let i = 0; i < gray.length; i++){
+      sumR += rgb.r[i];
+      sumG += rgb.g[i];
+      sumB += rgb.b[i];
+    }
+    const denom = Math.max(1, gray.length);
+    meanColor = {
+      r: sumR / denom,
+      g: sumG / denom,
+      b: sumB / denom
+    };
+  }
+  const colorSeedThreshold = 30;
   const mask = new Uint8Array(width * height);
   for(let i = 0; i < gray.length; i++){
-    mask[i] = gray[i] <= threshold ? 1 : 0;
+    const luminanceHit = gray[i] <= threshold;
+    const colorHit = meanColor
+      ? colorDistance({ r: rgb.r[i], g: rgb.g[i], b: rgb.b[i] }, meanColor) >= colorSeedThreshold
+      : false;
+    mask[i] = (luminanceHit || colorHit) ? 1 : 0;
   }
 
   const visited = new Uint8Array(width * height);
@@ -262,6 +346,10 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
             isBoundary = true;
             continue;
           }
+          if(hasStrongLocalColorBarrier({ rgb, width, height, x0: cx, y0: cy, x1: nx, y1: ny })){
+            isBoundary = true;
+            continue;
+          }
           if(visited[ni]) continue;
           visited[ni] = 1;
           q.push(ni);
@@ -306,6 +394,8 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
           source: 'visual-connected-components',
           pixelArea: area,
           imageThreshold: threshold,
+          colorSeedThreshold: meanColor ? colorSeedThreshold : null,
+          colorAwareBarrier: Boolean(rgb),
           boundaryComplexity: boundaryPixels.length / Math.max(1, area)
         },
         surfaceTypeCandidate: 'visual_component',

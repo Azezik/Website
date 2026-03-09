@@ -8492,7 +8492,26 @@ function getPageGrayImageData(page){
     const raw = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
     const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
     for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
-    return { gray, width: grayCanvas.width, height: grayCanvas.height };
+    const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+    const offY = state.pageOffsets[page-1] || 0;
+    const vp = state.pageViewports[page-1] || state.viewport;
+    const colorHeight = Math.round((vp.h ?? vp.height) || grayCanvas.height || 1);
+    const cctx = src?.getContext ? src.getContext('2d') : null;
+    if(!cctx) return { gray, width: grayCanvas.width, height: grayCanvas.height };
+    const colorRaw = cctx.getImageData(0, offY, grayCanvas.width, colorHeight);
+    const expected = grayCanvas.width * grayCanvas.height;
+    if(colorRaw?.data?.length < expected * 4){
+      return { gray, width: grayCanvas.width, height: grayCanvas.height };
+    }
+    const r = new Uint8Array(expected);
+    const g = new Uint8Array(expected);
+    const b = new Uint8Array(expected);
+    for(let i = 0, j = 0; j < expected; i += 4, j++){
+      r[j] = colorRaw.data[i] || 0;
+      g[j] = colorRaw.data[i + 1] || 0;
+      b[j] = colorRaw.data[i + 2] || 0;
+    }
+    return { gray, r, g, b, width: grayCanvas.width, height: grayCanvas.height };
   } catch(_){
     return null;
   }
