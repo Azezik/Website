@@ -763,6 +763,8 @@ function isConfigMode(){ return state.mode === ModeEnum.CONFIG; }
 function isRunMode(){ return state.mode === ModeEnum.RUN; }
 
 function guardInteractive(label){
+  // Learning mode needs full overlay/canvas access regardless of wizard mode
+  if(state.learningActive) return false;
   const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
   if(blocked) return true;
   if(isRunMode()){
@@ -852,6 +854,7 @@ function restoreViewerHome(){
 function handleFindTextTab(activeId){
   const isFindText = activeId === 'find-text';
   const isVisualRun = activeId === 'visual-run';
+  const isLearning = activeId === 'vision-learning';
   if(!state.debugSandbox){
     state.debugSandbox = { findTextSession: null, visualRunSession: null };
   }
@@ -864,7 +867,15 @@ function handleFindTextTab(activeId){
   } else if(isVisualRun){
     moveViewerToHost(els.visualRunViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
+  } else if(isLearning){
+    moveViewerToHost(els.learningViewerSlot);
+    if(els.wizardSection) els.wizardSection.style.display = 'none';
   } else {
+    // Leaving learning mode — clean up learning state if no session active
+    if(state.learningActive && !_learningSession){
+      state.learningActive = false;
+      state.learningPendingBox = null;
+    }
     if(state.debugSandbox.findTextSession && debugFindTextAdapter?.endSession){
       debugFindTextAdapter.endSession(state.debugSandbox.findTextSession);
       state.debugSandbox.findTextSession = null;
@@ -4907,7 +4918,7 @@ function getPageViewportSize(page){
 function getOverlayFlags(){
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
-  const visionOn = getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION;
+  const visionOn = getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION || !!state.learningActive;
   return {
     boxes: !!els.showBoxesToggle?.checked,
     rings: ringsOn,
@@ -4924,9 +4935,11 @@ function overlayFlagsEqual(a,b){
 }
 
 function isWrokitVisionGraphDebugEnabled(){
+  const graphToggledOn = !!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked;
+  if(state.learningActive && graphToggledOn) return true;
   return isConfigMode()
     && getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION
-    && (!!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked);
+    && graphToggledOn;
 }
 
 function getWrokitVisionDebugMaps(pageNum){
@@ -8413,8 +8426,8 @@ function tokenSignatureForCache(tokens = []){
 }
 
 function getWrokitVisionLivePrecomputedForPage(pageNum, tokens = [], viewport = null){
-  if(!isConfigMode()) return null;
-  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION) return null;
+  if(!isConfigMode() && !state.learningActive) return null;
+  if(getConfiguredEngineType() !== ENGINE_KIND.WROKIT_VISION && !state.learningActive) return null;
   if(!WrokitVisionEngine?.createSeedArtifacts) return null;
 
   const page = Math.max(1, Number(pageNum) || state.pageNum || 1);
@@ -15335,6 +15348,21 @@ function paintOverlay(ctx, options = {}){
 let drawing = false, start = null, startCss = null, applyingPendingSelection = false;
 
 els.overlayCanvas.addEventListener('pointerdown', e => {
+  /* ── Learning-mode annotation drawing ──────────────────────────── */
+  if(state.learningActive && _learningSession){
+    e.preventDefault();
+    const rect = els.overlayCanvas.getBoundingClientRect();
+    const { scaleX, scaleY } = getScaleFactors();
+    const cssX = e.clientX - rect.left;
+    const cssY = e.clientY - rect.top;
+    state.learningPendingBox = {
+      startX: cssX * scaleX, startY: cssY * scaleY,
+      endX: cssX * scaleX, endY: cssY * scaleY, active: true
+    };
+    els.overlayCanvas.setPointerCapture?.(e.pointerId);
+    return;
+  }
+  /* ── Normal config/run pointer handling ────────────────────────── */
   if(guardInteractive('overlay.pointerdown')) return;
   e.preventDefault();
   syncOverlay();
@@ -15352,6 +15380,17 @@ els.overlayCanvas.addEventListener('pointerdown', e => {
 }, { passive: false });
 
 els.overlayCanvas.addEventListener('pointermove', e => {
+  /* ── Learning-mode drag ────────────────────────────────────────── */
+  if(state.learningActive && state.learningPendingBox?.active){
+    e.preventDefault();
+    const rect = els.overlayCanvas.getBoundingClientRect();
+    const { scaleX, scaleY } = getScaleFactors();
+    state.learningPendingBox.endX = (e.clientX - rect.left) * scaleX;
+    state.learningPendingBox.endY = (e.clientY - rect.top) * scaleY;
+    drawOverlay();
+    return;
+  }
+  /* ── Normal config/run pointer handling ────────────────────────── */
   if(guardInteractive('overlay.pointermove')) return;
   if(state.pendingSelection && state.pendingSelection.active && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
@@ -15387,6 +15426,32 @@ els.overlayCanvas.addEventListener('pointermove', e => {
 }, { passive: false });
 
 async function finalizeSelection(e) {
+  /* ── Learning-mode: finalize annotation box ──────────────────────── */
+  if(state.learningActive && state.learningPendingBox){
+    const pb = state.learningPendingBox;
+    state.learningPendingBox = null;
+    if(!pb.active && !pb.endX) return;
+    const x = Math.min(pb.startX, pb.endX);
+    const y = Math.min(pb.startY, pb.endY);
+    const w = Math.abs(pb.endX - pb.startX);
+    const h = Math.abs(pb.endY - pb.startY);
+    // Ignore tiny accidental clicks
+    if(w < 5 || h < 5){ drawOverlay(); return; }
+    if(_learningSession){
+      const category = els.learningCategorySelect ? els.learningCategorySelect.value : 'visual_region';
+      const label = els.learningBoxLabel ? els.learningBoxLabel.value.trim() : '';
+      _learningSession.addAnnotation({
+        label,
+        category,
+        rawBox: { x, y, w, h }
+      });
+      if(els.learningBoxLabel) els.learningBoxLabel.value = '';
+      updateLearningPromptUI();
+    }
+    drawOverlay();
+    return;
+  }
+  /* ── Normal config/run finalize ──────────────────────────────────── */
   if(guardInteractive('overlay.pointerup')) return;
   if(state.pendingSelection && !state.overlayPinned){
     const rect = els.overlayCanvas.getBoundingClientRect();
@@ -15539,6 +15604,10 @@ function drawOverlay(){
   syncOverlay();
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
   paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });
+  // After paintOverlay draws the feature graph, paint learning annotations on top
+  if(state.learningActive){
+    paintLearningAnnotations(overlayCtx, scaleX, scaleY);
+  }
 }
 
 function renderCropAuditPanel(){
@@ -19427,14 +19496,23 @@ async function processBatch(files){
 }
 
 /* ====================== Vision Learning Mode ======================== */
+/*
+ *  Learning mode reuses the real viewport (#viewer / #pdfCanvas / #imgCanvas /
+ *  #overlayCanvas) and the WrokitVision precompute + feature-graph pipeline
+ *  so the user sees exactly what Config mode sees.
+ *
+ *  state.learningActive — true when a learning annotation session is live.
+ *  The shared overlay pointer events detect this flag and route drawing
+ *  to the learning annotation logic instead of the config selection logic.
+ */
 
 const _learningAPI = window.WrokitVisionLearning || null;
 const _learningStore = _learningAPI ? _learningAPI.createLearningStore(localStorage) : null;
 let _learningSession = null;
 let _learningPromptIdx = 0;
-let _learningImageCanvas = null;
-let _learningOverlayCanvas = null;
-let _learningPending = null; // { startX, startY, active }
+let _learningFileName = '';
+
+/* ── Stats / History helpers ────────────────────────────────────────── */
 
 function refreshLearningStats(){
   if(!_learningStore || !els.learningStatImages) return;
@@ -19455,11 +19533,11 @@ function renderLearningHistory(){
     els.learningHistoryList.innerHTML = '<p class="sub" style="color:var(--muted);">No annotations yet.</p>';
     return;
   }
-  els.learningHistoryList.innerHTML = records.map(function(r){
-    var boxCount = r.annotations ? r.annotations.length : 0;
-    var cats = {};
-    (r.annotations || []).forEach(function(a){ cats[a.category] = (cats[a.category]||0)+1; });
-    var catSummary = Object.keys(cats).map(function(k){ return k.replace(/_/g,' ') + ': ' + cats[k]; }).join(', ');
+  els.learningHistoryList.innerHTML = records.map(r => {
+    const boxCount = r.annotations ? r.annotations.length : 0;
+    const cats = {};
+    (r.annotations || []).forEach(a => { cats[a.category] = (cats[a.category]||0)+1; });
+    const catSummary = Object.keys(cats).map(k => k.replace(/_/g,' ') + ': ' + cats[k]).join(', ');
     return '<div class="panel minimal" style="margin-bottom:6px;padding:6px 10px;">' +
       '<strong>' + (r.imageName || r.imageId || 'Unknown') + '</strong>' +
       ' — ' + boxCount + ' boxes' +
@@ -19468,9 +19546,9 @@ function renderLearningHistory(){
       ' <button class="btn ghost" style="margin-left:8px;padding:2px 8px;font-size:0.85em;" data-delete-record="' + r.recordId + '">Delete</button>' +
       '</div>';
   }).join('');
-  els.learningHistoryList.querySelectorAll('[data-delete-record]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      var id = btn.getAttribute('data-delete-record');
+  els.learningHistoryList.querySelectorAll('[data-delete-record]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-delete-record');
       if(confirm('Delete this annotation record?')){
         _learningStore.deleteRecord(id);
         refreshLearningStats();
@@ -19479,65 +19557,116 @@ function renderLearningHistory(){
   });
 }
 
+/* ── Prompt UI ──────────────────────────────────────────────────────── */
+
 function updateLearningPromptUI(){
   if(!_learningSession) return;
-  var prompts = _learningSession.getPrompts();
-  var p = prompts[_learningPromptIdx] || prompts[0];
+  const prompts = _learningSession.getPrompts();
+  const p = prompts[_learningPromptIdx] || prompts[0];
   if(els.learningPromptStep) els.learningPromptStep.textContent = 'Step ' + (_learningPromptIdx + 1) + '/' + prompts.length;
   if(els.learningPromptText) els.learningPromptText.textContent = p.instruction;
   if(els.learningCategorySelect) els.learningCategorySelect.value = p.category;
   if(els.learningBoxCount) els.learningBoxCount.textContent = _learningSession.annotationCount() + ' boxes drawn';
 }
 
-function drawLearningOverlay(){
-  if(!_learningOverlayCanvas || !_learningSession) return;
-  var ctx = _learningOverlayCanvas.getContext('2d');
-  var w = _learningOverlayCanvas.width;
-  var h = _learningOverlayCanvas.height;
-  ctx.clearRect(0, 0, w, h);
+/* ── Build WrokitVision precompute for Learning mode ────────────────── */
+/*  Called after the file is opened and whenever we want to refresh the
+ *  feature graph (e.g. after a step change).  Does the same thing as
+ *  ensureWrokitVisionSeedGraphForCurrentGeometry() but without the
+ *  config-mode profile / wizard dependencies.
+ */
 
-  var categoryColors = {
-    visual_region: 'rgba(66,133,244,0.35)',
-    text_group: 'rgba(52,168,83,0.35)',
-    label: 'rgba(251,188,4,0.45)',
-    field_value: 'rgba(234,67,53,0.35)',
-    shape: 'rgba(154,80,163,0.35)',
-    structural_section: 'rgba(0,172,193,0.25)',
-    other: 'rgba(128,128,128,0.3)'
-  };
-  var borderColors = {
-    visual_region: '#4285f4',
-    text_group: '#34a853',
-    label: '#fbbc04',
-    field_value: '#ea4335',
-    shape: '#9a50a3',
-    structural_section: '#00acc1',
-    other: '#808080'
-  };
+function learningBuildFeatureGraph(){
+  if(!WrokitVisionEngine?.createSeedArtifacts) return;
+  const page = state.pageNum || 1;
+  const tokens = state.tokensByPage?.[page] || [];
+  const vp = state.pageViewports?.[page - 1] || state.viewport || null;
+  if(!tokens.length || !vp) return;
 
-  // Draw existing annotations
-  _learningSession.getAnnotations().forEach(function(ann){
-    var nb = ann.normBox;
-    var x = nb.x0n * w, y = nb.y0n * h, bw = nb.wN * w, bh = nb.hN * h;
-    ctx.fillStyle = categoryColors[ann.category] || categoryColors.other;
-    ctx.fillRect(x, y, bw, bh);
-    ctx.strokeStyle = borderColors[ann.category] || borderColors.other;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, bw, bh);
-    // Label
-    ctx.fillStyle = borderColors[ann.category] || '#333';
-    ctx.font = '11px IBM Plex Mono, monospace';
-    var labelText = ann.label || ann.category.replace(/_/g, ' ');
-    if(labelText.length > 20) labelText = labelText.slice(0, 18) + '..';
-    ctx.fillText(labelText, x + 3, y + 13);
+  const imageData = getPageGrayImageData(page);
+  const geometryId = 'learning-session';
+
+  // Build the precomputed structural map via the same engine Config uses
+  const seed = WrokitVisionEngine.createSeedArtifacts({
+    tokens,
+    viewport: vp,
+    page,
+    geometryId,
+    imageData
   });
 
-  // Draw pending box
-  if(_learningPending && _learningPending.active && _learningPending.endX != null){
-    var px = Math.min(_learningPending.startX, _learningPending.endX);
-    var py = Math.min(_learningPending.startY, _learningPending.endY);
-    var pw = Math.abs(_learningPending.endX - _learningPending.startX);
-    var ph = Math.abs(_learningPending.endY - _learningPending.startY);
+  // Store into the live-precomputed cache so getWrokitVisionDebugMaps() finds it
+  const artifact = seed?.precomputedStructuralMap || null;
+  if(artifact){
+    state.wrokitVisionLivePrecomputedByPage = state.wrokitVisionLivePrecomputedByPage || {};
+    state.wrokitVisionLivePrecomputedByPage[page] = {
+      cacheKey: 'learning:' + Date.now(),
+      artifact
+    };
+  }
+
+  // Clear debug map cache so paintOverlay re-builds from the new artifact
+  state.wrokitVisionDebugMapCache = {};
+  drawOverlay();
+}
+
+/* ── Learning annotation overlay (drawn on top of paintOverlay) ─────── */
+/*  paintOverlay handles the feature graph.  After it paints we add
+ *  the learning annotation boxes on top.  We hook into drawOverlay by
+ *  wrapping it: after paintOverlay runs, we call paintLearningAnnotations.
+ */
+
+const LEARNING_CATEGORY_COLORS = {
+  visual_region: 'rgba(66,133,244,0.35)',
+  text_group: 'rgba(52,168,83,0.35)',
+  label: 'rgba(251,188,4,0.45)',
+  field_value: 'rgba(234,67,53,0.35)',
+  shape: 'rgba(154,80,163,0.35)',
+  structural_section: 'rgba(0,172,193,0.25)',
+  other: 'rgba(128,128,128,0.3)'
+};
+const LEARNING_BORDER_COLORS = {
+  visual_region: '#4285f4',
+  text_group: '#34a853',
+  label: '#fbbc04',
+  field_value: '#ea4335',
+  shape: '#9a50a3',
+  structural_section: '#00acc1',
+  other: '#808080'
+};
+
+function paintLearningAnnotations(ctx, scaleX, scaleY){
+  if(!state.learningActive || !_learningSession) return;
+  const annotations = _learningSession.getAnnotations();
+  const vp = state.pageViewports?.[0] || state.viewport || { w: 1, h: 1 };
+  const vpW = Number(vp.width || vp.w) || 1;
+  const vpH = Number(vp.height || vp.h) || 1;
+
+  for(const ann of annotations){
+    // Annotation rawBox is in CSS pixels on the overlay; convert to paintOverlay space
+    const rx = ann.rawBox.x / scaleX;
+    const ry = ann.rawBox.y / scaleY;
+    const rw = ann.rawBox.w / scaleX;
+    const rh = ann.rawBox.h / scaleY;
+    ctx.fillStyle = LEARNING_CATEGORY_COLORS[ann.category] || LEARNING_CATEGORY_COLORS.other;
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeStyle = LEARNING_BORDER_COLORS[ann.category] || LEARNING_BORDER_COLORS.other;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.fillStyle = LEARNING_BORDER_COLORS[ann.category] || '#333';
+    ctx.font = '11px IBM Plex Mono, monospace';
+    let labelText = ann.label || ann.category.replace(/_/g, ' ');
+    if(labelText.length > 22) labelText = labelText.slice(0, 20) + '..';
+    ctx.fillText(labelText, rx + 3, ry + 13);
+  }
+
+  // Draw pending selection box (dashed)
+  if(state.learningPendingBox){
+    const pb = state.learningPendingBox;
+    const px = Math.min(pb.startX, pb.endX) / scaleX;
+    const py = Math.min(pb.startY, pb.endY) / scaleY;
+    const pw = Math.abs(pb.endX - pb.startX) / scaleX;
+    const ph = Math.abs(pb.endY - pb.startY) / scaleY;
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 3]);
@@ -19546,192 +19675,162 @@ function drawLearningOverlay(){
   }
 }
 
-function startLearningSession(imageUrl, fileName){
-  if(!_learningAPI) return;
+/* ── Open file in Learning mode ─────────────────────────────────────── */
+/*  Uses the same openFile/renderImage/renderAllPages pipeline but forces
+ *  WrokitVision engine type and sets learning state flags.
+ */
 
-  // Create viewer in the learning slot
-  var slot = els.learningViewerSlot;
-  if(!slot) return;
-  slot.innerHTML = '';
+async function learningOpenFile(file){
+  if(!file) return;
+  _learningFileName = file.name || 'untitled';
 
-  var container = document.createElement('div');
-  container.style.position = 'relative';
-  container.style.display = 'inline-block';
+  // Activate learning mode state BEFORE openFile so guardInteractive allows
+  // overlay operations (syncOverlay, sizeOverlayTo, drawOverlay) even if the
+  // system was previously in RUN mode.
+  state.learningActive = true;
 
-  var img = document.createElement('img');
-  img.style.maxWidth = '100%';
-  img.style.display = 'block';
+  // Force WrokitVision engine
+  const prevEngineType = state.selectedEngineType;
+  state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
 
-  img.onload = function(){
-    var displayW = img.clientWidth;
-    var displayH = img.clientHeight;
+  // Open through the real pipeline (renders into #viewer, extracts tokens, etc.)
+  await openFile(file);
 
-    var overlay = document.createElement('canvas');
-    overlay.width = displayW;
-    overlay.height = displayH;
-    overlay.style.position = 'absolute';
-    overlay.style.top = '0';
-    overlay.style.left = '0';
-    overlay.style.cursor = 'crosshair';
+  // Ensure the feature graph toggle is checked so paintOverlay renders it
+  if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = true;
 
-    container.appendChild(overlay);
-    _learningImageCanvas = img;
-    _learningOverlayCanvas = overlay;
+  // Show the graph controls
+  if(els.wrokitVisionGraphControls) els.wrokitVisionGraphControls.style.display = 'flex';
+  if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = 'flex';
+  if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = 'flex';
 
-    // Create session
+  // Build feature graph for the loaded document
+  learningBuildFeatureGraph();
+
+  // Create learning session with real viewport + tokens
+  if(_learningAPI){
+    const page = state.pageNum || 1;
+    const vp = state.pageViewports?.[page - 1] || state.viewport || { w: 0, h: 0 };
+    const tokens = state.tokensByPage?.[page] || [];
     _learningSession = _learningAPI.createLearningSession({
-      viewport: { w: displayW, h: displayH },
-      tokens: [],
+      viewport: { w: Number(vp.width || vp.w) || 0, h: Number(vp.height || vp.h) || 0 },
+      tokens,
       analysisResult: { regionNodes: [] }
     });
     _learningPromptIdx = 0;
-    _learningPending = null;
+  }
 
-    // Show session area
-    if(els.learningSessionArea) els.learningSessionArea.style.display = 'block';
-    updateLearningPromptUI();
-
-    // Pointer events for drawing boxes
-    overlay.addEventListener('pointerdown', function(e){
-      var rect = overlay.getBoundingClientRect();
-      _learningPending = {
-        startX: e.clientX - rect.left,
-        startY: e.clientY - rect.top,
-        endX: e.clientX - rect.left,
-        endY: e.clientY - rect.top,
-        active: true
-      };
-    });
-    overlay.addEventListener('pointermove', function(e){
-      if(!_learningPending || !_learningPending.active) return;
-      var rect = overlay.getBoundingClientRect();
-      _learningPending.endX = e.clientX - rect.left;
-      _learningPending.endY = e.clientY - rect.top;
-      drawLearningOverlay();
-    });
-    overlay.addEventListener('pointerup', function(){
-      if(!_learningPending || !_learningPending.active || !_learningSession) return;
-      _learningPending.active = false;
-      var x = Math.min(_learningPending.startX, _learningPending.endX);
-      var y = Math.min(_learningPending.startY, _learningPending.endY);
-      var w = Math.abs(_learningPending.endX - _learningPending.startX);
-      var h = Math.abs(_learningPending.endY - _learningPending.startY);
-      // Ignore tiny accidental clicks
-      if(w < 5 || h < 5){ _learningPending = null; drawLearningOverlay(); return; }
-      var category = els.learningCategorySelect ? els.learningCategorySelect.value : 'visual_region';
-      var label = els.learningBoxLabel ? els.learningBoxLabel.value.trim() : '';
-      _learningSession.addAnnotation({
-        label: label,
-        category: category,
-        rawBox: { x: x, y: y, w: w, h: h }
-      });
-      if(els.learningBoxLabel) els.learningBoxLabel.value = '';
-      _learningPending = null;
-      drawLearningOverlay();
-      updateLearningPromptUI();
-    });
-  };
-
-  img.src = imageUrl;
-  container.appendChild(img);
-  slot.appendChild(container);
-
-  if(els.learningStatus) els.learningStatus.textContent = 'Annotating: ' + (fileName || 'image');
+  // Show session area
+  if(els.learningSessionArea) els.learningSessionArea.style.display = 'block';
+  updateLearningPromptUI();
+  if(els.learningStatus) els.learningStatus.textContent = 'Annotating: ' + _learningFileName;
 }
 
-// File upload
+function learningEndSession(){
+  state.learningActive = false;
+  state.learningPendingBox = null;
+  _learningSession = null;
+  _learningPromptIdx = 0;
+  _learningFileName = '';
+  if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
+  if(els.learningStatus) els.learningStatus.textContent = '';
+  drawOverlay();
+}
+
+/* ── File upload ────────────────────────────────────────────────────── */
+
 if(els.learningFileInput){
-  els.learningFileInput.addEventListener('change', function(e){
-    var file = e.target.files && e.target.files[0];
+  els.learningFileInput.addEventListener('change', async function(e){
+    const file = e.target.files?.[0];
     if(!file) return;
-    var url = URL.createObjectURL(file);
-    startLearningSession(url, file.name);
     e.target.value = '';
+    await learningOpenFile(file);
   });
 }
 
-// Next/prev prompt
+/* ── Next / prev prompt (with feature graph refresh) ────────────────── */
+
 if(els.learningNextPromptBtn){
-  els.learningNextPromptBtn.addEventListener('click', function(){
+  els.learningNextPromptBtn.addEventListener('click', () => {
     if(!_learningSession) return;
-    var prompts = _learningSession.getPrompts();
+    const prompts = _learningSession.getPrompts();
     if(_learningPromptIdx < prompts.length - 1) _learningPromptIdx++;
     updateLearningPromptUI();
+    // Refresh the WrokitVision feature graph based on annotations so far
+    learningBuildFeatureGraph();
   });
 }
 if(els.learningPrevPromptBtn){
-  els.learningPrevPromptBtn.addEventListener('click', function(){
+  els.learningPrevPromptBtn.addEventListener('click', () => {
     if(!_learningSession) return;
     if(_learningPromptIdx > 0) _learningPromptIdx--;
     updateLearningPromptUI();
+    learningBuildFeatureGraph();
   });
 }
 
-// Undo
+/* ── Undo ───────────────────────────────────────────────────────────── */
+
 if(els.learningUndoBtn){
-  els.learningUndoBtn.addEventListener('click', function(){
+  els.learningUndoBtn.addEventListener('click', () => {
     if(!_learningSession) return;
     _learningSession.undoLast();
-    drawLearningOverlay();
+    drawOverlay();
     updateLearningPromptUI();
   });
 }
 
-// Save session
+/* ── Save session ───────────────────────────────────────────────────── */
+
 if(els.learningSaveBtn){
-  els.learningSaveBtn.addEventListener('click', function(){
+  els.learningSaveBtn.addEventListener('click', () => {
     if(!_learningSession || !_learningStore) return;
     if(_learningSession.annotationCount() === 0){
       alert('Draw at least one box before saving.');
       return;
     }
-    var imgName = els.learningStatus ? els.learningStatus.textContent.replace('Annotating: ', '') : 'image';
-    var record = _learningSession.finalize({
-      imageId: 'img-' + Date.now(),
-      imageName: imgName
+    const record = _learningSession.finalize({
+      imageId: state.currentFileId || ('img-' + Date.now()),
+      imageName: _learningFileName
     });
     _learningStore.addRecord(record);
-    _learningSession = null;
-    _learningPromptIdx = 0;
-    if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
-    if(els.learningViewerSlot) els.learningViewerSlot.innerHTML = '';
+    learningEndSession();
     if(els.learningStatus) els.learningStatus.textContent = 'Saved ' + record.annotations.length + ' annotations.';
     refreshLearningStats();
   });
 }
 
-// Cancel session
+/* ── Cancel session ─────────────────────────────────────────────────── */
+
 if(els.learningCancelBtn){
-  els.learningCancelBtn.addEventListener('click', function(){
-    _learningSession = null;
-    _learningPromptIdx = 0;
-    if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
-    if(els.learningViewerSlot) els.learningViewerSlot.innerHTML = '';
-    if(els.learningStatus) els.learningStatus.textContent = '';
+  els.learningCancelBtn.addEventListener('click', () => {
+    learningEndSession();
   });
 }
 
-// Analyze
+/* ── Analyze ────────────────────────────────────────────────────────── */
+
 if(els.learningAnalyzeBtn){
-  els.learningAnalyzeBtn.addEventListener('click', function(){
+  els.learningAnalyzeBtn.addEventListener('click', () => {
     if(!_learningStore || !_learningAPI) return;
-    var records = _learningStore.getAllRecords();
-    var report = _learningAPI.analyzeAll(records);
+    const records = _learningStore.getAllRecords();
+    const report = _learningAPI.analyzeAll(records);
     if(els.learningResultsContent){
       els.learningResultsContent.textContent = JSON.stringify(report, null, 2);
     }
-    var details = document.getElementById('learning-results');
+    const details = document.getElementById('learning-results');
     if(details) details.open = true;
   });
 }
 
-// Export
+/* ── Export ──────────────────────────────────────────────────────────── */
+
 if(els.learningExportBtn){
-  els.learningExportBtn.addEventListener('click', function(){
+  els.learningExportBtn.addEventListener('click', () => {
     if(!_learningStore) return;
-    var json = _learningStore.exportJSON();
-    var blob = new Blob([json], { type: 'application/json' });
-    var a = document.createElement('a');
+    const json = _learningStore.exportJSON();
+    const blob = new Blob([json], { type: 'application/json' });
+    const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'wrokit-learning-data.json';
     a.click();
@@ -19739,14 +19838,15 @@ if(els.learningExportBtn){
   });
 }
 
-// Import
+/* ── Import ──────────────────────────────────────────────────────────── */
+
 if(els.learningImportInput){
   els.learningImportInput.addEventListener('change', function(e){
-    var file = e.target.files && e.target.files[0];
+    const file = e.target.files?.[0];
     if(!file || !_learningStore) return;
-    var reader = new FileReader();
-    reader.onload = function(){
-      var added = _learningStore.importJSON(reader.result);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const added = _learningStore.importJSON(reader.result);
       alert('Imported ' + added + ' new annotation records.');
       refreshLearningStats();
     };
@@ -19755,9 +19855,10 @@ if(els.learningImportInput){
   });
 }
 
-// Clear all
+/* ── Clear all ──────────────────────────────────────────────────────── */
+
 if(els.learningClearBtn){
-  els.learningClearBtn.addEventListener('click', function(){
+  els.learningClearBtn.addEventListener('click', () => {
     if(!_learningStore) return;
     if(confirm('Delete all learning annotation data? This cannot be undone.')){
       _learningStore.clear();
