@@ -450,8 +450,8 @@
           <span id="learning-status" class="sub" style="color:var(--muted);"></span>
         </div>
         <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
-          Upload images and draw boxes around meaningful regions, text groups, labels, and values.
-          The system learns from your annotations to improve its region detection and extraction.
+          Upload a document, then draw boxes around meaningful regions, text groups, labels, and values.
+          The WrokitVision feature graph is shown over the document so you can see what the system detects.
         </p>
 
         <!-- Stats bar -->
@@ -463,55 +463,54 @@
           </div>
         </div>
 
-        <!-- Upload + annotate area -->
-        <div id="learning-annotate-area">
-          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
-            <label class="btn primary">
-              Upload Image to Annotate
-              <input id="learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
-            </label>
-            <button id="learning-analyze-btn" class="btn" type="button">Analyze Annotations</button>
-            <button id="learning-export-btn" class="btn" type="button">Export Data</button>
-            <label class="btn ghost">
-              Import Data
-              <input id="learning-import-input" type="file" accept="application/json" style="display:none" />
-            </label>
+        <!-- Upload + toolbar -->
+        <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+          <label class="btn primary">
+            Upload Document
+            <input id="learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
+          </label>
+          <button id="learning-analyze-btn" class="btn" type="button">Analyze Annotations</button>
+          <button id="learning-export-btn" class="btn" type="button">Export Data</button>
+          <label class="btn ghost">
+            Import Data
+            <input id="learning-import-input" type="file" accept="application/json" style="display:none" />
+          </label>
+        </div>
+
+        <!-- Active annotation session (prompt + controls) -->
+        <div id="learning-session-area" style="display:none;">
+          <div class="panel minimal" style="margin-bottom:12px;">
+            <div id="learning-prompt-bar" class="prompt" style="margin-bottom:8px;">
+              <span id="learning-prompt-step">Step 1/6</span>
+              <strong id="learning-prompt-text">Draw boxes around all distinct visual regions.</strong>
+            </div>
+            <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <span class="sub">Category:</span>
+              <select id="learning-category-select">
+                <option value="visual_region">Visual Region</option>
+                <option value="text_group">Text Group</option>
+                <option value="label">Label / Heading</option>
+                <option value="field_value">Field Value</option>
+                <option value="shape">Shape / Non-Text</option>
+                <option value="structural_section">Structural Section</option>
+              </select>
+              <input id="learning-box-label" placeholder="Optional label (e.g., company logo)" style="flex:1;min-width:150px;" />
+            </div>
+            <div class="actions" style="gap:8px;flex-wrap:wrap;">
+              <button id="learning-undo-btn" class="btn" type="button">Undo Last Box</button>
+              <button id="learning-next-prompt-btn" class="btn" type="button">Next Prompt</button>
+              <button id="learning-prev-prompt-btn" class="btn ghost" type="button">Previous Prompt</button>
+              <span id="learning-box-count" class="sub" style="margin-left:auto;">0 boxes drawn</span>
+            </div>
           </div>
-
-          <!-- Active annotation session -->
-          <div id="learning-session-area" style="display:none;">
-            <div class="panel minimal" style="margin-bottom:12px;">
-              <div id="learning-prompt-bar" class="prompt" style="margin-bottom:8px;">
-                <span id="learning-prompt-step">Step 1/6</span>
-                <strong id="learning-prompt-text">Draw boxes around all distinct visual regions.</strong>
-              </div>
-              <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                <span class="sub">Category:</span>
-                <select id="learning-category-select">
-                  <option value="visual_region">Visual Region</option>
-                  <option value="text_group">Text Group</option>
-                  <option value="label">Label / Heading</option>
-                  <option value="field_value">Field Value</option>
-                  <option value="shape">Shape / Non-Text</option>
-                  <option value="structural_section">Structural Section</option>
-                </select>
-                <input id="learning-box-label" placeholder="Optional label (e.g., company logo)" style="flex:1;min-width:150px;" />
-              </div>
-              <div id="learning-viewer-slot" class="viewer-slot" style="min-height:200px;"></div>
-              <div class="actions" style="gap:8px;flex-wrap:wrap;margin-top:8px;">
-                <button id="learning-undo-btn" class="btn" type="button">Undo Last Box</button>
-                <button id="learning-next-prompt-btn" class="btn" type="button">Next Prompt</button>
-                <button id="learning-prev-prompt-btn" class="btn ghost" type="button">Previous Prompt</button>
-                <span id="learning-box-count" class="sub" style="margin-left:auto;">0 boxes drawn</span>
-              </div>
-            </div>
-
-            <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
-              <button id="learning-save-btn" class="btn primary" type="button">Save Annotations</button>
-              <button id="learning-cancel-btn" class="btn ghost" type="button">Cancel Session</button>
-            </div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+            <button id="learning-save-btn" class="btn primary" type="button">Save Annotations</button>
+            <button id="learning-cancel-btn" class="btn ghost" type="button">Cancel Session</button>
           </div>
         </div>
+
+        <!-- Viewer slot: the shared #viewer element is moved here by handleFindTextTab -->
+        <div id="learning-viewer-slot" class="viewer-slot"></div>
 
         <!-- Analysis results -->
         <details id="learning-results" class="panel minimal" style="margin-top:12px;">
