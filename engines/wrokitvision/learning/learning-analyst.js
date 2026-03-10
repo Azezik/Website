@@ -94,7 +94,6 @@ function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
  * Returns:
  *   segmentationBias: 'over' | 'under' | 'balanced'
  *   suggestedMergeThreshold: number (current default: 32)
- *   suggestedHardBarrier: number (current default: 165)
  *   suggestedMinRegionArea: number (current default: 2000)
  *   evidence: { ... }
  */
@@ -134,63 +133,28 @@ function analyzeRegionDetection(records){
   if(avgAutoCount > avgHumanCount * 1.5) segmentationBias = 'over';
   else if(avgAutoCount < avgHumanCount * 0.7) segmentationBias = 'under';
 
-  const recordCount = records.length;
-  const confidenceScale = clamp(recordCount / 12, 0.35, 1);
-
   // Suggest merge threshold adjustment
-  const baseMergeThreshold = 32;
-  let mergeThresholdTarget = baseMergeThreshold;
+  let suggestedMergeThreshold = 32; // current default
   if(segmentationBias === 'over'){
     // System produces too many regions → increase merge threshold to merge more
     const ratio = avgAutoCount / Math.max(1, avgHumanCount);
-    mergeThresholdTarget = clamp(Math.round(baseMergeThreshold * Math.sqrt(ratio)), 32, 64);
+    suggestedMergeThreshold = clamp(Math.round(32 * Math.sqrt(ratio)), 32, 64);
   } else if(segmentationBias === 'under'){
     // System produces too few regions → decrease merge threshold to keep more separate
     const ratio = avgHumanCount / Math.max(1, avgAutoCount);
-    mergeThresholdTarget = clamp(Math.round(baseMergeThreshold / Math.sqrt(ratio)), 16, 32);
+    suggestedMergeThreshold = clamp(Math.round(32 / Math.sqrt(ratio)), 16, 32);
   }
-  const suggestedMergeThreshold = clamp(
-    Math.round(baseMergeThreshold + ((mergeThresholdTarget - baseMergeThreshold) * confidenceScale)),
-    16,
-    64
-  );
 
-  // Suggest hard barrier conservatively (higher merges across noisier micro-edges).
-  const baseHardBarrier = 165;
-  let hardBarrierTarget = baseHardBarrier;
-  if(segmentationBias === 'over'){
-    const ratio = avgAutoCount / Math.max(1, avgHumanCount);
-    hardBarrierTarget = clamp(baseHardBarrier + Math.round((ratio - 1) * 2.5), 165, 178);
-  } else if(segmentationBias === 'under'){
-    const ratio = avgHumanCount / Math.max(1, avgAutoCount);
-    hardBarrierTarget = clamp(baseHardBarrier - Math.round((ratio - 1) * 2), 150, 165);
-  }
-  const suggestedHardBarrier = clamp(
-    Math.round(baseHardBarrier + ((hardBarrierTarget - baseHardBarrier) * confidenceScale)),
-    150,
-    178
-  );
-
-  // Suggest minimum region area using low-percentile + evidence damping.
-  // This avoids swinging too aggressively on very small early datasets.
-  const baseMinRegionArea = 2000;
-  const lowerHumanArea = humanAreas.length ? percentile(humanAreas, 0.1) : baseMinRegionArea;
-  let minRegionAreaTarget = Math.max(500, Math.round(lowerHumanArea * 0.55));
-  if(segmentationBias === 'over') minRegionAreaTarget = Math.max(minRegionAreaTarget, Math.round(baseMinRegionArea * 1.15));
-  if(segmentationBias === 'under') minRegionAreaTarget = Math.min(minRegionAreaTarget, Math.round(baseMinRegionArea * 0.9));
-  const suggestedMinRegionArea = clamp(
-    Math.round(baseMinRegionArea + ((minRegionAreaTarget - baseMinRegionArea) * confidenceScale)),
-    500,
-    12000
-  );
+  // Suggest minimum region area based on smallest human-marked region
+  const smallestHumanArea = humanAreas.length ? percentile(humanAreas, 0.05) : 2000;
+  const suggestedMinRegionArea = Math.max(500, Math.round(smallestHumanArea * 0.5));
 
   return {
     segmentationBias,
     suggestedMergeThreshold,
-    suggestedHardBarrier,
     suggestedMinRegionArea,
     evidence: {
-      recordCount,
+      recordCount: records.length,
       avgHumanRegionCount: Math.round(avgHumanCount * 10) / 10,
       avgAutoRegionCount: Math.round(avgAutoCount * 10) / 10,
       avgIoU: Math.round(avgIoU * 1000) / 1000,
