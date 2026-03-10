@@ -466,6 +466,30 @@ const els = {
   visualRunAttemptDetails: document.getElementById('visual-run-attempt-details'),
   visualRunAttemptDownload: document.getElementById('visual-run-attempt-download'),
   extractedData:   document.getElementById('extracted-data'),
+  visionLearningPanel: document.getElementById('vision-learning'),
+  learningStatus:  document.getElementById('learning-status'),
+  learningStatImages: document.getElementById('learning-stat-images'),
+  learningStatBoxes: document.getElementById('learning-stat-boxes'),
+  learningStatStatus: document.getElementById('learning-stat-status'),
+  learningFileInput: document.getElementById('learning-file-input'),
+  learningAnalyzeBtn: document.getElementById('learning-analyze-btn'),
+  learningExportBtn: document.getElementById('learning-export-btn'),
+  learningImportInput: document.getElementById('learning-import-input'),
+  learningSessionArea: document.getElementById('learning-session-area'),
+  learningPromptStep: document.getElementById('learning-prompt-step'),
+  learningPromptText: document.getElementById('learning-prompt-text'),
+  learningCategorySelect: document.getElementById('learning-category-select'),
+  learningBoxLabel: document.getElementById('learning-box-label'),
+  learningViewerSlot: document.getElementById('learning-viewer-slot'),
+  learningUndoBtn: document.getElementById('learning-undo-btn'),
+  learningNextPromptBtn: document.getElementById('learning-next-prompt-btn'),
+  learningPrevPromptBtn: document.getElementById('learning-prev-prompt-btn'),
+  learningBoxCount: document.getElementById('learning-box-count'),
+  learningSaveBtn: document.getElementById('learning-save-btn'),
+  learningCancelBtn: document.getElementById('learning-cancel-btn'),
+  learningResultsContent: document.getElementById('learning-results-content'),
+  learningHistoryList: document.getElementById('learning-history-list'),
+  learningClearBtn: document.getElementById('learning-clear-btn'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -777,6 +801,9 @@ function showTab(id){
   if(els.wizardDetailsPanel){
     sections.push(els.wizardDetailsPanel);
   }
+  if(els.visionLearningPanel){
+    sections.push(els.visionLearningPanel);
+  }
   sections.forEach(sec => {
     if(sec) sec.style.display = sec.id === id ? 'block' : 'none';
   });
@@ -790,6 +817,8 @@ function showTab(id){
     syncExtractedWizardSelector();
     renderResultsTable();
     renderReports();
+  } else if(id === 'vision-learning'){
+    refreshLearningStats();
   }
   handleFindTextTab(id);
 }
@@ -19396,6 +19425,349 @@ async function processBatch(files){
     showTab('extracted-data');
   }
 }
+
+/* ====================== Vision Learning Mode ======================== */
+
+const _learningAPI = window.WrokitVisionLearning || null;
+const _learningStore = _learningAPI ? _learningAPI.createLearningStore(localStorage) : null;
+let _learningSession = null;
+let _learningPromptIdx = 0;
+let _learningImageCanvas = null;
+let _learningOverlayCanvas = null;
+let _learningPending = null; // { startX, startY, active }
+
+function refreshLearningStats(){
+  if(!_learningStore || !els.learningStatImages) return;
+  const stats = _learningStore.stats();
+  els.learningStatImages.textContent = stats.totalRecords;
+  els.learningStatBoxes.textContent = stats.totalBoxes;
+  els.learningStatStatus.textContent = stats.totalRecords === 0 ? 'No data yet'
+    : stats.totalRecords < 5 ? 'Early — keep annotating'
+    : stats.totalRecords < 15 ? 'Developing — getting useful'
+    : 'Ready for analysis';
+  renderLearningHistory();
+}
+
+function renderLearningHistory(){
+  if(!_learningStore || !els.learningHistoryList) return;
+  const records = _learningStore.getAllRecords();
+  if(!records.length){
+    els.learningHistoryList.innerHTML = '<p class="sub" style="color:var(--muted);">No annotations yet.</p>';
+    return;
+  }
+  els.learningHistoryList.innerHTML = records.map(function(r){
+    var boxCount = r.annotations ? r.annotations.length : 0;
+    var cats = {};
+    (r.annotations || []).forEach(function(a){ cats[a.category] = (cats[a.category]||0)+1; });
+    var catSummary = Object.keys(cats).map(function(k){ return k.replace(/_/g,' ') + ': ' + cats[k]; }).join(', ');
+    return '<div class="panel minimal" style="margin-bottom:6px;padding:6px 10px;">' +
+      '<strong>' + (r.imageName || r.imageId || 'Unknown') + '</strong>' +
+      ' — ' + boxCount + ' boxes' +
+      ' <span class="sub" style="color:var(--muted);">(' + catSummary + ')</span>' +
+      ' <span class="sub" style="color:var(--muted);margin-left:8px;">' + (r.timestamp ? new Date(r.timestamp).toLocaleDateString() : '') + '</span>' +
+      ' <button class="btn ghost" style="margin-left:8px;padding:2px 8px;font-size:0.85em;" data-delete-record="' + r.recordId + '">Delete</button>' +
+      '</div>';
+  }).join('');
+  els.learningHistoryList.querySelectorAll('[data-delete-record]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-delete-record');
+      if(confirm('Delete this annotation record?')){
+        _learningStore.deleteRecord(id);
+        refreshLearningStats();
+      }
+    });
+  });
+}
+
+function updateLearningPromptUI(){
+  if(!_learningSession) return;
+  var prompts = _learningSession.getPrompts();
+  var p = prompts[_learningPromptIdx] || prompts[0];
+  if(els.learningPromptStep) els.learningPromptStep.textContent = 'Step ' + (_learningPromptIdx + 1) + '/' + prompts.length;
+  if(els.learningPromptText) els.learningPromptText.textContent = p.instruction;
+  if(els.learningCategorySelect) els.learningCategorySelect.value = p.category;
+  if(els.learningBoxCount) els.learningBoxCount.textContent = _learningSession.annotationCount() + ' boxes drawn';
+}
+
+function drawLearningOverlay(){
+  if(!_learningOverlayCanvas || !_learningSession) return;
+  var ctx = _learningOverlayCanvas.getContext('2d');
+  var w = _learningOverlayCanvas.width;
+  var h = _learningOverlayCanvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  var categoryColors = {
+    visual_region: 'rgba(66,133,244,0.35)',
+    text_group: 'rgba(52,168,83,0.35)',
+    label: 'rgba(251,188,4,0.45)',
+    field_value: 'rgba(234,67,53,0.35)',
+    shape: 'rgba(154,80,163,0.35)',
+    structural_section: 'rgba(0,172,193,0.25)',
+    other: 'rgba(128,128,128,0.3)'
+  };
+  var borderColors = {
+    visual_region: '#4285f4',
+    text_group: '#34a853',
+    label: '#fbbc04',
+    field_value: '#ea4335',
+    shape: '#9a50a3',
+    structural_section: '#00acc1',
+    other: '#808080'
+  };
+
+  // Draw existing annotations
+  _learningSession.getAnnotations().forEach(function(ann){
+    var nb = ann.normBox;
+    var x = nb.x0n * w, y = nb.y0n * h, bw = nb.wN * w, bh = nb.hN * h;
+    ctx.fillStyle = categoryColors[ann.category] || categoryColors.other;
+    ctx.fillRect(x, y, bw, bh);
+    ctx.strokeStyle = borderColors[ann.category] || borderColors.other;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, bw, bh);
+    // Label
+    ctx.fillStyle = borderColors[ann.category] || '#333';
+    ctx.font = '11px IBM Plex Mono, monospace';
+    var labelText = ann.label || ann.category.replace(/_/g, ' ');
+    if(labelText.length > 20) labelText = labelText.slice(0, 18) + '..';
+    ctx.fillText(labelText, x + 3, y + 13);
+  });
+
+  // Draw pending box
+  if(_learningPending && _learningPending.active && _learningPending.endX != null){
+    var px = Math.min(_learningPending.startX, _learningPending.endX);
+    var py = Math.min(_learningPending.startY, _learningPending.endY);
+    var pw = Math.abs(_learningPending.endX - _learningPending.startX);
+    var ph = Math.abs(_learningPending.endY - _learningPending.startY);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(px, py, pw, ph);
+    ctx.setLineDash([]);
+  }
+}
+
+function startLearningSession(imageUrl, fileName){
+  if(!_learningAPI) return;
+
+  // Create viewer in the learning slot
+  var slot = els.learningViewerSlot;
+  if(!slot) return;
+  slot.innerHTML = '';
+
+  var container = document.createElement('div');
+  container.style.position = 'relative';
+  container.style.display = 'inline-block';
+
+  var img = document.createElement('img');
+  img.style.maxWidth = '100%';
+  img.style.display = 'block';
+
+  img.onload = function(){
+    var displayW = img.clientWidth;
+    var displayH = img.clientHeight;
+
+    var overlay = document.createElement('canvas');
+    overlay.width = displayW;
+    overlay.height = displayH;
+    overlay.style.position = 'absolute';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.cursor = 'crosshair';
+
+    container.appendChild(overlay);
+    _learningImageCanvas = img;
+    _learningOverlayCanvas = overlay;
+
+    // Create session
+    _learningSession = _learningAPI.createLearningSession({
+      viewport: { w: displayW, h: displayH },
+      tokens: [],
+      analysisResult: { regionNodes: [] }
+    });
+    _learningPromptIdx = 0;
+    _learningPending = null;
+
+    // Show session area
+    if(els.learningSessionArea) els.learningSessionArea.style.display = 'block';
+    updateLearningPromptUI();
+
+    // Pointer events for drawing boxes
+    overlay.addEventListener('pointerdown', function(e){
+      var rect = overlay.getBoundingClientRect();
+      _learningPending = {
+        startX: e.clientX - rect.left,
+        startY: e.clientY - rect.top,
+        endX: e.clientX - rect.left,
+        endY: e.clientY - rect.top,
+        active: true
+      };
+    });
+    overlay.addEventListener('pointermove', function(e){
+      if(!_learningPending || !_learningPending.active) return;
+      var rect = overlay.getBoundingClientRect();
+      _learningPending.endX = e.clientX - rect.left;
+      _learningPending.endY = e.clientY - rect.top;
+      drawLearningOverlay();
+    });
+    overlay.addEventListener('pointerup', function(){
+      if(!_learningPending || !_learningPending.active || !_learningSession) return;
+      _learningPending.active = false;
+      var x = Math.min(_learningPending.startX, _learningPending.endX);
+      var y = Math.min(_learningPending.startY, _learningPending.endY);
+      var w = Math.abs(_learningPending.endX - _learningPending.startX);
+      var h = Math.abs(_learningPending.endY - _learningPending.startY);
+      // Ignore tiny accidental clicks
+      if(w < 5 || h < 5){ _learningPending = null; drawLearningOverlay(); return; }
+      var category = els.learningCategorySelect ? els.learningCategorySelect.value : 'visual_region';
+      var label = els.learningBoxLabel ? els.learningBoxLabel.value.trim() : '';
+      _learningSession.addAnnotation({
+        label: label,
+        category: category,
+        rawBox: { x: x, y: y, w: w, h: h }
+      });
+      if(els.learningBoxLabel) els.learningBoxLabel.value = '';
+      _learningPending = null;
+      drawLearningOverlay();
+      updateLearningPromptUI();
+    });
+  };
+
+  img.src = imageUrl;
+  container.appendChild(img);
+  slot.appendChild(container);
+
+  if(els.learningStatus) els.learningStatus.textContent = 'Annotating: ' + (fileName || 'image');
+}
+
+// File upload
+if(els.learningFileInput){
+  els.learningFileInput.addEventListener('change', function(e){
+    var file = e.target.files && e.target.files[0];
+    if(!file) return;
+    var url = URL.createObjectURL(file);
+    startLearningSession(url, file.name);
+    e.target.value = '';
+  });
+}
+
+// Next/prev prompt
+if(els.learningNextPromptBtn){
+  els.learningNextPromptBtn.addEventListener('click', function(){
+    if(!_learningSession) return;
+    var prompts = _learningSession.getPrompts();
+    if(_learningPromptIdx < prompts.length - 1) _learningPromptIdx++;
+    updateLearningPromptUI();
+  });
+}
+if(els.learningPrevPromptBtn){
+  els.learningPrevPromptBtn.addEventListener('click', function(){
+    if(!_learningSession) return;
+    if(_learningPromptIdx > 0) _learningPromptIdx--;
+    updateLearningPromptUI();
+  });
+}
+
+// Undo
+if(els.learningUndoBtn){
+  els.learningUndoBtn.addEventListener('click', function(){
+    if(!_learningSession) return;
+    _learningSession.undoLast();
+    drawLearningOverlay();
+    updateLearningPromptUI();
+  });
+}
+
+// Save session
+if(els.learningSaveBtn){
+  els.learningSaveBtn.addEventListener('click', function(){
+    if(!_learningSession || !_learningStore) return;
+    if(_learningSession.annotationCount() === 0){
+      alert('Draw at least one box before saving.');
+      return;
+    }
+    var imgName = els.learningStatus ? els.learningStatus.textContent.replace('Annotating: ', '') : 'image';
+    var record = _learningSession.finalize({
+      imageId: 'img-' + Date.now(),
+      imageName: imgName
+    });
+    _learningStore.addRecord(record);
+    _learningSession = null;
+    _learningPromptIdx = 0;
+    if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
+    if(els.learningViewerSlot) els.learningViewerSlot.innerHTML = '';
+    if(els.learningStatus) els.learningStatus.textContent = 'Saved ' + record.annotations.length + ' annotations.';
+    refreshLearningStats();
+  });
+}
+
+// Cancel session
+if(els.learningCancelBtn){
+  els.learningCancelBtn.addEventListener('click', function(){
+    _learningSession = null;
+    _learningPromptIdx = 0;
+    if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
+    if(els.learningViewerSlot) els.learningViewerSlot.innerHTML = '';
+    if(els.learningStatus) els.learningStatus.textContent = '';
+  });
+}
+
+// Analyze
+if(els.learningAnalyzeBtn){
+  els.learningAnalyzeBtn.addEventListener('click', function(){
+    if(!_learningStore || !_learningAPI) return;
+    var records = _learningStore.getAllRecords();
+    var report = _learningAPI.analyzeAll(records);
+    if(els.learningResultsContent){
+      els.learningResultsContent.textContent = JSON.stringify(report, null, 2);
+    }
+    var details = document.getElementById('learning-results');
+    if(details) details.open = true;
+  });
+}
+
+// Export
+if(els.learningExportBtn){
+  els.learningExportBtn.addEventListener('click', function(){
+    if(!_learningStore) return;
+    var json = _learningStore.exportJSON();
+    var blob = new Blob([json], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'wrokit-learning-data.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+
+// Import
+if(els.learningImportInput){
+  els.learningImportInput.addEventListener('change', function(e){
+    var file = e.target.files && e.target.files[0];
+    if(!file || !_learningStore) return;
+    var reader = new FileReader();
+    reader.onload = function(){
+      var added = _learningStore.importJSON(reader.result);
+      alert('Imported ' + added + ' new annotation records.');
+      refreshLearningStats();
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+}
+
+// Clear all
+if(els.learningClearBtn){
+  els.learningClearBtn.addEventListener('click', function(){
+    if(!_learningStore) return;
+    if(confirm('Delete all learning annotation data? This cannot be undone.')){
+      _learningStore.clear();
+      refreshLearningStats();
+      if(els.learningResultsContent) els.learningResultsContent.textContent = '';
+    }
+  });
+}
+
+/* ====================== End Vision Learning Mode ==================== */
 
 /* ------------------------ Init on load ---------------------------- */
 applyEnvProfileConfig(envWizardBootstrap);
