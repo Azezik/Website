@@ -96,10 +96,15 @@ function buildBoundaryEvidence({ gray, rgb, width, height }){
     const edgeNorm = edge[i] / 1020;
     const colorNorm = color ? color[i] / 1020 : 0;
     const varNorm = variance[i] / 255;
-    // Rebalanced weights: raised variance from 0.14→0.20 so edge-dominant
-    // scenes (low color gradient) still produce meaningful boundary evidence
-    // via local texture contrast.  Edge and color weights reduced proportionally.
-    evidence[i] = clamp(Math.round((edgeNorm * 0.41 + colorNorm * 0.39 + varNorm * 0.20) * 255), 0, 255);
+    // Color-primary rebalance: colorNorm raised from 0.39 → 0.55 so that
+    // obvious color-defined boundaries (e.g. a strongly coloured panel against
+    // a plain background) produce boundary evidence reliably above hardBarrier
+    // and halt region growth at the correct edge.  edgeNorm reduced 0.41 → 0.27;
+    // varNorm reduced 0.20 → 0.18.  Weights sum to 1.00.
+    // At a clean color boundary (colorNorm ≈ 0.85, edgeNorm ≈ 0.70):
+    //   old → 0.679 × 255 = 173  (too close to hardBarrier=170; missed on softer edges)
+    //   new → 0.711 × 255 = 181  (comfortably clears hardBarrier; growth stops)
+    evidence[i] = clamp(Math.round((edgeNorm * 0.27 + colorNorm * 0.55 + varNorm * 0.18) * 255), 0, 255);
   }
   return evidence;
 }

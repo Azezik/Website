@@ -410,7 +410,7 @@
       const edgeNorm = edge[i] / 1020;
       const colorNorm = color ? color[i] / 1020 : 0;
       const varNorm = variance[i] / 255;
-      evidence[i] = clampInt(Math.round((edgeNorm * 0.44 + colorNorm * 0.42 + varNorm * 0.14) * 255), 0, 255);
+      evidence[i] = clampInt(Math.round((edgeNorm * 0.27 + colorNorm * 0.55 + varNorm * 0.18) * 255), 0, 255);
     }
     return evidence;
   }
