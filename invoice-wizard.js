@@ -475,6 +475,16 @@ const els = {
   learningAnalyzeBtn: document.getElementById('learning-analyze-btn'),
   learningExportBtn: document.getElementById('learning-export-btn'),
   learningImportInput: document.getElementById('learning-import-input'),
+  learningWrokitVisionGraphControls: document.getElementById('learning-wrokitvision-graph-controls'),
+  learningShowFeatureGraphToggle: document.getElementById('learning-show-feature-graph-toggle'),
+  learningShowTextGraphToggle: document.getElementById('learning-show-text-graph-toggle'),
+  learningFeatureGraphLayerPanel: document.getElementById('learning-feature-graph-layers'),
+  learningFeatureGraphLayerStructuralRegionsToggle: document.getElementById('learning-feature-graph-layer-structural-regions'),
+  learningFeatureGraphLayerStructuralEdgesToggle: document.getElementById('learning-feature-graph-layer-structural-edges'),
+  learningFeatureGraphLayerStructuralLabelsToggle: document.getElementById('learning-feature-graph-layer-structural-labels'),
+  learningFeatureGraphLayerVisualRegionsToggle: document.getElementById('learning-feature-graph-layer-visual-regions'),
+  learningFeatureGraphLayerTextNodesToggle: document.getElementById('learning-feature-graph-layer-text-nodes'),
+  learningFeatureGraphLayerTextEdgesToggle: document.getElementById('learning-feature-graph-layer-text-edges'),
   learningSessionArea: document.getElementById('learning-session-area'),
   learningPromptStep: document.getElementById('learning-prompt-step'),
   learningPromptText: document.getElementById('learning-prompt-text'),
@@ -883,6 +893,7 @@ function handleFindTextTab(activeId){
   } else if(isLearning){
     moveViewerToHost(els.learningViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
+    syncFeatureGraphLayerVisibilityUI();
   } else {
     // Leaving learning mode — clean up learning state if no session active
     if(state.learningActive && !_learningSession){
@@ -894,6 +905,7 @@ function handleFindTextTab(activeId){
       state.debugSandbox.findTextSession = null;
     }
     restoreViewerHome();
+    syncFeatureGraphLayerVisibilityUI();
   }
   if(state.visualRun){
     const wasActive = !!state.visualRun.active;
@@ -4929,6 +4941,45 @@ function getPageViewportSize(page){
   return getViewportDimensions(vp);
 }
 
+function getGraphToggleNodes(){
+  const learningGraphUiActive = !!state.learningActive || (els.viewer?.parentElement === els.learningViewerSlot);
+  const useLearningToggles = learningGraphUiActive && !!els.learningShowFeatureGraphToggle;
+  if(useLearningToggles){
+    return {
+      featureGraphToggle: els.learningShowFeatureGraphToggle,
+      textGraphToggle: els.learningShowTextGraphToggle,
+      layerToggles: {
+        structuralRegions: els.learningFeatureGraphLayerStructuralRegionsToggle,
+        structuralEdges: els.learningFeatureGraphLayerStructuralEdgesToggle,
+        structuralLabels: els.learningFeatureGraphLayerStructuralLabelsToggle,
+        visualRegions: els.learningFeatureGraphLayerVisualRegionsToggle,
+        textNodes: els.learningFeatureGraphLayerTextNodesToggle,
+        textEdges: els.learningFeatureGraphLayerTextEdgesToggle
+      }
+    };
+  }
+  return {
+    featureGraphToggle: els.showFeatureGraphToggle,
+    textGraphToggle: els.showTextGraphToggle,
+    layerToggles: {
+      structuralRegions: els.featureGraphLayerStructuralRegionsToggle,
+      structuralEdges: els.featureGraphLayerStructuralEdgesToggle,
+      structuralLabels: els.featureGraphLayerStructuralLabelsToggle,
+      visualRegions: els.featureGraphLayerVisualRegionsToggle,
+      textNodes: els.featureGraphLayerTextNodesToggle,
+      textEdges: els.featureGraphLayerTextEdgesToggle
+    }
+  };
+}
+
+function isFeatureGraphEnabled(){
+  return !!getGraphToggleNodes().featureGraphToggle?.checked;
+}
+
+function isTextGraphEnabled(){
+  return !!getGraphToggleNodes().textGraphToggle?.checked;
+}
+
 function getOverlayFlags(){
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
@@ -4938,33 +4989,27 @@ function getOverlayFlags(){
     rings: ringsOn,
     matches: matchesOn,
     ocr: !!els.showOcrBoxesToggle?.checked,
-    featureGraph: visionOn && !!els.showFeatureGraphToggle?.checked,
-    textGraph: visionOn && !!els.showTextGraphToggle?.checked,
+    featureGraph: visionOn && isFeatureGraphEnabled(),
+    textGraph: visionOn && isTextGraphEnabled(),
     featureGraphLayers: getFeatureGraphLayerFlags()
   };
 }
 
 function getFeatureGraphLayerFlags(){
+  const toggles = getGraphToggleNodes().layerToggles;
   return {
-    structuralRegions: els.featureGraphLayerStructuralRegionsToggle?.checked !== false,
-    structuralEdges: els.featureGraphLayerStructuralEdgesToggle?.checked !== false,
-    structuralLabels: els.featureGraphLayerStructuralLabelsToggle?.checked !== false,
-    visualRegions: els.featureGraphLayerVisualRegionsToggle?.checked !== false,
-    textNodes: els.featureGraphLayerTextNodesToggle?.checked !== false,
-    textEdges: els.featureGraphLayerTextEdgesToggle?.checked !== false
+    structuralRegions: toggles.structuralRegions?.checked !== false,
+    structuralEdges: toggles.structuralEdges?.checked !== false,
+    structuralLabels: toggles.structuralLabels?.checked !== false,
+    visualRegions: toggles.visualRegions?.checked !== false,
+    textNodes: toggles.textNodes?.checked !== false,
+    textEdges: toggles.textEdges?.checked !== false
   };
 }
 
 function syncFeatureGraphLayerVisibilityUI(){
-  const featureGraphOn = !!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked;
-  [
-    els.featureGraphLayerStructuralRegionsToggle,
-    els.featureGraphLayerStructuralEdgesToggle,
-    els.featureGraphLayerStructuralLabelsToggle,
-    els.featureGraphLayerVisualRegionsToggle,
-    els.featureGraphLayerTextNodesToggle,
-    els.featureGraphLayerTextEdgesToggle
-  ].forEach((toggle) => {
+  const featureGraphOn = isFeatureGraphEnabled() || isTextGraphEnabled();
+  Object.values(getGraphToggleNodes().layerToggles).forEach((toggle) => {
     if(!toggle) return;
     toggle.disabled = !featureGraphOn;
   });
@@ -4980,7 +5025,7 @@ function overlayFlagsEqual(a,b){
 }
 
 function isWrokitVisionGraphDebugEnabled(){
-  const graphToggledOn = !!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked;
+  const graphToggledOn = isFeatureGraphEnabled() || isTextGraphEnabled();
   if(state.learningActive && graphToggledOn) return true;
   return isConfigMode()
     && getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION
@@ -18338,6 +18383,26 @@ els.showTextGraphToggle?.addEventListener('change', ()=>{ syncFeatureGraphLayerV
     drawOverlayForVisibilityChange();
   });
 });
+els.learningShowFeatureGraphToggle?.addEventListener('change', ()=>{
+  syncFeatureGraphLayerVisibilityUI();
+  drawOverlayForVisibilityChange();
+});
+els.learningShowTextGraphToggle?.addEventListener('change', ()=>{
+  syncFeatureGraphLayerVisibilityUI();
+  drawOverlayForVisibilityChange();
+});
+[
+  els.learningFeatureGraphLayerStructuralRegionsToggle,
+  els.learningFeatureGraphLayerStructuralEdgesToggle,
+  els.learningFeatureGraphLayerStructuralLabelsToggle,
+  els.learningFeatureGraphLayerVisualRegionsToggle,
+  els.learningFeatureGraphLayerTextNodesToggle,
+  els.learningFeatureGraphLayerTextEdgesToggle
+].forEach(toggle => {
+  toggle?.addEventListener('change', ()=>{
+    drawOverlayForVisibilityChange();
+  });
+});
 els.ocrTraceToggle?.addEventListener('change', ()=>{
   state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
   if(state.ocrTrace.enabled){
@@ -19844,12 +19909,14 @@ async function learningOpenFile(file){
 
   // Ensure the feature graph toggle is checked so paintOverlay renders it
   if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = true;
+  if(els.learningShowFeatureGraphToggle) els.learningShowFeatureGraphToggle.checked = true;
 
   // Show the graph controls
   if(els.wrokitVisionGraphControls) els.wrokitVisionGraphControls.style.display = 'flex';
   if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = 'flex';
   if(els.wrokitVisionFeatureGraphLayerPanel) els.wrokitVisionFeatureGraphLayerPanel.style.display = '';
   if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = 'flex';
+  if(els.learningWrokitVisionGraphControls) els.learningWrokitVisionGraphControls.style.display = 'flex';
   syncFeatureGraphLayerVisibilityUI();
 
   // Build feature graph for the loaded document
@@ -19883,6 +19950,7 @@ function learningEndSession(){
   _learningFileName = '';
   if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
   if(els.learningStatus) els.learningStatus.textContent = '';
+  syncFeatureGraphLayerVisibilityUI();
   drawOverlay();
 }
 

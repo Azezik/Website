@@ -488,6 +488,28 @@
           </label>
         </div>
 
+        <div id="learning-wrokitvision-graph-controls" class="actions" style="display:flex; justify-content:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
+          <label id="learning-feature-graph-wrap" style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="learning-show-feature-graph-toggle" checked />
+            Show Feature Graph
+          </label>
+          <details id="learning-feature-graph-layers" style="min-width:260px;">
+            <summary>Feature Graph Layers</summary>
+            <div style="display:grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap:6px 12px; margin-top:8px;">
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-structural-regions" checked /> Regions</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-structural-edges" checked /> Edges / Connections</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-structural-labels" checked /> Labels</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-visual-regions" checked /> Visual Regions</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-text-nodes" checked /> Text Nodes</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="learning-feature-graph-layer-text-edges" checked /> Text Edges</label>
+            </div>
+          </details>
+          <label id="learning-text-graph-wrap" style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="learning-show-text-graph-toggle" />
+            Show Text Graph
+          </label>
+        </div>
+
         <!-- Active annotation session (prompt + controls) -->
         <div id="learning-session-area" style="display:none;">
           <div class="panel minimal" style="margin-bottom:12px;">
