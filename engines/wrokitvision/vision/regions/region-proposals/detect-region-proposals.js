@@ -107,7 +107,14 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
 
   const width = Number(imageData.width) || 0;
   const height = Number(imageData.height) || 0;
-  const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
+  // Raised from 0.0012 to 0.0015 based on Session A annotation evidence
+  // (avgAutoRegionCount 43.3 vs avgHumanRegionCount 11, precision 0.118):
+  // small colour-connected fragments are the primary source of false detections
+  // in mixed-content images.  +25% floor eliminates the smallest fragments
+  // without affecting text-derived proposals (OCR lines are sourced separately).
+  // Session B contract document is unaffected — its label/value candidates
+  // come from text lines, not visual colour regions.
+  const minArea = Math.max(100, Math.floor((width * height) * 0.0015));
   const maxArea = Math.floor((width * height) * 0.75);
   // Lower fragment threshold captures small atomic regions that survive merging.
   // These are the "camo patches" — genuine color-connected primitives that trace

@@ -148,14 +148,23 @@ function rankCandidates({ fieldSignature, candidates, analysis } = {}){
   const tokenMap = new Map((analysis?.textTokens || []).map((t) => [t.id, t]));
   const regionMap = new Map((analysis?.regionNodes || []).map((r) => [r.id, r]));
 
+  // Weights adjusted based on Session B annotation evidence (N97048 – Contract.pdf,
+  // 235 annotations, 51 labels + 28 field values = 79 label-value pairs).
+  // Session B shows IoU 0.77 with balanced segmentation bias, confirming that
+  // spatial proximity and structural position are the most reliable ranking signals
+  // for structured documents.  localGeometrySimilarity and nearbyLabelSimilarity
+  // are raised; graphRelationshipSimilarity is reduced (graph edge patterns are
+  // less discriminative across heterogeneous document types than spatial cues).
+  // containingRegionSimilarity is raised modestly — 78/144 matched regions confirm
+  // the region context is a useful corroborating signal.  Weights sum to 1.00.
   const weights = {
-    anchorTextSimilarity: 0.2,
-    nearbyLabelSimilarity: 0.17,
-    structuralSimilarity: 0.14,
-    containingRegionSimilarity: 0.1,
-    siblingArrangementSimilarity: 0.1,
-    localGeometrySimilarity: 0.17,
-    graphRelationshipSimilarity: 0.12
+    anchorTextSimilarity:         0.18,
+    nearbyLabelSimilarity:        0.19,
+    structuralSimilarity:         0.15,
+    containingRegionSimilarity:   0.12,
+    siblingArrangementSimilarity: 0.10,
+    localGeometrySimilarity:      0.19,
+    graphRelationshipSimilarity:  0.07
   };
 
   const ranked = (Array.isArray(candidates) ? candidates : []).map((candidate) => {

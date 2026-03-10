@@ -448,7 +448,7 @@
       labels[idx] = regionId;
       buckets[boundaryEvidence[idx]].push(idx);
     }
-    const hardBarrier = 155;
+    const hardBarrier = 170;
     for(let score = 0; score < buckets.length; score++){
       const queue = buckets[score];
       for(let qi = 0; qi < queue.length; qi++){
@@ -552,7 +552,7 @@
         (ra.sumB / ra.area) - (rb.sumB / rb.area)
       );
       const mergeScore = (edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60);
-      if(mergeScore <= 28) union(rec.a, rec.b);
+      if(mergeScore <= 64) union(rec.a, rec.b);
     }
     const merged = new Map();
     for(let rid = 0; rid < regions.length; rid++){
@@ -657,7 +657,7 @@
     const width = Number(imageData.width) || 0;
     const height = Number(imageData.height) || 0;
     if(width <= 2 || height <= 2) return [];
-    const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
+    const minArea = Math.max(100, Math.floor((width * height) * 0.0015));
     const maxArea = Math.floor((width * height) * 0.75);
     const sx = viewport.width / width;
     const sy = viewport.height / height;
@@ -850,7 +850,7 @@
         const confidence = Math.max(0.25, Math.min(0.95, (Number(region.confidence) || 0.5) * 0.8 + (isLarge ? 0.15 : 0)));
         return createSurfaceCandidate({ id: idFactory('surface'), geometry: { bbox: box }, confidence, provenance: { stage: 'surface-candidates', detector: 'region-surface-heuristic', sourceRegionId: region.id }, surfaceType, features: { regionArea: area, textDensity, panelLike: isPanel }, supportingRegionIds: [region.id] });
       })
-      .filter(c => c.features.regionArea > 2000);
+      .filter(c => c.features.regionArea > 3044);
   }
 
   // ── upload-analysis-pipeline.js ───────────────────────────────────────────
