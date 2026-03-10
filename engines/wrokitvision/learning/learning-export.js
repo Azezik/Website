@@ -181,6 +181,7 @@ function formatSessionExport(sessionData){
         out += '\n  Region Detection:\n';
         out += _kv('Segmentation bias', recs.regionDetection.segmentationBias || 'unknown', 4);
         out += _kv('Suggested mergeThreshold', recs.regionDetection.suggestedMergeThreshold, 4);
+        out += _kv('Suggested hardBarrier', recs.regionDetection.suggestedHardBarrier, 4);
         out += _kv('Suggested minRegionArea', recs.regionDetection.suggestedMinRegionArea, 4);
         if(recs.regionDetection.evidence){
           out += '    Evidence:\n';
