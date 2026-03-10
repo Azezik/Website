@@ -696,7 +696,7 @@
   function rankCandidates({ fieldSignature, candidates, analysis } = {}){
     const tokenMap = new Map((analysis?.textTokens || []).map(t => [t.id, t]));
     const regionMap = new Map((analysis?.regionNodes || []).map(r => [r.id, r]));
-    const weights = { anchorTextSimilarity: 0.2, nearbyLabelSimilarity: 0.17, structuralSimilarity: 0.14, containingRegionSimilarity: 0.1, siblingArrangementSimilarity: 0.1, localGeometrySimilarity: 0.17, graphRelationshipSimilarity: 0.12 };
+    const weights = { anchorTextSimilarity: 0.18, nearbyLabelSimilarity: 0.19, structuralSimilarity: 0.15, containingRegionSimilarity: 0.12, siblingArrangementSimilarity: 0.10, localGeometrySimilarity: 0.19, graphRelationshipSimilarity: 0.07 };
     const ranked = (Array.isArray(candidates) ? candidates : []).map(candidate => {
       const line = candidate.lineRef, block = candidate.blockRef;
       const region = candidate.regionRef || regionMap.get(candidate.localStructureRefs?.regionId) || null;
