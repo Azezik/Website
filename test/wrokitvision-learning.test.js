@@ -128,6 +128,18 @@ assert.strictEqual(snap.normBox.x0n, 50 / 800);
 assert.strictEqual(snap.confidence, 0.72);
 assert.strictEqual(snap.surfaceType, 'region_surface');
 
+const normalizedOnlyRegion = {
+  id: 'sr-002',
+  nx: 0.25,
+  ny: 0.1,
+  nw: 0.5,
+  nh: 0.2
+};
+const normalizedSnap = snapshotRegion(normalizedOnlyRegion, { w: 1000, h: 800 });
+assert.strictEqual(normalizedSnap.bbox.x, 250);
+assert.strictEqual(normalizedSnap.bbox.w, 500);
+assert.strictEqual(normalizedSnap.normBox.y0n, 0.1);
+
 // createAnnotationRecord
 const rec = createAnnotationRecord({
   imageId: 'img-001',
@@ -236,7 +248,7 @@ assert.strictEqual(comp.stats.extraCount, 1);
 const session = createLearningSession({
   viewport: { w: 800, h: 1000 },
   tokens: [{ id: 't1', text: 'hello' }],
-  analysisResult: { regionNodes: [region] }
+  analysisResult: { autoRegions: [region], regionNodes: [] }
 });
 
 assert.ok(session.getPrompts().length >= 4);
@@ -387,6 +399,26 @@ const { LearningStore: LS, LearningSession: LSess, LearningAnalyst: LA } = requi
 assert.ok(LS.createLearningStore);
 assert.ok(LSess.createLearningSession);
 assert.ok(LA.analyzeAll);
+
+const { formatSessionExport } = require('../engines/wrokitvision/learning/learning-export.js');
+const exportText = formatSessionExport({
+  sessionId: 'sess-1',
+  startedAt: '2026-01-01T00:00:00.000Z',
+  fileEntries: [{ annotationCount: 1, autoRegionCount: 0 }],
+  analysisSnapshots: [],
+  latestAggregate: {
+    status: 'early',
+    message: 'Test message',
+    recordCount: 1,
+    totalAnnotations: 1,
+    recommendations: {
+      regionDetection: {
+        evidence: { avgAutoRegionCount: 0 }
+      }
+    }
+  }
+});
+assert.ok(exportText.includes('Recommendation evidence strength: weak'));
 
 console.log('learning/index.js API tests passed.');
 console.log('All Wrokit Vision Learning tests passed.');

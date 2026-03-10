@@ -19553,7 +19553,7 @@ function refreshLearningSessionUI(){
  */
 function learningAutoAnalyze(){
   if(!_learningStore || !_learningAPI || !_learningSessionLog) return null;
-  const records = _learningStore.getAllRecords();
+  const records = getLearningSessionScopedRecords();
   const report = _learningAPI.analyzeAll(records);
   _learningSessionLog.addAnalysisSnapshot(report);
   // Update the UI results panel
@@ -19563,6 +19563,27 @@ function learningAutoAnalyze(){
   const details = document.getElementById('learning-results');
   if(details) details.open = true;
   return report;
+}
+
+function getLearningSessionScopedRecords(){
+  if(!_learningStore || !_learningSessionLog) return [];
+  const all = _learningStore.getAllRecords();
+  const session = _learningSessionLog.getSession();
+  const recordIds = new Set((session.fileEntries || []).map(entry => entry.recordId).filter(Boolean));
+  if(!recordIds.size) return [];
+  return all.filter(rec => recordIds.has(rec.recordId));
+}
+
+function getLearningDetectionRegionsForPage(page){
+  const maps = getWrokitVisionDebugMaps(page);
+  if(!maps?.structuralGraph) return [];
+  const visualLayerRegions = maps.structuralGraph.visualRegionLayer?.regions;
+  if(Array.isArray(visualLayerRegions) && visualLayerRegions.length) return visualLayerRegions;
+  const nodes = maps.structuralGraph.nodes || [];
+  return nodes.filter(node => {
+    const type = String(node?.type || '').toLowerCase();
+    return type === 'region' || type === 'panel' || type === 'visual_region';
+  });
 }
 
 function renderLearningHistory(){
@@ -19751,10 +19772,11 @@ async function learningOpenFile(file){
     const page = state.pageNum || 1;
     const vp = state.pageViewports?.[page - 1] || state.viewport || { w: 0, h: 0 };
     const tokens = state.tokensByPage?.[page] || [];
+    const autoRegions = getLearningDetectionRegionsForPage(page);
     _learningSession = _learningAPI.createLearningSession({
       viewport: { w: Number(vp.width || vp.w) || 0, h: Number(vp.height || vp.h) || 0 },
       tokens,
-      analysisResult: { regionNodes: [] }
+      analysisResult: { autoRegions, regionNodes: autoRegions }
     });
     _learningPromptIdx = 0;
   }
