@@ -96,9 +96,10 @@ function buildBoundaryEvidence({ gray, rgb, width, height }){
     const edgeNorm = edge[i] / 1020;
     const colorNorm = color ? color[i] / 1020 : 0;
     const varNorm = variance[i] / 255;
-    // Rebalanced weights: color gets more influence so color-only contrasts
-    // produce meaningful boundary evidence even when luminance is similar.
-    evidence[i] = clamp(Math.round((edgeNorm * 0.44 + colorNorm * 0.42 + varNorm * 0.14) * 255), 0, 255);
+    // Rebalanced weights: raised variance from 0.14→0.20 so edge-dominant
+    // scenes (low color gradient) still produce meaningful boundary evidence
+    // via local texture contrast.  Edge and color weights reduced proportionally.
+    evidence[i] = clamp(Math.round((edgeNorm * 0.41 + colorNorm * 0.39 + varNorm * 0.20) * 255), 0, 255);
   }
   return evidence;
 }
@@ -141,9 +142,11 @@ function buildAtomicRegions({ gray, rgb, width, height }){
     buckets[boundaryEvidence[idx]].push(idx);
   }
 
-  // Lowered hard barrier so weaker edges (edge-only and low-contrast scenes)
-  // can still stop region growth.  Previously 206 (~81%), now 155 (~61%).
-  const hardBarrier = 155;
+  // Hard barrier controls the maximum boundary evidence a region can grow across.
+  // Previously 206 (~81%), then 155 (~61%).  Raised to 165 (~65%) so that subtle
+  // intra-glyph boundaries (e.g. anti-aliased strokes) are crossed during growth,
+  // reducing orphan fragments inside text while still stopping at real edges.
+  const hardBarrier = 165;
   for(let score = 0; score < buckets.length; score++){
     const queue = buckets[score];
     for(let qi = 0; qi < queue.length; qi++){
@@ -313,11 +316,33 @@ function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }
       (ra.sumG / ra.area) - (rb.sumG / rb.area),
       (ra.sumB / ra.area) - (rb.sumB / rb.area)
     );
-    // Color-dominant merge scoring: colorDelta gets 60% weight so regions that
-    // differ primarily in hue/saturation are kept separate even when luminance
-    // is nearly identical.  Lower threshold (28) prevents over-merging.
-    const mergeScore = (edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60);
-    if(mergeScore <= 28) union(rec.a, rec.b);
+
+    // Border-length gate: require shared border to be proportional to the
+    // smaller region's perimeter.  This prevents merging regions that only
+    // touch at a thin seam (e.g. adjacent high-contrast shapes).
+    const smallerArea = Math.min(ra.area, rb.area);
+    const approxPerimeter = 4 * Math.sqrt(smallerArea);
+    const borderRatio = rec.border / Math.max(1, approxPerimeter);
+
+    // If shared border is less than 8% of estimated perimeter, require
+    // much stricter color similarity to merge (halve the threshold).
+    const borderPenalty = borderRatio < 0.08 ? 0.5 : 1.0;
+
+    // Aspect-ratio divergence penalty: when two regions have very different
+    // aspect ratios, they likely belong to different layout rows/columns.
+    // This prevents horizontal text strips from merging with adjacent rows.
+    const arA = (ra.x1 - ra.x0 + 1) / Math.max(1, ra.y1 - ra.y0 + 1);
+    const arB = (rb.x1 - rb.x0 + 1) / Math.max(1, rb.y1 - rb.y0 + 1);
+    const arDivergence = Math.max(arA, arB) / Math.max(0.01, Math.min(arA, arB));
+    // Penalize when aspect ratios diverge by more than 3:1
+    const arPenalty = arDivergence > 3.0 ? 1.3 : 1.0;
+
+    // Color-dominant merge scoring with border-length and aspect-ratio gates.
+    // Raised threshold from 28→32 to compensate for the raised hardBarrier
+    // (which creates fewer but larger atomic regions, making color deltas
+    // between neighbors slightly larger on average).
+    const mergeScore = ((edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60)) * arPenalty;
+    if(mergeScore <= 32 * borderPenalty) union(rec.a, rec.b);
   }
 
   const merged = new Map();
