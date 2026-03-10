@@ -490,6 +490,10 @@ const els = {
   learningResultsContent: document.getElementById('learning-results-content'),
   learningHistoryList: document.getElementById('learning-history-list'),
   learningClearBtn: document.getElementById('learning-clear-btn'),
+  learningExportSessionBtn: document.getElementById('learning-export-session-btn'),
+  learningNewSessionBtn: document.getElementById('learning-new-session-btn'),
+  learningSessionFileCount: document.getElementById('learning-session-file-count'),
+  learningSessionStarted: document.getElementById('learning-session-started'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -19508,6 +19512,7 @@ async function processBatch(files){
 
 const _learningAPI = window.WrokitVisionLearning || null;
 const _learningStore = _learningAPI ? _learningAPI.createLearningStore(localStorage) : null;
+const _learningSessionLog = _learningAPI && _learningAPI.createSessionLog ? _learningAPI.createSessionLog(localStorage) : null;
 let _learningSession = null;
 let _learningPromptIdx = 0;
 let _learningFileName = '';
@@ -19524,6 +19529,40 @@ function refreshLearningStats(){
     : stats.totalRecords < 15 ? 'Developing — getting useful'
     : 'Ready for analysis';
   renderLearningHistory();
+  refreshLearningSessionUI();
+}
+
+function refreshLearningSessionUI(){
+  if(!_learningSessionLog) return;
+  const session = _learningSessionLog.getSession();
+  if(els.learningSessionFileCount){
+    const n = session.fileEntries.length;
+    els.learningSessionFileCount.textContent = n + (n === 1 ? ' file' : ' files');
+  }
+  if(els.learningSessionStarted){
+    if(session.startedAt){
+      els.learningSessionStarted.textContent = 'started ' + new Date(session.startedAt).toLocaleDateString();
+    }
+  }
+}
+
+/**
+ * Auto-analyze: runs analyzeAll on current store records and logs the
+ * snapshot into the session log.  Called automatically after each save
+ * and on manual Analyze button click.
+ */
+function learningAutoAnalyze(){
+  if(!_learningStore || !_learningAPI || !_learningSessionLog) return null;
+  const records = _learningStore.getAllRecords();
+  const report = _learningAPI.analyzeAll(records);
+  _learningSessionLog.addAnalysisSnapshot(report);
+  // Update the UI results panel
+  if(els.learningResultsContent){
+    els.learningResultsContent.textContent = JSON.stringify(report, null, 2);
+  }
+  const details = document.getElementById('learning-results');
+  if(details) details.open = true;
+  return report;
 }
 
 function renderLearningHistory(){
@@ -19794,9 +19833,13 @@ if(els.learningSaveBtn){
       imageName: _learningFileName
     });
     _learningStore.addRecord(record);
+    // Accumulate into session log
+    if(_learningSessionLog) _learningSessionLog.addFileEntry(record);
     learningEndSession();
     if(els.learningStatus) els.learningStatus.textContent = 'Saved ' + record.annotations.length + ' annotations.';
     refreshLearningStats();
+    // Auto-analyze after each save so the session stays up to date
+    learningAutoAnalyze();
   });
 }
 
@@ -19812,14 +19855,7 @@ if(els.learningCancelBtn){
 
 if(els.learningAnalyzeBtn){
   els.learningAnalyzeBtn.addEventListener('click', () => {
-    if(!_learningStore || !_learningAPI) return;
-    const records = _learningStore.getAllRecords();
-    const report = _learningAPI.analyzeAll(records);
-    if(els.learningResultsContent){
-      els.learningResultsContent.textContent = JSON.stringify(report, null, 2);
-    }
-    const details = document.getElementById('learning-results');
-    if(details) details.open = true;
+    learningAutoAnalyze();
   });
 }
 
@@ -19864,6 +19900,46 @@ if(els.learningClearBtn){
       _learningStore.clear();
       refreshLearningStats();
       if(els.learningResultsContent) els.learningResultsContent.textContent = '';
+    }
+  });
+}
+
+/* ── Export Session (.txt) ──────────────────────────────────────────── */
+
+if(els.learningExportSessionBtn){
+  els.learningExportSessionBtn.addEventListener('click', () => {
+    if(!_learningSessionLog || !_learningAPI) return;
+    const sessionData = _learningSessionLog.getExportData();
+    if(!sessionData.fileEntries.length){
+      alert('No files annotated in this session yet. Upload and annotate at least one document first.');
+      return;
+    }
+    const txt = _learningAPI.formatSessionExport(sessionData);
+    const blob = new Blob([txt], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    a.download = 'wrokit-learning-session-' + dateStr + '.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    if(els.learningStatus) els.learningStatus.textContent = 'Session exported.';
+  });
+}
+
+/* ── New Session ───────────────────────────────────────────────────── */
+
+if(els.learningNewSessionBtn){
+  els.learningNewSessionBtn.addEventListener('click', () => {
+    if(!_learningSessionLog) return;
+    const session = _learningSessionLog.getSession();
+    const fileCount = session.fileEntries.length;
+    const msg = fileCount
+      ? 'Start a new session? The current session has ' + fileCount + ' file(s). This clears the session log (annotation records in the store are not deleted).'
+      : 'Start a new session?';
+    if(confirm(msg)){
+      _learningSessionLog.newSession();
+      refreshLearningSessionUI();
+      if(els.learningStatus) els.learningStatus.textContent = 'New session started.';
     }
   });
 }
