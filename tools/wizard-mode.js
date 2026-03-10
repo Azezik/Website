@@ -5,7 +5,7 @@
     root.WizardMode = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function(){
-  const WizardMode = Object.freeze({ CONFIG: 'CONFIG', RUN: 'RUN' });
+  const WizardMode = Object.freeze({ CONFIG: 'CONFIG', RUN: 'RUN', LEARN: 'LEARN' });
   function clearTransientState(state){
     if(!state) return state;
     state.stepIdx = 0;
@@ -53,6 +53,15 @@
   function enterConfigModeState(state){
     clearTransientState(state);
     if(state) state.mode = WizardMode.CONFIG;
+    return state;
+  }
+
+  function enterLearnModeState(state){
+    clearTransientState(state);
+    if(state){
+      state.mode = WizardMode.LEARN;
+      state.learningAnnotations = [];
+    }
     return state;
   }
 
@@ -127,9 +136,14 @@
     let mode = WizardMode.CONFIG;
     return {
       WizardMode,
-      setMode(next){ mode = next === WizardMode.RUN ? WizardMode.RUN : WizardMode.CONFIG; },
+      setMode(next){
+        if(next === WizardMode.RUN) mode = WizardMode.RUN;
+        else if(next === WizardMode.LEARN) mode = WizardMode.LEARN;
+        else mode = WizardMode.CONFIG;
+      },
       getMode(){ return mode; },
       isRun(){ return mode === WizardMode.RUN; },
+      isLearn(){ return mode === WizardMode.LEARN; },
       guardInteractive(label){
         if(mode !== WizardMode.RUN) return false;
         if(logger && typeof logger.warn === 'function'){
@@ -156,5 +170,5 @@
     };
   }
 
-  return { clearTransientState, enterRunModeState, enterConfigModeState, createRunLoopGuard, createRunDiagnostics, runKeyForFile, WizardMode, createModeController };
+  return { clearTransientState, enterRunModeState, enterConfigModeState, enterLearnModeState, createRunLoopGuard, createRunDiagnostics, runKeyForFile, WizardMode, createModeController };
 });
