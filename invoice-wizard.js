@@ -475,6 +475,16 @@ const els = {
   learningAnalyzeBtn: document.getElementById('learning-analyze-btn'),
   learningExportBtn: document.getElementById('learning-export-btn'),
   learningImportInput: document.getElementById('learning-import-input'),
+  learningWrokitVisionGraphControls: document.getElementById('learning-wrokitvision-graph-controls'),
+  learningShowFeatureGraphToggle: document.getElementById('learning-show-feature-graph-toggle'),
+  learningShowTextGraphToggle: document.getElementById('learning-show-text-graph-toggle'),
+  learningFeatureGraphLayerPanel: document.getElementById('learning-feature-graph-layers'),
+  learningFeatureGraphLayerStructuralRegionsToggle: document.getElementById('learning-feature-graph-layer-structural-regions'),
+  learningFeatureGraphLayerStructuralEdgesToggle: document.getElementById('learning-feature-graph-layer-structural-edges'),
+  learningFeatureGraphLayerStructuralLabelsToggle: document.getElementById('learning-feature-graph-layer-structural-labels'),
+  learningFeatureGraphLayerVisualRegionsToggle: document.getElementById('learning-feature-graph-layer-visual-regions'),
+  learningFeatureGraphLayerTextNodesToggle: document.getElementById('learning-feature-graph-layer-text-nodes'),
+  learningFeatureGraphLayerTextEdgesToggle: document.getElementById('learning-feature-graph-layer-text-edges'),
   learningSessionArea: document.getElementById('learning-session-area'),
   learningPromptStep: document.getElementById('learning-prompt-step'),
   learningPromptText: document.getElementById('learning-prompt-text'),
@@ -509,6 +519,13 @@ const els = {
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
   showFeatureGraphToggle: document.getElementById('show-feature-graph-toggle'),
   showTextGraphToggle: document.getElementById('show-text-graph-toggle'),
+  wrokitVisionFeatureGraphLayerPanel: document.getElementById('wrokitvision-feature-graph-layers'),
+  featureGraphLayerStructuralRegionsToggle: document.getElementById('feature-graph-layer-structural-regions'),
+  featureGraphLayerStructuralEdgesToggle: document.getElementById('feature-graph-layer-structural-edges'),
+  featureGraphLayerStructuralLabelsToggle: document.getElementById('feature-graph-layer-structural-labels'),
+  featureGraphLayerVisualRegionsToggle: document.getElementById('feature-graph-layer-visual-regions'),
+  featureGraphLayerTextNodesToggle: document.getElementById('feature-graph-layer-text-nodes'),
+  featureGraphLayerTextEdgesToggle: document.getElementById('feature-graph-layer-text-edges'),
   wrokitVisionFeatureGraphWrap: document.getElementById('wrokitvision-feature-graph-wrap'),
   wrokitVisionTextGraphWrap: document.getElementById('wrokitvision-text-graph-wrap'),
   wrokitVisionGraphControls: document.getElementById('wrokitvision-graph-controls'),
@@ -711,11 +728,13 @@ function syncExtractionEngineUI(){
   const isVision = activeEngine === ENGINE_KIND.WROKIT_VISION;
   if(els.wrokitVisionGraphControls) els.wrokitVisionGraphControls.style.display = isVision ? 'flex' : 'none';
   if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = isVision ? 'flex' : 'none';
+  if(els.wrokitVisionFeatureGraphLayerPanel) els.wrokitVisionFeatureGraphLayerPanel.style.display = isVision ? '' : 'none';
   if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = isVision ? 'flex' : 'none';
   if(!isVision){
     if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = false;
     if(els.showTextGraphToggle) els.showTextGraphToggle.checked = false;
   }
+  syncFeatureGraphLayerVisibilityUI();
 }
 
 function normalizeWizardId(raw){
@@ -874,6 +893,7 @@ function handleFindTextTab(activeId){
   } else if(isLearning){
     moveViewerToHost(els.learningViewerSlot);
     if(els.wizardSection) els.wizardSection.style.display = 'none';
+    syncFeatureGraphLayerVisibilityUI();
   } else {
     // Leaving learning mode — clean up learning state if no session active
     if(state.learningActive && !_learningSession){
@@ -885,6 +905,7 @@ function handleFindTextTab(activeId){
       state.debugSandbox.findTextSession = null;
     }
     restoreViewerHome();
+    syncFeatureGraphLayerVisibilityUI();
   }
   if(state.visualRun){
     const wasActive = !!state.visualRun.active;
@@ -1771,6 +1792,7 @@ let state = {
   pageRenderReady: [],
   currentTraceId: null,
   wrokitVisionDebugMapCache: {},
+  wrokitVisionOverlayMapsByPage: {},
   wrokitVisionLivePrecomputedByPage: {},
   wrokitVisionGraphLoadingByPage: {},
   selectedRunId: '',
@@ -4919,6 +4941,45 @@ function getPageViewportSize(page){
   return getViewportDimensions(vp);
 }
 
+function getGraphToggleNodes(){
+  const learningGraphUiActive = !!state.learningActive || (els.viewer?.parentElement === els.learningViewerSlot);
+  const useLearningToggles = learningGraphUiActive && !!els.learningShowFeatureGraphToggle;
+  if(useLearningToggles){
+    return {
+      featureGraphToggle: els.learningShowFeatureGraphToggle,
+      textGraphToggle: els.learningShowTextGraphToggle,
+      layerToggles: {
+        structuralRegions: els.learningFeatureGraphLayerStructuralRegionsToggle,
+        structuralEdges: els.learningFeatureGraphLayerStructuralEdgesToggle,
+        structuralLabels: els.learningFeatureGraphLayerStructuralLabelsToggle,
+        visualRegions: els.learningFeatureGraphLayerVisualRegionsToggle,
+        textNodes: els.learningFeatureGraphLayerTextNodesToggle,
+        textEdges: els.learningFeatureGraphLayerTextEdgesToggle
+      }
+    };
+  }
+  return {
+    featureGraphToggle: els.showFeatureGraphToggle,
+    textGraphToggle: els.showTextGraphToggle,
+    layerToggles: {
+      structuralRegions: els.featureGraphLayerStructuralRegionsToggle,
+      structuralEdges: els.featureGraphLayerStructuralEdgesToggle,
+      structuralLabels: els.featureGraphLayerStructuralLabelsToggle,
+      visualRegions: els.featureGraphLayerVisualRegionsToggle,
+      textNodes: els.featureGraphLayerTextNodesToggle,
+      textEdges: els.featureGraphLayerTextEdgesToggle
+    }
+  };
+}
+
+function isFeatureGraphEnabled(){
+  return !!getGraphToggleNodes().featureGraphToggle?.checked;
+}
+
+function isTextGraphEnabled(){
+  return !!getGraphToggleNodes().textGraphToggle?.checked;
+}
+
 function getOverlayFlags(){
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
@@ -4928,18 +4989,43 @@ function getOverlayFlags(){
     rings: ringsOn,
     matches: matchesOn,
     ocr: !!els.showOcrBoxesToggle?.checked,
-    featureGraph: visionOn && !!els.showFeatureGraphToggle?.checked,
-    textGraph: visionOn && !!els.showTextGraphToggle?.checked
+    featureGraph: visionOn && isFeatureGraphEnabled(),
+    textGraph: visionOn && isTextGraphEnabled(),
+    featureGraphLayers: getFeatureGraphLayerFlags()
   };
+}
+
+function getFeatureGraphLayerFlags(){
+  const toggles = getGraphToggleNodes().layerToggles;
+  return {
+    structuralRegions: toggles.structuralRegions?.checked !== false,
+    structuralEdges: toggles.structuralEdges?.checked !== false,
+    structuralLabels: toggles.structuralLabels?.checked !== false,
+    visualRegions: toggles.visualRegions?.checked !== false,
+    textNodes: toggles.textNodes?.checked !== false,
+    textEdges: toggles.textEdges?.checked !== false
+  };
+}
+
+function syncFeatureGraphLayerVisibilityUI(){
+  const featureGraphOn = isFeatureGraphEnabled() || isTextGraphEnabled();
+  Object.values(getGraphToggleNodes().layerToggles).forEach((toggle) => {
+    if(!toggle) return;
+    toggle.disabled = !featureGraphOn;
+  });
 }
 
 function overlayFlagsEqual(a,b){
   if(!a || !b) return false;
-  return ['boxes','rings','matches','ocr','featureGraph','textGraph'].every(k => !!a[k] === !!b[k]);
+  const scalarEqual = ['boxes','rings','matches','ocr','featureGraph','textGraph'].every(k => !!a[k] === !!b[k]);
+  if(!scalarEqual) return false;
+  const aLayers = a.featureGraphLayers || {};
+  const bLayers = b.featureGraphLayers || {};
+  return ['structuralRegions','structuralEdges','structuralLabels','visualRegions','textNodes','textEdges'].every(k => !!aLayers[k] === !!bLayers[k]);
 }
 
 function isWrokitVisionGraphDebugEnabled(){
-  const graphToggledOn = !!els.showFeatureGraphToggle?.checked || !!els.showTextGraphToggle?.checked;
+  const graphToggledOn = isFeatureGraphEnabled() || isTextGraphEnabled();
   if(state.learningActive && graphToggledOn) return true;
   return isConfigMode()
     && getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION
@@ -8545,6 +8631,7 @@ function ensureWrokitVisionSeedGraphForCurrentGeometry(){
   };
   // Clear in-memory debug map cache so the overlay re-renders with fresh data.
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionOverlayMapsByPage = {};
   // Do not persist transient config-upload map artifacts on every step change.
   // These are upload-scoped runtime aids and are saved with the profile through
   // the normal explicit wizard-save flow.
@@ -11869,6 +11956,7 @@ function cleanupDoc(){
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionOverlayMapsByPage = {};
   state.wrokitVisionLivePrecomputedByPage = {};
   state.wrokitVisionRuntimeCache = {};
   state.wrokitVisionGraphLoadingByPage = {};
@@ -14771,13 +14859,20 @@ function getScaleFactors(){
 
 function paintOverlay(ctx, options = {}){
   if(!ctx || !ctx.canvas) return;
-  const { scaleX = 1, scaleY = 1, pageFilter = null, offsetY = 0, includeSelections = true, flags = getOverlayFlags(), boxSource = 'profile', layoutFirst = true, fileId = state.currentFileId } = options;
+  const { scaleX = 1, scaleY = 1, pageFilter = null, offsetY = 0, includeSelections = true, flags = getOverlayFlags(), boxSource = 'profile', layoutFirst = true, fileId = state.currentFileId, skipGraphMapFetch = false } = options;
   const boxesOn = !!flags.boxes;
   const ringsOn = !!flags.rings;
   const matchesOn = !!flags.matches;
   const ocrOn = !!flags.ocr;
   const featureGraphOn = !!flags.featureGraph;
   const textGraphOn = !!flags.textGraph;
+  const featureGraphLayers = flags.featureGraphLayers || getFeatureGraphLayerFlags();
+  const structuralRegionsOn = !!featureGraphLayers.structuralRegions;
+  const structuralEdgesOn = !!featureGraphLayers.structuralEdges;
+  const structuralLabelsOn = !!featureGraphLayers.structuralLabels;
+  const visualRegionsOn = !!featureGraphLayers.visualRegions;
+  const textNodesOn = !!featureGraphLayers.textNodes;
+  const textEdgesOn = !!featureGraphLayers.textEdges;
   const targetPage = pageFilter || state.pageNum;
   const offsetForPage = (page) => ((state.pageOffsets[(page||1)-1] || 0) / scaleY) - offsetY;
 
@@ -14887,7 +14982,12 @@ function paintOverlay(ctx, options = {}){
   else { drawBoxes(); drawLayout(); }
 
   if((featureGraphOn || textGraphOn) && (!pageFilter || targetPage === pageFilter)){
-    const maps = getWrokitVisionDebugMaps(targetPage);
+    const maps = skipGraphMapFetch
+      ? (state.wrokitVisionOverlayMapsByPage?.[targetPage] || null)
+      : getWrokitVisionDebugMaps(targetPage);
+    if(!skipGraphMapFetch && maps){
+      state.wrokitVisionOverlayMapsByPage[targetPage] = maps;
+    }
     const offPx = offsetForPage(targetPage);
     const graphLoading = !!state.wrokitVisionGraphLoadingByPage?.[targetPage];
 
@@ -14965,25 +15065,29 @@ function paintOverlay(ctx, options = {}){
     if(textGraphOn && maps?.textMap?.nodes?.length){
       const tNodes = maps.textMap.nodes.map(projectGraphNode);
       ctx.save();
-      ctx.strokeStyle = 'rgba(6,182,212,0.7)';
-      ctx.lineWidth = 1.05;
-      for(const edge of maps.textMap.edges || []){
-        const from = tNodes[edge.from];
-        const to = tNodes[edge.to];
-        if(!from || !to) continue;
-        ctx.beginPath();
-        ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
-        ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
-        ctx.stroke();
+      if(textEdgesOn){
+        ctx.strokeStyle = 'rgba(6,182,212,0.7)';
+        ctx.lineWidth = 1.05;
+        for(const edge of maps.textMap.edges || []){
+          const from = tNodes[edge.from];
+          const to = tNodes[edge.to];
+          if(!from || !to) continue;
+          ctx.beginPath();
+          ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
+          ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
+          ctx.stroke();
+        }
       }
-      ctx.fillStyle = 'rgba(2,132,199,0.96)';
-      const radius = Math.max(1.75, 2.8 / Math.max(scaleX, scaleY));
-      for(const node of tNodes){
-        const cx = (node.cx || (node.x + node.w / 2)) / scaleX;
-        const cy = ((node.cy || (node.y + node.h / 2)) / scaleY) + offPx;
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.fill();
+      if(textNodesOn){
+        ctx.fillStyle = 'rgba(2,132,199,0.96)';
+        const radius = Math.max(1.75, 2.8 / Math.max(scaleX, scaleY));
+        for(const node of tNodes){
+          const cx = (node.cx || (node.x + node.w / 2)) / scaleX;
+          const cy = ((node.cy || (node.y + node.h / 2)) / scaleY) + offPx;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
       ctx.restore();
     }
@@ -15021,6 +15125,7 @@ function paintOverlay(ctx, options = {}){
       //   section / text_dense_surface → red dashed (structural section)
       //   everything else → orange solid (block / generic region)
       for(const node of structuralNodes){
+        if(!structuralRegionsOn) continue;
         const projected = projectedById.get(node.id);
         if(!projected) continue;
         const rx = projected.x / scaleX;
@@ -15063,46 +15168,50 @@ function paintOverlay(ctx, options = {}){
         ctx.strokeRect(rx, ry, rw, rh);
         ctx.setLineDash([]);
         // Label: show type and provenance source so the data path is inspectable.
-        const prov = node.provenance?.sourceType || node.provenance?.detector || '';
-        const labelText = prov ? `${t}|${prov}` : (t || String(node.id || '').slice(0, 14));
-        const isSection = t === 'section' || t === 'text_dense_surface';
-        const labelX = rx + 2;
-        const labelY = ry + (isSection ? 12 : 10);
-        ctx.fillStyle = t === 'page_surface' ? 'rgba(100,116,139,0.85)'
-          : t === 'text_cluster'    ? 'rgba(29,78,216,0.9)'
-          : t === 'text_strip'      ? 'rgba(8,145,178,0.9)'
-          : t === 'visual_component'? 'rgba(109,40,217,0.9)'
-          : isSection               ? 'rgba(185,28,28,0.95)'
-          : 'rgba(194,65,12,0.95)';
-        ctx.font = isSection ? 'bold 9px monospace' : '9px monospace';
-        ctx.fillText(labelText.slice(0, 26), labelX, labelY);
+        if(structuralLabelsOn){
+          const prov = node.provenance?.sourceType || node.provenance?.detector || '';
+          const labelText = prov ? `${t}|${prov}` : (t || String(node.id || '').slice(0, 14));
+          const isSection = t === 'section' || t === 'text_dense_surface';
+          const labelX = rx + 2;
+          const labelY = ry + (isSection ? 12 : 10);
+          ctx.fillStyle = t === 'page_surface' ? 'rgba(100,116,139,0.85)'
+            : t === 'text_cluster'    ? 'rgba(29,78,216,0.9)'
+            : t === 'text_strip'      ? 'rgba(8,145,178,0.9)'
+            : t === 'visual_component'? 'rgba(109,40,217,0.9)'
+            : isSection               ? 'rgba(185,28,28,0.95)'
+            : 'rgba(194,65,12,0.95)';
+          ctx.font = isSection ? 'bold 9px monospace' : '9px monospace';
+          ctx.fillText(labelText.slice(0, 26), labelX, labelY);
+        }
       }
       // Draw edges: color by type
-      for(const edge of maps.structuralGraph.edges || []){
-        const from = projectedById.get(edge.from);
-        const to = projectedById.get(edge.to);
-        if(!from || !to) continue;
-        if(edge.type === 'contains'){
-          ctx.strokeStyle = 'rgba(185,28,28,0.35)';
-          ctx.setLineDash([3, 4]);
-          ctx.lineWidth = 1;
-        } else if(edge.type === 'adjacent_v'){
-          ctx.strokeStyle = 'rgba(234,88,12,0.7)';
-          ctx.setLineDash([]);
-          ctx.lineWidth = 1.5;
-        } else if(edge.type === 'adjacent_h'){
-          ctx.strokeStyle = 'rgba(251,146,60,0.7)';
-          ctx.setLineDash([]);
-          ctx.lineWidth = 1.5;
-        } else {
-          ctx.strokeStyle = 'rgba(194,65,12,0.45)';
-          ctx.setLineDash([]);
-          ctx.lineWidth = 1;
+      if(structuralEdgesOn){
+        for(const edge of maps.structuralGraph.edges || []){
+          const from = projectedById.get(edge.from);
+          const to = projectedById.get(edge.to);
+          if(!from || !to) continue;
+          if(edge.type === 'contains'){
+            ctx.strokeStyle = 'rgba(185,28,28,0.35)';
+            ctx.setLineDash([3, 4]);
+            ctx.lineWidth = 1;
+          } else if(edge.type === 'adjacent_v'){
+            ctx.strokeStyle = 'rgba(234,88,12,0.7)';
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1.5;
+          } else if(edge.type === 'adjacent_h'){
+            ctx.strokeStyle = 'rgba(251,146,60,0.7)';
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1.5;
+          } else {
+            ctx.strokeStyle = 'rgba(194,65,12,0.45)';
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1;
+          }
+          ctx.beginPath();
+          ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
+          ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
+          ctx.stroke();
         }
-        ctx.beginPath();
-        ctx.moveTo((from.cx || (from.x + from.w / 2)) / scaleX, ((from.cy || (from.y + from.h / 2)) / scaleY) + offPx);
-        ctx.lineTo((to.cx || (to.x + to.w / 2)) / scaleX, ((to.cy || (to.y + to.h / 2)) / scaleY) + offPx);
-        ctx.stroke();
       }
       ctx.setLineDash([]);
       ctx.restore();
@@ -15118,7 +15227,7 @@ function paintOverlay(ctx, options = {}){
     //   AA% = what fraction of the page this region covers
     //   LL  = mean luminance (0 = black, 100 = white)
     //   FF  = fill ratio (how solid vs. irregular the shape is)
-    if(featureGraphOn && maps?.structuralGraph?.visualRegionLayer?.regions?.length){
+    if(featureGraphOn && visualRegionsOn && maps?.structuralGraph?.visualRegionLayer?.regions?.length){
       const vrRegions = maps.structuralGraph.visualRegionLayer.regions;
       const projectPoint = (pt) => {
         if(!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
@@ -15603,15 +15712,19 @@ els.viewer.addEventListener('scroll', ()=>{
     updatePageIndicator();
   }
 });
-function drawOverlay(){
+function drawOverlay(options = {}){
   if(guardInteractive('overlay.draw')) return;
   syncOverlay();
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
-  paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });
+  paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true, skipGraphMapFetch: !!options.skipGraphMapFetch });
   // After paintOverlay draws the feature graph, paint learning annotations on top
   if(state.learningActive){
     paintLearningAnnotations(overlayCtx, scaleX, scaleY);
   }
+}
+
+function drawOverlayForVisibilityChange(){
+  drawOverlay({ skipGraphMapFetch: true });
 }
 
 function renderCropAuditPanel(){
@@ -18251,8 +18364,45 @@ els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); draw
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
-els.showFeatureGraphToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
-els.showTextGraphToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.showFeatureGraphToggle?.addEventListener('change', ()=>{
+  syncFeatureGraphLayerVisibilityUI();
+  markSnapshotsDirty();
+  drawOverlayForVisibilityChange();
+});
+els.showTextGraphToggle?.addEventListener('change', ()=>{ syncFeatureGraphLayerVisibilityUI(); markSnapshotsDirty(); drawOverlayForVisibilityChange(); });
+[
+  els.featureGraphLayerStructuralRegionsToggle,
+  els.featureGraphLayerStructuralEdgesToggle,
+  els.featureGraphLayerStructuralLabelsToggle,
+  els.featureGraphLayerVisualRegionsToggle,
+  els.featureGraphLayerTextNodesToggle,
+  els.featureGraphLayerTextEdgesToggle
+].forEach(toggle => {
+  toggle?.addEventListener('change', ()=>{
+    markSnapshotsDirty();
+    drawOverlayForVisibilityChange();
+  });
+});
+els.learningShowFeatureGraphToggle?.addEventListener('change', ()=>{
+  syncFeatureGraphLayerVisibilityUI();
+  drawOverlayForVisibilityChange();
+});
+els.learningShowTextGraphToggle?.addEventListener('change', ()=>{
+  syncFeatureGraphLayerVisibilityUI();
+  drawOverlayForVisibilityChange();
+});
+[
+  els.learningFeatureGraphLayerStructuralRegionsToggle,
+  els.learningFeatureGraphLayerStructuralEdgesToggle,
+  els.learningFeatureGraphLayerStructuralLabelsToggle,
+  els.learningFeatureGraphLayerVisualRegionsToggle,
+  els.learningFeatureGraphLayerTextNodesToggle,
+  els.learningFeatureGraphLayerTextEdgesToggle
+].forEach(toggle => {
+  toggle?.addEventListener('change', ()=>{
+    drawOverlayForVisibilityChange();
+  });
+});
 els.ocrTraceToggle?.addEventListener('change', ()=>{
   state.ocrTrace.enabled = !!els.ocrTraceToggle.checked;
   if(state.ocrTrace.enabled){
@@ -19667,6 +19817,7 @@ function learningBuildFeatureGraph(){
 
   // Clear debug map cache so paintOverlay re-builds from the new artifact
   state.wrokitVisionDebugMapCache = {};
+  state.wrokitVisionOverlayMapsByPage = {};
   drawOverlay();
 }
 
@@ -19758,11 +19909,15 @@ async function learningOpenFile(file){
 
   // Ensure the feature graph toggle is checked so paintOverlay renders it
   if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = true;
+  if(els.learningShowFeatureGraphToggle) els.learningShowFeatureGraphToggle.checked = true;
 
   // Show the graph controls
   if(els.wrokitVisionGraphControls) els.wrokitVisionGraphControls.style.display = 'flex';
   if(els.wrokitVisionFeatureGraphWrap) els.wrokitVisionFeatureGraphWrap.style.display = 'flex';
+  if(els.wrokitVisionFeatureGraphLayerPanel) els.wrokitVisionFeatureGraphLayerPanel.style.display = '';
   if(els.wrokitVisionTextGraphWrap) els.wrokitVisionTextGraphWrap.style.display = 'flex';
+  if(els.learningWrokitVisionGraphControls) els.learningWrokitVisionGraphControls.style.display = 'flex';
+  syncFeatureGraphLayerVisibilityUI();
 
   // Build feature graph for the loaded document
   learningBuildFeatureGraph();
@@ -19795,6 +19950,7 @@ function learningEndSession(){
   _learningFileName = '';
   if(els.learningSessionArea) els.learningSessionArea.style.display = 'none';
   if(els.learningStatus) els.learningStatus.textContent = '';
+  syncFeatureGraphLayerVisibilityUI();
   drawOverlay();
 }
 
