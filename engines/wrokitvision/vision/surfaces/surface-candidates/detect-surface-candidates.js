@@ -22,7 +22,7 @@ function detectSurfaceCandidates(regionNodes = [], { idFactory } = {}){
         supportingRegionIds: [region.id]
       });
     })
-    .filter(candidate => candidate.features.regionArea > 2000);
+    .filter(candidate => candidate.features.regionArea > 3044);
 }
 
 module.exports = {
