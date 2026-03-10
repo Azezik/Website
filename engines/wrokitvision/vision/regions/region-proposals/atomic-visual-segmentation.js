@@ -338,11 +338,10 @@ function mergeAtomicRegions({ labels, regions, boundaryEvidence, width, height }
     const arPenalty = arDivergence > 3.0 ? 1.3 : 1.0;
 
     // Color-dominant merge scoring with border-length and aspect-ratio gates.
-    // Raised threshold from 28→32 to compensate for the raised hardBarrier
-    // (which creates fewer but larger atomic regions, making color deltas
-    // between neighbors slightly larger on average).
+    // Learning-session recommendation (lsess-mmkv51e3-rmyd-1) indicates
+    // sustained over-segmentation, so this merge threshold is raised to 64.
     const mergeScore = ((edgeMean * 0.25) + (grayDelta * 0.15) + (colorDelta * 0.60)) * arPenalty;
-    if(mergeScore <= 32 * borderPenalty) union(rec.a, rec.b);
+    if(mergeScore <= 64 * borderPenalty) union(rec.a, rec.b);
   }
 
   const merged = new Map();
