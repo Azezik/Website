@@ -74,6 +74,15 @@ function buildSurfaceCandidateOverlay(surfaceCandidates = []){
   return { layer: 'surface-candidates', count: surfaceCandidates.length, items: surfaceCandidates };
 }
 
+function buildAtomicFragmentOverlay(atomicFragments = []){
+  return {
+    layer: 'atomic-fragments',
+    role: 'segmentation-seed-debug',
+    count: atomicFragments.length,
+    items: atomicFragments
+  };
+}
+
 module.exports = {
   buildRegionProposalOverlay,
   buildRegionGeometryOverlay,
@@ -82,5 +91,6 @@ module.exports = {
   buildTextLineOverlay,
   buildTextBlockOverlay,
   buildTextGraphOverlay,
-  buildSurfaceCandidateOverlay
+  buildSurfaceCandidateOverlay,
+  buildAtomicFragmentOverlay
 };

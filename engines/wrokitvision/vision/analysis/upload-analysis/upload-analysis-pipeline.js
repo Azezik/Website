@@ -19,7 +19,8 @@ const {
   buildTextLineOverlay,
   buildTextBlockOverlay,
   buildTextGraphOverlay,
-  buildSurfaceCandidateOverlay
+  buildSurfaceCandidateOverlay,
+  buildAtomicFragmentOverlay
 } = require('./debug-artifacts');
 
 function createIdFactory(seed = 'analysis'){
@@ -41,12 +42,14 @@ function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = 
   const textLines = groupTextLines(textTokens, { idFactory });
   const textBlocks = groupTextBlocks(textLines, textTokens, { idFactory });
 
-  const proposalRegions = detectRegionProposals({
+  const proposalResult = detectRegionProposals({
     textLines,
     viewport: resolvedViewport,
     idFactory,
     imageData
   });
+  const proposalRegions = proposalResult.regions || proposalResult;
+  const atomicFragments = proposalResult.atomicFragments || [];
   const regionNodes = computeRegionFeatures(proposalRegions, textTokens);
   const regionGraph = buildRegionGraph(regionNodes, { idFactory });
   const textGraph = buildTextGraph({ textTokens, textLines, textBlocks, idFactory });
@@ -60,7 +63,8 @@ function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = 
     textLinesOverlay: buildTextLineOverlay(textLines),
     textBlocksOverlay: buildTextBlockOverlay(textBlocks),
     textGraphOverlay: buildTextGraphOverlay(textGraph),
-    surfaceCandidatesOverlay: buildSurfaceCandidateOverlay(surfaceCandidates)
+    surfaceCandidatesOverlay: buildSurfaceCandidateOverlay(surfaceCandidates),
+    atomicFragmentsOverlay: buildAtomicFragmentOverlay(atomicFragments)
   };
 
   return createUploadedImageAnalysis({

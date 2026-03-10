@@ -102,24 +102,43 @@ function orientedRectFromContour(contour, fallbackBbox){
 
 function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
   if(!imageData?.gray || !imageData.width || !imageData.height || !viewport?.width || !viewport?.height){
-    return [];
+    return { proposals: [], atomicFragments: [] };
   }
 
   const width = Number(imageData.width) || 0;
   const height = Number(imageData.height) || 0;
   const minArea = Math.max(100, Math.floor((width * height) * 0.0012));
   const maxArea = Math.floor((width * height) * 0.75);
+  // Lower fragment threshold captures small atomic regions that survive merging.
+  // These are the "camo patches" — genuine color-connected primitives that trace
+  // local shape geometry with high fidelity.  Exposed for debug visualization.
+  const fragmentMinArea = Math.max(16, Math.floor((width * height) * 0.00015));
   const sx = viewport.width / width;
   const sy = viewport.height / height;
   const proposals = [];
+  const atomicFragments = [];
   const segmented = buildAtomicVisualSegments({ imageData });
-  if(!segmented) return proposals;
+  if(!segmented) return { proposals, atomicFragments };
 
   for(const merged of segmented.mergedRegions){
       const area = merged.area;
-      if(area < minArea || area > maxArea) continue;
       const bw = merged.x1 - merged.x0 + 1;
       const bh = merged.y1 - merged.y0 + 1;
+
+      // Capture small fragments as atomic primitives before filtering them out
+      // of the main proposals.  These fragments contain high-fidelity boundary
+      // information useful for shape detection and debugging.
+      if(area >= fragmentMinArea && area < minArea && bw >= 2 && bh >= 2){
+        atomicFragments.push({
+          id: idFactory('atomic_fragment'),
+          bbox: { x: merged.x0 * sx, y: merged.y0 * sy, w: bw * sx, h: bh * sy },
+          pixelArea: area,
+          atomicCount: merged.atomicCount
+        });
+        continue;
+      }
+
+      if(area < minArea || area > maxArea) continue;
       if(bw < 10 || bh < 10) continue;
 
       const bbox = {
@@ -178,7 +197,7 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
       }));
   }
 
-  return proposals;
+  return { proposals, atomicFragments };
 }
 
 function detectRegionProposals({ textLines = [], viewport, idFactory, imageData = null } = {}){
@@ -212,7 +231,8 @@ function detectRegionProposals({ textLines = [], viewport, idFactory, imageData 
     }));
   }
 
-  regions.push(...detectConnectedVisualProposals({ imageData, viewport, idFactory }));
+  const visualResult = detectConnectedVisualProposals({ imageData, viewport, idFactory });
+  regions.push(...visualResult.proposals);
 
   if(viewport?.width && viewport?.height){
     const pageBox = { x: 0, y: 0, w: viewport.width, h: viewport.height };
@@ -227,7 +247,10 @@ function detectRegionProposals({ textLines = [], viewport, idFactory, imageData 
     }));
   }
 
-  return regions;
+  return {
+    regions,
+    atomicFragments: visualResult.atomicFragments || []
+  };
 }
 
 module.exports = {
