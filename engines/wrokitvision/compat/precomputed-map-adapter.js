@@ -78,9 +78,16 @@
     const confidence = Number(region?.confidence) || 0;
     const textDensity = Number(region?.textDensity) || 0;
 
+    // Propagate surfaceTypeCandidate as the node type so the overlay renderer
+    // can color-code different region kinds (text_strip, text_cluster,
+    // visual_component, page_surface, section, text_dense_surface).
+    // Previously this was hardcoded to 'region_surface', causing every node to
+    // render as generic orange regardless of its actual classification.
+    const resolvedType = region?.surfaceTypeCandidate || 'region_surface';
+
     return {
       id: region?.id || null,
-      type: 'region_surface',
+      type: resolvedType,
       derivedPanelClass: region?.surfaceTypeCandidate === 'panel' ? 'panel' : null,
       surfaceTypeCandidate: region?.surfaceTypeCandidate || 'unknown',
       x,

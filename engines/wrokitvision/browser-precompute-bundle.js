@@ -685,6 +685,15 @@
       const hull = convexHull(resolvedContour);
       const rotatedRect = (contour && contour.length >= 3) ? orientedRectFromContour(contour, bbox) : rotatedRectFromBbox(bbox);
 
+      // Compute mean luminance for this merged region so the compat adapter
+      // can propagate it to the visual region layer overlay (lum: label).
+      let sumGray = 0;
+      for(const rid of merged.rootIds){
+        const atomicRegion = atomic.regions[rid];
+        if(atomicRegion) sumGray += atomicRegion.sumGray;
+      }
+      const meanLuminanceNorm = area > 0 ? clamp01((sumGray / area) / 255) : 0.5;
+
       proposals.push(createStructuralRegionNode({
         id: idFactory('region'),
         geometry: { bbox, contour: resolvedContour, hull: hull.length >= 3 ? hull : fallbackContour, rotatedRect },
@@ -696,7 +705,8 @@
           atomicRegionCount: merged.atomicCount,
           atomicSeedCount: segmented.atomicCount,
           boundaryFirst: true,
-          hasRealContour: !!(contour && contour.length >= 3)
+          hasRealContour: !!(contour && contour.length >= 3),
+          meanLuminanceNorm
         },
         surfaceTypeCandidate: 'visual_component',
         textDensity: 0
