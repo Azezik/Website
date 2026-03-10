@@ -56,9 +56,13 @@
 const LearningStore = require('./learning-store');
 const LearningSession = require('./learning-session');
 const LearningAnalyst = require('./learning-analyst');
+const LearningSessionLog = require('./learning-session-log');
+const LearningExport = require('./learning-export');
 
 module.exports = {
   LearningStore,
   LearningSession,
-  LearningAnalyst
+  LearningAnalyst,
+  LearningSessionLog,
+  LearningExport
 };

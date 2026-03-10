@@ -463,6 +463,17 @@
           </div>
         </div>
 
+        <!-- Session controls -->
+        <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <span class="sub">Session:</span>
+          <strong id="learning-session-file-count" style="font-variant-numeric:tabular-nums;">0 files</strong>
+          <span class="sub" id="learning-session-started" style="color:var(--muted);"></span>
+          <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="learning-export-session-btn" class="btn" type="button">Export Session</button>
+            <button id="learning-new-session-btn" class="btn ghost" type="button">New Session</button>
+          </span>
+        </div>
+
         <!-- Upload + toolbar -->
         <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
           <label class="btn primary">
@@ -470,7 +481,7 @@
             <input id="learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
           </label>
           <button id="learning-analyze-btn" class="btn" type="button">Analyze Annotations</button>
-          <button id="learning-export-btn" class="btn" type="button">Export Data</button>
+          <button id="learning-export-btn" class="btn" type="button">Export Raw Data</button>
           <label class="btn ghost">
             Import Data
             <input id="learning-import-input" type="file" accept="application/json" style="display:none" />

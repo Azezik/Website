@@ -308,6 +308,232 @@
     return { status: status, message: msgs[status], recordCount: records.length, totalAnnotations: totalAnns, recommendations: { regionDetection: rd } };
   }
 
+  /* ── Session Log ──────────────────────────────────────────────────────── */
+  /*  Accumulates learning activity across multiple files into a single
+   *  exportable session.  Persisted to localStorage.  */
+
+  var SESSION_STORAGE_KEY = 'wrokit.learning.sessionLog';
+
+  function _categorySummary(annotations){
+    var counts = {};
+    (annotations || []).forEach(function(a){ counts[a.category] = (counts[a.category] || 0) + 1; });
+    return counts;
+  }
+
+  function createSessionLog(storage){
+    var backend = storage || root.localStorage;
+
+    function _load(){
+      try { var raw = backend.getItem(SESSION_STORAGE_KEY); return raw ? JSON.parse(raw) : null; }
+      catch(e){ return null; }
+    }
+    function _save(s){ backend.setItem(SESSION_STORAGE_KEY, JSON.stringify(s)); }
+
+    function _createEmpty(){
+      return {
+        sessionId: generateId('lsess'),
+        startedAt: new Date().toISOString(),
+        fileEntries: [],
+        analysisSnapshots: [],
+        latestAggregate: null
+      };
+    }
+
+    function _ensure(){
+      var s = _load();
+      if(!s){ s = _createEmpty(); _save(s); }
+      return s;
+    }
+
+    return {
+      getSession: function(){ return _ensure(); },
+      hasSession: function(){ return !!_load(); },
+      fileCount: function(){ var s = _load(); return s ? s.fileEntries.length : 0; },
+
+      addFileEntry: function(record){
+        var s = _ensure();
+        s.fileEntries.push({
+          recordId: record.recordId,
+          imageName: record.imageName || record.imageId || 'unknown',
+          timestamp: record.timestamp || new Date().toISOString(),
+          viewport: record.viewport,
+          annotationCount: (record.annotations || []).length,
+          categoryBreakdown: _categorySummary(record.annotations),
+          autoRegionCount: (record.autoRegions || []).length,
+          comparisonStats: (record.metadata && record.metadata.comparison) || null
+        });
+        _save(s);
+      },
+
+      addAnalysisSnapshot: function(report){
+        var s = _ensure();
+        s.analysisSnapshots.push({
+          timestamp: new Date().toISOString(),
+          recordCountAtTime: report.recordCount || 0,
+          status: report.status,
+          message: report.message,
+          recommendations: report.recommendations || null
+        });
+        s.latestAggregate = report;
+        _save(s);
+      },
+
+      newSession: function(){ _save(_createEmpty()); },
+
+      getExportData: function(){ return _ensure(); }
+    };
+  }
+
+  /* ── Session Export Formatter ────────────────────────────────────────── */
+
+  var EXPORT_PROMPT =
+    '################################################################################\n' +
+    '  WROKIT VISION \u2014 LEARNING SESSION EXPORT\n' +
+    '################################################################################\n' +
+    '\n' +
+    'You are receiving a WrokitVision Learning Session export.\n' +
+    '\n' +
+    'This file contains findings derived from human annotations compared against\n' +
+    'WrokitVision\'s automatic detections across multiple documents. A human user\n' +
+    'drew bounding boxes on real documents to mark visual regions, text groups,\n' +
+    'labels, field values, shapes, and structural sections. The system compared\n' +
+    'those human-drawn boxes against what WrokitVision auto-detected, and produced\n' +
+    'parameter recommendations.\n' +
+    '\n' +
+    'YOUR TASK:\n' +
+    '1. Analyze the findings below \u2014 pay attention to segmentation bias,\n' +
+    '   IoU scores, precision/recall, threshold suggestions, and ranking weight\n' +
+    '   recommendations.\n' +
+    '2. Identify which WrokitVision parameters need adjustment based on the\n' +
+    '   evidence.\n' +
+    '3. Implement the appropriate parameter changes in the WrokitVision codebase.\n' +
+    '   Key areas to tune:\n' +
+    '   - Region detection thresholds (mergeThreshold, hardBarrier, minRegionArea)\n' +
+    '   - Surface classification thresholds (textDenseSurfaceThreshold,\n' +
+    '     panelTextDensityMax)\n' +
+    '   - Candidate ranking weights (the 7 scoring weights)\n' +
+    '   - Confidence thresholds (per-category acceptance cutoffs)\n' +
+    '4. Use the per-file summaries to understand document diversity \u2014 different\n' +
+    '   document types may reveal different weaknesses.\n' +
+    '5. Use the analysis evolution (snapshots over time) to see whether\n' +
+    '   recommendations stabilized or shifted as more data was added.\n' +
+    '\n' +
+    'The data below is the complete session evidence. Use it as tuning ground truth.\n' +
+    '\n' +
+    '################################################################################\n';
+
+  function _fmtLine(w){ var s = ''; for(var i = 0; i < (w||72); i++) s += '\u2500'; return s; }
+  function _fmtSection(title){ return '\n' + _fmtLine() + '\n  ' + title + '\n' + _fmtLine() + '\n'; }
+  function _fmtKv(label, value, indent){ return new Array((indent||2)+1).join(' ') + label + ': ' + value + '\n'; }
+  function _fmtJson(obj, indent){
+    var pad = new Array((indent||4)+1).join(' ');
+    return JSON.stringify(obj, null, 2).split('\n').map(function(l){ return pad + l; }).join('\n') + '\n';
+  }
+
+  function formatSessionExport(sessionData){
+    if(!sessionData) return EXPORT_PROMPT + '\n[No session data available]\n';
+
+    var out = EXPORT_PROMPT;
+
+    /* Session overview */
+    out += _fmtSection('SESSION OVERVIEW');
+    out += _fmtKv('Session ID', sessionData.sessionId || 'unknown');
+    out += _fmtKv('Started', sessionData.startedAt || 'unknown');
+    out += _fmtKv('Exported', new Date().toISOString());
+    out += _fmtKv('Files annotated', (sessionData.fileEntries || []).length);
+    var totalBoxes = (sessionData.fileEntries || []).reduce(function(s, f){ return s + (f.annotationCount || 0); }, 0);
+    out += _fmtKv('Total annotation boxes', totalBoxes);
+    var totalAuto = (sessionData.fileEntries || []).reduce(function(s, f){ return s + (f.autoRegionCount || 0); }, 0);
+    out += _fmtKv('Total auto-detected regions', totalAuto);
+    out += _fmtKv('Analysis snapshots', (sessionData.analysisSnapshots || []).length);
+
+    /* Per-file summaries */
+    if(sessionData.fileEntries && sessionData.fileEntries.length){
+      out += _fmtSection('PER-FILE ANNOTATION SUMMARIES');
+      for(var i = 0; i < sessionData.fileEntries.length; i++){
+        var f = sessionData.fileEntries[i];
+        out += '\n  File ' + (i+1) + ': ' + (f.imageName || 'unknown') + '\n';
+        out += _fmtKv('Timestamp', f.timestamp || 'unknown', 4);
+        out += _fmtKv('Viewport', f.viewport ? f.viewport.w + ' x ' + f.viewport.h : 'unknown', 4);
+        out += _fmtKv('Human annotations', f.annotationCount || 0, 4);
+        out += _fmtKv('Auto-detected regions', f.autoRegionCount || 0, 4);
+        if(f.categoryBreakdown){
+          out += '    Category breakdown:\n';
+          var cats = Object.keys(f.categoryBreakdown);
+          for(var c = 0; c < cats.length; c++){
+            out += '      ' + cats[c].replace(/_/g, ' ') + ': ' + f.categoryBreakdown[cats[c]] + '\n';
+          }
+        }
+        if(f.comparisonStats){
+          out += '    Comparison vs auto-detection:\n';
+          out += _fmtKv('Matched regions', f.comparisonStats.matchCount || 0, 6);
+          out += _fmtKv('Missed by system', f.comparisonStats.missedCount || 0, 6);
+          out += _fmtKv('Extra detections', f.comparisonStats.extraCount || 0, 6);
+          out += _fmtKv('Average IoU', (f.comparisonStats.averageIoU || 0).toFixed(3), 6);
+          out += _fmtKv('Precision', (f.comparisonStats.precision || 0).toFixed(3), 6);
+          out += _fmtKv('Recall', (f.comparisonStats.recall || 0).toFixed(3), 6);
+        }
+      }
+    }
+
+    /* Latest aggregate analysis */
+    if(sessionData.latestAggregate){
+      out += _fmtSection('LATEST AGGREGATE ANALYSIS');
+      out += _fmtKv('Status', sessionData.latestAggregate.status || 'unknown');
+      out += _fmtKv('Summary', sessionData.latestAggregate.message || '');
+      out += _fmtKv('Records analyzed', sessionData.latestAggregate.recordCount || 0);
+      out += _fmtKv('Total annotations', sessionData.latestAggregate.totalAnnotations || 0);
+      var recs = sessionData.latestAggregate.recommendations;
+      if(recs){
+        if(recs.regionDetection){
+          out += '\n  Region Detection:\n';
+          out += _fmtKv('Segmentation bias', recs.regionDetection.segmentationBias || 'unknown', 4);
+          out += _fmtKv('Suggested mergeThreshold', recs.regionDetection.suggestedMergeThreshold, 4);
+          out += _fmtKv('Suggested minRegionArea', recs.regionDetection.suggestedMinRegionArea, 4);
+          if(recs.regionDetection.evidence){ out += '    Evidence:\n'; out += _fmtJson(recs.regionDetection.evidence, 6); }
+        }
+        if(recs.surfaceClassification){
+          out += '\n  Surface Classification:\n';
+          out += _fmtKv('Suggested textDenseThreshold', recs.surfaceClassification.suggestedTextDenseThreshold, 4);
+          out += _fmtKv('Suggested panelTextDensityMax', recs.surfaceClassification.suggestedPanelTextDensityMax, 4);
+          if(recs.surfaceClassification.evidence){ out += '    Evidence:\n'; out += _fmtJson(recs.surfaceClassification.evidence, 6); }
+        }
+        if(recs.rankingWeights){
+          out += '\n  Candidate Ranking Weights:\n';
+          if(recs.rankingWeights.suggestedWeights){ out += '    Suggested weights:\n'; out += _fmtJson(recs.rankingWeights.suggestedWeights, 6); }
+          if(recs.rankingWeights.evidence){ out += '    Evidence:\n'; out += _fmtJson(recs.rankingWeights.evidence, 6); }
+        }
+        if(recs.confidenceThresholds){
+          out += '\n  Confidence Thresholds:\n';
+          out += _fmtKv('Suggested minConfidence', recs.confidenceThresholds.suggestedMinConfidence, 4);
+          if(recs.confidenceThresholds.evidence){ out += '    Evidence:\n'; out += _fmtJson(recs.confidenceThresholds.evidence, 6); }
+        }
+      }
+    }
+
+    /* Analysis evolution */
+    if(sessionData.analysisSnapshots && sessionData.analysisSnapshots.length > 1){
+      out += _fmtSection('ANALYSIS EVOLUTION (snapshots over time)');
+      out += '  Shows how recommendations changed as more files were annotated.\n\n';
+      for(var si = 0; si < sessionData.analysisSnapshots.length; si++){
+        var snap = sessionData.analysisSnapshots[si];
+        out += '  Snapshot ' + (si+1) + '  [' + (snap.timestamp || '') + ']\n';
+        out += _fmtKv('Records at time', snap.recordCountAtTime || 0, 4);
+        out += _fmtKv('Status', snap.status || 'unknown', 4);
+        if(snap.recommendations){ out += '    Recommendations:\n'; out += _fmtJson(snap.recommendations, 6); }
+        out += '\n';
+      }
+    }
+
+    /* Footer */
+    out += _fmtSection('END OF EXPORT');
+    out += '  Use the data above to implement WrokitVision parameter improvements.\n';
+    out += '  Focus on the latest aggregate analysis for current recommendations,\n';
+    out += '  and use the per-file summaries and analysis evolution for context.\n';
+
+    return out;
+  }
+
   /* ── Public API ────────────────────────────────────────────────────────── */
 
   root.WrokitVisionLearning = {
@@ -322,7 +548,10 @@
     createLearningStore: createLearningStore,
     createLearningSession: createLearningSession,
     analyzeAll: analyzeAll,
-    STORAGE_KEY: STORAGE_KEY
+    createSessionLog: createSessionLog,
+    formatSessionExport: formatSessionExport,
+    STORAGE_KEY: STORAGE_KEY,
+    SESSION_STORAGE_KEY: SESSION_STORAGE_KEY
   };
 
 })(typeof self !== 'undefined' ? self : this);
