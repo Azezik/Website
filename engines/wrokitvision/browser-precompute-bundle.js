@@ -643,6 +643,7 @@
     return {
       width, height,
       atomicCount: atomic.regions.length,
+      atomicRegions: atomic.regions,
       mergedRegions: mergeResult.mergedRegions,
       labels: atomic.labels,
       parent: mergeResult.parent,
@@ -689,7 +690,7 @@
       // can propagate it to the visual region layer overlay (lum: label).
       let sumGray = 0;
       for(const rid of merged.rootIds){
-        const atomicRegion = atomic.regions[rid];
+        const atomicRegion = segmented.atomicRegions[rid];
         if(atomicRegion) sumGray += atomicRegion.sumGray;
       }
       const meanLuminanceNorm = area > 0 ? clamp01((sumGray / area) / 255) : 0.5;
