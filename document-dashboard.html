@@ -74,6 +74,7 @@
         <button class="tablink" data-target="wizard-manager">Wizard Manager</button>
         <button class="tablink" data-target="preconfigured-wizards">Pre-configured Wizards</button>
         <button class="tablink" data-target="extracted-data">Extracted Data</button>
+        <button class="tablink" data-target="vision-learning">Learning</button>
         <button class="tablink" data-target="reports">Reports</button>
       </nav>
 
@@ -443,6 +444,91 @@
         </div>
       </section>
 
+      <section id="vision-learning" class="panel" style="display:none">
+        <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;">Wrokit Vision Learning</h3>
+          <span id="learning-status" class="sub" style="color:var(--muted);"></span>
+        </div>
+        <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
+          Upload images and draw boxes around meaningful regions, text groups, labels, and values.
+          The system learns from your annotations to improve its region detection and extraction.
+        </p>
+
+        <!-- Stats bar -->
+        <div id="learning-stats-bar" class="panel minimal" style="margin-bottom:12px;">
+          <div class="actions" style="gap:16px;flex-wrap:wrap;">
+            <span class="sub">Images annotated: <strong id="learning-stat-images">0</strong></span>
+            <span class="sub">Total boxes: <strong id="learning-stat-boxes">0</strong></span>
+            <span class="sub">Status: <strong id="learning-stat-status">No data yet</strong></span>
+          </div>
+        </div>
+
+        <!-- Upload + annotate area -->
+        <div id="learning-annotate-area">
+          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+            <label class="btn primary">
+              Upload Image to Annotate
+              <input id="learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
+            </label>
+            <button id="learning-analyze-btn" class="btn" type="button">Analyze Annotations</button>
+            <button id="learning-export-btn" class="btn" type="button">Export Data</button>
+            <label class="btn ghost">
+              Import Data
+              <input id="learning-import-input" type="file" accept="application/json" style="display:none" />
+            </label>
+          </div>
+
+          <!-- Active annotation session -->
+          <div id="learning-session-area" style="display:none;">
+            <div class="panel minimal" style="margin-bottom:12px;">
+              <div id="learning-prompt-bar" class="prompt" style="margin-bottom:8px;">
+                <span id="learning-prompt-step">Step 1/6</span>
+                <strong id="learning-prompt-text">Draw boxes around all distinct visual regions.</strong>
+              </div>
+              <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <span class="sub">Category:</span>
+                <select id="learning-category-select">
+                  <option value="visual_region">Visual Region</option>
+                  <option value="text_group">Text Group</option>
+                  <option value="label">Label / Heading</option>
+                  <option value="field_value">Field Value</option>
+                  <option value="shape">Shape / Non-Text</option>
+                  <option value="structural_section">Structural Section</option>
+                </select>
+                <input id="learning-box-label" placeholder="Optional label (e.g., company logo)" style="flex:1;min-width:150px;" />
+              </div>
+              <div id="learning-viewer-slot" class="viewer-slot" style="min-height:200px;"></div>
+              <div class="actions" style="gap:8px;flex-wrap:wrap;margin-top:8px;">
+                <button id="learning-undo-btn" class="btn" type="button">Undo Last Box</button>
+                <button id="learning-next-prompt-btn" class="btn" type="button">Next Prompt</button>
+                <button id="learning-prev-prompt-btn" class="btn ghost" type="button">Previous Prompt</button>
+                <span id="learning-box-count" class="sub" style="margin-left:auto;">0 boxes drawn</span>
+              </div>
+            </div>
+
+            <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+              <button id="learning-save-btn" class="btn primary" type="button">Save Annotations</button>
+              <button id="learning-cancel-btn" class="btn ghost" type="button">Cancel Session</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Analysis results -->
+        <details id="learning-results" class="panel minimal" style="margin-top:12px;">
+          <summary>Analysis &amp; Recommendations</summary>
+          <div id="learning-results-content" class="code" style="white-space:pre-wrap;margin-top:8px;"></div>
+        </details>
+
+        <!-- Annotation history -->
+        <details id="learning-history" class="panel minimal" style="margin-top:12px;">
+          <summary>Annotation History</summary>
+          <div id="learning-history-list" style="margin-top:8px;"></div>
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-top:8px;">
+            <button id="learning-clear-btn" class="btn ghost" type="button">Clear All Data</button>
+          </div>
+        </details>
+      </section>
+
       <section id="reports" class="panel" style="display:none">
         <p class="sub" style="margin:0;color:var(--muted);">Reports coming soon.</p>
       </section>
@@ -642,6 +728,7 @@
   <script src="engines/wrokitvision/browser-field-pipeline-bundle.js"></script>
   <script src="engines/core/wrokit-vision-engine.js"></script>
   <script src="engines/core/engine-registry.js"></script>
+  <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
