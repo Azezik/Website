@@ -636,6 +636,17 @@
           <input type="checkbox" id="show-feature-graph-toggle" />
           Show Feature Graph
         </label>
+        <details id="wrokitvision-feature-graph-layers" style="display:none; min-width:260px;">
+          <summary>Feature Graph Layers</summary>
+          <div style="display:grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap:6px 12px; margin-top:8px;">
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-structural-regions" checked /> Regions</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-structural-edges" checked /> Edges / Connections</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-structural-labels" checked /> Labels</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-visual-regions" checked /> Visual Regions</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-text-nodes" checked /> Text Nodes</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="feature-graph-layer-text-edges" checked /> Text Edges</label>
+          </div>
+        </details>
         <label id="wrokitvision-text-graph-wrap" style="display:none; align-items:center; gap:6px;">
           <input type="checkbox" id="show-text-graph-toggle" />
           Show Text Graph
