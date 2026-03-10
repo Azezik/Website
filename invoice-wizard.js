@@ -763,6 +763,8 @@ function isConfigMode(){ return state.mode === ModeEnum.CONFIG; }
 function isRunMode(){ return state.mode === ModeEnum.RUN; }
 
 function guardInteractive(label){
+  // Learning mode needs full overlay/canvas access regardless of wizard mode
+  if(state.learningActive) return false;
   const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
   if(blocked) return true;
   if(isRunMode()){
@@ -15598,7 +15600,7 @@ els.viewer.addEventListener('scroll', ()=>{
   }
 });
 function drawOverlay(){
-  if(guardInteractive('overlay.draw') && !state.learningActive) return;
+  if(guardInteractive('overlay.draw')) return;
   syncOverlay();
   const { scaleX = 1, scaleY = 1 } = getScaleFactors();
   paintOverlay(overlayCtx, { scaleX, scaleY, flags: getOverlayFlags(), includeSelections: true });
@@ -19682,15 +19684,17 @@ async function learningOpenFile(file){
   if(!file) return;
   _learningFileName = file.name || 'untitled';
 
+  // Activate learning mode state BEFORE openFile so guardInteractive allows
+  // overlay operations (syncOverlay, sizeOverlayTo, drawOverlay) even if the
+  // system was previously in RUN mode.
+  state.learningActive = true;
+
   // Force WrokitVision engine
   const prevEngineType = state.selectedEngineType;
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
 
   // Open through the real pipeline (renders into #viewer, extracts tokens, etc.)
   await openFile(file);
-
-  // Activate learning mode state
-  state.learningActive = true;
 
   // Ensure the feature graph toggle is checked so paintOverlay renders it
   if(els.showFeatureGraphToggle) els.showFeatureGraphToggle.checked = true;
