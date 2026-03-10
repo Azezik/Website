@@ -90,8 +90,33 @@
 
   function snapshotRegion(region, viewport){
     var bbox = (region && region.geometry && region.geometry.bbox) || (region && region.bbox) || {};
-    var x = Number(bbox.x) || 0, y = Number(bbox.y) || 0;
-    var w = Math.max(0, Number(bbox.w) || 0), h = Math.max(0, Number(bbox.h) || 0);
+    var vpW = Math.max(1, Number(viewport && viewport.w) || 1);
+    var vpH = Math.max(1, Number(viewport && viewport.h) || 1);
+
+    var x = Number(bbox.x), y = Number(bbox.y);
+    var w = Number(bbox.w), h = Number(bbox.h);
+
+    if(!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)){
+      x = Number(region && region.x);
+      y = Number(region && region.y);
+      w = Number(region && region.w);
+      h = Number(region && region.h);
+    }
+
+    if((!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) &&
+       Number.isFinite(region && region.nx) && Number.isFinite(region && region.ny) &&
+       Number.isFinite(region && region.nw) && Number.isFinite(region && region.nh)){
+      x = Number(region.nx) * vpW;
+      y = Number(region.ny) * vpH;
+      w = Number(region.nw) * vpW;
+      h = Number(region.nh) * vpH;
+    }
+
+    x = Number.isFinite(x) ? x : 0;
+    y = Number.isFinite(y) ? y : 0;
+    w = Math.max(0, Number.isFinite(w) ? w : 0);
+    h = Math.max(0, Number.isFinite(h) ? h : 0);
+
     return {
       regionId: (region && region.id) || null,
       bbox: { x: x, y: y, w: w, h: h },
@@ -228,7 +253,8 @@
     var tokens = opts.tokens || [];
     var annotations = [];
     var finalized = false;
-    var autoRegions = ((opts.analysisResult && opts.analysisResult.regionNodes) || []).map(function(r){ return snapshotRegion(r, vp); });
+    var detectedRegions = Array.isArray(opts.analysisResult && opts.analysisResult.autoRegions) ? (opts.analysisResult && opts.analysisResult.autoRegions) : ((opts.analysisResult && opts.analysisResult.regionNodes) || []);
+    var autoRegions = detectedRegions.map(function(r){ return snapshotRegion(r, vp); });
 
     return {
       getPrompts: function(){ return LEARNING_PROMPTS; },
@@ -430,6 +456,25 @@
     return JSON.stringify(obj, null, 2).split('\n').map(function(l){ return pad + l; }).join('\n') + '\n';
   }
 
+  function _computeEvidenceStrength(latestAggregate){
+    if(!latestAggregate) return { level: 'none', note: 'No aggregate analysis available.' };
+    var recordCount = Number(latestAggregate.recordCount) || 0;
+    var totalAnnotations = Number(latestAggregate.totalAnnotations) || 0;
+    var autoAvg = Number(latestAggregate.recommendations && latestAggregate.recommendations.regionDetection && latestAggregate.recommendations.regionDetection.evidence && latestAggregate.recommendations.regionDetection.evidence.avgAutoRegionCount) || 0;
+
+    if(recordCount === 0) return { level: 'none', note: 'No records were analyzed in this session.' };
+    if(autoAvg <= 0){
+      return { level: 'weak', note: 'Auto-detected region count is zero in analyzed records; recommendations are low-confidence until detection capture is verified.' };
+    }
+    if(recordCount < 5 || totalAnnotations < 30){
+      return { level: 'weak', note: 'Small evidence sample. Treat recommendations as directional and gather more annotated files.' };
+    }
+    if(recordCount < 15 || totalAnnotations < 120){
+      return { level: 'moderate', note: 'Evidence is usable but still limited. Validate changes against additional files.' };
+    }
+    return { level: 'strong', note: 'Recommendation evidence is supported by a broad session sample.' };
+  }
+
   function formatSessionExport(sessionData){
     if(!sessionData) return EXPORT_PROMPT + '\n[No session data available]\n';
 
@@ -483,6 +528,9 @@
       out += _fmtKv('Summary', sessionData.latestAggregate.message || '');
       out += _fmtKv('Records analyzed', sessionData.latestAggregate.recordCount || 0);
       out += _fmtKv('Total annotations', sessionData.latestAggregate.totalAnnotations || 0);
+      var evidenceStrength = _computeEvidenceStrength(sessionData.latestAggregate);
+      out += _fmtKv('Recommendation evidence strength', evidenceStrength.level);
+      out += _fmtKv('Evidence note', evidenceStrength.note);
       var recs = sessionData.latestAggregate.recommendations;
       if(recs){
         if(recs.regionDetection){

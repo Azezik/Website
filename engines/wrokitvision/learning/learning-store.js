@@ -97,10 +97,34 @@ function normalizeBox(rawBox, viewport){
 
 function snapshotRegion(region, viewport){
   const bbox = region?.geometry?.bbox || region?.bbox || {};
-  const x = Number(bbox.x) || 0;
-  const y = Number(bbox.y) || 0;
-  const w = Math.max(0, Number(bbox.w) || 0);
-  const h = Math.max(0, Number(bbox.h) || 0);
+  const vpW = Math.max(1, Number(viewport?.w) || 1);
+  const vpH = Math.max(1, Number(viewport?.h) || 1);
+
+  let x = Number(bbox.x);
+  let y = Number(bbox.y);
+  let w = Number(bbox.w);
+  let h = Number(bbox.h);
+
+  if(!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)){
+    x = Number(region?.x);
+    y = Number(region?.y);
+    w = Number(region?.w);
+    h = Number(region?.h);
+  }
+
+  if((!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h))
+      && Number.isFinite(region?.nx) && Number.isFinite(region?.ny)
+      && Number.isFinite(region?.nw) && Number.isFinite(region?.nh)){
+    x = Number(region.nx) * vpW;
+    y = Number(region.ny) * vpH;
+    w = Number(region.nw) * vpW;
+    h = Number(region.nh) * vpH;
+  }
+
+  x = Number.isFinite(x) ? x : 0;
+  y = Number.isFinite(y) ? y : 0;
+  w = Math.max(0, Number.isFinite(w) ? w : 0);
+  h = Math.max(0, Number.isFinite(h) ? h : 0);
   return {
     regionId:    region?.id || null,
     bbox:        { x, y, w, h },

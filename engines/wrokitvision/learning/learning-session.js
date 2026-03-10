@@ -206,7 +206,10 @@ function createLearningSession({ viewport, tokens, analysisResult } = {}){
   let finalized = false;
 
   // Snapshot auto-detected regions at session start
-  const autoRegions = (analysisResult?.regionNodes || []).map(r => snapshotRegion(r, vp));
+  const detectedRegions = Array.isArray(analysisResult?.autoRegions)
+    ? analysisResult.autoRegions
+    : (analysisResult?.regionNodes || []);
+  const autoRegions = detectedRegions.map(r => snapshotRegion(r, vp));
 
   return {
     /** The prompts to present to the user, in order. */

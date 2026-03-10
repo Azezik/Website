@@ -74,6 +74,39 @@ function _jsonBlock(obj, indent){
   return lines.map(function(l){ return pad + l; }).join('\n') + '\n';
 }
 
+function _computeEvidenceStrength(latestAggregate){
+  if(!latestAggregate) return { level: 'none', note: 'No aggregate analysis available.' };
+  const recordCount = Number(latestAggregate.recordCount) || 0;
+  const totalAnnotations = Number(latestAggregate.totalAnnotations) || 0;
+  const autoAvg = Number(latestAggregate.recommendations?.regionDetection?.evidence?.avgAutoRegionCount) || 0;
+
+  if(recordCount === 0){
+    return { level: 'none', note: 'No records were analyzed in this session.' };
+  }
+  if(autoAvg <= 0){
+    return {
+      level: 'weak',
+      note: 'Auto-detected region count is zero in analyzed records; recommendations are low-confidence until detection capture is verified.'
+    };
+  }
+  if(recordCount < 5 || totalAnnotations < 30){
+    return {
+      level: 'weak',
+      note: 'Small evidence sample. Treat recommendations as directional and gather more annotated files.'
+    };
+  }
+  if(recordCount < 15 || totalAnnotations < 120){
+    return {
+      level: 'moderate',
+      note: 'Evidence is usable but still limited. Validate changes against additional files.'
+    };
+  }
+  return {
+    level: 'strong',
+    note: 'Recommendation evidence is supported by a broad session sample.'
+  };
+}
+
 /* ── Main export formatter ────────────────────────────────────────────────── */
 
 function formatSessionExport(sessionData){
@@ -138,6 +171,9 @@ function formatSessionExport(sessionData){
     out += _kv('Summary', sessionData.latestAggregate.message || '');
     out += _kv('Records analyzed', sessionData.latestAggregate.recordCount || 0);
     out += _kv('Total annotations', sessionData.latestAggregate.totalAnnotations || 0);
+    var evidenceStrength = _computeEvidenceStrength(sessionData.latestAggregate);
+    out += _kv('Recommendation evidence strength', evidenceStrength.level);
+    out += _kv('Evidence note', evidenceStrength.note);
 
     var recs = sessionData.latestAggregate.recommendations;
     if(recs){
