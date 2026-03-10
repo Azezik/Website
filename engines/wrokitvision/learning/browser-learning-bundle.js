@@ -537,7 +537,6 @@
           out += '\n  Region Detection:\n';
           out += _fmtKv('Segmentation bias', recs.regionDetection.segmentationBias || 'unknown', 4);
           out += _fmtKv('Suggested mergeThreshold', recs.regionDetection.suggestedMergeThreshold, 4);
-          out += _fmtKv('Suggested hardBarrier', recs.regionDetection.suggestedHardBarrier, 4);
           out += _fmtKv('Suggested minRegionArea', recs.regionDetection.suggestedMinRegionArea, 4);
           if(recs.regionDetection.evidence){ out += '    Evidence:\n'; out += _fmtJson(recs.regionDetection.evidence, 6); }
         }
