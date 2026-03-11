@@ -14982,10 +14982,18 @@ function paintOverlay(ctx, options = {}){
   else { drawBoxes(); drawLayout(); }
 
   if((featureGraphOn || textGraphOn) && (!pageFilter || targetPage === pageFilter)){
-    const maps = skipGraphMapFetch
-      ? (state.wrokitVisionOverlayMapsByPage?.[targetPage] || null)
+    // When skipGraphMapFetch is set (layer-visibility toggles), prefer the
+    // already-computed overlay map so we avoid rebuilding on every checkbox
+    // click.  Fall back to a fresh getWrokitVisionDebugMaps call if the cache
+    // is empty — this is the case when the main feature-graph toggle is turned
+    // on for the first time in a session, and the silent || null that was here
+    // previously caused the graph to render nothing in that scenario.
+    // Always write the result back to the overlay cache so the next
+    // skipGraphMapFetch call can reuse it without refetching.
+    const maps = (skipGraphMapFetch && state.wrokitVisionOverlayMapsByPage?.[targetPage])
+      ? state.wrokitVisionOverlayMapsByPage[targetPage]
       : getWrokitVisionDebugMaps(targetPage);
-    if(!skipGraphMapFetch && maps){
+    if(maps){
       state.wrokitVisionOverlayMapsByPage[targetPage] = maps;
     }
     const offPx = offsetForPage(targetPage);
@@ -18367,9 +18375,12 @@ els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); d
 els.showFeatureGraphToggle?.addEventListener('change', ()=>{
   syncFeatureGraphLayerVisibilityUI();
   markSnapshotsDirty();
-  drawOverlayForVisibilityChange();
+  // Full fetch required: turning the graph on/off must build (or discard) the
+  // underlying maps.  drawOverlayForVisibilityChange skips the fetch and would
+  // silently render nothing if the overlay cache is empty.
+  drawOverlay();
 });
-els.showTextGraphToggle?.addEventListener('change', ()=>{ syncFeatureGraphLayerVisibilityUI(); markSnapshotsDirty(); drawOverlayForVisibilityChange(); });
+els.showTextGraphToggle?.addEventListener('change', ()=>{ syncFeatureGraphLayerVisibilityUI(); markSnapshotsDirty(); drawOverlay(); });
 [
   els.featureGraphLayerStructuralRegionsToggle,
   els.featureGraphLayerStructuralEdgesToggle,
@@ -18385,11 +18396,11 @@ els.showTextGraphToggle?.addEventListener('change', ()=>{ syncFeatureGraphLayerV
 });
 els.learningShowFeatureGraphToggle?.addEventListener('change', ()=>{
   syncFeatureGraphLayerVisibilityUI();
-  drawOverlayForVisibilityChange();
+  drawOverlay();
 });
 els.learningShowTextGraphToggle?.addEventListener('change', ()=>{
   syncFeatureGraphLayerVisibilityUI();
-  drawOverlayForVisibilityChange();
+  drawOverlay();
 });
 [
   els.learningFeatureGraphLayerStructuralRegionsToggle,
