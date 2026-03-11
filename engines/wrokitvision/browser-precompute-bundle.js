@@ -670,6 +670,7 @@
       const bw = merged.x1 - merged.x0 + 1;
       const bh = merged.y1 - merged.y0 + 1;
       if(bw < 10 || bh < 10) continue;
+      if(bw / Math.max(1, bh) > 4.0) continue;
       const bbox = { x: merged.x0 * sx, y: merged.y0 * sy, w: bw * sx, h: bh * sy };
 
       // Extract real contour from the label map when available
@@ -796,14 +797,22 @@
   }
   function buildRegionGraph(regionNodes, { idFactory } = {}){
     const edges = [];
+    const proximityDegree = new Map();
+    const MAX_PROXIMITY_DEGREE = 5;
     const nodes = Array.isArray(regionNodes) ? regionNodes : [];
     for(let i = 0; i < nodes.length; i++){
       for(let j = i + 1; j < nodes.length; j++){
         const a = nodes[i]; const b = nodes[j];
         const boxA = ensureBBox(a.geometry?.bbox || {}); const boxB = ensureBBox(b.geometry?.bbox || {});
-        const proximity = Math.max(0, 1 - (boxDistance(boxA, boxB) / 800));
+        const proximity = Math.max(0, 1 - (boxDistance(boxA, boxB) / 400));
         if(proximity > 0.1){
-          edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'spatial_proximity', weight: proximity, rationale: createScoreBreakdown({ total: proximity, components: [{ key: 'distance', value: proximity }] }), provenance: { stage: 'region-graph' } }));
+          const degA = proximityDegree.get(a.id) || 0;
+          const degB = proximityDegree.get(b.id) || 0;
+          if(degA < MAX_PROXIMITY_DEGREE && degB < MAX_PROXIMITY_DEGREE){
+            edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'spatial_proximity', weight: proximity, rationale: createScoreBreakdown({ total: proximity, components: [{ key: 'distance', value: proximity }] }), provenance: { stage: 'region-graph' } }));
+            proximityDegree.set(a.id, degA + 1);
+            proximityDegree.set(b.id, degB + 1);
+          }
         }
         if(contains(boxA, boxB) || contains(boxB, boxA)){
           edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: contains(boxA, boxB) ? a.id : b.id, targetNodeId: contains(boxA, boxB) ? b.id : a.id, edgeType: 'contains', weight: 0.95, rationale: createScoreBreakdown({ total: 0.95, notes: ['region containment relationship'] }), provenance: { stage: 'region-graph' } }));

@@ -148,6 +148,17 @@ function detectConnectedVisualProposals({ imageData, viewport, idFactory }){
       if(area < minArea || area > maxArea) continue;
       if(bw < 10 || bh < 10) continue;
 
+      // Reject proposals whose bounding box is extreme horizontally.
+      // Sky, road, and other featureless horizontal backgrounds routinely
+      // produce merged regions that are 5–10× wider than tall.  These add
+      // noise to the structural graph (as large hub nodes) and to the
+      // visual-region layer (as wide flat boxes), while not corresponding
+      // to any meaningful object boundary.  A 4:1 limit removes these
+      // bands while preserving buildings, signs, panels, and other objects
+      // that are naturally taller or roughly square.
+      // Text-derived proposals are built separately and are unaffected.
+      if(bw / Math.max(1, bh) > 4.0) continue;
+
       const bbox = {
         x: merged.x0 * sx,
         y: merged.y0 * sy,
