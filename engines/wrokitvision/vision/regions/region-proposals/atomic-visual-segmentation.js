@@ -148,14 +148,10 @@ function buildAtomicRegions({ gray, rgb, width, height }){
   }
 
   // Hard barrier controls the maximum boundary evidence a region can grow across.
-  // Previously 206 (~81%), then 155 (~61%), then 165 (~65%).  Raised to 170 (~67%)
-  // based on Session A annotation evidence (6 files, avgAutoRegionCount 43.3 vs
-  // avgHumanRegionCount 11): persistent over-segmentation indicates regions are
-  // still atomising at too-low a boundary evidence level.  The conservative +5
-  // increase lets growth absorb low-contrast internal texture (subtle gradients,
-  // lightly anti-aliased strokes) while still halting at genuine structural edges.
-  // Session B (contract, IoU 0.77) remains unaffected at this magnitude.
-  const hardBarrier = 170;
+  // Previously 206 (~81%), then 155 (~61%).  Raised to 165 (~65%) so that subtle
+  // intra-glyph boundaries (e.g. anti-aliased strokes) are crossed during growth,
+  // reducing orphan fragments inside text while still stopping at real edges.
+  const hardBarrier = 165;
   for(let score = 0; score < buckets.length; score++){
     const queue = buckets[score];
     for(let qi = 0; qi < queue.length; qi++){
