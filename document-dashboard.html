@@ -370,6 +370,7 @@
             <button id="view-snapshot-btn" class="btn" type="button">View Snapshot</button>
             <button id="backup-cloud-btn" class="btn" type="button">Backup to Cloud</button>
             <button id="restore-cloud-btn" class="btn" type="button">Restore from Cloud</button>
+            <button id="enable-firestore-btn" class="btn" type="button" title="Enable incremental cloud persistence (eliminates localStorage limits)">Enable Cloud Sync</button>
             <span id="snapshotStatus" class="sub"></span>
           </div>
         </div>
@@ -772,6 +773,14 @@
   <script src="engines/core/wrokit-vision-engine.js"></script>
   <script src="engines/core/engine-registry.js"></script>
   <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
+  <!-- Data layer modules (loaded before invoice-wizard.js) -->
+  <script src="js/data/telemetry.js"></script>
+  <script src="js/data/write-queue.js"></script>
+  <script src="js/data/local-cache.js"></script>
+  <script src="js/data/firestore-repo.js"></script>
+  <script src="js/data/wizard-data-service.js"></script>
+  <script src="js/data/migration.js"></script>
+  <script src="js/data/index.js"></script>
   <script src="invoice-wizard.js"></script>
 </body>
 </html>
