@@ -4388,6 +4388,34 @@ async function resolveProfileForReadPath({ username, docType, wizardId, geometry
   return { profile: null, geometryId: requestedGeometryId, source: 'none' };
 }
 
+async function resolveGeometryIdsForReadPath({ username, docType, wizardId, requestedGeometryId = null, context = 'generic' } = {}){
+  const localGeometryIds = collectGeometryIdsForWizard(username, docType, wizardId);
+  const fromCloud = [];
+  let fallbackReason = 'cloud-disabled';
+  if(isCloudSyncPrimaryEnabled()){
+    const cloudPayload = await loadCloudProfileSnapshot();
+    const adapted = adaptCloudPayloadToProfile(cloudPayload);
+    if(adapted && adapted.wizardId === wizardId && (!adapted.docType || adapted.docType === docType) && adapted.geometryId){
+      fromCloud.push(adapted.geometryId);
+      fallbackReason = 'none';
+    } else {
+      fallbackReason = cloudPayload ? 'cloud-profile-mismatch-or-missing-geometry' : 'cloud-profile-unavailable';
+    }
+  }
+  const geometryIds = Array.from(new Set([...(localGeometryIds || []), ...fromCloud].filter(Boolean)));
+  const source = fromCloud.length ? 'cloud+local' : 'local';
+  console.info('[geometry-resolver]', {
+    context,
+    wizardId,
+    docType,
+    requestedGeometryId: requestedGeometryId || DEFAULT_GEOMETRY_ID,
+    resolvedGeometryIds: geometryIds,
+    source,
+    fallbackReason
+  });
+  return { geometryIds, source, fallbackReason };
+}
+
 // Raw and compiled stores
 const rawFieldMap = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
 const rawStoreContract = (!isSkinV2 && window.LegacyRawStoreAdapter?.createLegacyRawStore)
@@ -8048,16 +8076,12 @@ function confirmWizardExport(){
 async function getWizardConfigurationStatus(template){
   const docType = template?.documentTypeId || state.docType;
   const wizardId = template?.id || DEFAULT_WIZARD_ID;
-  const geometryIds = collectGeometryIdsForWizard(state.username, docType, wizardId);
-  let cloudGeometryId = null;
-  if(isCloudSyncPrimaryEnabled()){
-    const cloudPayload = await loadCloudProfileSnapshot();
-    const adapted = adaptCloudPayloadToProfile(cloudPayload);
-    if(adapted && adapted.wizardId === wizardId && (!adapted.docType || adapted.docType === docType)){
-      cloudGeometryId = adapted.geometryId || DEFAULT_GEOMETRY_ID;
-    }
-  }
-  const candidateGeometryIds = Array.from(new Set([...(geometryIds || []), cloudGeometryId].filter(Boolean)));
+  const { geometryIds: candidateGeometryIds } = await resolveGeometryIdsForReadPath({
+    username: state.username,
+    docType,
+    wizardId,
+    context: 'wizard-manager'
+  });
   const hasConfiguredProfile = [];
   for(const gid of candidateGeometryIds){
     const resolved = await resolveProfileForReadPath({
@@ -19385,7 +19409,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     }
     state.activeGeometryId = geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID;
     let profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
-    const geometryIds = collectGeometryIdsForWizard(state.username, state.docType, wizardId);
+    const { geometryIds, source: geometryIdSource, fallbackReason: geometryFallbackReason } = await resolveGeometryIdsForReadPath({
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      requestedGeometryId: geometryId,
+      context: 'run-mode'
+    });
     const resolvedRead = await resolveProfileForReadPath({
       username: state.username,
       docType: state.docType,
@@ -19403,6 +19433,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       geometryIds,
       requestedGeometryId: runContext.geometryId || profile?.geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID,
       resolvedGeometryId: geometryId,
+      geometryIdSource,
+      geometryFallbackReason,
       profileKey: profileStorageKey,
       source: resolvedRead.source
     });
