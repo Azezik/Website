@@ -3902,10 +3902,40 @@ function sortObj(o){
   return o;
 }
 
+function u8ToB64(u8){
+  if(!(u8 instanceof Uint8Array) || !u8.length) return '';
+  let binary = '';
+  const CHUNK = 0x8000;
+  for(let i=0; i<u8.length; i += CHUNK){
+    const part = u8.subarray(i, i + CHUNK);
+    binary += String.fromCharCode(...part);
+  }
+  return btoa(binary);
+}
+
 function jsonReplacer(key, value){
   if(value instanceof Uint8Array){
     const size = this.patchSize || Math.sqrt(value.length);
     return {type:'rle', data:rleEncode(value), width:size, height:size};
+  }
+  if(ArrayBuffer.isView(value)){
+    const uint = value instanceof Uint8Array
+      ? value
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    return {
+      type: 'typed-array',
+      ctor: value.constructor?.name || 'Uint8Array',
+      length: value.length,
+      data: u8ToB64(uint)
+    };
+  }
+  if(value instanceof ArrayBuffer){
+    const bytes = new Uint8Array(value);
+    return {
+      type: 'array-buffer',
+      byteLength: value.byteLength,
+      data: u8ToB64(bytes)
+    };
   }
   return value;
 }
@@ -3918,12 +3948,28 @@ function jsonReviver(key, value){
     if(value.type === 'b64' && typeof value.data === 'string'){
       return b64ToU8(value.data);
     }
+    if(value.type === 'typed-array' && typeof value.data === 'string'){
+      const bytes = b64ToU8(value.data);
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      const ctor = globalThis?.[value.ctor];
+      if(typeof ctor === 'function'){
+        try{
+          if(ctor.BYTES_PER_ELEMENT && Number.isFinite(value.length)) return new ctor(buffer, 0, value.length);
+          return new ctor(buffer);
+        } catch(err){ /* fall back to Uint8Array below */ }
+      }
+      return bytes;
+    }
+    if(value.type === 'array-buffer' && typeof value.data === 'string'){
+      const bytes = b64ToU8(value.data);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
   }
   return value;
 }
 
 function serializeProfile(p){
-  return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer, 2);
+  return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer);
 }
 
 function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID, geometryId = null){
@@ -4100,6 +4146,37 @@ function normalizeRowsPayload(payload){
 }
 
 let saveTimer=null;
+
+function isQuotaExceededError(err){
+  if(!err) return false;
+  return err?.name === 'QuotaExceededError' || err?.code === 22 || /quota/i.test(String(err?.message || ''));
+}
+
+function reclaimLocalStorageForProfileSave({ username, docType, wizardId } = {}){
+  const protectedProfilePrefix = LS.profileKey(username, docType, wizardId, '').replace(/\.$/, '');
+  const removablePrefixes = [
+    'wiz.patternBundle.',
+    'visualrun_',
+    'ocrmagic.segmentStore',
+    'ocrmagic.segmentStore.chunks',
+    'findtext.learning.'
+  ];
+  const removed = [];
+  for(let i = localStorage.length - 1; i >= 0; i--){
+    const key = localStorage.key(i);
+    if(!key) continue;
+    if(protectedProfilePrefix && key.startsWith(protectedProfilePrefix)) continue;
+    if(removablePrefixes.some(prefix => key === prefix || key.startsWith(prefix))){
+      removed.push(key);
+      localStorage.removeItem(key);
+    }
+  }
+  if(removed.length){
+    console.warn('[storage][reclaim]', { removedCount: removed.length, removed });
+  }
+  return removed.length;
+}
+
 function saveProfile(u, d, p, wizardId = currentWizardId(), geometryId = currentGeometryId()){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
@@ -4138,9 +4215,20 @@ function saveProfile(u, d, p, wizardId = currentWizardId(), geometryId = current
       upsertGeometryMeta(u, d, wizardId, geometryMeta);
       LS.setProfile(u, d, p, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId);
     } catch(err){
-      console.error('saveProfile', err);
-      alert('Failed to save profile');
-      return;
+      if(isQuotaExceededError(err)){
+        try{
+          reclaimLocalStorageForProfileSave({ username: u, docType: d, wizardId });
+          LS.setProfile(u, d, p, wizardId, resolvedGeometryId === DEFAULT_GEOMETRY_ID ? null : resolvedGeometryId);
+        } catch(retryErr){
+          console.error('saveProfile', retryErr);
+          alert('Failed to save profile: local storage is full. Please remove old wizard caches and retry.');
+          return;
+        }
+      } else {
+        console.error('saveProfile', err);
+        alert('Failed to save profile');
+        return;
+      }
     }
     try {
       const hasGeom = Array.isArray(p?.fields) && p.fields.some(hasFieldGeometry);
