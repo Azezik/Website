@@ -468,6 +468,41 @@
       }
     }
 
+    // ---- Learning Data ----
+
+    async loadLearningData(){
+      if(!this._uid) return null;
+      const cachePath = 'learning';
+
+      if(this.isFirestoreEnabled && this._repo?.getLearningData){
+        try {
+          const data = await this._repo.getLearningData(this._uid);
+          if(data){
+            this._cacheWrite(cachePath, data);
+            return data;
+          }
+        } catch(err){
+          this._emitError(err, { action: 'loadLearningData' });
+        }
+      }
+      return this._cacheRead(cachePath);
+    }
+
+    async saveLearningData(learningData){
+      if(!this._uid) return;
+      const cachePath = 'learning';
+      this._cacheWrite(cachePath, learningData);
+
+      if(this.isFirestoreEnabled && this._repo?.setLearningData){
+        // Learning data can be large — write directly
+        try {
+          await this._repo.setLearningData(this._uid, learningData);
+        } catch(err){
+          this._emitError(err, { action: 'saveLearningData' });
+        }
+      }
+    }
+
     // ---- Hydrate full wizard (load all related data) ----
 
     async hydrateWizard(wizardId, layoutId){

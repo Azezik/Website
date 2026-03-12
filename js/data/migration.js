@@ -108,7 +108,8 @@
         models: [],
         ocrmagic: {},
         wizards: {},
-        settings: {}
+        settings: {},
+        learning: {}
       };
 
       // Session
@@ -142,6 +143,28 @@
       try {
         result.ocrmagic.segmentStore = localStorage.getItem('ocrmagic.segmentStore') || null;
         result.ocrmagic.segmentStoreChunks = localStorage.getItem('ocrmagic.segmentStore.chunks') || null;
+      } catch{}
+
+      // Vision learning annotations
+      try {
+        const annotationsRaw = localStorage.getItem('wrokit.learning.annotations');
+        if(annotationsRaw) result.learning.annotations = JSON.parse(annotationsRaw);
+      } catch{}
+
+      // Vision learning session log
+      try {
+        const sessionLogRaw = localStorage.getItem('wrokit.learning.sessionLog');
+        if(sessionLogRaw) result.learning.sessionLog = JSON.parse(sessionLogRaw);
+      } catch{}
+
+      // FindText learning log and weights
+      try {
+        const findtextLogRaw = localStorage.getItem('findtext_learning_log_v1');
+        if(findtextLogRaw) result.learning.findtextLog = JSON.parse(findtextLogRaw);
+      } catch{}
+      try {
+        const findtextWeightsRaw = localStorage.getItem('findtext_ranker_weights_v1');
+        if(findtextWeightsRaw) result.learning.findtextWeights = JSON.parse(findtextWeightsRaw);
       } catch{}
 
       // Scan for wizard profiles, masterDb, rows, patterns, geometries
@@ -363,6 +386,11 @@
       // Write OCR segments
       if(data.ocrmagic?.segmentStore){
         await this._repo.setOcrSegments(uid, data.ocrmagic.segmentStore, data.ocrmagic.segmentStoreChunks);
+      }
+
+      // Write learning data (vision annotations, session log, findtext)
+      if(data.learning && this._repo.setLearningData){
+        await this._repo.setLearningData(uid, data.learning);
       }
 
       // Write wizards

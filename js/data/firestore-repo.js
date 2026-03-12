@@ -384,6 +384,64 @@
       return JSON.parse(parts.join(''));
     }
 
+    // ---- Learning Data ----
+
+    async getLearningData(uid){
+      const api = this._requireApi();
+      const ref = this._userDocRef(api, uid, 'learning', 'current');
+      const snap = await api.getDoc(ref);
+      this._trackRead('learning/current');
+      if(!snap.exists()) return null;
+      const data = snap.data();
+      if(data._chunked){
+        return this._readChunkedLearning(uid, data._chunkCount);
+      }
+      return data;
+    }
+
+    async setLearningData(uid, learningData){
+      const api = this._requireApi();
+      const payload = { ...learningData, updatedAt: api.serverTimestamp() };
+      const sizeBytes = estimateDocSize(payload);
+
+      if(sizeBytes > MAX_DOC_BYTES){
+        const serialized = JSON.stringify(learningData);
+        const chunkSize = MAX_DOC_BYTES / 2;
+        const chunks = [];
+        for(let i = 0; i < serialized.length; i += chunkSize){
+          chunks.push(serialized.slice(i, i + chunkSize));
+        }
+        const headerRef = this._userDocRef(api, uid, 'learning', 'current');
+        await api.setDoc(headerRef, {
+          _chunked: true,
+          _chunkCount: chunks.length,
+          updatedAt: api.serverTimestamp(),
+          sizeBytes
+        });
+        for(let i = 0; i < chunks.length; i++){
+          const chunkRef = this._userDocRef(api, uid, 'learning', 'current', 'chunks', `chunk_${i}`);
+          await api.setDoc(chunkRef, { index: i, data: chunks[i] });
+        }
+      } else {
+        const ref = this._userDocRef(api, uid, 'learning', 'current');
+        await api.setDoc(ref, { ...payload, _chunked: false, sizeBytes }, { merge: true });
+      }
+      this._trackWrite('learning/current', { sizeBytes });
+    }
+
+    async _readChunkedLearning(uid, chunkCount){
+      const api = this._requireApi();
+      const parts = [];
+      for(let i = 0; i < chunkCount; i++){
+        const chunkRef = this._userDocRef(api, uid, 'learning', 'current', 'chunks', `chunk_${i}`);
+        const snap = await api.getDoc(chunkRef);
+        if(!snap.exists()) throw new Error(`Missing learning chunk ${i}`);
+        parts.push(snap.data().data);
+        this._trackRead(`learning/current/chunks/chunk_${i}`);
+      }
+      return JSON.parse(parts.join(''));
+    }
+
     // ---- Batch write support ----
 
     async batchWrite(uid, operations){

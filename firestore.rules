@@ -76,6 +76,16 @@ service cloud.firestore {
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
+    // Learning data (vision annotations, findtext weights, can be chunked)
+    match /users/{userId}/learning/{docId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /users/{userId}/learning/{docId}/chunks/{chunkId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
     // ── Global username registry (unchanged) ──
     match /Usernames/{usernameLower} {
       allow get: if request.auth != null;
