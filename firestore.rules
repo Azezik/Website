@@ -1,12 +1,92 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // User-specific data (including backups) is scoped by UID
+
+    // ── Legacy: User-specific data (including backups) scoped by UID ──
+    // Kept for backward compatibility during migration period.
     match /Users/{userId}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Global username registry to prevent hijacking
+    // ── New normalized schema: users/{uid}/... ──
+
+    // User profile metadata
+    match /users/{userId}/meta/{docId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && request.resource.data.keys().hasAny(['updatedAt']);
+    }
+
+    // Wizard metadata
+    match /users/{userId}/wizards/{wizardId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && request.resource.data.keys().hasAny(['updatedAt'])
+        && request.resource.data.size() < 50;
+    }
+
+    // Wizard layouts
+    match /users/{userId}/wizards/{wizardId}/layouts/{layoutId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && request.resource.data.keys().hasAny(['updatedAt']);
+    }
+
+    // Wizard layout fields
+    match /users/{userId}/wizards/{wizardId}/layouts/{layoutId}/fields/{fieldKey} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && request.resource.data.keys().hasAny(['updatedAt']);
+    }
+
+    // Pattern bundles (can be large, chunked)
+    match /users/{userId}/wizards/{wizardId}/patterns/{patternId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /users/{userId}/wizards/{wizardId}/patterns/{patternId}/chunks/{chunkId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Master DB, rows, chart-ready data
+    match /users/{userId}/wizards/{wizardId}/{subcol}/{docId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && subcol in ['masterDb', 'masterDbRows', 'chartReady', 'runs'];
+    }
+
+    // Templates and models
+    match /users/{userId}/templates/{templateId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /users/{userId}/models/{modelId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // OCR segments (can be chunked)
+    match /users/{userId}/ocrSegments/{segmentId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /users/{userId}/ocrSegments/{segmentId}/chunks/{chunkId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Learning data (vision annotations, findtext weights, can be chunked)
+    match /users/{userId}/learning/{docId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /users/{userId}/learning/{docId}/chunks/{chunkId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ── Global username registry (unchanged) ──
     match /Usernames/{usernameLower} {
       allow get: if request.auth != null;
       allow create: if request.auth != null

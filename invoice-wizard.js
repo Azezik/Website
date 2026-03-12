@@ -616,6 +616,7 @@ const els = {
   finishWizardBtn: document.getElementById('finishWizardBtn'),
   backupCloudBtn: document.getElementById('backup-cloud-btn'),
   restoreCloudBtn: document.getElementById('restore-cloud-btn'),
+  enableFirestoreBtn: document.getElementById('enable-firestore-btn'),
 
   // Custom wizard builder
   builderSection: document.getElementById('builder-section'),
@@ -17264,6 +17265,18 @@ async function enterAppWithAuth(opts = {}, options = {}){
     showLoginUi();
     return false;
   }
+  // Initialize the data layer if available and user is authenticated
+  if(user?.uid && opts.username && window.WrokitDataLayer){
+    try {
+      if(!window._wrokitDataLayer){
+        window._wrokitDataLayer = window.WrokitDataLayer.create();
+      }
+      await window._wrokitDataLayer.init(user.uid, opts.username);
+      console.info('[data-layer] initialized', { uid: user.uid, username: opts.username, firestoreEnabled: window._wrokitDataLayer.service.isFirestoreEnabled });
+    } catch(err){
+      console.warn('[data-layer] init failed (non-blocking)', err);
+    }
+  }
   completeLogin(opts);
   return true;
 }
@@ -17520,6 +17533,46 @@ els.resetModelBtn?.addEventListener('click', ()=>{
 });
 els.backupCloudBtn?.addEventListener('click', backupToCloud);
 els.restoreCloudBtn?.addEventListener('click', restoreFromCloud);
+
+// Data layer: enable Firestore persistence + migration
+els.enableFirestoreBtn?.addEventListener('click', async ()=>{
+  const dl = window._wrokitDataLayer;
+  if(!dl){
+    alert('Data layer not initialized. Please log in first.');
+    return;
+  }
+  const api = window.firebaseApi;
+  const user = api?.auth?.currentUser;
+  if(!user?.uid || !state.username){
+    alert('Please log in before enabling cloud persistence.');
+    return;
+  }
+  if(dl.service.isFirestoreEnabled){
+    alert('Firestore persistence is already enabled.');
+    return;
+  }
+  if(!confirm('Enable cloud persistence? This will migrate your local data to Firestore. Your local data will be kept as a cache.')){
+    return;
+  }
+  try {
+    const result = await dl.enableFirestoreAndMigrate(user.uid, state.username);
+    if(result.status === 'complete' || result.status === 'already-complete'){
+      alert('Cloud persistence enabled. Your data is now synced to Firestore.');
+    } else {
+      alert('Migration status: ' + result.status + (result.error ? ' — ' + result.error : ''));
+    }
+  } catch(err){
+    console.error('[enable-firestore] failed', err);
+    alert('Failed to enable cloud persistence: ' + (err?.message || 'Unknown error'));
+  }
+});
+
+// Data layer diagnostics (accessible from console)
+window.getWrokitDataDiagnostics = function(){
+  const dl = window._wrokitDataLayer;
+  if(!dl) return { error: 'Data layer not initialized' };
+  return dl.getDiagnostics();
+};
 function openBuilderFromSelection(){
   const val = modelSelect?.value || '';
   const templateId = val.startsWith('custom:') ? val.replace('custom:','') : (isSkinV2 ? state.activeWizardId : '');
