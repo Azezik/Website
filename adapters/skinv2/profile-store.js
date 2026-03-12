@@ -1,4 +1,14 @@
 (function(root){
+  function sanitizeForFirestore(value){
+    return JSON.parse(JSON.stringify(value, (key, current) => {
+      if(current === undefined) return undefined;
+      if(key === 'landmark') return undefined;
+      if(key === 'ringMask' || key === 'edgePatch') return undefined;
+      if(ArrayBuffer.isView(current) || current instanceof ArrayBuffer) return undefined;
+      return current;
+    }));
+  }
+
   function saveViaCloudSync(username, docType, profile, wizardId, geometryId){
     const dataLayer = root._wrokitDataLayer;
     const service = dataLayer?.service;
@@ -10,13 +20,13 @@
       return false;
     }
 
-    const payload = {
+    const payload = sanitizeForFirestore({
       username,
       docType,
       wizardId: wizardId || 'default',
       geometryId: geometryId || null,
       profile
-    };
+    });
 
     Promise.resolve(service.saveProfile(uid, payload)).catch((err)=>{
       console.warn('[profile-store] cloud profile save failed', err);
