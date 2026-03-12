@@ -1,4 +1,15 @@
 (function(root){
+  const FIRESTORE_FLAG_KEY = 'wrokit.firestorePrimary';
+
+  function isCloudSyncEnabled(service){
+    if(service?.isFirestoreEnabled) return true;
+    try {
+      return root.localStorage?.getItem(FIRESTORE_FLAG_KEY) === '1';
+    } catch{
+      return false;
+    }
+  }
+
   function sanitizeForFirestore(value){
     return JSON.parse(JSON.stringify(value, (key, current) => {
       if(current === undefined) return undefined;
@@ -12,12 +23,17 @@
   function saveViaCloudSync(username, docType, profile, wizardId, geometryId){
     const dataLayer = root._wrokitDataLayer;
     const service = dataLayer?.service;
-    if(!service?.isFirestoreEnabled) return false;
+    if(!isCloudSyncEnabled(service)) return { handled: false, reason: 'cloud-disabled' };
+
+    if(!service?.saveProfile){
+      console.warn('[profile-store] cloud sync enabled but data layer is unavailable; skipping legacy local profile save');
+      return { handled: true, reason: 'cloud-enabled-no-service' };
+    }
 
     const uid = root.firebaseApi?.auth?.currentUser?.uid || service?._uid;
     if(!uid){
-      console.warn('[profile-store] cloud sync enabled but uid is unavailable; falling back to legacy local save');
-      return false;
+      console.warn('[profile-store] cloud sync enabled but uid is unavailable; skipping legacy local profile save');
+      return { handled: true, reason: 'cloud-enabled-no-uid' };
     }
 
     const payload = sanitizeForFirestore({
@@ -31,7 +47,7 @@
     Promise.resolve(service.saveProfile(uid, payload)).catch((err)=>{
       console.warn('[profile-store] cloud profile save failed', err);
     });
-    return true;
+    return { handled: true, reason: 'cloud-save-enqueued' };
   }
 
   function createSkinV2ProfileStore(deps){
@@ -41,7 +57,8 @@
         return loadProfile ? loadProfile(username, docType, wizardId, geometryId) : null;
       },
       saveProfile(username, docType, profile, wizardId, geometryId){
-        if(saveViaCloudSync(username, docType, profile, wizardId, geometryId)) return;
+        const cloud = saveViaCloudSync(username, docType, profile, wizardId, geometryId);
+        if(cloud?.handled) return;
         if(saveProfile) saveProfile(username, docType, profile, wizardId, geometryId);
       },
       migrateProfile(profile){
