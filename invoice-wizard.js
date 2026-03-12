@@ -4322,6 +4322,72 @@ const profileStore = {
   }
 };
 
+function isCloudSyncPrimaryEnabled(){
+  try { return localStorage.getItem('wrokit.firestorePrimary') === '1'; }
+  catch{ return false; }
+}
+
+let _cloudProfileSnapshotPromise = null;
+let _cloudProfileSnapshotCache = null;
+
+async function loadCloudProfileSnapshot(){
+  if(!isSkinV2 || !isCloudSyncPrimaryEnabled()) return null;
+  if(_cloudProfileSnapshotCache) return _cloudProfileSnapshotCache;
+  if(_cloudProfileSnapshotPromise) return _cloudProfileSnapshotPromise;
+  const dl = window._wrokitDataLayer;
+  const service = dl?.service;
+  if(!service?.loadProfile) return null;
+  const uid = window.firebaseApi?.auth?.currentUser?.uid || service?._uid;
+  if(!uid) return null;
+  _cloudProfileSnapshotPromise = Promise.resolve(service.loadProfile(uid)).then((data)=>{
+    _cloudProfileSnapshotCache = data || null;
+    return _cloudProfileSnapshotCache;
+  }).catch((err)=>{
+    console.warn('[cloud-profile] load failed', err);
+    return null;
+  }).finally(()=>{
+    _cloudProfileSnapshotPromise = null;
+  });
+  return _cloudProfileSnapshotPromise;
+}
+
+function adaptCloudPayloadToProfile(cloudPayload){
+  if(!cloudPayload || typeof cloudPayload !== 'object') return null;
+  const wrapped = (cloudPayload.profile && typeof cloudPayload.profile === 'object') ? cloudPayload.profile : null;
+  const profile = wrapped || (Array.isArray(cloudPayload.fields) ? cloudPayload : null);
+  if(!profile) return null;
+  const wizardId = cloudPayload.wizardId || profile.wizardId || null;
+  const docType = cloudPayload.docType || profile.docType || state.docType || null;
+  const geometryId = cloudPayload.geometryId || profile.geometryId || DEFAULT_GEOMETRY_ID;
+  const normalized = ensureConfiguredFlag(migrateProfile(clonePlain(profile)));
+  if(normalized && !normalized.geometryId){ normalized.geometryId = geometryId; }
+  if(normalized && !normalized.wizardId && wizardId){ normalized.wizardId = wizardId; }
+  if(normalized && !normalized.docType && docType){ normalized.docType = docType; }
+  return { profile: normalized, wizardId, docType, geometryId };
+}
+
+async function resolveProfileForReadPath({ username, docType, wizardId, geometryId, geometryIds = [] } = {}){
+  const requestedGeometryId = geometryId || DEFAULT_GEOMETRY_ID;
+  const ids = Array.from(new Set([requestedGeometryId, ...(geometryIds || []), DEFAULT_GEOMETRY_ID])).filter(Boolean);
+  if(isCloudSyncPrimaryEnabled()){
+    const cloudPayload = await loadCloudProfileSnapshot();
+    const adapted = adaptCloudPayloadToProfile(cloudPayload);
+    if(adapted && adapted.wizardId === wizardId && (!adapted.docType || adapted.docType === docType)){
+      if(ids.includes(adapted.geometryId) || adapted.geometryId === requestedGeometryId){
+        return { profile: adapted.profile, geometryId: adapted.geometryId || requestedGeometryId, source: 'cloud' };
+      }
+    }
+  }
+
+  let local = profileStore.loadProfile(username, docType, wizardId, requestedGeometryId);
+  if(local) return { profile: local, geometryId: requestedGeometryId, source: 'local' };
+  for(const gid of ids){
+    local = profileStore.loadProfile(username, docType, wizardId, gid);
+    if(local) return { profile: local, geometryId: gid, source: 'local' };
+  }
+  return { profile: null, geometryId: requestedGeometryId, source: 'none' };
+}
+
 // Raw and compiled stores
 const rawFieldMap = new FieldMap(); // {fileId: [{fieldKey,value,page,bbox,ts}]}
 const rawStoreContract = (!isSkinV2 && window.LegacyRawStoreAdapter?.createLegacyRawStore)
@@ -7979,16 +8045,33 @@ function confirmWizardExport(){
   showWizardManagerTab(template.id);
 }
 
-function getWizardConfigurationStatus(template){
+async function getWizardConfigurationStatus(template){
   const docType = template?.documentTypeId || state.docType;
   const wizardId = template?.id || DEFAULT_WIZARD_ID;
   const geometryIds = collectGeometryIdsForWizard(state.username, docType, wizardId);
-  const hasConfiguredProfile = geometryIds.some(gid => {
-    const profile = loadProfile(state.username, docType, wizardId, gid);
+  let cloudGeometryId = null;
+  if(isCloudSyncPrimaryEnabled()){
+    const cloudPayload = await loadCloudProfileSnapshot();
+    const adapted = adaptCloudPayloadToProfile(cloudPayload);
+    if(adapted && adapted.wizardId === wizardId && (!adapted.docType || adapted.docType === docType)){
+      cloudGeometryId = adapted.geometryId || DEFAULT_GEOMETRY_ID;
+    }
+  }
+  const candidateGeometryIds = Array.from(new Set([...(geometryIds || []), cloudGeometryId].filter(Boolean)));
+  const hasConfiguredProfile = [];
+  for(const gid of candidateGeometryIds){
+    const resolved = await resolveProfileForReadPath({
+      username: state.username,
+      docType,
+      wizardId,
+      geometryId: gid,
+      geometryIds: candidateGeometryIds
+    });
+    const profile = resolved.profile;
     const hasGeom = Array.isArray(profile?.fields) && profile.fields.some(hasFieldGeometry);
-    return profile?.isConfigured && hasGeom;
-  });
-  return { docType, wizardId, geometryIds, hasConfiguredProfile };
+    hasConfiguredProfile.push(profile?.isConfigured && hasGeom);
+  }
+  return { docType, wizardId, geometryIds: candidateGeometryIds, hasConfiguredProfile: hasConfiguredProfile.some(Boolean) };
 }
 
 function createWizardSettingsButton({ wizardId, hasConfiguredProfile }){
@@ -8335,7 +8418,7 @@ function renderWizardBatchLog(wizardId){
   els.wizardDetailsLog.appendChild(wrapper);
 }
 
-function renderWizardManagerList(selectedId=null){
+async function renderWizardManagerList(selectedId=null){
   if(!els.wizardManagerList) return;
   const templates = refreshWizardTemplates();
   els.wizardManagerList.innerHTML = '';
@@ -8347,8 +8430,8 @@ function renderWizardManagerList(selectedId=null){
   const list = document.createElement('div');
   list.className = 'wizard-table';
   let selectedRow = null;
-  templates.forEach(t => {
-    const { docType, wizardId, geometryIds, hasConfiguredProfile } = getWizardConfigurationStatus(t);
+  for(const t of templates){
+    const { docType, wizardId, geometryIds, hasConfiguredProfile } = await getWizardConfigurationStatus(t);
     const geometryMeta = getGeometryIndex(state.username, docType, wizardId, geometryIds);
     const row = document.createElement('div');
     row.className = 'wizard-row';
@@ -8374,7 +8457,7 @@ function renderWizardManagerList(selectedId=null){
     row.appendChild(info);
     row.appendChild(actions);
     list.appendChild(row);
-  });
+  }
   els.wizardManagerList.appendChild(list);
   if(selectedRow){
     requestAnimationFrame(() => {
@@ -19303,19 +19386,26 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     state.activeGeometryId = geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID;
     let profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
     const geometryIds = collectGeometryIdsForWizard(state.username, state.docType, wizardId);
-    console.info('[geom-run-selector]', { wizardId, geometryIds, requestedGeometryId: geometryId, profileKey: profileStorageKey });
-    let storedProfile = profileStore.loadProfile(state.username, state.docType, wizardId, geometryId);
-    if(!storedProfile){
-      for(const gid of geometryIds){
-        const candidateProfile = profileStore.loadProfile(state.username, state.docType, wizardId, gid);
-        if(candidateProfile){
-          storedProfile = candidateProfile;
-          geometryId = gid;
-          profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, gid === DEFAULT_GEOMETRY_ID ? null : gid);
-          break;
-        }
-      }
+    const resolvedRead = await resolveProfileForReadPath({
+      username: state.username,
+      docType: state.docType,
+      wizardId,
+      geometryId,
+      geometryIds
+    });
+    let storedProfile = resolvedRead.profile;
+    if(resolvedRead.geometryId && resolvedRead.geometryId !== geometryId){
+      geometryId = resolvedRead.geometryId;
+      profileStorageKey = LS.profileKey(state.username, state.docType, wizardId, geometryId === DEFAULT_GEOMETRY_ID ? null : geometryId);
     }
+    console.info('[geom-run-selector]', {
+      wizardId,
+      geometryIds,
+      requestedGeometryId: runContext.geometryId || profile?.geometryId || state.activeGeometryId || DEFAULT_GEOMETRY_ID,
+      resolvedGeometryId: geometryId,
+      profileKey: profileStorageKey,
+      source: resolvedRead.source
+    });
     const hasGeom = Array.isArray(storedProfile?.fields) && storedProfile.fields.some(hasFieldGeometry);
     if(!storedProfile?.isConfigured || !hasGeom){
       if(!runContext.isBatch){ notifyRunIssue('Please configure this wizard before running extraction.'); }
