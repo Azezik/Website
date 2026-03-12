@@ -26,14 +26,14 @@
     if(!isCloudSyncEnabled(service)) return { handled: false, reason: 'cloud-disabled' };
 
     if(!service?.saveProfile){
-      console.warn('[profile-store] cloud sync enabled but data layer is unavailable; skipping legacy local profile save');
-      return { handled: true, reason: 'cloud-enabled-no-service' };
+      console.warn('[profile-store] cloud sync enabled but data layer is unavailable; falling back to legacy local profile save');
+      return { handled: false, reason: 'cloud-enabled-no-service' };
     }
 
     const uid = root.firebaseApi?.auth?.currentUser?.uid || service?._uid;
     if(!uid){
-      console.warn('[profile-store] cloud sync enabled but uid is unavailable; skipping legacy local profile save');
-      return { handled: true, reason: 'cloud-enabled-no-uid' };
+      console.warn('[profile-store] cloud sync enabled but uid is unavailable; falling back to legacy local profile save');
+      return { handled: false, reason: 'cloud-enabled-no-uid' };
     }
 
     const payload = sanitizeForFirestore({
