@@ -582,6 +582,514 @@
     return out;
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Batch Structural Learning  –  Phase 1
+     ══════════════════════════════════════════════════════════════════════════ */
+
+  var BATCH_SESSION_STORAGE_KEY = 'wrokit.learning.batchSessions';
+
+  /* ── Statistical helpers ──────────────────────────────────────────────── */
+
+  function _mean(arr){ return arr.length ? arr.reduce(function(s,v){return s+v;},0)/arr.length : 0; }
+  function _variance(arr){
+    if(arr.length < 2) return 0;
+    var m = _mean(arr);
+    return arr.reduce(function(s,v){return s+(v-m)*(v-m);},0)/(arr.length-1);
+  }
+  function _stddev(arr){ return Math.sqrt(_variance(arr)); }
+  function _cv(arr){
+    var m = _mean(arr);
+    if(m === 0) return arr.length > 1 && _stddev(arr) > 0 ? Infinity : 0;
+    return _stddev(arr) / Math.abs(m);
+  }
+  function _median(arr){
+    if(!arr.length) return 0;
+    var sorted = arr.slice().sort(function(a,b){return a-b;});
+    var mid = Math.floor(sorted.length/2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
+  }
+  function _clamp(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); }
+
+  function _cosineSim(a, b){
+    if(!a||!b||a.length!==b.length||!a.length) return 0;
+    var dot=0, mA=0, mB=0;
+    for(var i=0;i<a.length;i++){ dot+=a[i]*b[i]; mA+=a[i]*a[i]; mB+=b[i]*b[i]; }
+    var d = Math.sqrt(mA)*Math.sqrt(mB);
+    return d>0 ? dot/d : 0;
+  }
+
+  function _jsd(p, q){
+    if(!p||!q||p.length!==q.length||!p.length) return 1;
+    var m = p.map(function(_,i){ return (p[i]+q[i])/2; });
+    var klPM=0, klQM=0;
+    for(var i=0;i<p.length;i++){
+      if(p[i]>0&&m[i]>0) klPM += p[i]*Math.log2(p[i]/m[i]);
+      if(q[i]>0&&m[i]>0) klQM += q[i]*Math.log2(q[i]/m[i]);
+    }
+    return _clamp((klPM+klQM)/2, 0, 1);
+  }
+
+  function _cvToStability(cv){ return _clamp(1-cv, 0, 1); }
+
+  /* ── Extract document structural summary ──────────────────────────────── */
+
+  function extractDocumentSummary(analysisResult, opts){
+    opts = opts || {};
+    var ar = analysisResult || {};
+    var regionNodes = ar.regionNodes || [];
+    var regionGraph = ar.regionGraph || {nodes:[],edges:[]};
+    var textLines = ar.textLines || [];
+    var textBlocks = ar.textBlocks || [];
+    var textTokens = ar.textTokens || [];
+    var surfaceCandidates = ar.surfaceCandidates || [];
+    var viewport = ar.viewport || opts.viewport || {width:0,height:0};
+    var vpW = Number(viewport.width||viewport.w)||1;
+    var vpH = Number(viewport.height||viewport.h)||1;
+
+    var regionDescriptors = regionNodes.map(function(r){
+      var bbox = (r.geometry&&r.geometry.bbox)||{};
+      var x=Number(bbox.x)||0, y=Number(bbox.y)||0, w=Number(bbox.w)||0, h=Number(bbox.h)||0;
+      return {
+        regionId: r.id,
+        normalizedBbox: {x:clamp01(x/vpW),y:clamp01(y/vpH),w:clamp01(w/vpW),h:clamp01(h/vpH)},
+        area: w*h,
+        normalizedArea: clamp01((w*h)/(vpW*vpH)),
+        aspectRatio: h>0 ? w/h : 0,
+        confidence: Number(r.confidence)||0,
+        textDensity: Number(r.textDensity)||0,
+        surfaceType: r.surfaceTypeCandidate||'unknown',
+        features: r.features||{},
+        centroid: {x:clamp01((x+w/2)/vpW), y:clamp01((y+h/2)/vpH)}
+      };
+    });
+
+    var adjacencyEdges = (regionGraph.edges||[]).map(function(e){
+      return {sourceId:e.sourceNodeId,targetId:e.targetNodeId,edgeType:e.edgeType,weight:Number(e.weight)||0};
+    });
+
+    var neighborhoodMap = {};
+    for(var ei=0;ei<adjacencyEdges.length;ei++){
+      var e = adjacencyEdges[ei];
+      if(!neighborhoodMap[e.sourceId]) neighborhoodMap[e.sourceId]=[];
+      if(!neighborhoodMap[e.targetId]) neighborhoodMap[e.targetId]=[];
+      neighborhoodMap[e.sourceId].push({neighborId:e.targetId,edgeType:e.edgeType,weight:e.weight});
+      neighborhoodMap[e.targetId].push({neighborId:e.sourceId,edgeType:e.edgeType,weight:e.weight});
+    }
+
+    var neighborhoodDescriptors = {};
+    for(var ri=0;ri<regionDescriptors.length;ri++){
+      var rd = regionDescriptors[ri];
+      var neighbors = neighborhoodMap[rd.regionId]||[];
+      neighborhoodDescriptors[rd.regionId] = {
+        neighborCount: neighbors.length,
+        avgEdgeWeight: neighbors.length ? neighbors.reduce(function(s,n){return s+n.weight;},0)/neighbors.length : 0,
+        containsCount: neighbors.filter(function(n){return n.edgeType==='contains';}).length,
+        proximityCount: neighbors.filter(function(n){return n.edgeType==='spatial_proximity';}).length
+      };
+    }
+
+    var textStructure = {
+      lineCount: textLines.length,
+      blockCount: textBlocks.length,
+      tokenCount: textTokens.length,
+      avgTokensPerLine: textLines.length ? textTokens.length/textLines.length : 0,
+      avgLinesPerBlock: textBlocks.length ? textLines.length/textBlocks.length : 0,
+      blockDescriptors: textBlocks.map(function(b){
+        var bb = (b.geometry&&b.geometry.bbox)||{};
+        return {
+          blockId:b.id,
+          normalizedBbox:{x:clamp01((Number(bb.x)||0)/vpW),y:clamp01((Number(bb.y)||0)/vpH),w:clamp01((Number(bb.w)||0)/vpW),h:clamp01((Number(bb.h)||0)/vpH)},
+          lineCount:(b.lineIds||[]).length,
+          tokenCount:(b.tokenIds||[]).length,
+          textLength:(b.text||'').length
+        };
+      })
+    };
+
+    var gridSize = 4;
+    var spatialGrid = [];
+    for(var g=0;g<gridSize*gridSize;g++) spatialGrid.push(0);
+    for(var si=0;si<regionDescriptors.length;si++){
+      var srd = regionDescriptors[si];
+      var gx = Math.min(gridSize-1, Math.floor(srd.centroid.x*gridSize));
+      var gy = Math.min(gridSize-1, Math.floor(srd.centroid.y*gridSize));
+      spatialGrid[gy*gridSize+gx] += srd.normalizedArea;
+    }
+    var gridSum = spatialGrid.reduce(function(s,v){return s+v;},0);
+    var normalizedSpatialDistribution = spatialGrid.map(function(v){return gridSum>0?v/gridSum:0;});
+
+    var regionSignatures = regionDescriptors.map(function(rd2){
+      var nh = neighborhoodDescriptors[rd2.regionId]||{};
+      return {
+        regionId: rd2.regionId,
+        featureVector: [
+          rd2.normalizedBbox.x, rd2.normalizedBbox.y, rd2.normalizedBbox.w, rd2.normalizedBbox.h,
+          rd2.normalizedArea, rd2.aspectRatio>10?10:rd2.aspectRatio,
+          rd2.confidence, rd2.textDensity, (nh.neighborCount||0)/10, nh.avgEdgeWeight||0
+        ],
+        spatialBin: Math.min(gridSize-1,Math.floor(rd2.centroid.y*gridSize))*gridSize + Math.min(gridSize-1,Math.floor(rd2.centroid.x*gridSize))
+      };
+    });
+
+    var surfaceTypeCounts = {};
+    for(var sti=0;sti<regionDescriptors.length;sti++){
+      var st = regionDescriptors[sti].surfaceType;
+      surfaceTypeCounts[st] = (surfaceTypeCounts[st]||0)+1;
+    }
+
+    return {
+      documentId: opts.documentId || generateId('bdoc'),
+      documentName: opts.documentName || '',
+      timestamp: new Date().toISOString(),
+      viewport: {w:vpW,h:vpH},
+      regionDescriptors: regionDescriptors,
+      adjacencyEdges: adjacencyEdges,
+      neighborhoodDescriptors: neighborhoodDescriptors,
+      textStructure: textStructure,
+      surfaceTypeCounts: surfaceTypeCounts,
+      normalizedSpatialDistribution: normalizedSpatialDistribution,
+      regionSignatures: regionSignatures,
+      metrics: {
+        regionCount: regionNodes.length,
+        edgeCount: adjacencyEdges.length,
+        avgRegionArea: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.normalizedArea;},0)/regionDescriptors.length : 0,
+        avgTextDensity: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.textDensity;},0)/regionDescriptors.length : 0,
+        avgConfidence: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.confidence;},0)/regionDescriptors.length : 0,
+        textLineCount: textLines.length,
+        textBlockCount: textBlocks.length,
+        surfaceCandidateCount: surfaceCandidates.length
+      }
+    };
+  }
+
+  /* ── Batch stability analysis ─────────────────────────────────────────── */
+
+  function analyzeBatchStability(documents){
+    if(!Array.isArray(documents) || documents.length < 2){
+      return {
+        status: 'insufficient_data',
+        message: documents && documents.length === 1
+          ? 'Need at least 2 documents. Currently have 1.'
+          : 'No documents in this batch session.',
+        documentCount: documents ? documents.length : 0,
+        stabilityMetrics: null, parameterDiagnoses: null, overallStability: null, intermediateData: null
+      };
+    }
+
+    // Region count stability
+    var rcCounts = documents.map(function(d){return d.metrics.regionCount;});
+    var rcCV = _cv(rcCounts);
+    var regionCount = {
+      metric:'region_count', stability:_cvToStability(rcCV), values:rcCounts,
+      mean:Math.round(_mean(rcCounts)*100)/100, stddev:Math.round(_stddev(rcCounts)*100)/100,
+      cv:Math.round(rcCV*1000)/1000, min:Math.min.apply(null,rcCounts), max:Math.max.apply(null,rcCounts), median:_median(rcCounts)
+    };
+
+    // Region area stability
+    var raAvgs = documents.map(function(d){return d.metrics.avgRegionArea;});
+    var raCV = _cv(raAvgs);
+    var regionArea = {
+      metric:'region_area', stability:_cvToStability(raCV),
+      mean:Math.round(_mean(raAvgs)*10000)/10000, stddev:Math.round(_stddev(raAvgs)*10000)/10000,
+      cv:Math.round(raCV*1000)/1000
+    };
+
+    // Region density stability
+    var rdVals = documents.map(function(d){return d.metrics.avgTextDensity;});
+    var rdCV = _cv(rdVals);
+    var regionDensity = {
+      metric:'region_density', stability:_cvToStability(rdCV), values:rdVals,
+      mean:Math.round(_mean(rdVals)*1000)/1000, cv:Math.round(rdCV*1000)/1000
+    };
+
+    // Adjacency graph stability
+    var egCounts = documents.map(function(d){return d.metrics.edgeCount;});
+    var egCV = _cv(egCounts);
+    var etDists = documents.map(function(d){
+      var types={spatial_proximity:0,contains:0,other:0};
+      var total = d.adjacencyEdges.length||1;
+      for(var i=0;i<d.adjacencyEdges.length;i++){
+        var et=d.adjacencyEdges[i].edgeType;
+        if(types.hasOwnProperty(et)) types[et]++; else types.other++;
+      }
+      return [types.spatial_proximity/total, types.contains/total, types.other/total];
+    });
+    var totalJSD=0, pc=0;
+    for(var i=0;i<etDists.length;i++) for(var j=i+1;j<etDists.length;j++){ totalJSD+=_jsd(etDists[i],etDists[j]); pc++; }
+    var avgJSD = pc>0 ? totalJSD/pc : 0;
+    var awVals = documents.map(function(d){
+      if(!d.adjacencyEdges.length) return 0;
+      return d.adjacencyEdges.reduce(function(s,e){return s+e.weight;},0)/d.adjacencyEdges.length;
+    });
+    var awCV = _cv(awVals);
+    var ecStab = _cvToStability(egCV), edStab = _clamp(1-avgJSD,0,1), ewStab = _cvToStability(awCV);
+    var adjacencyGraph = {
+      metric:'adjacency_graph', stability:Math.round((ecStab*0.4+edStab*0.35+ewStab*0.25)*1000)/1000,
+      edgeCountStability:Math.round(ecStab*1000)/1000,
+      edgeTypeDistributionStability:Math.round(edStab*1000)/1000,
+      edgeWeightStability:Math.round(ewStab*1000)/1000,
+      edgeCounts:egCounts, avgEdgeTypeJSD:Math.round(avgJSD*1000)/1000
+    };
+
+    // Spatial distribution stability
+    var spDists = documents.map(function(d){return d.normalizedSpatialDistribution;});
+    var totalSim=0, spc=0;
+    for(var si=0;si<spDists.length;si++) for(var sj=si+1;sj<spDists.length;sj++){ totalSim+=_cosineSim(spDists[si],spDists[sj]); spc++; }
+    var avgSim = spc>0 ? totalSim/spc : 1;
+    var spatialDistribution = {
+      metric:'spatial_distribution', stability:Math.round(_clamp(avgSim,0,1)*1000)/1000,
+      avgPairwiseCosineSimilarity:Math.round(avgSim*1000)/1000
+    };
+
+    // Text structure stability
+    var tlCounts = documents.map(function(d){return d.textStructure.lineCount;});
+    var tbCounts = documents.map(function(d){return d.textStructure.blockCount;});
+    var ttCounts = documents.map(function(d){return d.textStructure.tokenCount;});
+    var tlS=_cvToStability(_cv(tlCounts)), tbS=_cvToStability(_cv(tbCounts)), ttS=_cvToStability(_cv(ttCounts));
+    var textStructure = {
+      metric:'text_structure', stability:Math.round((tlS*0.35+tbS*0.35+ttS*0.3)*1000)/1000,
+      lineCountStability:Math.round(tlS*1000)/1000, blockCountStability:Math.round(tbS*1000)/1000,
+      tokenCountStability:Math.round(ttS*1000)/1000,
+      avgLines:Math.round(_mean(tlCounts)*10)/10, avgBlocks:Math.round(_mean(tbCounts)*10)/10
+    };
+
+    // Surface type stability
+    var allTypes = {};
+    for(var di=0;di<documents.length;di++){
+      var stc = documents[di].surfaceTypeCounts||{};
+      for(var t in stc) if(stc.hasOwnProperty(t)) allTypes[t]=true;
+    }
+    var typeList = Object.keys(allTypes).sort();
+    var stDists = documents.map(function(d){
+      var total = 0; for(var t in (d.surfaceTypeCounts||{})) if(d.surfaceTypeCounts.hasOwnProperty(t)) total+=d.surfaceTypeCounts[t];
+      total = total||1;
+      return typeList.map(function(t){return (d.surfaceTypeCounts[t]||0)/total;});
+    });
+    var stTotal=0, stPc=0;
+    for(var sti=0;sti<stDists.length;sti++) for(var stj=sti+1;stj<stDists.length;stj++){ stTotal+=_cosineSim(stDists[sti],stDists[stj]); stPc++; }
+    var stAvg = stPc>0 ? stTotal/stPc : 1;
+    var surfaceTypeDistribution = {
+      metric:'surface_type_distribution', stability:Math.round(_clamp(stAvg,0,1)*1000)/1000,
+      surfaceTypes:typeList, avgPairwiseSimilarity:Math.round(stAvg*1000)/1000
+    };
+
+    var stabilityMetrics = {
+      regionCount:regionCount, regionArea:regionArea, regionDensity:regionDensity,
+      adjacencyGraph:adjacencyGraph, spatialDistribution:spatialDistribution,
+      textStructure:textStructure, surfaceTypeDistribution:surfaceTypeDistribution
+    };
+
+    // Overall stability
+    var weights = {regionCount:0.20,regionArea:0.15,regionDensity:0.10,adjacencyGraph:0.20,spatialDistribution:0.15,textStructure:0.10,surfaceTypeDistribution:0.10};
+    var overall = 0;
+    for(var wk in weights) if(weights.hasOwnProperty(wk)) overall += (stabilityMetrics[wk].stability||0)*weights[wk];
+    overall = Math.round(overall*1000)/1000;
+
+    // Parameter diagnoses
+    var diagnoses = [];
+    if(regionCount.stability < 0.7){
+      diagnoses.push({parameter:'region_segmentation_thresholds',impact:'high',stability:regionCount.stability,
+        diagnosis:'Region count varies significantly (CV='+regionCount.cv+').',
+        recommendation:'Increase mergeThreshold to reduce over-segmentation sensitivity.',
+        suggestedAdjustments:{mergeThreshold:regionCount.cv>0.5?'increase by 20-40%':'increase by 10-20%'}});
+    }
+    if(regionArea.stability < 0.7 && regionCount.stability > 0.5){
+      diagnoses.push({parameter:'color_tolerance',impact:'medium',stability:regionArea.stability,
+        diagnosis:'Region areas vary while counts are stable. Color-based boundaries may be shifting.',
+        recommendation:'Increase color tolerance for more consistent region boundaries.',
+        suggestedAdjustments:{colorTolerance:'increase by 15-25%'}});
+    }
+    if(adjacencyGraph.stability < 0.7){
+      diagnoses.push({parameter:'edge_detection_thresholds',impact:adjacencyGraph.stability<0.5?'high':'medium',stability:adjacencyGraph.stability,
+        diagnosis:'Graph structure varies significantly across documents.',
+        recommendation:'Adjust hardBarrier threshold to stabilize edge detection.',
+        suggestedAdjustments:{hardBarrier:adjacencyGraph.edgeCountStability<0.5?'increase by 20%':'increase by 10%'}});
+    }
+    if(spatialDistribution.stability < 0.7){
+      diagnoses.push({parameter:'region_merge_split_thresholds',impact:'medium',stability:spatialDistribution.stability,
+        diagnosis:'Spatial distribution of regions varies across documents.',
+        recommendation:'Adjust merge/split thresholds for consistent spatial layouts.',
+        suggestedAdjustments:{mergeSensitivity:'reduce by 15%'}});
+    }
+    if(surfaceTypeDistribution.stability < 0.7){
+      diagnoses.push({parameter:'visual_proposal_thresholds',impact:surfaceTypeDistribution.stability<0.5?'high':'medium',stability:surfaceTypeDistribution.stability,
+        diagnosis:'Surface type classification varies across documents.',
+        recommendation:'Adjust visual proposal confidence thresholds.',
+        suggestedAdjustments:{proposalConfidenceMin:'increase to filter low-confidence proposals'}});
+    }
+    if(textStructure.stability < 0.7){
+      diagnoses.push({parameter:'text_grouping_thresholds',impact:'low',stability:textStructure.stability,
+        diagnosis:'Text line/block grouping varies across documents.',
+        recommendation:'Review line grouping tolerance and block stacking gap threshold.',
+        suggestedAdjustments:{lineBandTolerance:textStructure.lineCountStability<0.6?'increase by 20%':'no change'}});
+    }
+    var impactOrder = {high:0,medium:1,low:2};
+    diagnoses.sort(function(a,b){return (impactOrder[a.impact]||3)-(impactOrder[b.impact]||3);});
+
+    var status = 'stable';
+    if(overall < 0.5) status = 'unstable';
+    else if(overall < 0.7) status = 'moderately_stable';
+    else if(overall < 0.85) status = 'mostly_stable';
+
+    var msgs = {
+      unstable:'Structural outputs are highly inconsistent. Multiple parameters need adjustment.',
+      moderately_stable:'Moderate inconsistency detected. Some parameters may need tuning.',
+      mostly_stable:'Mostly consistent. Minor adjustments may improve stability.',
+      stable:'Consistent structural outputs. Parameters are well-tuned for this document type.'
+    };
+
+    var intermediateData = {
+      perDocumentMetrics: documents.map(function(d){
+        return {documentId:d.documentId,documentName:d.documentName,metrics:d.metrics,
+          normalizedSpatialDistribution:d.normalizedSpatialDistribution,regionSignatureCount:d.regionSignatures.length};
+      }),
+      batchRegionSignatures: [],
+      batchSpatialDistributions: documents.map(function(d){
+        return {documentId:d.documentId,distribution:d.normalizedSpatialDistribution};
+      })
+    };
+    for(var bdi=0;bdi<documents.length;bdi++){
+      var bdoc = documents[bdi];
+      for(var bri=0;bri<bdoc.regionSignatures.length;bri++){
+        var rs = bdoc.regionSignatures[bri];
+        intermediateData.batchRegionSignatures.push({documentId:bdoc.documentId,regionId:rs.regionId,featureVector:rs.featureVector,spatialBin:rs.spatialBin});
+      }
+    }
+
+    return {
+      status:status, message:msgs[status], documentCount:documents.length,
+      analyzedAt:new Date().toISOString(), overallStability:overall,
+      stabilityMetrics:stabilityMetrics, parameterDiagnoses:diagnoses, intermediateData:intermediateData
+    };
+  }
+
+  /* ── Report formatter ─────────────────────────────────────────────────── */
+
+  function formatStabilityReport(report){
+    if(!report) return '[No report data]';
+    if(report.status === 'insufficient_data') return report.message;
+    var out = '';
+    out += '══════════════════════════════════════════════════════════════\n';
+    out += '  BATCH STRUCTURAL STABILITY REPORT\n';
+    out += '══════════════════════════════════════════════════════════════\n\n';
+    out += '  Status: ' + report.status.toUpperCase() + '\n';
+    out += '  Overall Stability: ' + (report.overallStability*100).toFixed(1) + '%\n';
+    out += '  Documents analyzed: ' + report.documentCount + '\n';
+    out += '  Analyzed at: ' + report.analyzedAt + '\n\n';
+    out += '  ' + report.message + '\n';
+    out += '\n──────────────────────────────────────────────────────────────\n';
+    out += '  STABILITY METRICS\n';
+    out += '──────────────────────────────────────────────────────────────\n\n';
+    var metrics = report.stabilityMetrics;
+    if(metrics){
+      var names = {regionCount:'Region Count',regionArea:'Region Area',regionDensity:'Region Density',
+        adjacencyGraph:'Adjacency Graph',spatialDistribution:'Spatial Distribution',
+        textStructure:'Text Structure',surfaceTypeDistribution:'Surface Type Distribution'};
+      for(var mk in names){
+        if(!names.hasOwnProperty(mk)||!metrics[mk]) continue;
+        var pct = (metrics[mk].stability*100).toFixed(1);
+        var filled = Math.round(metrics[mk].stability*20);
+        var bar = '[' + Array(filled+1).join('\u2588') + Array(21-filled).join('\u2591') + ']';
+        out += '  ' + (names[mk]+'                            ').slice(0,28) + bar + '  ' + pct + '%\n';
+      }
+    }
+    if(report.parameterDiagnoses && report.parameterDiagnoses.length){
+      out += '\n──────────────────────────────────────────────────────────────\n';
+      out += '  PARAMETER DIAGNOSES & RECOMMENDATIONS\n';
+      out += '──────────────────────────────────────────────────────────────\n';
+      for(var pi=0;pi<report.parameterDiagnoses.length;pi++){
+        var d = report.parameterDiagnoses[pi];
+        out += '\n  [' + d.impact.toUpperCase() + ' IMPACT] ' + d.parameter.replace(/_/g,' ') + '\n';
+        out += '    Stability: ' + (d.stability*100).toFixed(1) + '%\n';
+        out += '    Diagnosis: ' + d.diagnosis + '\n';
+        out += '    Recommendation: ' + d.recommendation + '\n';
+        if(d.suggestedAdjustments){
+          out += '    Suggested adjustments:\n';
+          for(var ak in d.suggestedAdjustments){
+            if(d.suggestedAdjustments.hasOwnProperty(ak)) out += '      '+ak+': '+d.suggestedAdjustments[ak]+'\n';
+          }
+        }
+      }
+    } else {
+      out += '\n  No parameter issues detected. Parameters are well-tuned.\n';
+    }
+    out += '\n══════════════════════════════════════════════════════════════\n';
+    return out;
+  }
+
+  /* ── Batch session store ──────────────────────────────────────────────── */
+
+  function createBatchSessionStore(storage){
+    var backend = storage || (function(){
+      var m = {};
+      return {getItem:function(k){return m[k]||null;},setItem:function(k,v){m[k]=v;}};
+    })();
+
+    function _load(){
+      try { var raw=backend.getItem(BATCH_SESSION_STORAGE_KEY); return raw ? JSON.parse(raw) : []; }
+      catch(_e){ return []; }
+    }
+    function _save(sessions){ backend.setItem(BATCH_SESSION_STORAGE_KEY, JSON.stringify(sessions)); }
+
+    return {
+      createSession: function(opts){
+        opts = opts||{};
+        var sessions = _load();
+        var session = {
+          sessionId:generateId('bsess'), name:String(opts.name||'Untitled Batch'),
+          description:String(opts.description||''), createdAt:new Date().toISOString(),
+          updatedAt:new Date().toISOString(), documents:[], stabilityReport:null, status:'open'
+        };
+        sessions.push(session);
+        _save(sessions);
+        return session;
+      },
+      getAllSessions: function(){ return _load(); },
+      getSession: function(sessionId){
+        return _load().find(function(s){return s.sessionId===sessionId;})||null;
+      },
+      addDocument: function(sessionId, docSummary){
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;});
+        if(!session) return null;
+        session.documents.push(docSummary);
+        session.updatedAt = new Date().toISOString();
+        _save(sessions);
+        return docSummary.documentId;
+      },
+      removeDocument: function(sessionId, documentId){
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;});
+        if(!session) return false;
+        var idx = -1;
+        for(var i=0;i<session.documents.length;i++){ if(session.documents[i].documentId===documentId){idx=i;break;} }
+        if(idx<0) return false;
+        session.documents.splice(idx,1);
+        session.updatedAt = new Date().toISOString();
+        _save(sessions);
+        return true;
+      },
+      saveStabilityReport: function(sessionId, report){
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;});
+        if(!session) return false;
+        session.stabilityReport = report;
+        session.updatedAt = new Date().toISOString();
+        _save(sessions);
+        return true;
+      },
+      deleteSession: function(sessionId){
+        var sessions = _load().filter(function(s){return s.sessionId!==sessionId;});
+        _save(sessions);
+      },
+      documentCount: function(sessionId){
+        var session = this.getSession(sessionId);
+        return session ? session.documents.length : 0;
+      },
+      clear: function(){ _save([]); }
+    };
+  }
+
   /* ── Public API ────────────────────────────────────────────────────────── */
 
   root.WrokitVisionLearning = {
@@ -599,7 +1107,13 @@
     createSessionLog: createSessionLog,
     formatSessionExport: formatSessionExport,
     STORAGE_KEY: STORAGE_KEY,
-    SESSION_STORAGE_KEY: SESSION_STORAGE_KEY
+    SESSION_STORAGE_KEY: SESSION_STORAGE_KEY,
+    // Batch Structural Learning (Phase 1)
+    extractDocumentSummary: extractDocumentSummary,
+    analyzeBatchStability: analyzeBatchStability,
+    formatStabilityReport: formatStabilityReport,
+    createBatchSessionStore: createBatchSessionStore,
+    BATCH_SESSION_STORAGE_KEY: BATCH_SESSION_STORAGE_KEY
   };
 
 })(typeof self !== 'undefined' ? self : this);
