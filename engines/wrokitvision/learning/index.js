@@ -58,11 +58,15 @@ const LearningSession = require('./learning-session');
 const LearningAnalyst = require('./learning-analyst');
 const LearningSessionLog = require('./learning-session-log');
 const LearningExport = require('./learning-export');
+const BatchLearningSession = require('./batch-learning-session');
+const BatchStructuralAnalyst = require('./batch-structural-analyst');
 
 module.exports = {
   LearningStore,
   LearningSession,
   LearningAnalyst,
   LearningSessionLog,
-  LearningExport
+  LearningExport,
+  BatchLearningSession,
+  BatchStructuralAnalyst
 };

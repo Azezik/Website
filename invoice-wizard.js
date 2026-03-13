@@ -20486,6 +20486,270 @@ if(els.learningNewSessionBtn){
 
 /* ====================== End Vision Learning Mode ==================== */
 
+/* ====================== Batch Structural Learning (Phase 1) ========== */
+
+/* ── Learning sub-tab switching ────────────────────────────────────── */
+
+(function initLearningSubTabs(){
+  var subTabNav = document.getElementById('learningSubTabs');
+  if(!subTabNav) return;
+  var buttons = subTabNav.querySelectorAll('button[data-learning-target]');
+  buttons.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var targetId = btn.getAttribute('data-learning-target');
+      buttons.forEach(function(b){ b.classList.toggle('active', b === btn); });
+      var guidedTab = document.getElementById('learning-guided-tab');
+      var batchTab = document.getElementById('learning-batch-tab');
+      if(guidedTab) guidedTab.style.display = targetId === 'learning-guided-tab' ? 'block' : 'none';
+      if(batchTab) batchTab.style.display = targetId === 'learning-batch-tab' ? 'block' : 'none';
+      if(targetId === 'learning-batch-tab') refreshBatchSessionUI();
+    });
+  });
+})();
+
+/* ── Batch session state ───────────────────────────────────────────── */
+
+var _batchStore = _learningAPI && _learningAPI.createBatchSessionStore
+  ? _learningAPI.createBatchSessionStore(localStorage)
+  : null;
+var _activeBatchSessionId = null;
+
+/* ── Batch session UI helpers ──────────────────────────────────────── */
+
+function refreshBatchSessionUI(){
+  if(!_batchStore) return;
+  var select = document.getElementById('batch-session-select');
+  if(!select) return;
+  var sessions = _batchStore.getAllSessions();
+  // Preserve selection
+  var prev = _activeBatchSessionId || select.value;
+  select.innerHTML = '<option value="">— Select or create a session —</option>';
+  for(var i = 0; i < sessions.length; i++){
+    var s = sessions[i];
+    var opt = document.createElement('option');
+    opt.value = s.sessionId;
+    opt.textContent = s.name + ' (' + s.documents.length + ' docs)';
+    if(s.sessionId === prev) opt.selected = true;
+    select.appendChild(opt);
+  }
+  if(prev && sessions.find(function(s){return s.sessionId===prev;})){
+    _activeBatchSessionId = prev;
+    showBatchSessionDetails(prev);
+  } else {
+    _activeBatchSessionId = null;
+    var details = document.getElementById('batch-session-details');
+    if(details) details.style.display = 'none';
+  }
+}
+
+function showBatchSessionDetails(sessionId){
+  if(!_batchStore) return;
+  var session = _batchStore.getSession(sessionId);
+  var details = document.getElementById('batch-session-details');
+  if(!session || !details){ if(details) details.style.display = 'none'; return; }
+  details.style.display = 'block';
+  var nameEl = document.getElementById('batch-session-name-display');
+  var descEl = document.getElementById('batch-session-desc-display');
+  var countEl = document.getElementById('batch-doc-count');
+  var statusEl = document.getElementById('batch-session-status');
+  var listCountEl = document.getElementById('batch-doc-list-count');
+  var analyzeBtn = document.getElementById('batch-analyze-btn');
+  if(nameEl) nameEl.textContent = session.name;
+  if(descEl) descEl.textContent = session.description || '';
+  if(countEl) countEl.textContent = session.documents.length;
+  if(listCountEl) listCountEl.textContent = session.documents.length;
+  if(statusEl) statusEl.textContent = 'Created: ' + new Date(session.createdAt).toLocaleDateString();
+  if(analyzeBtn) analyzeBtn.disabled = session.documents.length < 2;
+
+  // Render document list
+  var listEl = document.getElementById('batch-doc-list');
+  if(listEl){
+    if(!session.documents.length){
+      listEl.innerHTML = '<p class="sub" style="color:var(--muted);">No documents yet. Upload documents to add them.</p>';
+    } else {
+      listEl.innerHTML = session.documents.map(function(d, idx){
+        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border,#eee);">' +
+          '<span class="sub" style="min-width:24px;text-align:right;">' + (idx+1) + '.</span>' +
+          '<span style="flex:1;">' + (d.documentName || d.documentId) + '</span>' +
+          '<span class="sub" style="color:var(--muted);">' + d.metrics.regionCount + ' regions, ' + d.metrics.textBlockCount + ' blocks</span>' +
+          '<button class="btn ghost" style="padding:2px 8px;font-size:12px;" data-remove-doc="' + d.documentId + '">Remove</button>' +
+          '</div>';
+      }).join('');
+      // Bind remove buttons
+      listEl.querySelectorAll('[data-remove-doc]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var docId = btn.getAttribute('data-remove-doc');
+          if(_batchStore && _activeBatchSessionId){
+            _batchStore.removeDocument(_activeBatchSessionId, docId);
+            showBatchSessionDetails(_activeBatchSessionId);
+            refreshBatchSessionUI();
+          }
+        });
+      });
+    }
+  }
+
+  // Show existing report if available
+  if(session.stabilityReport){
+    var reportEl = document.getElementById('batch-report-content');
+    if(reportEl && _learningAPI && _learningAPI.formatStabilityReport){
+      reportEl.textContent = _learningAPI.formatStabilityReport(session.stabilityReport);
+    }
+  }
+}
+
+/* ── Batch session event handlers ──────────────────────────────────── */
+
+// Session select
+(function(){
+  var select = document.getElementById('batch-session-select');
+  if(select){
+    select.addEventListener('change', function(){
+      _activeBatchSessionId = select.value || null;
+      if(_activeBatchSessionId) showBatchSessionDetails(_activeBatchSessionId);
+      else { var d = document.getElementById('batch-session-details'); if(d) d.style.display = 'none'; }
+    });
+  }
+})();
+
+// New session button
+(function(){
+  var btn = document.getElementById('batch-new-session-btn');
+  var form = document.getElementById('batch-new-session-form');
+  if(btn && form){
+    btn.addEventListener('click', function(){ form.style.display = 'block'; });
+  }
+  var cancelBtn = document.getElementById('batch-cancel-session-btn');
+  if(cancelBtn && form){
+    cancelBtn.addEventListener('click', function(){ form.style.display = 'none'; });
+  }
+  var createBtn = document.getElementById('batch-create-session-btn');
+  if(createBtn && form){
+    createBtn.addEventListener('click', function(){
+      if(!_batchStore) return;
+      var nameInput = document.getElementById('batch-session-name');
+      var descInput = document.getElementById('batch-session-desc');
+      var name = (nameInput && nameInput.value.trim()) || 'Untitled Batch';
+      var desc = (descInput && descInput.value.trim()) || '';
+      var session = _batchStore.createSession({name: name, description: desc});
+      _activeBatchSessionId = session.sessionId;
+      form.style.display = 'none';
+      if(nameInput) nameInput.value = '';
+      if(descInput) descInput.value = '';
+      refreshBatchSessionUI();
+    });
+  }
+})();
+
+// Delete session button
+(function(){
+  var btn = document.getElementById('batch-delete-session-btn');
+  if(btn){
+    btn.addEventListener('click', function(){
+      if(!_batchStore || !_activeBatchSessionId) return;
+      if(!confirm('Delete this batch session? This cannot be undone.')) return;
+      _batchStore.deleteSession(_activeBatchSessionId);
+      _activeBatchSessionId = null;
+      refreshBatchSessionUI();
+    });
+  }
+})();
+
+// Add documents via file input
+(function(){
+  var fileInput = document.getElementById('batch-file-input');
+  if(!fileInput) return;
+  fileInput.addEventListener('change', function(e){
+    if(!_batchStore || !_activeBatchSessionId || !_learningAPI) return;
+    var files = e.target.files;
+    if(!files || !files.length) return;
+
+    var processCount = 0;
+    var totalFiles = files.length;
+
+    for(var fi = 0; fi < files.length; fi++){
+      (function(file){
+        var reader = new FileReader();
+        reader.onload = function(){
+          // Use the WrokitVision precompute pipeline if available
+          var precompute = window.WrokitVisionPrecompute || null;
+          if(!precompute || !precompute.runUploadAnalysis){
+            // Fallback: create a minimal summary from file metadata
+            var minimalSummary = _learningAPI.extractDocumentSummary(
+              {regionNodes:[],regionGraph:{nodes:[],edges:[]},textLines:[],textBlocks:[],textTokens:[],surfaceCandidates:[],viewport:{width:0,height:0}},
+              {documentName: file.name}
+            );
+            _batchStore.addDocument(_activeBatchSessionId, minimalSummary);
+            processCount++;
+            if(processCount >= totalFiles) showBatchSessionDetails(_activeBatchSessionId);
+            return;
+          }
+
+          // Process the image through the analysis pipeline
+          var img = new Image();
+          img.onload = function(){
+            var viewport = {width: img.naturalWidth, height: img.naturalHeight};
+            // Run OCR if available, otherwise use empty tokens
+            var tokens = [];
+            var analysisResult = precompute.runUploadAnalysis({
+              tokens: tokens,
+              viewport: viewport,
+              page: 1,
+              imageRef: file.name
+            });
+            var summary = _learningAPI.extractDocumentSummary(analysisResult, {documentName: file.name});
+            _batchStore.addDocument(_activeBatchSessionId, summary);
+            processCount++;
+            if(processCount >= totalFiles){
+              showBatchSessionDetails(_activeBatchSessionId);
+              refreshBatchSessionUI();
+            }
+          };
+          img.onerror = function(){
+            processCount++;
+            if(processCount >= totalFiles){
+              showBatchSessionDetails(_activeBatchSessionId);
+              refreshBatchSessionUI();
+            }
+          };
+          img.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      })(files[fi]);
+    }
+    e.target.value = '';
+  });
+})();
+
+// Analyze batch stability
+(function(){
+  var btn = document.getElementById('batch-analyze-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!_batchStore || !_activeBatchSessionId || !_learningAPI) return;
+    var session = _batchStore.getSession(_activeBatchSessionId);
+    if(!session || session.documents.length < 2){
+      alert('Need at least 2 documents for batch stability analysis.');
+      return;
+    }
+    var report = _learningAPI.analyzeBatchStability(session.documents);
+    _batchStore.saveStabilityReport(_activeBatchSessionId, report);
+
+    // Show report
+    var reportEl = document.getElementById('batch-report-content');
+    if(reportEl) reportEl.textContent = _learningAPI.formatStabilityReport(report);
+
+    // Show metrics detail
+    var metricsEl = document.getElementById('batch-metrics-content');
+    if(metricsEl && report.stabilityMetrics){
+      metricsEl.innerHTML = '<pre class="code" style="white-space:pre-wrap;">' +
+        JSON.stringify(report.stabilityMetrics, null, 2).replace(/</g, '&lt;') + '</pre>';
+    }
+  });
+})();
+
+/* ====================== End Batch Structural Learning ================ */
+
 /* ------------------------ Init on load ---------------------------- */
 applyEnvProfileConfig(envWizardBootstrap);
 renderResultsTable();

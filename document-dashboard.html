@@ -450,6 +450,15 @@
           <h3 style="margin:0;">Wrokit Vision Learning</h3>
           <span id="learning-status" class="sub" style="color:var(--muted);"></span>
         </div>
+
+        <!-- Learning sub-tabs -->
+        <nav class="subtabs" id="learningSubTabs" style="margin:8px 0 12px;">
+          <button class="tablink active" data-learning-target="learning-guided-tab">Guided Learning</button>
+          <button class="tablink" data-learning-target="learning-batch-tab">Batch Structural</button>
+        </nav>
+
+        <!-- ═══ Guided Learning sub-tab (existing) ═══ -->
+        <div id="learning-guided-tab">
         <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
           Upload a document, then draw boxes around meaningful regions, text groups, labels, and values.
           The WrokitVision feature graph is shown over the document so you can see what the system detects.
@@ -560,6 +569,85 @@
             <button id="learning-clear-btn" class="btn ghost" type="button">Clear All Data</button>
           </div>
         </details>
+        </div><!-- /learning-guided-tab -->
+
+        <!-- ═══ Batch Structural Learning sub-tab ═══ -->
+        <div id="learning-batch-tab" style="display:none;">
+          <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
+            Analyze batches of documents that share the same layout to measure structural consistency
+            and identify parameter tuning opportunities. No user annotations required.
+          </p>
+
+          <!-- Batch session management -->
+          <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+            <div class="actions" style="gap:12px;flex-wrap:wrap;align-items:center;">
+              <span class="sub">Batch Sessions:</span>
+              <select id="batch-session-select" style="min-width:200px;">
+                <option value="">— Select or create a session —</option>
+              </select>
+              <button id="batch-new-session-btn" class="btn" type="button">New Session</button>
+              <button id="batch-delete-session-btn" class="btn ghost" type="button">Delete Session</button>
+            </div>
+          </div>
+
+          <!-- New session form (hidden by default) -->
+          <div id="batch-new-session-form" class="panel minimal" style="display:none;margin-bottom:12px;padding:12px;">
+            <div class="field" style="margin-bottom:8px;">
+              <label for="batch-session-name">Session Name</label>
+              <input id="batch-session-name" placeholder="e.g., Supplier A Invoices" style="width:100%;max-width:400px;" />
+            </div>
+            <div class="field" style="margin-bottom:8px;">
+              <label for="batch-session-desc">Description (optional)</label>
+              <input id="batch-session-desc" placeholder="e.g., 50 invoices from Jan-Mar 2026" style="width:100%;max-width:400px;" />
+            </div>
+            <div class="actions" style="gap:8px;">
+              <button id="batch-create-session-btn" class="btn primary" type="button">Create Session</button>
+              <button id="batch-cancel-session-btn" class="btn ghost" type="button">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Active session details -->
+          <div id="batch-session-details" style="display:none;">
+            <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+              <div class="actions" style="gap:16px;flex-wrap:wrap;align-items:center;">
+                <strong id="batch-session-name-display"></strong>
+                <span class="sub">Documents: <strong id="batch-doc-count">0</strong></span>
+                <span class="sub" id="batch-session-status" style="color:var(--muted);"></span>
+              </div>
+              <p class="sub" id="batch-session-desc-display" style="margin:4px 0 0;color:var(--muted);"></p>
+            </div>
+
+            <!-- Add documents -->
+            <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+              <label class="btn primary">
+                Add Documents
+                <input id="batch-file-input" type="file" accept="image/png,image/jpeg,application/pdf" multiple style="display:none" />
+              </label>
+              <button id="batch-analyze-btn" class="btn" type="button" disabled>Analyze Batch Stability</button>
+            </div>
+
+            <!-- Document list -->
+            <details id="batch-doc-list-panel" class="panel minimal" style="margin-bottom:12px;">
+              <summary>Documents in Session (<span id="batch-doc-list-count">0</span>)</summary>
+              <div id="batch-doc-list" style="margin-top:8px;max-height:200px;overflow-y:auto;"></div>
+            </details>
+
+            <!-- Stability report -->
+            <details id="batch-report-panel" class="panel minimal" style="margin-bottom:12px;">
+              <summary>Stability Report</summary>
+              <div id="batch-report-content" class="code" style="white-space:pre-wrap;margin-top:8px;">
+                No analysis run yet. Add at least 2 documents and click "Analyze Batch Stability".
+              </div>
+            </details>
+
+            <!-- Stability metrics visualization -->
+            <details id="batch-metrics-panel" class="panel minimal" style="margin-bottom:12px;">
+              <summary>Stability Metrics Detail</summary>
+              <div id="batch-metrics-content" style="margin-top:8px;"></div>
+            </details>
+          </div>
+        </div><!-- /learning-batch-tab -->
+
       </section>
 
       <section id="reports" class="panel" style="display:none">
