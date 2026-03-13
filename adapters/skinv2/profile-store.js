@@ -12,14 +12,30 @@
     }
   }
 
+  // Keys whose values are transient runtime artifacts from the Wrokit Vision
+  // engine and must never be persisted to Firestore (or any remote store).
+  const RUNTIME_STRIP_KEYS = new Set([
+    'landmark','ringMask','edgePatch',
+    'neighborhoods','selectionResolution',
+    'resolvedLocalSubgraph','localStructure','localCoordinateFrame',
+    'relevanceScores','retainedNodeIds','rejectedNodeIds',
+    'seedStructuralGraph','seedTextGraphSummary',
+    'uploadedImageAnalysis'
+  ]);
+
   function sanitizeForFirestore(value){
-    return JSON.parse(JSON.stringify(value, (key, current) => {
+    const raw = JSON.parse(JSON.stringify(value, (key, current) => {
       if(current === undefined) return undefined;
-      if(key === 'landmark') return undefined;
-      if(key === 'ringMask' || key === 'edgePatch') return undefined;
+      if(RUNTIME_STRIP_KEYS.has(key)) return undefined;
       if(ArrayBuffer.isView(current) || current instanceof ArrayBuffer) return undefined;
       return current;
     }));
+    // Also strip the top-level geometryArtifacts container (precomputed maps,
+    // seed graphs) which is rebuild-on-demand from tokens + image data.
+    if(raw?.profile?.wrokitVision?.geometryArtifacts){
+      delete raw.profile.wrokitVision.geometryArtifacts;
+    }
+    return raw;
   }
 
   function getDataLayerService(){

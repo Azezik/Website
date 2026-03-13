@@ -3969,8 +3969,74 @@ function jsonReviver(key, value){
   return value;
 }
 
+/**
+ * Strip transient Wrokit Vision runtime artifacts from a profile clone before
+ * persistence.  These structures (structural graphs, layout maps, OCR token
+ * arrays, region proposals, debug visualisations, matching candidates, etc.)
+ * are generated live during config-mode extraction and must never be written
+ * to localStorage or Firestore – they cause quota-exceeded errors and bloat
+ * persisted objects far beyond what the storage adapters can handle.
+ *
+ * What IS kept:
+ *   - field-level bounding boxes, geometry, anchor metrics, magic types
+ *   - minimal wrokitVisionConfig: schema, method, fieldKey, page, geometryId,
+ *     bbox, viewport, rawBox, mapStats, precomputedStructuralMapRef,
+ *     fieldSignature (top-level only – no nested subgraph copies)
+ *   - aiConfig (already small)
+ *   - fingerprints, keywordRelations, column config, area config
+ *
+ * What IS removed:
+ *   - wrokitVision.geometryArtifacts (full precomputedStructuralMaps,
+ *     seedStructuralGraphs, uploadedImageAnalysis, etc.)
+ *   - wrokitVisionConfig.neighborhoods (text/structural neighbor arrays)
+ *   - wrokitVisionConfig.selectionResolution (resolvedLocalSubgraph,
+ *     localStructure, localCoordinateFrame, relevanceScores, etc.)
+ *   - Any Uint8Array / ArrayBuffer fields that survive cloning
+ */
+function stripRuntimeVisionData(profile){
+  if(!profile || typeof profile !== 'object') return profile;
+
+  // 1. Remove top-level geometry artifacts (precomputed maps, seed graphs).
+  //    These are rebuild-on-demand from tokens + image data.
+  if(profile.wrokitVision){
+    delete profile.wrokitVision.geometryArtifacts;
+    // If nothing meaningful remains, drop the container entirely.
+    if(!Object.keys(profile.wrokitVision).length){
+      delete profile.wrokitVision;
+    }
+  }
+
+  // 2. Slim down per-field wrokitVisionConfig to the minimal portable subset.
+  const VISION_CFG_KEEP = new Set([
+    'schema','method','fieldKey','page','geometryId',
+    'bbox','viewport','rawBox','mapStats',
+    'precomputedStructuralMapRef','fieldSignature','labelHints'
+  ]);
+
+  if(Array.isArray(profile.fields)){
+    for(const field of profile.fields){
+      if(field.wrokitVisionConfig && typeof field.wrokitVisionConfig === 'object'){
+        const slim = {};
+        for(const key of VISION_CFG_KEEP){
+          if(field.wrokitVisionConfig[key] !== undefined){
+            slim[key] = field.wrokitVisionConfig[key];
+          }
+        }
+        field.wrokitVisionConfig = Object.keys(slim).length ? slim : null;
+      }
+      // Remove any residual binary blobs on legacy landmark data.
+      if(field.landmark){
+        delete field.landmark.ringMask;
+        delete field.landmark.edgePatch;
+      }
+    }
+  }
+  return profile;
+}
+
 function serializeProfile(p){
-  return JSON.stringify(sortObj(migrateProfile(structuredClone(p))), jsonReplacer);
+  const clone = stripRuntimeVisionData(migrateProfile(structuredClone(p)));
+  return JSON.stringify(sortObj(clone), jsonReplacer);
 }
 
 function patternStoreKey(docType, wizardId = DEFAULT_WIZARD_ID, geometryId = null){
@@ -8772,7 +8838,7 @@ function computeImageContentHash(page){
   try {
     const grayCanvas = state.grayCanvases?.[page];
     if(!grayCanvas || grayCanvas.width <= 0 || grayCanvas.height <= 0) return null;
-    const ctx = grayCanvas.getContext('2d');
+    const ctx = grayCanvas.getContext('2d', { willReadFrequently: true });
     const w = grayCanvas.width;
     const h = grayCanvas.height;
     const raw = ctx.getImageData(0, 0, w, h);
@@ -8901,7 +8967,7 @@ function ensureGrayCanvas(page){
   const h = Math.round((vp.h ?? vp.height) || 1);
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(src, 0, offY, w, h, 0, 0, w, h);
   const img = ctx.getImageData(0,0,w,h);
   for(let i=0;i<img.data.length;i+=4){
@@ -8917,7 +8983,7 @@ function getPageGrayImageData(page){
   try {
     const grayCanvas = ensureGrayCanvas(page);
     if(!grayCanvas || grayCanvas.width <= 0 || grayCanvas.height <= 0) return null;
-    const gctx = grayCanvas.getContext('2d');
+    const gctx = grayCanvas.getContext('2d', { willReadFrequently: true });
     const raw = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
     const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
     for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
@@ -8925,7 +8991,7 @@ function getPageGrayImageData(page){
     const offY = state.pageOffsets[page-1] || 0;
     const vp = state.pageViewports[page-1] || state.viewport;
     const colorHeight = Math.round((vp.h ?? vp.height) || grayCanvas.height || 1);
-    const cctx = src?.getContext ? src.getContext('2d') : null;
+    const cctx = src?.getContext ? src.getContext('2d', { willReadFrequently: true }) : null;
     if(!cctx) return { gray, width: grayCanvas.width, height: grayCanvas.height };
     const colorRaw = cctx.getImageData(0, offY, grayCanvas.width, colorHeight);
     const expected = grayCanvas.width * grayCanvas.height;
@@ -19653,7 +19719,14 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         fields: profileFieldDiagnostics
       });
     }
-    const runtimeEngineType = isRunMode() ? getConfiguredEngineType() : getProfileEngineType(activeProfile || state.profile);
+    // In RUN mode, prefer the engine type stored in the profile (the engine
+    // that was active when the wizard was configured).  Fall back to the UI
+    // selector only when the profile has no engine annotation.  This ensures
+    // drag-and-drop batch extraction from the document dashboard uses the
+    // correct engine even when the config-mode UI state is stale.
+    const runtimeEngineType = isRunMode()
+      ? (getProfileEngineType(activeProfile) || getConfiguredEngineType())
+      : getProfileEngineType(activeProfile || state.profile);
     const runExtractionEngine = getRuntimeExtractionEngine(runtimeEngineType);
     if(!runExtractionEngine?.orchestrate){
       throw new Error('EngineExtraction.orchestrate is unavailable');
