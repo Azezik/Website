@@ -20553,6 +20553,13 @@ function refreshBatchSessionUI(){
     _activeBatchSessionId = null;
     var details = document.getElementById('batch-session-details');
     if(details) details.style.display = 'none';
+    // Hide Phase 2 and 2B panels when no session is active
+    var p2 = document.getElementById('batch-phase2-panel');
+    if(p2) p2.style.display = 'none';
+    var p2b = document.getElementById('batch-phase2b-panel');
+    if(p2b) p2b.style.display = 'none';
+    var p2bSel = document.getElementById('batch-phase2b-doc-select');
+    if(p2bSel) p2bSel.innerHTML = '<option value="">— Select a document —</option>';
   }
 }
 
@@ -20635,11 +20642,20 @@ function showBatchSessionDetails(sessionId){
   } else {
     var phase2Panel2 = document.getElementById('batch-phase2-panel');
     if(phase2Panel2) phase2Panel2.style.display = 'none';
+    // Also hide Phase 2B when Phase 2 is not available
+    var phase2bPanel2 = document.getElementById('batch-phase2b-panel');
+    if(phase2bPanel2) phase2bPanel2.style.display = 'none';
   }
 
   // Show existing correspondence result if available
   if(session.correspondenceResult){
     _renderCorrespondenceResult(session.correspondenceResult);
+  } else {
+    // No correspondence result: hide Phase 2B and clear its dropdown
+    var phase2bPanel3 = document.getElementById('batch-phase2b-panel');
+    if(phase2bPanel3) phase2bPanel3.style.display = 'none';
+    var phase2bSelect = document.getElementById('batch-phase2b-doc-select');
+    if(phase2bSelect) phase2bSelect.innerHTML = '<option value="">— Select a document —</option>';
   }
 }
 
@@ -20652,7 +20668,11 @@ function showBatchSessionDetails(sessionId){
     select.addEventListener('change', function(){
       _activeBatchSessionId = select.value || null;
       if(_activeBatchSessionId) showBatchSessionDetails(_activeBatchSessionId);
-      else { var d = document.getElementById('batch-session-details'); if(d) d.style.display = 'none'; }
+      else {
+        var d = document.getElementById('batch-session-details'); if(d) d.style.display = 'none';
+        var p2 = document.getElementById('batch-phase2-panel'); if(p2) p2.style.display = 'none';
+        var p2b = document.getElementById('batch-phase2b-panel'); if(p2b) p2b.style.display = 'none';
+      }
     });
   }
 })();
