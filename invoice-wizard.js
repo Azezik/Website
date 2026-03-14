@@ -20675,7 +20675,7 @@ function showBatchSessionDetails(sessionId){
   }
 })();
 
-// Add documents via file input
+// Add documents via file input — sequential processing with PDF + image support
 (function(){
   var fileInput = document.getElementById('batch-file-input');
   if(!fileInput) return;
@@ -20683,145 +20683,328 @@ function showBatchSessionDetails(sessionId){
     if(!_batchStore || !_activeBatchSessionId || !_learningAPI) return;
     var files = e.target.files;
     if(!files || !files.length) return;
-
-    var processCount = 0;
-    var totalFiles = files.length;
-    var statusEl = document.getElementById('batch-session-status');
-
-    function onFileComplete(){
-      processCount++;
-      if(statusEl) statusEl.textContent = 'Processing ' + processCount + '/' + totalFiles + '...';
-      if(processCount >= totalFiles){
-        if(statusEl) statusEl.textContent = '';
-        showBatchSessionDetails(_activeBatchSessionId);
-        refreshBatchSessionUI();
-      }
-    }
-
-    if(statusEl) statusEl.textContent = 'Processing 0/' + totalFiles + '...';
-
-    for(var fi = 0; fi < files.length; fi++){
-      (function(file){
-        var reader = new FileReader();
-        reader.onload = function(){
-          // Require the WrokitVision precompute pipeline — do not silently
-          // accept empty summaries when it is unavailable.
-          var precompute = window.WrokitVisionPrecompute || null;
-          if(!precompute || !precompute.buildPrecomputedStructuralMap){
-            console.warn('[BatchLearning] WrokitVisionPrecompute.buildPrecomputedStructuralMap not available – skipping ' + file.name);
-            var placeholder = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
-            // Placeholder will be marked invalid by validation and excluded from analysis
-            _batchStore.addDocument(_activeBatchSessionId, placeholder);
-            onFileComplete();
-            return;
-          }
-
-          // Load the image to extract pixel data and viewport dimensions
-          var img = new Image();
-          img.onload = function(){
-            var viewport = {width: img.naturalWidth, height: img.naturalHeight};
-
-            // Extract imageData (grayscale + RGB channels) from canvas
-            var imageData = null;
-            try {
-              var cvs = document.createElement('canvas');
-              cvs.width = img.naturalWidth;
-              cvs.height = img.naturalHeight;
-              var ctx = cvs.getContext('2d', { willReadFrequently: true });
-              ctx.drawImage(img, 0, 0);
-              var raw = ctx.getImageData(0, 0, cvs.width, cvs.height);
-              var px = cvs.width * cvs.height;
-              var gray = new Uint8Array(px);
-              var rCh = new Uint8Array(px);
-              var gCh = new Uint8Array(px);
-              var bCh = new Uint8Array(px);
-              for(var i = 0, j = 0; j < px; i += 4, j++){
-                var rv = raw.data[i] || 0, gv = raw.data[i+1] || 0, bv = raw.data[i+2] || 0;
-                gray[j] = Math.round(rv * 0.299 + gv * 0.587 + bv * 0.114);
-                rCh[j] = rv; gCh[j] = gv; bCh[j] = bv;
-              }
-              imageData = { gray: gray, r: rCh, g: gCh, b: bCh, width: cvs.width, height: cvs.height };
-            } catch(ex){
-              console.warn('[BatchLearning] Failed to extract imageData for ' + file.name, ex);
-            }
-
-            // Run OCR via Tesseract if available, otherwise use empty tokens.
-            // Visual segmentation will still produce regions from imageData alone.
-            var tokens = [];
-            var runWithTokens = function(toks){
-              try {
-                var structuralMap = precompute.buildPrecomputedStructuralMap({
-                  tokens: toks,
-                  viewport: viewport,
-                  page: 1,
-                  geometryId: 'batch-learning',
-                  imageData: imageData
-                });
-                var analysisResult = structuralMap && structuralMap.uploadedImageAnalysis
-                  ? structuralMap.uploadedImageAnalysis
-                  : {};
-                // Attach viewport since the analysis pipeline may not always embed it
-                if(!analysisResult.viewport) analysisResult.viewport = viewport;
-                console.log('[BatchLearning] Analysis for ' + file.name + ':',
-                  'regions=' + ((analysisResult.regionNodes||[]).length),
-                  'blocks=' + ((analysisResult.textBlocks||[]).length),
-                  'lines=' + ((analysisResult.textLines||[]).length),
-                  'surfaces=' + ((analysisResult.surfaceCandidates||[]).length));
-                var summary = _learningAPI.extractDocumentSummary(analysisResult, {documentName: file.name, viewport: viewport});
-                console.log('[BatchLearning] Summary for ' + file.name + ':',
-                  'valid=' + summary.structurallyValid,
-                  'regionCount=' + summary.metrics.regionCount,
-                  'blockCount=' + summary.metrics.textBlockCount);
-                _batchStore.addDocument(_activeBatchSessionId, summary);
-              } catch(err){
-                console.error('[BatchLearning] Pipeline error for ' + file.name, err);
-                var errSummary = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
-                _batchStore.addDocument(_activeBatchSessionId, errSummary);
-              }
-              onFileComplete();
-            };
-
-            // Try to get OCR tokens from Tesseract if available
-            if(window.Tesseract && window.Tesseract.recognize){
-              window.Tesseract.recognize(img, 'eng', {}).then(function(result){
-                var toks = [];
-                if(result && result.data && result.data.words){
-                  toks = result.data.words.map(function(w){
-                    return {
-                      x: w.bbox.x0, y: w.bbox.y0,
-                      w: w.bbox.x1 - w.bbox.x0,
-                      h: w.bbox.y1 - w.bbox.y0,
-                      text: w.text,
-                      confidence: (w.confidence || 0) / 100
-                    };
-                  });
-                }
-                console.log('[BatchLearning] OCR produced ' + toks.length + ' tokens for ' + file.name);
-                runWithTokens(toks);
-              }).catch(function(err){
-                console.warn('[BatchLearning] OCR failed for ' + file.name + ', proceeding with visual-only analysis', err);
-                runWithTokens([]);
-              });
-            } else {
-              // No OCR available – visual segmentation only
-              console.log('[BatchLearning] No OCR engine available, proceeding with visual-only analysis for ' + file.name);
-              runWithTokens([]);
-            }
-          };
-          img.onerror = function(){
-            console.error('[BatchLearning] Failed to load image: ' + file.name);
-            var errSummary = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
-            _batchStore.addDocument(_activeBatchSessionId, errSummary);
-            onFileComplete();
-          };
-          img.src = reader.result;
-        };
-        reader.readAsDataURL(file);
-      })(files[fi]);
-    }
+    var fileList = Array.prototype.slice.call(files);
     e.target.value = '';
+    _batchProcessQueue(fileList);
   });
 })();
+
+/**
+ * Sequential batch file processor.  Processes one file at a time so the
+ * async PDF.js → canvas → WrokitVision pipeline is reliable and debuggable.
+ * Each file goes through:  queued → loading → rendering → extracting_tokens
+ *   → analyzing → extracting_summary → valid/invalid/error
+ */
+function _batchProcessQueue(fileList){
+  if(!_batchStore || !_activeBatchSessionId || !_learningAPI) return;
+
+  var precompute = window.WrokitVisionPrecompute || null;
+  var hasPipeline = !!(precompute && precompute.buildPrecomputedStructuralMap);
+
+  var totalFiles = fileList.length;
+  var statusEl   = document.getElementById('batch-session-status');
+  var docListEl  = document.getElementById('batch-doc-list');
+
+  function updateGlobalStatus(msg){ if(statusEl) statusEl.textContent = msg; }
+
+  // Per-file status tracking — renders live progress in the doc list panel
+  var statusMap = {};
+  function renderDocStatus(){
+    if(!docListEl) return;
+    var html = '';
+    for(var k = 0; k < fileList.length; k++){
+      var fn = fileList[k].name;
+      var st = statusMap[fn] || { state: 'queued', detail: '' };
+      var color = {
+        queued:'var(--muted,#888)', loading:'#b87e0a', rendering:'#b87e0a',
+        extracting_tokens:'#b87e0a', analyzing:'#2a7', extracting_summary:'#2a7',
+        valid:'#2a7', invalid:'#c44', error:'#c44', skipped:'#888'
+      }[st.state] || 'var(--muted)';
+      html += '<div style="padding:3px 0;font-size:13px;border-bottom:1px solid var(--border,#eee);">' +
+        '<span style="display:inline-block;min-width:24px;text-align:right;color:var(--muted);">' + (k+1) + '.</span> ' +
+        '<span style="color:' + color + ';font-weight:600;font-size:11px;min-width:140px;display:inline-block;">' +
+          st.state.replace(/_/g,' ') + '</span> ' +
+        '<span>' + fn + '</span>' +
+        (st.detail ? ' <span style="color:var(--muted);font-size:12px;"> — ' + st.detail + '</span>' : '') +
+        '</div>';
+    }
+    docListEl.innerHTML = html;
+  }
+  function setFileStatus(fileName, state, detail){
+    statusMap[fileName] = { state: state, detail: detail || '' };
+    console.log('[BatchLearning][' + state + '] ' + fileName + (detail ? ' — ' + detail : ''));
+    renderDocStatus();
+  }
+
+  // Initialise all files as queued
+  for(var qi = 0; qi < fileList.length; qi++) statusMap[fileList[qi].name] = { state: 'queued', detail: '' };
+  renderDocStatus();
+  updateGlobalStatus('Processing 0/' + totalFiles + '...');
+
+  // Open the doc list details panel so user can see progress
+  var docListPanel = document.getElementById('batch-doc-list-panel');
+  if(docListPanel) docListPanel.open = true;
+
+  function processNext(idx){
+    if(idx >= fileList.length){
+      updateGlobalStatus('');
+      showBatchSessionDetails(_activeBatchSessionId);
+      refreshBatchSessionUI();
+      return;
+    }
+    var file = fileList[idx];
+    var fileName = file.name;
+    updateGlobalStatus('Processing ' + (idx+1) + '/' + totalFiles + ': ' + fileName);
+
+    if(!hasPipeline){
+      setFileStatus(fileName, 'skipped', 'WrokitVisionPrecompute not available');
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+      processNext(idx + 1);
+      return;
+    }
+
+    var isPdf = /\.pdf$/i.test(fileName) || file.type === 'application/pdf';
+    setFileStatus(fileName, 'loading', isPdf ? 'PDF document' : 'image file');
+
+    var reader = new FileReader();
+    reader.onerror = function(){
+      setFileStatus(fileName, 'error', 'Failed to read file');
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+      processNext(idx + 1);
+    };
+    reader.onload = function(){
+      var arrayBuffer = reader.result;
+      if(isPdf){
+        _batchProcessPdf(fileName, arrayBuffer, function(){ processNext(idx + 1); });
+      } else {
+        _batchProcessImage(fileName, arrayBuffer, function(){ processNext(idx + 1); });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  processNext(0);
+
+  /* ── PDF processing path ─────────────────────────────────────────────── */
+  /* Renders page 1 via pdf.js, extracts text tokens via getTextContent,   */
+  /* and imageData via canvas — same pipeline the main system uses.        */
+
+  function _batchProcessPdf(fileName, arrayBuffer, done){
+    if(!pdfjsLibRef || !pdfjsLibRef.getDocument){
+      setFileStatus(fileName, 'error', 'pdf.js not available — cannot process PDF');
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+      done(); return;
+    }
+
+    setFileStatus(fileName, 'loading', 'parsing PDF with pdf.js');
+    var pdfData = new Uint8Array(arrayBuffer);
+    var loadingTask = pdfjsLibRef.getDocument({ data: pdfData });
+
+    loadingTask.promise.then(function(pdfDoc){
+      setFileStatus(fileName, 'rendering', 'page 1 of ' + pdfDoc.numPages);
+      return pdfDoc.getPage(1).then(function(page){
+        // Use same scale as the main document pipeline
+        var scale = (window.devicePixelRatio || 1) * 1.5;  // matches BASE_PDF_SCALE
+        var vp = page.getViewport({ scale: scale });
+        var viewport = { width: Math.round(vp.width), height: Math.round(vp.height) };
+
+        console.log('[BatchLearning] PDF viewport for ' + fileName + ':',
+          viewport.width + 'x' + viewport.height, '(scale=' + scale + ')');
+
+        // Render page 1 to an off-screen canvas
+        var cvs = document.createElement('canvas');
+        cvs.width = viewport.width;
+        cvs.height = viewport.height;
+        var ctx = cvs.getContext('2d', { willReadFrequently: true });
+        var renderTask = page.render({ canvasContext: ctx, viewport: vp });
+
+        return renderTask.promise.then(function(){
+          setFileStatus(fileName, 'extracting_tokens', 'reading PDF text content');
+
+          // Extract text tokens via pdf.js getTextContent — same method as readTokensForPage
+          return page.getTextContent().then(function(content){
+            var tokens = [];
+            for(var ci = 0; ci < content.items.length; ci++){
+              var item = content.items[ci];
+              var tx = pdfjsLibRef.Util.transform(vp.transform, item.transform);
+              var x = tx[4], yTop = tx[5], w = item.width, h = item.height;
+              var text = item.str;
+              // Apply the same OCR corrections used by the main pipeline
+              if(typeof applyOcrCorrections === 'function'){
+                try {
+                  var corrResult = applyOcrCorrections(text);
+                  text = corrResult.text || corrResult.corrected || text;
+                } catch(_){}
+              }
+              tokens.push({ text: text, confidence: 1, x: x, y: yTop - h, w: w, h: h, page: 1 });
+            }
+            console.log('[BatchLearning] PDF text extraction for ' + fileName + ': ' + tokens.length + ' tokens');
+
+            // Extract imageData (gray + RGB channels) from the rendered canvas
+            var imageData = _batchExtractImageData(cvs);
+            console.log('[BatchLearning] imageData for ' + fileName + ':',
+              imageData ? imageData.width + 'x' + imageData.height : 'null');
+
+            // Run WrokitVision structural analysis
+            _batchRunAnalysis(fileName, tokens, viewport, imageData, done);
+          });
+        });
+      });
+    }).catch(function(err){
+      console.error('[BatchLearning] PDF processing failed for ' + fileName + ':', err);
+      setFileStatus(fileName, 'error', 'PDF processing failed: ' + (err.message || String(err)));
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+      done();
+    });
+  }
+
+  /* ── Image processing path ───────────────────────────────────────────── */
+
+  function _batchProcessImage(fileName, arrayBuffer, done){
+    setFileStatus(fileName, 'loading', 'decoding image');
+    var blob = new Blob([arrayBuffer]);
+    var url = URL.createObjectURL(blob);
+    var img = new Image();
+    img.onload = function(){
+      URL.revokeObjectURL(url);
+      var viewport = { width: img.naturalWidth, height: img.naturalHeight };
+      console.log('[BatchLearning] Image viewport for ' + fileName + ':',
+        viewport.width + 'x' + viewport.height);
+
+      setFileStatus(fileName, 'rendering', viewport.width + 'x' + viewport.height);
+      var cvs = document.createElement('canvas');
+      cvs.width = img.naturalWidth;
+      cvs.height = img.naturalHeight;
+      var ctx = cvs.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+
+      var imageData = _batchExtractImageData(cvs);
+
+      // OCR via Tesseract if available
+      if(window.Tesseract && window.Tesseract.recognize){
+        setFileStatus(fileName, 'extracting_tokens', 'running Tesseract OCR');
+        window.Tesseract.recognize(img, 'eng', {}).then(function(result){
+          var toks = [];
+          if(result && result.data && result.data.words){
+            toks = result.data.words.map(function(w){
+              return {
+                x: w.bbox.x0, y: w.bbox.y0,
+                w: w.bbox.x1 - w.bbox.x0, h: w.bbox.y1 - w.bbox.y0,
+                text: w.text, confidence: (w.confidence || 0) / 100
+              };
+            });
+          }
+          console.log('[BatchLearning] Tesseract OCR for ' + fileName + ': ' + toks.length + ' tokens');
+          _batchRunAnalysis(fileName, toks, viewport, imageData, done);
+        }).catch(function(err){
+          console.warn('[BatchLearning] OCR failed for ' + fileName + ', using visual-only analysis:', err);
+          _batchRunAnalysis(fileName, [], viewport, imageData, done);
+        });
+      } else {
+        console.log('[BatchLearning] No OCR engine, visual-only for ' + fileName);
+        _batchRunAnalysis(fileName, [], viewport, imageData, done);
+      }
+    };
+    img.onerror = function(){
+      URL.revokeObjectURL(url);
+      setFileStatus(fileName, 'error', 'Failed to decode image');
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+      done();
+    };
+    img.src = url;
+  }
+
+  /* ── Shared: extract imageData channels from canvas ──────────────────── */
+
+  function _batchExtractImageData(canvas){
+    try {
+      var ctx = canvas.getContext('2d', { willReadFrequently: true });
+      var raw = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var px = canvas.width * canvas.height;
+      var gray = new Uint8Array(px);
+      var rCh = new Uint8Array(px);
+      var gCh = new Uint8Array(px);
+      var bCh = new Uint8Array(px);
+      for(var i = 0, j = 0; j < px; i += 4, j++){
+        var rv = raw.data[i] || 0, gv = raw.data[i+1] || 0, bv = raw.data[i+2] || 0;
+        gray[j] = Math.round(rv * 0.299 + gv * 0.587 + bv * 0.114);
+        rCh[j] = rv; gCh[j] = gv; bCh[j] = bv;
+      }
+      return { gray: gray, r: rCh, g: gCh, b: bCh, width: canvas.width, height: canvas.height };
+    } catch(ex){
+      console.warn('[BatchLearning] Failed to extract imageData from canvas:', ex);
+      return null;
+    }
+  }
+
+  /* ── Shared: run WrokitVision analysis and extract summary ───────────── */
+
+  function _batchRunAnalysis(fileName, tokens, viewport, imageData, done){
+    setFileStatus(fileName, 'analyzing',
+      tokens.length + ' tokens, ' + viewport.width + 'x' + viewport.height +
+      (imageData ? ', imageData=' + imageData.width + 'x' + imageData.height : ', no imageData'));
+    try {
+      var structuralMap = precompute.buildPrecomputedStructuralMap({
+        tokens: tokens,
+        viewport: viewport,
+        page: 1,
+        geometryId: 'batch-learning',
+        imageData: imageData
+      });
+
+      var analysisResult = (structuralMap && structuralMap.uploadedImageAnalysis) || {};
+      if(!analysisResult.viewport) analysisResult.viewport = viewport;
+
+      var regionCount  = (analysisResult.regionNodes || []).length;
+      var blockCount   = (analysisResult.textBlocks || []).length;
+      var lineCount    = (analysisResult.textLines || []).length;
+      var surfaceCount = (analysisResult.surfaceCandidates || []).length;
+      var edgeCount    = ((analysisResult.regionGraph || {}).edges || []).length;
+
+      console.log('[BatchLearning] Pipeline output for ' + fileName + ':',
+        'regions=' + regionCount, 'blocks=' + blockCount,
+        'lines=' + lineCount, 'surfaces=' + surfaceCount, 'edges=' + edgeCount);
+
+      setFileStatus(fileName, 'extracting_summary',
+        regionCount + ' regions, ' + blockCount + ' blocks, ' + edgeCount + ' edges');
+
+      var summary = _learningAPI.extractDocumentSummary(analysisResult, {
+        documentName: fileName,
+        viewport: viewport
+      });
+
+      console.log('[BatchLearning] Summary for ' + fileName + ':',
+        'structurallyValid=' + summary.structurallyValid,
+        'regionCount=' + summary.metrics.regionCount,
+        'blockCount=' + summary.metrics.textBlockCount,
+        'edgeCount=' + summary.metrics.edgeCount,
+        'avgConfidence=' + (summary.metrics.avgConfidence || 0).toFixed(3),
+        'reason=' + (summary.validationReason || 'none'));
+
+      _batchStore.addDocument(_activeBatchSessionId, summary);
+
+      if(summary.structurallyValid){
+        setFileStatus(fileName, 'valid',
+          summary.metrics.regionCount + ' regions, ' +
+          summary.metrics.textBlockCount + ' blocks, ' +
+          summary.metrics.edgeCount + ' edges');
+      } else {
+        setFileStatus(fileName, 'invalid', summary.validationReason || 'No structural outputs');
+      }
+    } catch(err){
+      console.error('[BatchLearning] Pipeline error for ' + fileName + ':', err);
+      setFileStatus(fileName, 'error', err.message || 'Pipeline error');
+      _batchStore.addDocument(_activeBatchSessionId,
+        _learningAPI.extractDocumentSummary({}, {documentName: fileName}));
+    }
+    done();
+  }
+}
 
 // Analyze batch stability
 (function(){
