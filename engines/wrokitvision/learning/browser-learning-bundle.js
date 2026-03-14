@@ -737,11 +737,33 @@
       surfaceTypeCounts[st] = (surfaceTypeCounts[st]||0)+1;
     }
 
+    var metrics = {
+      regionCount: regionNodes.length,
+      edgeCount: adjacencyEdges.length,
+      avgRegionArea: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.normalizedArea;},0)/regionDescriptors.length : 0,
+      avgTextDensity: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.textDensity;},0)/regionDescriptors.length : 0,
+      avgConfidence: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.confidence;},0)/regionDescriptors.length : 0,
+      textLineCount: textLines.length,
+      textBlockCount: textBlocks.length,
+      surfaceCandidateCount: surfaceCandidates.length
+    };
+
+    var hasRegions = metrics.regionCount > 0;
+    var hasViewport = vpW > 1 && vpH > 1;
+    var structurallyValid = hasRegions && hasViewport;
+    var validationReason = !hasViewport
+      ? 'Missing or zero viewport dimensions'
+      : !hasRegions
+        ? 'No regions detected — WrokitVision analysis may not have run or the image produced no structural output'
+        : '';
+
     return {
       documentId: opts.documentId || generateId('bdoc'),
       documentName: opts.documentName || '',
       timestamp: new Date().toISOString(),
       viewport: {w:vpW,h:vpH},
+      structurallyValid: structurallyValid,
+      validationReason: validationReason,
       regionDescriptors: regionDescriptors,
       adjacencyEdges: adjacencyEdges,
       neighborhoodDescriptors: neighborhoodDescriptors,
@@ -749,16 +771,7 @@
       surfaceTypeCounts: surfaceTypeCounts,
       normalizedSpatialDistribution: normalizedSpatialDistribution,
       regionSignatures: regionSignatures,
-      metrics: {
-        regionCount: regionNodes.length,
-        edgeCount: adjacencyEdges.length,
-        avgRegionArea: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.normalizedArea;},0)/regionDescriptors.length : 0,
-        avgTextDensity: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.textDensity;},0)/regionDescriptors.length : 0,
-        avgConfidence: regionDescriptors.length ? regionDescriptors.reduce(function(s,r){return s+r.confidence;},0)/regionDescriptors.length : 0,
-        textLineCount: textLines.length,
-        textBlockCount: textBlocks.length,
-        surfaceCandidateCount: surfaceCandidates.length
-      }
+      metrics: metrics
     };
   }
 
@@ -772,9 +785,42 @@
           ? 'Need at least 2 documents. Currently have 1.'
           : 'No documents in this batch session.',
         documentCount: documents ? documents.length : 0,
+        validDocumentCount: 0, invalidDocuments: [],
         stabilityMetrics: null, parameterDiagnoses: null, overallStability: null, intermediateData: null
       };
     }
+
+    // Filter to structurally valid documents only
+    var validDocs = [], invalidDocs = [];
+    for(var vdi=0;vdi<documents.length;vdi++){
+      var vdoc = documents[vdi];
+      var isValid = vdoc.structurallyValid === true ||
+        (vdoc.structurallyValid === undefined &&
+         vdoc.metrics && vdoc.metrics.regionCount > 0 &&
+         vdoc.viewport && vdoc.viewport.w > 1 && vdoc.viewport.h > 1);
+      if(isValid) validDocs.push(vdoc);
+      else invalidDocs.push({
+        documentId: vdoc.documentId||'(unknown)',
+        documentName: vdoc.documentName||'(unnamed)',
+        reason: vdoc.validationReason||'No structural outputs (0 regions detected)'
+      });
+    }
+
+    if(validDocs.length < 2){
+      var invMsg = invalidDocs.length > 0
+        ? ' ' + invalidDocs.length + ' document(s) excluded (no structural outputs).'
+        : '';
+      return {
+        status: 'insufficient_valid_data',
+        message: 'Need at least 2 documents with real structural outputs. Found ' +
+          validDocs.length + ' valid out of ' + documents.length + ' total.' + invMsg,
+        documentCount: documents.length,
+        validDocumentCount: validDocs.length, invalidDocuments: invalidDocs,
+        stabilityMetrics: null, parameterDiagnoses: null, overallStability: null, intermediateData: null
+      };
+    }
+
+    documents = validDocs;
 
     // Region count stability
     var rcCounts = documents.map(function(d){return d.metrics.regionCount;});
@@ -958,6 +1004,7 @@
 
     return {
       status:status, message:msgs[status], documentCount:documents.length,
+      validDocumentCount:validDocs.length, invalidDocuments:invalidDocs,
       analyzedAt:new Date().toISOString(), overallStability:overall,
       stabilityMetrics:stabilityMetrics, parameterDiagnoses:diagnoses, intermediateData:intermediateData
     };
@@ -967,7 +1014,7 @@
 
   function formatStabilityReport(report){
     if(!report) return '[No report data]';
-    if(report.status === 'insufficient_data') return report.message;
+    if(report.status === 'insufficient_data' || report.status === 'insufficient_valid_data') return report.message;
     var out = '';
     out += '══════════════════════════════════════════════════════════════\n';
     out += '  BATCH STRUCTURAL STABILITY REPORT\n';
@@ -975,8 +1022,18 @@
     out += '  Status: ' + report.status.toUpperCase() + '\n';
     out += '  Overall Stability: ' + (report.overallStability*100).toFixed(1) + '%\n';
     out += '  Documents analyzed: ' + report.documentCount + '\n';
+    if(report.invalidDocuments && report.invalidDocuments.length > 0){
+      out += '  Documents excluded (invalid): ' + report.invalidDocuments.length + '\n';
+    }
     out += '  Analyzed at: ' + report.analyzedAt + '\n\n';
     out += '  ' + report.message + '\n';
+    if(report.invalidDocuments && report.invalidDocuments.length > 0){
+      out += '\n  EXCLUDED DOCUMENTS:\n';
+      for(var ivi=0;ivi<report.invalidDocuments.length;ivi++){
+        var inv = report.invalidDocuments[ivi];
+        out += '    - ' + (inv.documentName||inv.documentId) + ': ' + inv.reason + '\n';
+      }
+    }
     out += '\n──────────────────────────────────────────────────────────────\n';
     out += '  STABILITY METRICS\n';
     out += '──────────────────────────────────────────────────────────────\n\n';
