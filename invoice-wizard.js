@@ -21023,10 +21023,13 @@ function _batchProcessQueue(fileList){
     var reportEl = document.getElementById('batch-report-content');
     var metricsEl = document.getElementById('batch-metrics-content');
 
+    var exportBtn = document.getElementById('batch-export-btn');
+
     if(report.status === 'insufficient_valid_data'){
       if(reportEl) reportEl.textContent = report.message;
       if(metricsEl) metricsEl.innerHTML = '<p style="color:#c44;">Batch analysis cannot proceed. ' +
         'Ensure documents have been processed through the WrokitVision analysis pipeline.</p>';
+      if(exportBtn){ exportBtn.disabled = true; exportBtn.style.display = 'none'; }
       // Do not save a misleading report
       return;
     }
@@ -21038,6 +21041,48 @@ function _batchProcessQueue(fileList){
       metricsEl.innerHTML = '<pre class="code" style="white-space:pre-wrap;">' +
         JSON.stringify(report.stabilityMetrics, null, 2).replace(/</g, '&lt;') + '</pre>';
     }
+
+    // Show export button after successful analysis
+    if(exportBtn){ exportBtn.disabled = false; exportBtn.style.display = ''; }
+  });
+})();
+
+/* ── Export stability report as .txt ─────────────────────────────────── */
+(function(){
+  var exportBtn = document.getElementById('batch-export-btn');
+  if(!exportBtn) return;
+  exportBtn.addEventListener('click', function(){
+    var reportEl = document.getElementById('batch-report-content');
+    var metricsEl = document.getElementById('batch-metrics-content');
+    var reportText = reportEl ? reportEl.textContent : '';
+    var metricsText = metricsEl ? metricsEl.textContent : '';
+
+    if(!reportText || reportText.indexOf('No analysis run yet') === 0){
+      alert('No stability report available. Run an analysis first.');
+      return;
+    }
+
+    var output = '--------------------------------\n' +
+      'WrokitVision Batch Stability Report\n' +
+      '--------------------------------\n' +
+      reportText + '\n' +
+      '--------------------------------\n' +
+      'Stability Metrics Detail\n' +
+      '--------------------------------\n' +
+      metricsText + '\n';
+
+    var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    var filename = 'wrokit-batch-stability-' + timestamp + '.txt';
+
+    var blob = new Blob([output], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   });
 })();
 
