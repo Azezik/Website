@@ -8,6 +8,7 @@ const { groupTextLines } = require('../../text/text-grouping/group-text-lines');
 const { groupTextBlocks } = require('../../text/text-grouping/group-text-blocks');
 const { detectRegionProposals } = require('../../regions/region-proposals/detect-region-proposals');
 const { computeRegionFeatures } = require('../../regions/region-features/compute-region-features');
+const { refineRegionCoherence } = require('../../regions/region-refinement/refine-region-coherence');
 const { buildRegionGraph } = require('../../regions/region-graph/build-region-graph');
 const { buildTextGraph } = require('../../text/text-graph/build-text-graph');
 const { detectSurfaceCandidates } = require('../../surfaces/surface-candidates/detect-surface-candidates');
@@ -50,7 +51,8 @@ function runUploadAnalysis({ tokens = [], viewport = null, page = 1, imageRef = 
   });
   const proposalRegions = proposalResult.regions || proposalResult;
   const atomicFragments = proposalResult.atomicFragments || [];
-  const regionNodes = computeRegionFeatures(proposalRegions, textTokens);
+  const refinedRegions = refineRegionCoherence(proposalRegions);
+  const regionNodes = computeRegionFeatures(refinedRegions, textTokens);
   const regionGraph = buildRegionGraph(regionNodes, { idFactory });
   const textGraph = buildTextGraph({ textTokens, textLines, textBlocks, idFactory });
   const surfaceCandidates = detectSurfaceCandidates(regionNodes, { idFactory });
