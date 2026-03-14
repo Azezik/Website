@@ -1447,4 +1447,92 @@ function buildExtractionTargets() {
   console.log('formatRefinementReport tests passed.');
 })();
 
+// ── textSource field in extractTextFromNormBox ──────────────────────────
+
+(function testTextSourceField() {
+  var viewport = { width: 800, height: 1000 };
+
+  // Case 1: Multiple tokens → textSource = 'tokens'
+  var manyTokens = [
+    { x: 100, y: 50, w: 40, h: 12, text: 'Invoice', confidence: 0.9 },
+    { x: 145, y: 50, w: 20, h: 12, text: '#', confidence: 0.9 },
+    { x: 170, y: 50, w: 50, h: 12, text: '12345', confidence: 0.95 }
+  ];
+  var normBox = { x0n: 0.1, y0n: 0.04, wN: 0.2, hN: 0.04 };
+  var result = extractTextFromNormBox(normBox, manyTokens, viewport);
+  assert.strictEqual(result.textSource, 'tokens', 'Multiple tokens should yield textSource=tokens');
+
+  // Case 2: Single token → textSource = 'tokens_sparse'
+  var oneToken = [
+    { x: 120, y: 55, w: 30, h: 12, text: 'Hi', confidence: 0.8 }
+  ];
+  var sparseResult = extractTextFromNormBox(normBox, oneToken, viewport);
+  assert.strictEqual(sparseResult.textSource, 'tokens_sparse', 'One token should yield textSource=tokens_sparse');
+
+  // Case 3: No tokens in box → textSource = 'no_tokens'
+  var farBox = { x0n: 0.9, y0n: 0.9, wN: 0.05, hN: 0.05 };
+  var noResult = extractTextFromNormBox(farBox, manyTokens, viewport);
+  assert.strictEqual(noResult.textSource, 'no_tokens', 'No tokens should yield textSource=no_tokens');
+
+  // Case 4: Null/empty inputs → textSource should still be present (or default)
+  var nullResult = extractTextFromNormBox(null, manyTokens, viewport);
+  assert.ok(nullResult.tokenCount === 0, 'Null normBox should return 0 tokens');
+
+  console.log('textSource field tests passed.');
+})();
+
+// ── textSource in extractFromBatch ──────────────────────────────────────
+
+(function testTextSourceInExtractFromBatch() {
+  var docs = [];
+  for (var i = 0; i < 3; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'txtsrc-' + i + '.png' }));
+  }
+
+  var corrResult = analyzeCorrespondence(docs);
+  var targets = buildExtractionTargets();
+  var refDocId = corrResult.referenceDocument.documentId;
+  var refDoc = docs.find(function(d) { return d.documentId === refDocId; });
+  var refinement = refineAnchors(corrResult, targets, refDoc);
+
+  // With tokens → textSource should be present on all fields
+  var batchTokensWithData = {};
+  for (var di = 0; di < docs.length; di++) {
+    batchTokensWithData[docs[di].documentId] = {
+      tokens: [
+        { x: 480, y: 50, w: 80, h: 14, text: 'INV-001', confidence: 0.9 },
+        { x: 560, y: 50, w: 60, h: 14, text: 'foo', confidence: 0.85 },
+        { x: 480, y: 100, w: 70, h: 14, text: '2024-01-15', confidence: 0.9 }
+      ],
+      viewport: { width: 800, height: 1000 }
+    };
+  }
+
+  var resultWith = extractFromBatch(refinement, corrResult, refDoc, docs, batchTokensWithData);
+  for (var ri = 0; ri < resultWith.results.length; ri++) {
+    for (var fi = 0; fi < resultWith.results[ri].fields.length; fi++) {
+      var f = resultWith.results[ri].fields[fi];
+      assert.ok(f.textSource, 'Field should have textSource property, got: ' + f.textSource);
+      assert.ok(['tokens', 'tokens_sparse', 'no_tokens'].indexOf(f.textSource) >= 0,
+        'textSource should be valid: ' + f.textSource);
+    }
+  }
+
+  // Without tokens → textSource should be 'no_tokens'
+  var batchTokensEmpty = {};
+  for (var di2 = 0; di2 < docs.length; di2++) {
+    batchTokensEmpty[docs[di2].documentId] = { tokens: [], viewport: { width: 800, height: 1000 } };
+  }
+
+  var resultEmpty = extractFromBatch(refinement, corrResult, refDoc, docs, batchTokensEmpty);
+  for (var ri2 = 0; ri2 < resultEmpty.results.length; ri2++) {
+    for (var fi2 = 0; fi2 < resultEmpty.results[ri2].fields.length; fi2++) {
+      assert.strictEqual(resultEmpty.results[ri2].fields[fi2].textSource, 'no_tokens',
+        'Empty tokens should yield no_tokens');
+    }
+  }
+
+  console.log('textSource in extractFromBatch tests passed.');
+})();
+
 console.log('All Phase 2B Anchor Refinement + Extraction tests passed.');

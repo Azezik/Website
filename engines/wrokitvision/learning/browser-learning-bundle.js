@@ -1570,7 +1570,8 @@
     if(curLine.length>0)lines.push(curLine.map(function(t){return t.text;}).join(' '));
     var text=lines.join('\n').trim();
     var avgC=matched.length>0?_mean(matched.map(function(t){return t.confidence||0.5;})):0;
-    return{text:text,tokenCount:matched.length,confidence:_round(avgC,4)};
+    var textSource=matched.length>=2?'tokens':(matched.length>0?'tokens_sparse':'no_tokens');
+    return{text:text,tokenCount:matched.length,confidence:_round(avgC,4),textSource:textSource};
   }
 
   function extractFromBatch(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens){
@@ -1588,7 +1589,7 @@
         var ext={text:'',tokenCount:0,confidence:0};
         if(dt&&dt.tokens)ext=extractTextFromNormBox(tr.transferredNormBox,dt.tokens,dt.viewport);
         dr.fields.push({fieldKey:target.fieldKey,label:target.label,sourceNormBox:target.normBox,transferredNormBox:tr.transferredNormBox,
-          transferConfidence:tr.confidence,transferMethod:tr.method,anchorsUsed:tr.anchorsUsed,extractedText:ext.text,tokenCount:ext.tokenCount,textConfidence:ext.confidence});
+          transferConfidence:tr.confidence,transferMethod:tr.method,anchorsUsed:tr.anchorsUsed,extractedText:ext.text,tokenCount:ext.tokenCount,textConfidence:ext.confidence,textSource:ext.textSource||'no_tokens'});
       }
       results.push(dr);
     }

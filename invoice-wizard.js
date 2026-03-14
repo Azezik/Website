@@ -21779,11 +21779,65 @@ function _renderPhase2BRefinementResult(result){
   }
 }
 
-// Extract button
+// Extract button (async — supports OCR fallback for scanned documents)
 (function(){
   var btn = document.getElementById('batch-phase2b-extract-btn');
   if(!btn) return;
-  btn.addEventListener('click', function(){
+
+  /** Crop a normalized box region from a data-URL image and return the cropped canvas. */
+  function _cropNormBoxFromDataUrl(dataUrl, normBox){
+    return new Promise(function(resolve, reject){
+      var img = new Image();
+      img.onload = function(){
+        var sx = Math.round(normBox.x0n * img.width);
+        var sy = Math.round(normBox.y0n * img.height);
+        var sw = Math.max(1, Math.round(normBox.wN * img.width));
+        var sh = Math.max(1, Math.round(normBox.hN * img.height));
+        // Clamp to image bounds
+        sx = Math.max(0, Math.min(sx, img.width - 1));
+        sy = Math.max(0, Math.min(sy, img.height - 1));
+        sw = Math.min(sw, img.width - sx);
+        sh = Math.min(sh, img.height - sy);
+        var cvs = document.createElement('canvas');
+        cvs.width = sw; cvs.height = sh;
+        var ctx = cvs.getContext('2d');
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+        resolve(cvs);
+      };
+      img.onerror = function(){ reject(new Error('Failed to load image for OCR crop')); };
+      img.src = dataUrl;
+    });
+  }
+
+  /** Run Tesseract OCR on a cropped canvas, try PSM 6 and 7, pick best. */
+  async function _ocrCrop(cropCanvas){
+    if(!window.Tesseract || !window.Tesseract.recognize){
+      return { text: '', confidence: 0, psmUsed: null };
+    }
+    var best = { text: '', confidence: 0, tokenCount: 0, psmUsed: null };
+    var psms = [6, 7];
+    for(var pi = 0; pi < psms.length; pi++){
+      try {
+        var res = await window.Tesseract.recognize(cropCanvas, 'eng', { tessedit_pageseg_mode: psms[pi] });
+        var words = (res.data && res.data.words) || [];
+        var toks = words.map(function(w){ return w.text.trim(); }).filter(Boolean);
+        var meanConf = toks.length > 0
+          ? words.reduce(function(s,w){ return s + w.confidence; }, 0) / toks.length / 100
+          : 0;
+        var text = toks.join(' ').trim();
+        if(toks.length > best.tokenCount || (toks.length === best.tokenCount && meanConf > best.confidence)){
+          best = { text: text, confidence: meanConf, tokenCount: toks.length, psmUsed: psms[pi] };
+        }
+      } catch(e){
+        console.warn('[Phase2B] OCR probe PSM ' + psms[pi] + ' failed:', e);
+      }
+    }
+    return best;
+  }
+
+  var MIN_TOKEN_THRESHOLD = 2; // Below this, trigger OCR fallback
+
+  btn.addEventListener('click', async function(){
     if(!_phase2bState.refinementResult || !_phase2bState.correspondenceResult) {
       alert('Run anchor refinement first.');
       return;
@@ -21804,26 +21858,59 @@ function _renderPhase2BRefinementResult(result){
     if(statusEl) statusEl.textContent = 'Extracting...';
     btn.disabled = true;
 
-    setTimeout(function(){
-      try {
-        var result = _learningAPI.extractFromBatch(
-          _phase2bState.refinementResult,
-          _phase2bState.correspondenceResult,
-          refDoc,
-          session.documents,
-          batchTokens
-        );
+    try {
+      // Step 1: Run normal token-based extraction
+      var result = _learningAPI.extractFromBatch(
+        _phase2bState.refinementResult,
+        _phase2bState.correspondenceResult,
+        refDoc,
+        session.documents,
+        batchTokens
+      );
 
-        _phase2bState.extractionResult = result;
-        _renderPhase2BExtractionResult(result);
-        if(statusEl) statusEl.textContent = result.status === 'complete' ? 'Extraction complete' : result.status;
-      } catch(err){
-        console.error('[Phase2B] Extraction failed:', err);
-        if(statusEl) statusEl.textContent = 'Extraction failed';
-        alert('Extraction failed: ' + (err.message || String(err)));
+      // Step 2: OCR fallback for fields with insufficient tokens
+      var ocrNeeded = [];
+      for(var di = 0; di < result.results.length; di++){
+        var docResult = result.results[di];
+        var docDataUrl = _batchCanvasStore[docResult.documentName];
+        for(var fi = 0; fi < docResult.fields.length; fi++){
+          var f = docResult.fields[fi];
+          if(f.tokenCount < MIN_TOKEN_THRESHOLD && docDataUrl){
+            ocrNeeded.push({ di: di, fi: fi, normBox: f.transferredNormBox, dataUrl: docDataUrl, field: f });
+          }
+        }
       }
-      btn.disabled = false;
-    }, 50);
+
+      if(ocrNeeded.length > 0){
+        if(statusEl) statusEl.textContent = 'Extracting... OCR fallback for ' + ocrNeeded.length + ' field(s)';
+        for(var oi = 0; oi < ocrNeeded.length; oi++){
+          var item = ocrNeeded[oi];
+          try {
+            var cropCvs = await _cropNormBoxFromDataUrl(item.dataUrl, item.normBox);
+            var ocrResult = await _ocrCrop(cropCvs);
+            if(ocrResult.text){
+              item.field.extractedText = ocrResult.text;
+              item.field.textConfidence = Math.round(ocrResult.confidence * 1000) / 1000;
+              item.field.textSource = 'ocr_fallback';
+            } else {
+              item.field.textSource = 'no_text';
+            }
+          } catch(ocrErr){
+            console.warn('[Phase2B] OCR fallback failed for doc ' + item.di + ' field ' + item.fi + ':', ocrErr);
+            item.field.textSource = 'no_text';
+          }
+        }
+      }
+
+      _phase2bState.extractionResult = result;
+      _renderPhase2BExtractionResult(result);
+      if(statusEl) statusEl.textContent = result.status === 'complete' ? 'Extraction complete' : result.status;
+    } catch(err){
+      console.error('[Phase2B] Extraction failed:', err);
+      if(statusEl) statusEl.textContent = 'Extraction failed';
+      alert('Extraction failed: ' + (err.message || String(err)));
+    }
+    btn.disabled = false;
   });
 })();
 
@@ -21870,7 +21957,12 @@ function _renderPhase2BExtractionResult(result){
       html += '<div style="margin-bottom:2px;">' + textDisplay + '</div>';
       html += '<div class="sub" style="font-size:10px;color:var(--muted);">';
       html += '<span style="color:' + confColor + ';">' + f.transferMethod.replace(/_/g, ' ') + '</span>';
-      if(f.tokenCount > 0) html += ' · ' + f.tokenCount + ' tokens';
+      // Text source indicator (separate from transfer method)
+      var ts = f.textSource || (f.tokenCount > 0 ? 'tokens' : 'no_tokens');
+      var tsColor = ts === 'tokens' ? '#2a7' : ts === 'ocr_fallback' ? '#e67e22' : ts === 'tokens_sparse' ? '#b87e0a' : '#999';
+      var tsLabel = ts === 'tokens' ? 'tokens' : ts === 'ocr_fallback' ? 'OCR fallback' : ts === 'tokens_sparse' ? 'sparse tokens' : 'no text';
+      html += ' · <span style="color:' + tsColor + ';">' + tsLabel + '</span>';
+      if(f.tokenCount > 0 && ts !== 'ocr_fallback') html += ' (' + f.tokenCount + ')';
       html += '</div></div>';
     }
   }
