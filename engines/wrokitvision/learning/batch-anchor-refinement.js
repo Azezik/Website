@@ -557,10 +557,13 @@ function extractTextFromNormBox(normBox, tokens, viewport) {
     ? mean(matched.map(function (t) { return t.confidence || 0.5; }))
     : 0;
 
+  var textSource = matched.length >= 2 ? 'tokens' : (matched.length > 0 ? 'tokens_sparse' : 'no_tokens');
+
   return {
     text: text,
     tokenCount: matched.length,
-    confidence: round(avgConf, 4)
+    confidence: round(avgConf, 4),
+    textSource: textSource
   };
 }
 
@@ -638,7 +641,8 @@ function extractFromBatch(refinementResult, correspondenceResult, refDoc, batchD
         anchorsUsed: transferResult.anchorsUsed,
         extractedText: extraction.text,
         tokenCount: extraction.tokenCount,
-        textConfidence: extraction.confidence
+        textConfidence: extraction.confidence,
+        textSource: extraction.textSource || 'no_tokens'
       });
     }
 
