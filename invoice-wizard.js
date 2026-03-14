@@ -20560,6 +20560,8 @@ function refreshBatchSessionUI(){
     if(p2b) p2b.style.display = 'none';
     var p2bSel = document.getElementById('batch-phase2b-doc-select');
     if(p2bSel) p2bSel.innerHTML = '<option value="">— Select a document —</option>';
+    var p3a = document.getElementById('batch-phase3a-panel');
+    if(p3a) p3a.style.display = 'none';
   }
 }
 
@@ -20642,20 +20644,24 @@ function showBatchSessionDetails(sessionId){
   } else {
     var phase2Panel2 = document.getElementById('batch-phase2-panel');
     if(phase2Panel2) phase2Panel2.style.display = 'none';
-    // Also hide Phase 2B when Phase 2 is not available
+    // Also hide Phase 2B and 3A when Phase 2 is not available
     var phase2bPanel2 = document.getElementById('batch-phase2b-panel');
     if(phase2bPanel2) phase2bPanel2.style.display = 'none';
+    var phase3aPanel2 = document.getElementById('batch-phase3a-panel');
+    if(phase3aPanel2) phase3aPanel2.style.display = 'none';
   }
 
   // Show existing correspondence result if available
   if(session.correspondenceResult){
     _renderCorrespondenceResult(session.correspondenceResult);
   } else {
-    // No correspondence result: hide Phase 2B and clear its dropdown
+    // No correspondence result: hide Phase 2B, 3A and clear dropdown
     var phase2bPanel3 = document.getElementById('batch-phase2b-panel');
     if(phase2bPanel3) phase2bPanel3.style.display = 'none';
     var phase2bSelect = document.getElementById('batch-phase2b-doc-select');
     if(phase2bSelect) phase2bSelect.innerHTML = '<option value="">— Select a document —</option>';
+    var phase3aPanel3 = document.getElementById('batch-phase3a-panel');
+    if(phase3aPanel3) phase3aPanel3.style.display = 'none';
   }
 }
 
@@ -20672,6 +20678,7 @@ function showBatchSessionDetails(sessionId){
         var d = document.getElementById('batch-session-details'); if(d) d.style.display = 'none';
         var p2 = document.getElementById('batch-phase2-panel'); if(p2) p2.style.display = 'none';
         var p2b = document.getElementById('batch-phase2b-panel'); if(p2b) p2b.style.display = 'none';
+        var p3a = document.getElementById('batch-phase3a-panel'); if(p3a) p3a.style.display = 'none';
       }
     });
   }
@@ -21905,6 +21912,13 @@ function _renderPhase2BRefinementResult(result){
       _phase2bState.extractionResult = result;
       _renderPhase2BExtractionResult(result);
       if(statusEl) statusEl.textContent = result.status === 'complete' ? 'Extraction complete' : result.status;
+
+      // Show Phase 3A panel after successful extraction
+      if(result.status === 'complete' && result.results && result.results.length > 0){
+        var p3aPanel = document.getElementById('batch-phase3a-panel');
+        if(p3aPanel) p3aPanel.style.display = 'block';
+        _initPhase3ACorrections(result);
+      }
     } catch(err){
       console.error('[Phase2B] Extraction failed:', err);
       if(statusEl) statusEl.textContent = 'Extraction failed';
@@ -21986,6 +22000,387 @@ function _renderPhase2BExtractionResult(result){
     var text = _learningAPI.formatRefinementReport(_phase2bState.refinementResult);
     var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     var filename = 'wrokit-refinement-' + timestamp + '.txt';
+    var blob = new Blob([text], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  });
+})();
+
+/* ── Phase 3A: Field Intelligence ─────────────────────────────────────── */
+
+var _phase3aState = {
+  corrections: [],       // Array of { documentId, documentName, fields: [{ fieldKey, correctedText, datatype }] }
+  learningResult: null,  // Output from learnFieldGeometry
+  extractionResult: null // Reference to Phase 2B extraction result
+};
+
+/** Populate the Phase 3A correction UI from extraction results. */
+function _initPhase3ACorrections(extractionResult) {
+  _phase3aState.extractionResult = extractionResult;
+  _phase3aState.corrections = [];
+  _phase3aState.learningResult = null;
+
+  // Populate document selector
+  var sel = document.getElementById('batch-phase3a-doc-select');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— Select a document —</option>';
+  var results = extractionResult.results || [];
+  for (var di = 0; di < results.length; di++) {
+    var dr = results[di];
+    var opt = document.createElement('option');
+    opt.value = dr.documentId;
+    opt.textContent = dr.documentName + (dr.isReference ? ' (ref)' : '');
+    sel.appendChild(opt);
+  }
+
+  // Clear previous state
+  var fieldsContainer = document.getElementById('batch-phase3a-fields-container');
+  if (fieldsContainer) fieldsContainer.innerHTML = '';
+  var corrFields = document.getElementById('batch-phase3a-correction-fields');
+  if (corrFields) corrFields.style.display = 'none';
+  var savedEl = document.getElementById('batch-phase3a-saved-corrections');
+  if (savedEl) savedEl.innerHTML = '';
+  var resultsPanel = document.getElementById('batch-phase3a-results');
+  if (resultsPanel) resultsPanel.style.display = 'none';
+  var learnBtn = document.getElementById('batch-phase3a-learn-btn');
+  if (learnBtn) learnBtn.disabled = true;
+
+  _renderPhase3ASavedCorrections();
+}
+
+/** Load correction fields for a selected document. */
+function _loadPhase3ACorrectionFields(documentId) {
+  var corrFields = document.getElementById('batch-phase3a-correction-fields');
+  var container = document.getElementById('batch-phase3a-fields-container');
+  var docLabel = document.getElementById('batch-phase3a-doc-label');
+  if (!corrFields || !container || !_phase3aState.extractionResult) return;
+
+  var docResult = _phase3aState.extractionResult.results.find(function (r) { return r.documentId === documentId; });
+  if (!docResult) { corrFields.style.display = 'none'; return; }
+
+  corrFields.style.display = 'block';
+  if (docLabel) docLabel.textContent = docResult.documentName;
+
+  var colors = ['#2a7', '#e67e22', '#3498db'];
+  var datatypes = ['text', 'number', 'date', 'currency', 'identifier'];
+  var html = '';
+
+  for (var fi = 0; fi < docResult.fields.length; fi++) {
+    var f = docResult.fields[fi];
+    var color = colors[fi % colors.length];
+    html += '<div class="batch-phase3a-field-row" data-field-key="' + f.fieldKey + '" style="margin-bottom:10px;padding:8px;border-left:3px solid ' + color + ';background:var(--surface,#fafafa);border-radius:0 6px 6px 0;">';
+    html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">';
+    html += '<strong style="font-size:13px;min-width:100px;">' + f.label + '</strong>';
+    html += '<span class="sub" style="font-size:12px;color:var(--muted);min-width:120px;" title="Extracted value">Extracted: <em>' + (f.extractedText || '—') + '</em></span>';
+    html += '</div>';
+    html += '<div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">';
+    html += '<input type="text" class="batch-phase3a-correction-input" data-field-key="' + f.fieldKey + '" placeholder="Corrected value" value="" style="flex:1;min-width:150px;max-width:280px;font-size:13px;" />';
+    html += '<select class="batch-phase3a-datatype-select" data-field-key="' + f.fieldKey + '" style="font-size:12px;max-width:120px;">';
+    for (var dti = 0; dti < datatypes.length; dti++) {
+      html += '<option value="' + datatypes[dti] + '">' + datatypes[dti] + '</option>';
+    }
+    html += '</select>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+
+  // Add hover highlight behavior for correction fields
+  var rows = container.querySelectorAll('.batch-phase3a-field-row');
+  for (var ri = 0; ri < rows.length; ri++) {
+    rows[ri].addEventListener('mouseenter', function () { this.style.outline = '2px solid #2a7'; });
+    rows[ri].addEventListener('mouseleave', function () { this.style.outline = ''; });
+  }
+}
+
+/** Render saved corrections list. */
+function _renderPhase3ASavedCorrections() {
+  var el = document.getElementById('batch-phase3a-saved-corrections');
+  if (!el) return;
+
+  if (_phase3aState.corrections.length === 0) {
+    el.innerHTML = '<p class="sub" style="color:var(--muted);font-size:12px;margin:4px 0;">No corrections saved yet. Select documents and correct their extracted values.</p>';
+    return;
+  }
+
+  var html = '<div style="font-size:12px;margin-bottom:8px;">';
+  html += '<strong>Saved Corrections (' + _phase3aState.corrections.length + ' document(s)):</strong>';
+  html += '</div>';
+
+  for (var ci = 0; ci < _phase3aState.corrections.length; ci++) {
+    var c = _phase3aState.corrections[ci];
+    html += '<div style="padding:6px 8px;margin-bottom:4px;background:var(--surface,#f5f5f5);border-radius:4px;font-size:12px;display:flex;justify-content:space-between;align-items:center;">';
+    html += '<span>' + c.documentName + ' — ' + c.fields.length + ' field(s) corrected</span>';
+    html += '<button class="btn ghost batch-phase3a-remove-correction" data-doc-id="' + c.documentId + '" style="font-size:11px;padding:2px 6px;" type="button">Remove</button>';
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+
+  // Bind remove buttons
+  var removeBtns = el.querySelectorAll('.batch-phase3a-remove-correction');
+  for (var ri = 0; ri < removeBtns.length; ri++) {
+    removeBtns[ri].addEventListener('click', function () {
+      var docId = this.getAttribute('data-doc-id');
+      _phase3aState.corrections = _phase3aState.corrections.filter(function (c) { return c.documentId !== docId; });
+      _renderPhase3ASavedCorrections();
+      var learnBtn = document.getElementById('batch-phase3a-learn-btn');
+      if (learnBtn) learnBtn.disabled = _phase3aState.corrections.length === 0;
+    });
+  }
+}
+
+/** Render Phase 3A geometry learning results. */
+function _renderPhase3AResults(result) {
+  var panel = document.getElementById('batch-phase3a-results');
+  var statusEl = document.getElementById('batch-phase3a-results-status');
+  var profileCountEl = document.getElementById('batch-phase3a-profile-count');
+  var profilesContent = document.getElementById('batch-phase3a-profiles-content');
+  var detailsContent = document.getElementById('batch-phase3a-details-content');
+  if (!panel) return;
+
+  panel.style.display = 'block';
+  if (statusEl) statusEl.textContent = result.status === 'improved' ? 'Geometry improved' : 'No improvement';
+  if (profileCountEl) profileCountEl.textContent = result.fieldProfiles.length;
+
+  // Render field profiles
+  if (profilesContent) {
+    var html = '';
+    for (var pi = 0; pi < result.fieldProfiles.length; pi++) {
+      var p = result.fieldProfiles[pi];
+      var statusColor = p.improvedCount > 0 ? '#2a7' : '#999';
+      html += '<div style="padding:8px;margin-bottom:8px;border:1px solid var(--border,#ddd);border-radius:6px;background:#fff;">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
+      html += '<strong style="font-size:13px;">' + p.label + '</strong>';
+      html += '<span style="font-size:11px;color:' + statusColor + ';">' + p.improvedCount + '/' + p.correctionCount + ' improved</span>';
+      html += '</div>';
+      html += '<div class="sub" style="font-size:11px;color:var(--muted);">';
+      html += 'Offset: dx=' + (p.preferredOffset.dx * 100).toFixed(2) + '%, dy=' + (p.preferredOffset.dy * 100).toFixed(2) + '% · ';
+      html += 'Expansion: dw=' + (p.preferredExpansion.dw * 100).toFixed(2) + '%, dh=' + (p.preferredExpansion.dh * 100).toFixed(2) + '% · ';
+      html += 'Confidence: ' + (p.geometryConfidence * 100).toFixed(1) + '% · ';
+      html += 'Best: ' + p.dominantFamily.replace(/_/g, ' ');
+      html += '</div>';
+      html += '</div>';
+    }
+    profilesContent.innerHTML = html || '<p class="sub" style="color:var(--muted);">No profiles generated.</p>';
+  }
+
+  // Render per-document details
+  if (detailsContent) {
+    var dhtml = '';
+    for (var di = 0; di < result.perDocumentResults.length; di++) {
+      var dr = result.perDocumentResults[di];
+      dhtml += '<div style="margin-bottom:8px;">';
+      dhtml += '<strong style="font-size:12px;">' + dr.documentName + '</strong>';
+      for (var fi = 0; fi < dr.fields.length; fi++) {
+        var f = dr.fields[fi];
+        var fColor = f.improved ? '#2a7' : '#999';
+        dhtml += '<div class="sub" style="font-size:11px;margin-left:12px;color:var(--muted);">';
+        dhtml += f.label + ': <span style="color:' + fColor + ';">';
+        if (f.improved) {
+          dhtml += 'improved +' + (f.improvement * 100).toFixed(1) + '% → ' + (f.bestCandidate ? f.bestCandidate.family.replace(/_/g, ' ') : '');
+        } else {
+          dhtml += 'original optimal';
+        }
+        dhtml += '</span>';
+        dhtml += '</div>';
+      }
+      dhtml += '</div>';
+    }
+    detailsContent.innerHTML = dhtml || '<p class="sub" style="color:var(--muted);">No details available.</p>';
+  }
+}
+
+// Phase 3A: Document selector
+(function () {
+  var sel = document.getElementById('batch-phase3a-doc-select');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    var docId = sel.value;
+    if (docId) {
+      _loadPhase3ACorrectionFields(docId);
+    } else {
+      var corrFields = document.getElementById('batch-phase3a-correction-fields');
+      if (corrFields) corrFields.style.display = 'none';
+    }
+  });
+})();
+
+// Phase 3A: View Document button
+(function () {
+  var btn = document.getElementById('batch-phase3a-view-doc-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var sel = document.getElementById('batch-phase3a-doc-select');
+    if (!sel || !sel.value) { alert('Select a document first.'); return; }
+    var docId = sel.value;
+    var dataUrl = null;
+    // Find document name from extraction result
+    if (_phase3aState.extractionResult) {
+      var dr = _phase3aState.extractionResult.results.find(function (r) { return r.documentId === docId; });
+      if (dr) dataUrl = _batchCanvasStore[dr.documentName];
+    }
+    if (!dataUrl) { alert('Document image not available.'); return; }
+    // Open image in new window with BBOX overlay
+    var win = window.open('', '_blank', 'width=800,height=1000');
+    if (!win) return;
+    var fields = _phase3aState.extractionResult.results.find(function (r) { return r.documentId === docId; });
+    var colors = ['#2a7', '#e67e22', '#3498db'];
+    var svgOverlays = '';
+    if (fields) {
+      for (var fi = 0; fi < fields.fields.length; fi++) {
+        var f = fields.fields[fi];
+        var nb = f.transferredNormBox;
+        var c = colors[fi % colors.length];
+        svgOverlays += '<rect x="' + (nb.x0n * 100) + '%" y="' + (nb.y0n * 100) + '%" width="' + (nb.wN * 100) + '%" height="' + (nb.hN * 100) + '%" fill="' + c + '" fill-opacity="0.15" stroke="' + c + '" stroke-width="2" />';
+        svgOverlays += '<text x="' + (nb.x0n * 100) + '%" y="' + (nb.y0n * 100 - 0.5) + '%" fill="' + c + '" font-size="12" font-weight="bold">' + f.label + '</text>';
+      }
+    }
+    win.document.write('<!DOCTYPE html><html><head><title>Document Viewer</title></head><body style="margin:0;background:#222;display:flex;justify-content:center;align-items:flex-start;">' +
+      '<div style="position:relative;display:inline-block;max-width:100%;">' +
+      '<img src="' + dataUrl + '" style="max-width:100%;display:block;" />' +
+      '<svg style="position:absolute;top:0;left:0;width:100%;height:100%;">' + svgOverlays + '</svg>' +
+      '</div></body></html>');
+    win.document.close();
+  });
+})();
+
+// Phase 3A: Save Correction button
+(function () {
+  var btn = document.getElementById('batch-phase3a-save-correction-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var sel = document.getElementById('batch-phase3a-doc-select');
+    if (!sel || !sel.value) { alert('Select a document first.'); return; }
+    var docId = sel.value;
+    var docResult = _phase3aState.extractionResult && _phase3aState.extractionResult.results.find(function (r) { return r.documentId === docId; });
+    if (!docResult) return;
+
+    var inputs = document.querySelectorAll('.batch-phase3a-correction-input');
+    var datatypeSelects = document.querySelectorAll('.batch-phase3a-datatype-select');
+    var correctedFields = [];
+
+    for (var i = 0; i < inputs.length; i++) {
+      var fieldKey = inputs[i].getAttribute('data-field-key');
+      var correctedText = inputs[i].value.trim();
+      if (!correctedText) continue; // Skip empty corrections
+      var datatype = 'text';
+      for (var dsi = 0; dsi < datatypeSelects.length; dsi++) {
+        if (datatypeSelects[dsi].getAttribute('data-field-key') === fieldKey) {
+          datatype = datatypeSelects[dsi].value;
+          break;
+        }
+      }
+      correctedFields.push({ fieldKey: fieldKey, correctedText: correctedText, datatype: datatype });
+    }
+
+    if (correctedFields.length === 0) {
+      alert('Enter at least one correction.');
+      return;
+    }
+
+    // Remove existing correction for this doc if any, then add new
+    _phase3aState.corrections = _phase3aState.corrections.filter(function (c) { return c.documentId !== docId; });
+    _phase3aState.corrections.push({
+      documentId: docId,
+      documentName: docResult.documentName,
+      fields: correctedFields
+    });
+
+    _renderPhase3ASavedCorrections();
+
+    var learnBtn = document.getElementById('batch-phase3a-learn-btn');
+    if (learnBtn) learnBtn.disabled = _phase3aState.corrections.length === 0;
+
+    var statusEl = document.getElementById('batch-phase3a-correction-status');
+    if (statusEl) statusEl.textContent = 'Saved ' + correctedFields.length + ' correction(s)';
+    setTimeout(function () { if (statusEl) statusEl.textContent = ''; }, 3000);
+  });
+})();
+
+// Phase 3A: Clear Corrections button
+(function () {
+  var btn = document.getElementById('batch-phase3a-clear-corrections-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    _phase3aState.corrections = [];
+    _renderPhase3ASavedCorrections();
+    var learnBtn = document.getElementById('batch-phase3a-learn-btn');
+    if (learnBtn) learnBtn.disabled = true;
+    var resultsPanel = document.getElementById('batch-phase3a-results');
+    if (resultsPanel) resultsPanel.style.display = 'none';
+  });
+})();
+
+// Phase 3A: Learn Geometry button
+(function () {
+  var btn = document.getElementById('batch-phase3a-learn-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    if (!_phase3aState.corrections.length || !_phase3aState.extractionResult) {
+      alert('Save corrections for at least one document first.');
+      return;
+    }
+    if (!_learningAPI || !_learningAPI.learnFieldGeometry) {
+      alert('Learning API not available.');
+      return;
+    }
+    if (!_batchStore || !_activeBatchSessionId) return;
+    var session = _batchStore.getSession(_activeBatchSessionId);
+    if (!session) return;
+
+    var refDocId = _phase2bState.correspondenceResult && _phase2bState.correspondenceResult.referenceDocument.documentId;
+    var refDoc = refDocId ? session.documents.find(function (d) { return d.documentId === refDocId; }) : null;
+
+    var batchTokens = _getBatchTokens(_activeBatchSessionId);
+    var statusEl = document.getElementById('batch-phase3a-status');
+    if (statusEl) statusEl.textContent = 'Learning geometry...';
+    btn.disabled = true;
+
+    setTimeout(function () {
+      try {
+        var result = _learningAPI.learnFieldGeometry(
+          _phase3aState.extractionResult,
+          _phase3aState.corrections,
+          batchTokens,
+          refDoc
+        );
+
+        _phase3aState.learningResult = result;
+        _renderPhase3AResults(result);
+
+        // Save geometry profiles to session store
+        if (result.fieldProfiles && result.fieldProfiles.length > 0 && _batchStore.saveGeometryProfiles) {
+          _batchStore.saveGeometryProfiles(_activeBatchSessionId, result.fieldProfiles);
+        }
+
+        if (statusEl) statusEl.textContent = result.status === 'improved' ? 'Geometry improved' : 'No improvement found';
+      } catch (err) {
+        console.error('[Phase3A] Geometry learning failed:', err);
+        if (statusEl) statusEl.textContent = 'Learning failed';
+        alert('Geometry learning failed: ' + (err.message || String(err)));
+      }
+      btn.disabled = false;
+    }, 50);
+  });
+})();
+
+// Phase 3A: Export Geometry Report
+(function () {
+  var btn = document.getElementById('batch-phase3a-export-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    if (!_phase3aState.learningResult || !_learningAPI || !_learningAPI.formatGeometryReport) {
+      alert('No geometry learning data to export.');
+      return;
+    }
+    var text = _learningAPI.formatGeometryReport(_phase3aState.learningResult);
+    var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    var filename = 'wrokit-geometry-' + timestamp + '.txt';
     var blob = new Blob([text], { type: 'text/plain' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');

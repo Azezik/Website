@@ -1229,6 +1229,15 @@
         _save(sessions);
         return true;
       },
+      saveGeometryProfiles: function(sessionId, profiles){
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;});
+        if(!session) return false;
+        session.geometryProfiles = profiles;
+        session.updatedAt = new Date().toISOString();
+        _save(sessions);
+        return true;
+      },
       deleteSession: function(sessionId){
         var sessions = _load().filter(function(s){return s.sessionId!==sessionId;});
         _save(sessions);
@@ -1629,6 +1638,204 @@
     return out;
   }
 
+  /* ── Phase 3A: Field Intelligence ──────────────────────────────────────── */
+
+  function _levenshteinDistance(a,b){
+    if(a===b)return 0;if(!a.length)return 1;if(!b.length)return 1;
+    var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];for(var j=0;j<=a.length;j++)m[0][j]=j;
+    for(i=1;i<=b.length;i++){for(j=1;j<=a.length;j++){
+      if(b.charAt(i-1)===a.charAt(j-1))m[i][j]=m[i-1][j-1];
+      else m[i][j]=Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+    }}
+    return m[b.length][a.length]/Math.max(a.length,b.length);
+  }
+
+  function _tokenOverlap(ext,corr){
+    if(!corr||!corr.trim())return 0;
+    var ct=corr.toLowerCase().split(/\s+/).filter(Boolean);if(!ct.length)return 0;
+    var el=ext.toLowerCase(),found=0;
+    for(var i=0;i<ct.length;i++){if(el.indexOf(ct[i])>=0)found++;}
+    return found/ct.length;
+  }
+
+  function _textSimilarity(ext,corr){
+    if(!corr||!corr.trim())return ext?0:1;if(!ext||!ext.trim())return 0;
+    return(1-_levenshteinDistance(ext.trim(),corr.trim()))*0.6+_tokenOverlap(ext,corr)*0.4;
+  }
+
+  function _normBoxCenter3(nb){return{x:nb.x0n+nb.wN/2,y:nb.y0n+nb.hN/2};}
+  function _pointDist3(a,b){return Math.sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y));}
+  function _normBoxIoU3(a,b){
+    var ax1=a.x0n+a.wN,ay1=a.y0n+a.hN,bx1=b.x0n+b.wN,by1=b.y0n+b.hN;
+    var ix0=Math.max(a.x0n,b.x0n),iy0=Math.max(a.y0n,b.y0n),ix1=Math.min(ax1,bx1),iy1=Math.min(ay1,by1);
+    if(ix1<=ix0||iy1<=iy0)return 0;var inter=(ix1-ix0)*(iy1-iy0);var union=a.wN*a.hN+b.wN*b.hN-inter;
+    return union>0?inter/union:0;
+  }
+
+  function generateCandidates(originalBox,refDoc){
+    var candidates=[];
+    candidates.push({normBox:{x0n:originalBox.x0n,y0n:originalBox.y0n,wN:originalBox.wN,hN:originalBox.hN},family:'original',label:'Original BBOX'});
+    var regions=(refDoc&&refDoc.regionDescriptors)||[];
+    var boxCenter=_normBoxCenter3(originalBox);
+    var origArea=originalBox.wN*originalBox.hN,maxExpArea=origArea*2;
+    var bestR=null,bestOv=0;
+    for(var ri=0;ri<regions.length;ri++){
+      var r=regions[ri],rNb={x0n:r.normalizedBbox.x,y0n:r.normalizedBbox.y,wN:r.normalizedBbox.w,hN:r.normalizedBbox.h};
+      if(rNb.wN*rNb.hN>0.4)continue;
+      var ov=_normBoxIoU3(originalBox,rNb);
+      var ci2=boxCenter.x>=rNb.x0n&&boxCenter.x<=rNb.x0n+rNb.wN&&boxCenter.y>=rNb.y0n&&boxCenter.y<=rNb.y0n+rNb.hN;
+      var sc=ov+(ci2?0.5:0);
+      if(sc>bestOv&&rNb.wN*rNb.hN<=maxExpArea){bestOv=sc;bestR=rNb;}
+    }
+    if(bestR){
+      var eX=Math.min(originalBox.x0n,bestR.x0n),eY=Math.min(originalBox.y0n,bestR.y0n);
+      var eX1=Math.max(originalBox.x0n+originalBox.wN,bestR.x0n+bestR.wN),eY1=Math.max(originalBox.y0n+originalBox.hN,bestR.y0n+bestR.hN);
+      var eW=eX1-eX,eH=eY1-eY;
+      if(eW*eH<=maxExpArea)candidates.push({normBox:{x0n:_round(eX,6),y0n:_round(eY,6),wN:_round(eW,6),hN:_round(eH,6)},family:'structural_expansion',label:'Structural region expansion'});
+      var bf=0.5,bX=originalBox.x0n+(eX-originalBox.x0n)*bf,bY=originalBox.y0n+(eY-originalBox.y0n)*bf;
+      var bX1=(originalBox.x0n+originalBox.wN)+(eX1-(originalBox.x0n+originalBox.wN))*bf;
+      var bY1=(originalBox.y0n+originalBox.hN)+(eY1-(originalBox.y0n+originalBox.hN))*bf;
+      var bW=bX1-bX,bH=bY1-bY;
+      if(bW*bH<=maxExpArea&&bW>0&&bH>0)candidates.push({normBox:{x0n:_round(bX,6),y0n:_round(bY,6),wN:_round(bW,6),hN:_round(bH,6)},family:'structural_expansion',label:'Partial region expansion (50%)'});
+    }
+    var stX=originalBox.wN*0.2,stY=originalBox.hN*0.2,ef=0.15;
+    var shifts=[{dx:-stX,dy:0},{dx:stX,dy:0},{dx:0,dy:-stY},{dx:0,dy:stY},{dx:-stX,dy:-stY},{dx:stX,dy:-stY},{dx:-stX,dy:stY},{dx:stX,dy:stY}];
+    for(var si=0;si<shifts.length;si++){
+      var s=shifts[si];
+      candidates.push({normBox:{x0n:_round(_clamp(originalBox.x0n+s.dx,0,1-originalBox.wN),6),y0n:_round(_clamp(originalBox.y0n+s.dy,0,1-originalBox.hN),6),wN:originalBox.wN,hN:originalBox.hN},family:'local_search',label:'Shift'});
+    }
+    var evs=[{dw:ef,dh:0},{dw:0,dh:ef},{dw:ef,dh:ef},{dw:-ef,dh:0},{dw:0,dh:-ef},{dw:-ef,dh:-ef}];
+    for(var ei=0;ei<evs.length;ei++){
+      var e=evs[ei],ew=originalBox.wN*(1+e.dw),eh=originalBox.hN*(1+e.dh);
+      if(ew<0.005||eh<0.005||ew*eh>maxExpArea)continue;
+      var ex=_clamp(originalBox.x0n-(ew-originalBox.wN)/2,0,Math.max(0,1-ew));
+      var ey=_clamp(originalBox.y0n-(eh-originalBox.hN)/2,0,Math.max(0,1-eh));
+      candidates.push({normBox:{x0n:_round(ex,6),y0n:_round(ey,6),wN:_round(ew,6),hN:_round(eh,6)},family:'local_search',label:'Resize'});
+    }
+    var combos=[{dx:-stX,dw:ef},{dx:stX,dw:ef},{dy:-stY,dh:ef},{dy:stY,dh:ef}];
+    for(var cci=0;cci<combos.length;cci++){
+      var cc=combos[cci],cw=originalBox.wN*(1+(cc.dw||0)),ch=originalBox.hN*(1+(cc.dh||0));
+      if(cw*ch>maxExpArea)continue;
+      var ccx=_clamp(originalBox.x0n+(cc.dx||0)-((cw-originalBox.wN)/2),0,Math.max(0,1-cw));
+      var ccy=_clamp(originalBox.y0n+(cc.dy||0)-((ch-originalBox.hN)/2),0,Math.max(0,1-ch));
+      candidates.push({normBox:{x0n:_round(ccx,6),y0n:_round(ccy,6),wN:_round(cw,6),hN:_round(ch,6)},family:'local_search',label:'Shift+Resize'});
+    }
+    return candidates;
+  }
+
+  function scoreCandidate(candidate,extractedText,extractionConfidence,correctedText,originalBox,tokenCount){
+    var origC=_normBoxCenter3(originalBox),candC=_normBoxCenter3(candidate.normBox);
+    var cDist=_pointDist3(origC,candC),iou=_normBoxIoU3(originalBox,candidate.normBox);
+    var alignScore=iou*0.6+_clamp(1-cDist/0.15,0,1)*0.4;
+    var confScore=0;
+    if(tokenCount>0)confScore=_clamp(extractionConfidence,0,1)*0.7+_clamp(tokenCount/5,0,1)*0.3;
+    var simScore=_textSimilarity(extractedText,correctedText);
+    var total=alignScore*0.40+confScore*0.30+simScore*0.30;
+    return{totalScore:_round(total,4),alignmentScore:_round(alignScore,4),confidenceScore:_round(confScore,4),similarityScore:_round(simScore,4)};
+  }
+
+  function optimizeFieldGeometry(fieldResult,correctedText,tokens,viewport,refDoc){
+    var origBox=fieldResult.transferredNormBox;
+    var candidates=generateCandidates(origBox,refDoc);
+    var scored=[];
+    for(var ci=0;ci<candidates.length;ci++){
+      var cand=candidates[ci],ext=extractTextFromNormBox(cand.normBox,tokens,viewport);
+      var sc=scoreCandidate(cand,ext.text,ext.confidence,correctedText,origBox,ext.tokenCount);
+      scored.push({normBox:cand.normBox,family:cand.family,label:cand.label,extractedText:ext.text,tokenCount:ext.tokenCount,extractionConfidence:ext.confidence,
+        totalScore:sc.totalScore,alignmentScore:sc.alignmentScore,confidenceScore:sc.confidenceScore,similarityScore:sc.similarityScore});
+    }
+    scored.sort(function(a,b){return b.totalScore-a.totalScore;});
+    var best=scored[0]||null,orig=scored.find(function(s){return s.family==='original';});
+    var offset=null,expansion=null;
+    if(best){
+      offset={dx:_round(best.normBox.x0n-origBox.x0n,6),dy:_round(best.normBox.y0n-origBox.y0n,6)};
+      expansion={dw:_round(best.normBox.wN-origBox.wN,6),dh:_round(best.normBox.hN-origBox.hN,6)};
+    }
+    var improved=best&&orig&&best.totalScore>orig.totalScore;
+    var improvement=(best&&orig)?_round(best.totalScore-orig.totalScore,4):0;
+    return{fieldKey:fieldResult.fieldKey,label:fieldResult.label,originalBox:origBox,bestCandidate:best,originalCandidate:orig,
+      improved:improved,improvement:improvement,offset:offset,expansion:expansion,candidateCount:scored.length,topCandidates:scored.slice(0,5),geometryConfidence:best?best.totalScore:0};
+  }
+
+  function learnFieldGeometry(extractionResult,corrections,batchTokens,refDoc,opts){
+    if(!extractionResult||!extractionResult.results||!corrections||!corrections.length)
+      return{status:'no_data',message:'No extraction results or corrections provided.',fieldProfiles:[],perDocumentResults:[]};
+    var targets=extractionResult.extractionTargets||[],perDocResults=[],fieldOpts={};
+    for(var ti=0;ti<targets.length;ti++)fieldOpts[targets[ti].fieldKey]=[];
+    for(var ci=0;ci<corrections.length;ci++){
+      var corr=corrections[ci];
+      var docRes=extractionResult.results.find(function(r){return r.documentId===corr.documentId;});
+      if(!docRes)continue;
+      var dt=batchTokens[corr.documentId];if(!dt)continue;
+      var dor={documentId:corr.documentId,documentName:docRes.documentName,fields:[]};
+      for(var fi=0;fi<corr.fields.length;fi++){
+        var fc=corr.fields[fi];
+        var fr=docRes.fields.find(function(f){return f.fieldKey===fc.fieldKey;});if(!fr)continue;
+        var oRes=optimizeFieldGeometry(fr,fc.correctedText,dt.tokens,dt.viewport,refDoc);
+        dor.fields.push(oRes);
+        if(fieldOpts[fc.fieldKey])fieldOpts[fc.fieldKey].push(oRes);
+      }
+      perDocResults.push(dor);
+    }
+    var fieldProfiles=[];
+    for(var fk in fieldOpts){
+      if(!fieldOpts.hasOwnProperty(fk))continue;
+      var fo=fieldOpts[fk];if(!fo.length)continue;
+      var tgt=targets.find(function(t){return t.fieldKey===fk;});
+      var aDx=_mean(fo.map(function(o){return o.offset?o.offset.dx:0;}));
+      var aDy=_mean(fo.map(function(o){return o.offset?o.offset.dy:0;}));
+      var aDw=_mean(fo.map(function(o){return o.expansion?o.expansion.dw:0;}));
+      var aDh=_mean(fo.map(function(o){return o.expansion?o.expansion.dh:0;}));
+      var aC=_mean(fo.map(function(o){return o.geometryConfidence;}));
+      var iC=fo.filter(function(o){return o.improved;}).length;
+      var fCounts={};
+      for(var oi=0;oi<fo.length;oi++){var bf2=fo[oi].bestCandidate?fo[oi].bestCandidate.family:'original';fCounts[bf2]=(fCounts[bf2]||0)+1;}
+      var domFam='original',maxFC=0;for(var fm in fCounts){if(fCounts[fm]>maxFC){maxFC=fCounts[fm];domFam=fm;}}
+      var aNh=null;
+      if(refDoc&&tgt){
+        var tc=_normBoxCenter3(tgt.normBox);
+        var nr=(refDoc.regionDescriptors||[]).filter(function(r){return _pointDist3(tc,r.centroid)<0.2;});
+        aNh={nearbyRegionCount:nr.length,nearbyRegionTypes:nr.map(function(r){return r.surfaceType;}),avgDistance:nr.length>0?_round(_mean(nr.map(function(r){return _pointDist3(tc,r.centroid);})),4):0};
+      }
+      fieldProfiles.push({fieldKey:fk,label:tgt?tgt.label:fk,originalBox:tgt?tgt.normBox:null,preferredOffset:{dx:_round(aDx,6),dy:_round(aDy,6)},
+        preferredExpansion:{dw:_round(aDw,6),dh:_round(aDh,6)},geometryConfidence:_round(aC,4),dominantFamily:domFam,correctionCount:fo.length,improvedCount:iC,anchorNeighborhood:aNh,learnedAt:new Date().toISOString()});
+    }
+    var tI=fieldProfiles.reduce(function(s,p){return s+p.improvedCount;},0);
+    var tC=fieldProfiles.reduce(function(s,p){return s+p.correctionCount;},0);
+    return{status:tI>0?'improved':'no_improvement',
+      message:tI>0?'Geometry improved for '+tI+' of '+tC+' field corrections across '+fieldProfiles.length+' field(s).':'No geometry improvement found. Original positions are optimal.',
+      fieldProfiles:fieldProfiles,perDocumentResults:perDocResults,correctionDocCount:corrections.length,learnedAt:new Date().toISOString()};
+  }
+
+  function applyGeometryProfile(transferredBox,fieldProfile){
+    if(!fieldProfile||!fieldProfile.preferredOffset||fieldProfile.geometryConfidence<0.1)return{refinedBox:transferredBox,applied:false};
+    var nX=transferredBox.x0n+fieldProfile.preferredOffset.dx,nY=transferredBox.y0n+fieldProfile.preferredOffset.dy;
+    var nW=transferredBox.wN+fieldProfile.preferredExpansion.dw,nH=transferredBox.hN+fieldProfile.preferredExpansion.dh;
+    nW=_clamp(nW,0.005,1);nH=_clamp(nH,0.005,1);nX=_clamp(nX,0,Math.max(0,1-nW));nY=_clamp(nY,0,Math.max(0,1-nH));
+    return{refinedBox:{x0n:_round(nX,6),y0n:_round(nY,6),wN:_round(nW,6),hN:_round(nH,6)},applied:true};
+  }
+
+  function formatGeometryReport(result){
+    if(!result)return'[No geometry learning data]';if(result.status==='no_data')return result.message;
+    var out='══════════════════════════════════════════════════════════════\n';
+    out+='  FIELD INTELLIGENCE REPORT (Phase 3A)\n══════════════════════════════════════════════════════════════\n\n';
+    out+='  Status: '+result.status.toUpperCase().replace(/_/g,' ')+'\n  '+result.message+'\n  Corrected Documents: '+result.correctionDocCount+'\n';
+    if(result.fieldProfiles&&result.fieldProfiles.length>0){
+      out+='\n──────────────────────────────────────────────────────────────\n  FIELD GEOMETRY PROFILES\n──────────────────────────────────────────────────────────────\n';
+      for(var pi=0;pi<result.fieldProfiles.length;pi++){
+        var p=result.fieldProfiles[pi];
+        out+='\n  '+p.label+' ('+p.fieldKey+')\n';
+        out+='    Offset: dx='+(p.preferredOffset.dx*100).toFixed(2)+'%, dy='+(p.preferredOffset.dy*100).toFixed(2)+'%\n';
+        out+='    Expansion: dw='+(p.preferredExpansion.dw*100).toFixed(2)+'%, dh='+(p.preferredExpansion.dh*100).toFixed(2)+'%\n';
+        out+='    Confidence: '+(p.geometryConfidence*100).toFixed(1)+'%\n';
+        out+='    Best Family: '+p.dominantFamily.replace(/_/g,' ')+'\n';
+        out+='    Improved: '+p.improvedCount+'/'+p.correctionCount+'\n';
+      }
+    }
+    out+='\n══════════════════════════════════════════════════════════════\n';
+    return out;
+  }
+
   /* ── Public API ────────────────────────────────────────────────────────── */
 
   root.WrokitVisionLearning = {
@@ -1667,7 +1874,14 @@
     transferBBox: transferBBox,
     extractTextFromNormBox: extractTextFromNormBox,
     extractFromBatch: extractFromBatch,
-    formatRefinementReport: formatRefinementReport
+    formatRefinementReport: formatRefinementReport,
+    // Field Intelligence (Phase 3A)
+    learnFieldGeometry: learnFieldGeometry,
+    optimizeFieldGeometry: optimizeFieldGeometry,
+    generateCandidates: generateCandidates,
+    scoreCandidate: scoreCandidate,
+    applyGeometryProfile: applyGeometryProfile,
+    formatGeometryReport: formatGeometryReport
   };
 
 })(typeof self !== 'undefined' ? self : this);
