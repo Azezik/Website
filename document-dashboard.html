@@ -646,6 +646,50 @@
               <summary>Stability Metrics Detail</summary>
               <div id="batch-metrics-content" style="margin-top:8px;"></div>
             </details>
+
+            <!-- ═══ Phase 2: Structural Correspondence ═══ -->
+            <div id="batch-phase2-panel" style="display:none;margin-top:16px;">
+              <div style="border-top:2px solid var(--border,#ddd);padding-top:12px;">
+                <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+                  <h4 style="margin:0;">Phase 2 — Structural Correspondence</h4>
+                  <span id="batch-phase2-status" class="sub" style="color:var(--muted);"></span>
+                </div>
+                <p class="sub" style="margin:0 0 12px;color:var(--muted);">
+                  Analyze structural similarities across the batch to discover which regions correspond
+                  to each other across documents. Builds a Template Alignment Model from recurring structural anchors.
+                </p>
+
+                <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+                  <button id="batch-correspondence-btn" class="btn primary" type="button">Run Correspondence Analysis</button>
+                  <button id="batch-correspondence-export-btn" class="btn ghost" type="button" disabled style="display:none;">Export Correspondence Report (.txt)</button>
+                </div>
+
+                <!-- Reference document info -->
+                <details id="batch-reference-panel" class="panel minimal" style="margin-bottom:12px;display:none;">
+                  <summary>Reference Document</summary>
+                  <div id="batch-reference-content" style="margin-top:8px;"></div>
+                </details>
+
+                <!-- Discovered anchors -->
+                <details id="batch-anchors-panel" class="panel minimal" style="margin-bottom:12px;display:none;">
+                  <summary>Structural Anchors (<span id="batch-anchor-count">0</span>)</summary>
+                  <div id="batch-anchors-content" style="margin-top:8px;"></div>
+                </details>
+
+                <!-- Correspondence report -->
+                <details id="batch-correspondence-report-panel" class="panel minimal" style="margin-bottom:12px;display:none;">
+                  <summary>Correspondence Report</summary>
+                  <div id="batch-correspondence-report-content" class="code" style="white-space:pre-wrap;margin-top:8px;"></div>
+                </details>
+
+                <!-- Alignment model -->
+                <details id="batch-alignment-panel" class="panel minimal" style="margin-bottom:12px;display:none;">
+                  <summary>Template Alignment Model</summary>
+                  <div id="batch-alignment-content" style="margin-top:8px;"></div>
+                </details>
+              </div>
+            </div>
+
           </div>
         </div><!-- /learning-batch-tab -->
 

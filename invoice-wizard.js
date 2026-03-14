@@ -20615,6 +20615,17 @@ function showBatchSessionDetails(sessionId){
     if(reportEl && _learningAPI && _learningAPI.formatStabilityReport){
       reportEl.textContent = _learningAPI.formatStabilityReport(session.stabilityReport);
     }
+    // Show Phase 2 panel after Phase 1 has been run
+    var phase2Panel = document.getElementById('batch-phase2-panel');
+    if(phase2Panel) phase2Panel.style.display = 'block';
+  } else {
+    var phase2Panel2 = document.getElementById('batch-phase2-panel');
+    if(phase2Panel2) phase2Panel2.style.display = 'none';
+  }
+
+  // Show existing correspondence result if available
+  if(session.correspondenceResult){
+    _renderCorrespondenceResult(session.correspondenceResult);
   }
 }
 
@@ -21044,6 +21055,204 @@ function _batchProcessQueue(fileList){
 
     // Show export button after successful analysis
     if(exportBtn){ exportBtn.disabled = false; exportBtn.style.display = ''; }
+
+    // Show Phase 2 panel after successful Phase 1 analysis
+    var phase2Panel = document.getElementById('batch-phase2-panel');
+    if(phase2Panel) phase2Panel.style.display = 'block';
+
+    // Show existing correspondence result if available
+    _showExistingCorrespondenceResult();
+  });
+})();
+
+/* ── Phase 2: Structural Correspondence Analysis ───────────────────────── */
+
+function _showExistingCorrespondenceResult(){
+  if(!_batchStore || !_activeBatchSessionId) return;
+  var session = _batchStore.getSession(_activeBatchSessionId);
+  if(!session || !session.correspondenceResult) return;
+  _renderCorrespondenceResult(session.correspondenceResult);
+}
+
+function _renderCorrespondenceResult(result){
+  if(!result) return;
+
+  // Reference document panel
+  var refPanel = document.getElementById('batch-reference-panel');
+  var refContent = document.getElementById('batch-reference-content');
+  if(refPanel && refContent && result.referenceDocument){
+    refPanel.style.display = '';
+    var refDoc = result.referenceDocument;
+    var refHtml = '<div style="padding:4px 0;">';
+    refHtml += '<div style="margin-bottom:8px;"><strong>' + (refDoc.documentName || refDoc.documentId) + '</strong></div>';
+    if(refDoc.centralityScore != null){
+      refHtml += '<div class="sub" style="color:var(--muted);">Centrality Score: <strong>' + (refDoc.centralityScore * 100).toFixed(1) + '%</strong>';
+      refHtml += ' — This document is most structurally similar to the rest of the batch.</div>';
+    }
+    if(refDoc.centralityScores && refDoc.centralityScores.length > 1){
+      refHtml += '<details style="margin-top:8px;"><summary class="sub" style="cursor:pointer;">All document centrality scores</summary>';
+      refHtml += '<div style="margin-top:4px;">';
+      for(var ci = 0; ci < refDoc.centralityScores.length; ci++){
+        var cs = refDoc.centralityScores[ci];
+        var barW = Math.round((cs.avgSimilarity || 0) * 100);
+        refHtml += '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:13px;">';
+        refHtml += '<span style="min-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (cs.documentName || cs.documentId) + '</span>';
+        refHtml += '<div style="flex:1;background:var(--border,#eee);height:8px;border-radius:4px;overflow:hidden;">';
+        refHtml += '<div style="width:' + barW + '%;height:100%;background:' + (ci === 0 ? '#2a7' : '#69b') + ';border-radius:4px;"></div></div>';
+        refHtml += '<span class="sub" style="min-width:50px;text-align:right;">' + (cs.avgSimilarity * 100).toFixed(1) + '%</span>';
+        refHtml += '</div>';
+      }
+      refHtml += '</div></details>';
+    }
+    refHtml += '</div>';
+    refContent.innerHTML = refHtml;
+  }
+
+  // Anchors panel
+  var anchorsPanel = document.getElementById('batch-anchors-panel');
+  var anchorsContent = document.getElementById('batch-anchors-content');
+  var anchorCountEl = document.getElementById('batch-anchor-count');
+  if(anchorsPanel && anchorsContent && result.anchors){
+    anchorsPanel.style.display = '';
+    if(anchorCountEl) anchorCountEl.textContent = result.anchors.length;
+
+    if(result.anchors.length === 0){
+      anchorsContent.innerHTML = '<p class="sub" style="color:var(--muted);">No recurring structural anchors discovered.</p>';
+    } else {
+      var anchHtml = '';
+      for(var ai = 0; ai < result.anchors.length; ai++){
+        var a = result.anchors[ai];
+        var confPct = (a.confidence * 100).toFixed(1);
+        var freqPct = (a.frequency * 100).toFixed(0);
+        var confColor = a.confidence >= 0.7 ? '#2a7' : a.confidence >= 0.5 ? '#b87e0a' : '#c44';
+        anchHtml += '<div style="padding:8px;margin-bottom:8px;border:1px solid var(--border,#eee);border-radius:6px;border-left:3px solid ' + confColor + ';">';
+        anchHtml += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">';
+        anchHtml += '<strong style="font-size:13px;">Anchor ' + (ai + 1) + '</strong>';
+        anchHtml += '<span style="font-size:12px;color:' + confColor + ';font-weight:600;">' + confPct + '% confidence</span>';
+        anchHtml += '</div>';
+        anchHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:4px 16px;margin-top:6px;font-size:12px;color:var(--muted);">';
+        anchHtml += '<span>Position: (' + (a.normalizedPosition.x * 100).toFixed(1) + '%, ' + (a.normalizedPosition.y * 100).toFixed(1) + '%)</span>';
+        anchHtml += '<span>Size: ' + (a.normalizedArea * 100).toFixed(2) + '% of page</span>';
+        anchHtml += '<span>Type: ' + a.surfaceType + '</span>';
+        anchHtml += '<span>Frequency: ' + a.matchCount + '/' + a.totalDocuments + ' (' + freqPct + '%)</span>';
+        anchHtml += '<span>Avg Similarity: ' + (a.avgSimilarity * 100).toFixed(1) + '%</span>';
+        anchHtml += '</div>';
+        // Confidence bar
+        var barW = Math.round(a.confidence * 100);
+        anchHtml += '<div style="margin-top:6px;background:var(--border,#eee);height:6px;border-radius:3px;overflow:hidden;">';
+        anchHtml += '<div style="width:' + barW + '%;height:100%;background:' + confColor + ';border-radius:3px;"></div></div>';
+        anchHtml += '</div>';
+      }
+      anchorsContent.innerHTML = anchHtml;
+    }
+  }
+
+  // Full report panel
+  var reportPanel = document.getElementById('batch-correspondence-report-panel');
+  var reportContent = document.getElementById('batch-correspondence-report-content');
+  if(reportPanel && reportContent && _learningAPI && _learningAPI.formatCorrespondenceReport){
+    reportPanel.style.display = '';
+    reportContent.textContent = _learningAPI.formatCorrespondenceReport(result);
+  }
+
+  // Alignment model panel
+  var alignPanel = document.getElementById('batch-alignment-panel');
+  var alignContent = document.getElementById('batch-alignment-content');
+  if(alignPanel && alignContent && result.alignmentModel){
+    alignPanel.style.display = '';
+    var am = result.alignmentModel;
+    var amHtml = '<div style="padding:4px 0;">';
+    amHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px 16px;margin-bottom:12px;">';
+    amHtml += '<div class="panel minimal" style="padding:8px;text-align:center;"><div class="sub" style="font-size:11px;color:var(--muted);">Anchors</div><strong style="font-size:18px;">' + am.anchorCount + '</strong><div class="sub" style="font-size:11px;color:var(--muted);">of ' + am.totalRegionsInReference + ' regions</div></div>';
+    amHtml += '<div class="panel minimal" style="padding:8px;text-align:center;"><div class="sub" style="font-size:11px;color:var(--muted);">Coverage</div><strong style="font-size:18px;">' + (am.anchorCoverage * 100).toFixed(1) + '%</strong></div>';
+    amHtml += '<div class="panel minimal" style="padding:8px;text-align:center;"><div class="sub" style="font-size:11px;color:var(--muted);">Avg Confidence</div><strong style="font-size:18px;">' + (am.avgAnchorConfidence * 100).toFixed(1) + '%</strong></div>';
+    amHtml += '<div class="panel minimal" style="padding:8px;text-align:center;"><div class="sub" style="font-size:11px;color:var(--muted);">Avg Frequency</div><strong style="font-size:18px;">' + (am.avgAnchorFrequency * 100).toFixed(1) + '%</strong></div>';
+    amHtml += '</div>';
+    amHtml += '<details><summary class="sub" style="cursor:pointer;">Raw alignment model data</summary>';
+    amHtml += '<pre class="code" style="white-space:pre-wrap;margin-top:8px;font-size:12px;">' +
+      JSON.stringify(am, null, 2).replace(/</g, '&lt;') + '</pre></details>';
+    amHtml += '</div>';
+    alignContent.innerHTML = amHtml;
+  }
+
+  // Status
+  var statusEl = document.getElementById('batch-phase2-status');
+  if(statusEl) statusEl.textContent = result.status === 'complete'
+    ? 'Analysis complete'
+    : result.status.replace(/_/g, ' ');
+
+  // Export button
+  var exportBtn = document.getElementById('batch-correspondence-export-btn');
+  if(exportBtn && result.status !== 'insufficient_data' && result.status !== 'insufficient_valid_data'){
+    exportBtn.disabled = false;
+    exportBtn.style.display = '';
+  }
+}
+
+// Run Correspondence Analysis button
+(function(){
+  var btn = document.getElementById('batch-correspondence-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!_batchStore || !_activeBatchSessionId || !_learningAPI || !_learningAPI.analyzeCorrespondence) return;
+    var session = _batchStore.getSession(_activeBatchSessionId);
+    if(!session || session.documents.length < 2){
+      alert('Need at least 2 documents for correspondence analysis.');
+      return;
+    }
+
+    var statusEl = document.getElementById('batch-phase2-status');
+    if(statusEl) statusEl.textContent = 'Analyzing correspondences...';
+    btn.disabled = true;
+
+    // Use setTimeout to let the UI update before the synchronous computation
+    setTimeout(function(){
+      try {
+        var result = _learningAPI.analyzeCorrespondence(session.documents);
+
+        if(result.status === 'insufficient_valid_data'){
+          if(statusEl) statusEl.textContent = 'Insufficient data';
+          alert(result.message);
+          btn.disabled = false;
+          return;
+        }
+
+        // Save result to session
+        if(_batchStore.saveCorrespondenceResult){
+          _batchStore.saveCorrespondenceResult(_activeBatchSessionId, result);
+        }
+
+        // Render the result
+        _renderCorrespondenceResult(result);
+      } catch(err){
+        console.error('[BatchLearning] Correspondence analysis failed:', err);
+        if(statusEl) statusEl.textContent = 'Analysis failed';
+        alert('Correspondence analysis failed: ' + (err.message || String(err)));
+      }
+      btn.disabled = false;
+    }, 50);
+  });
+})();
+
+// Export correspondence report as .txt
+(function(){
+  var exportBtn = document.getElementById('batch-correspondence-export-btn');
+  if(!exportBtn) return;
+  exportBtn.addEventListener('click', function(){
+    var reportEl = document.getElementById('batch-correspondence-report-content');
+    var reportText = reportEl ? reportEl.textContent : '';
+    if(!reportText || reportText.indexOf('[No correspondence') === 0){
+      alert('No correspondence report available. Run analysis first.');
+      return;
+    }
+    var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    var filename = 'wrokit-correspondence-' + timestamp + '.txt';
+    var blob = new Blob([reportText], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
   });
 })();
 
