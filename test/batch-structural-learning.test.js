@@ -1327,7 +1327,143 @@ function buildExtractionTargets() {
   assert.strictEqual(emptyTransfer.method, 'identity_fallback');
   assert.strictEqual(emptyTransfer.anchorsUsed, 0);
 
+  // Method should be anchor_relative_projection (not the old anchor_weighted_transfer)
+  if (targetDoc && refinement.refinedAnchors.length > 0) {
+    var transfer2 = transferBBox(targets[0], refinement.refinedAnchors, corrResult, targetDoc.documentId, targetDoc);
+    assert.strictEqual(transfer2.method, 'anchor_relative_projection', 'Should use relative projection method');
+  }
+
   console.log('transferBBox tests passed.');
+})();
+
+// ── transferBBox relative-position projection correctness ────────────────
+
+(function testTransferBBoxRelativeProjection() {
+  // Build a controlled scenario where we can verify the projection behavior.
+  // Create ref doc with a known region, and target doc with the same region
+  // shifted to a known position. The BBOX drawn near the ref region should
+  // transfer to the corresponding position near the target region.
+
+  var refDoc = {
+    documentId: 'ref-proj', documentName: 'ref-proj.png',
+    regionDescriptors: [
+      { regionId: 'r1', centroid: { x: 0.2, y: 0.3 },
+        normalizedBbox: { x: 0.15, y: 0.25, w: 0.1, h: 0.1 },
+        normalizedArea: 0.01, aspectRatio: 1, surfaceType: 'text',
+        textDensity: 0.5 },
+      { regionId: 'r2', centroid: { x: 0.7, y: 0.8 },
+        normalizedBbox: { x: 0.65, y: 0.75, w: 0.1, h: 0.1 },
+        normalizedArea: 0.01, aspectRatio: 1, surfaceType: 'text',
+        textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  var tgtDoc = {
+    documentId: 'tgt-proj', documentName: 'tgt-proj.png',
+    regionDescriptors: [
+      // Region 1 shifted right by 0.1, down by 0.05
+      { regionId: 'tr1', centroid: { x: 0.3, y: 0.35 },
+        normalizedBbox: { x: 0.25, y: 0.30, w: 0.1, h: 0.1 },
+        normalizedArea: 0.01, aspectRatio: 1, surfaceType: 'text',
+        textDensity: 0.5 },
+      { regionId: 'tr2', centroid: { x: 0.8, y: 0.85 },
+        normalizedBbox: { x: 0.75, y: 0.80, w: 0.1, h: 0.1 },
+        normalizedArea: 0.01, aspectRatio: 1, surfaceType: 'text',
+        textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  // Simulate refined anchors: anchors on ref doc pointing to r1 and r2
+  var refinedAnchors = [
+    {
+      anchorId: 'anchor-r1', refRegionId: 'r1',
+      normalizedPosition: { x: 0.2, y: 0.3 },
+      normalizedBbox: { x: 0.15, y: 0.25, w: 0.1, h: 0.1 },
+      relevanceScore: 0.8, bestTargetKey: 'field_near_r1',
+      confidence: 0.9
+    },
+    {
+      anchorId: 'anchor-r2', refRegionId: 'r2',
+      normalizedPosition: { x: 0.7, y: 0.8 },
+      normalizedBbox: { x: 0.65, y: 0.75, w: 0.1, h: 0.1 },
+      relevanceScore: 0.7, bestTargetKey: 'field_near_r2',
+      confidence: 0.85
+    }
+  ];
+
+  // Simulate correspondences: r1→tr1, r2→tr2
+  var correspondenceResult = {
+    referenceDocument: { documentId: 'ref-proj' },
+    correspondences: [
+      { refRegionId: 'r1', tgtDocumentId: 'tgt-proj', tgtRegionId: 'tr1', similarity: 0.95 },
+      { refRegionId: 'r2', tgtDocumentId: 'tgt-proj', tgtRegionId: 'tr2', similarity: 0.90 }
+    ]
+  };
+
+  // User draws a BBOX right next to region r1 on the ref doc
+  // Box at (0.25, 0.30) is 0.05 to the right of r1's center (0.2, 0.3)
+  var targetNearR1 = {
+    fieldKey: 'field_near_r1',
+    label: 'Near R1',
+    normBox: { x0n: 0.22, y0n: 0.28, wN: 0.06, hN: 0.04 }
+  };
+
+  var result = transferBBox(targetNearR1, refinedAnchors, correspondenceResult, 'tgt-proj', tgtDoc);
+
+  assert.ok(result.method === 'anchor_relative_projection', 'Uses relative projection');
+  assert.ok(result.anchorsUsed > 0, 'Used anchors');
+
+  // The BBOX was at center (0.25, 0.30) on ref doc.
+  // Nearest anchor r1 is at (0.2, 0.3). Relative offset = (+0.05, 0).
+  // r1 maps to tr1 at (0.3, 0.35). Scale = 1 (same size regions).
+  // So the projected position from r1 should be (0.3 + 0.05, 0.35 + 0) = (0.35, 0.35).
+  // With r2 further away (lower weight), the result should be close to (0.35, 0.35).
+  var txCenter = {
+    x: result.transferredNormBox.x0n + result.transferredNormBox.wN / 2,
+    y: result.transferredNormBox.y0n + result.transferredNormBox.hN / 2
+  };
+
+  // The transferred center should be close to (0.35, 0.35)
+  // (not exactly, because r2 contributes a small amount)
+  assert.ok(Math.abs(txCenter.x - 0.35) < 0.05,
+    'Transferred X should be near 0.35 (relative projection from r1→tr1): got ' + txCenter.x.toFixed(4));
+  assert.ok(Math.abs(txCenter.y - 0.35) < 0.05,
+    'Transferred Y should be near 0.35 (relative projection from r1→tr1): got ' + txCenter.y.toFixed(4));
+
+  // OLD BUG CHECK: The old method would compute avg(tgt-ref) = avg((0.1,0.05), (0.1,0.05)) = (0.1, 0.05)
+  // and add it to srcBox: (0.22+0.1, 0.28+0.05) = center at (0.35, 0.33).
+  // For this symmetric case, old and new happen to be similar. Let's test an asymmetric case.
+
+  // Asymmetric: BBOX far from r1 but near r2 on ref doc.
+  // r2 center = (0.7, 0.8), r2 maps to tr2 at (0.8, 0.85).
+  // Relative shift from r2's perspective: r2 shifted by (+0.1, +0.05).
+  // If BBOX is at (0.65, 0.78), relative to r2: (-0.05, -0.02).
+  // Projected from tr2: (0.8 - 0.05, 0.85 - 0.02) = (0.75, 0.83).
+  // Old method: avg offset = (0.1, 0.05), newPos = (0.65+0.1, 0.78+0.05) center = (0.78, 0.835).
+  // New method should give result dominated by r2 (much closer), near (0.75, 0.83).
+  var targetNearR2 = {
+    fieldKey: 'field_near_r2',
+    label: 'Near R2',
+    normBox: { x0n: 0.62, y0n: 0.76, wN: 0.06, hN: 0.04 }
+  };
+
+  var result2 = transferBBox(targetNearR2, refinedAnchors, correspondenceResult, 'tgt-proj', tgtDoc);
+  var txCenter2 = {
+    x: result2.transferredNormBox.x0n + result2.transferredNormBox.wN / 2,
+    y: result2.transferredNormBox.y0n + result2.transferredNormBox.hN / 2
+  };
+
+  // Should be closer to (0.75, 0.83) from r2's projection than (0.78, 0.835) from old method
+  assert.ok(Math.abs(txCenter2.x - 0.75) < 0.04,
+    'Asymmetric: Transferred X near r2 should be near 0.75: got ' + txCenter2.x.toFixed(4));
+  assert.ok(Math.abs(txCenter2.y - 0.83) < 0.04,
+    'Asymmetric: Transferred Y near r2 should be near 0.83: got ' + txCenter2.y.toFixed(4));
+
+  console.log('transferBBox relative-position projection tests passed.');
 })();
 
 // ── extractTextFromNormBox ───────────────────────────────────────────────

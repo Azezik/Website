@@ -1527,6 +1527,7 @@
   function transferBBox(target,refinedAnchors,correspondenceResult,targetDocId,targetDoc){
     var srcBox=target.normBox,srcCenter=_normBoxCenter(srcBox);
     var docCorr=(correspondenceResult.correspondences||[]).filter(function(c){return c.tgtDocumentId===targetDocId;});
+    // Stage 1+2: Build anchor pairs with relative-position data
     var anchorPairs=[];
     for(var ai=0;ai<refinedAnchors.length;ai++){
       var anchor=refinedAnchors[ai],match=null;
@@ -1535,26 +1536,65 @@
       var tgtRegion=null,tgtRegs=targetDoc.regionDescriptors||[];
       for(var ri=0;ri<tgtRegs.length;ri++){if(tgtRegs[ri].regionId===match.tgtRegionId){tgtRegion=tgtRegs[ri];break;}}
       if(!tgtRegion)continue;
-      var dist=_pointDist(srcCenter,anchor.normalizedPosition);
-      anchorPairs.push({anchor:anchor,match:match,tgtRegion:tgtRegion,distance:dist,weight:_clamp(1-dist/0.5,0.1,1)*match.similarity});
+      // Stage 1: BBOX position relative to this anchor on reference doc
+      var refCenter=anchor.normalizedPosition;
+      var relOX=srcCenter.x-refCenter.x, relOY=srcCenter.y-refCenter.y;
+      // Scale = target region / reference region
+      var refBb=anchor.normalizedBbox, tgtBb=tgtRegion.normalizedBbox;
+      var scX=refBb.w>0?tgtBb.w/refBb.w:1, scY=refBb.h>0?tgtBb.h/refBb.h:1;
+      scX=_clamp(scX,0.5,2.0); scY=_clamp(scY,0.5,2.0);
+      // Stage 3: Project — reconstruct BBOX from target anchor position
+      var tgtC=tgtRegion.centroid;
+      var candCX=tgtC.x+relOX*scX, candCY=tgtC.y+relOY*scY;
+      var candW=srcBox.wN*scX, candH=srcBox.hN*scY;
+      var dist=_pointDist(srcCenter,refCenter);
+      var proxW=_clamp(1-dist/0.5,0.1,1);
+      var fieldBonus=(anchor.bestTargetKey===target.fieldKey)?1.5:1.0;
+      var weight=proxW*match.similarity*fieldBonus;
+      anchorPairs.push({anchor:anchor,match:match,tgtRegion:tgtRegion,distance:dist,weight:weight,
+        candidateCenter:{x:candCX,y:candCY},candidateSize:{w:candW,h:candH},scale:{x:scX,y:scY}});
     }
     anchorPairs.sort(function(a,b){return a.distance-b.distance;});
     if(anchorPairs.length===0)return{transferredNormBox:{x0n:srcBox.x0n,y0n:srcBox.y0n,wN:srcBox.wN,hN:srcBox.hN},confidence:0.3,method:'identity_fallback',anchorsUsed:0};
-    var maxA=Math.min(anchorPairs.length,5),totalW=0,oX=0,oY=0,sW=0,sH=0;
+    // Stage 3: Weighted average of projected candidates
+    var maxA=Math.min(anchorPairs.length,5),totalW=0,avgCX=0,avgCY=0,avgW=0,avgH=0;
     for(var pi=0;pi<maxA;pi++){
-      var p=anchorPairs[pi],rc=p.anchor.normalizedPosition,tc=p.tgtRegion.centroid;
-      var dx=tc.x-rc.x,dy=tc.y-rc.y;
-      var sw=p.anchor.normalizedBbox.w>0?p.tgtRegion.normalizedBbox.w/p.anchor.normalizedBbox.w:1;
-      var sh=p.anchor.normalizedBbox.h>0?p.tgtRegion.normalizedBbox.h/p.anchor.normalizedBbox.h:1;
-      oX+=dx*p.weight;oY+=dy*p.weight;sW+=sw*p.weight;sH+=sh*p.weight;totalW+=p.weight;
+      var p=anchorPairs[pi];
+      avgCX+=p.candidateCenter.x*p.weight; avgCY+=p.candidateCenter.y*p.weight;
+      avgW+=p.candidateSize.w*p.weight; avgH+=p.candidateSize.h*p.weight;
+      totalW+=p.weight;
     }
-    if(totalW>0){oX/=totalW;oY/=totalW;sW/=totalW;sH/=totalW;}else{oX=0;oY=0;sW=1;sH=1;}
-    sW=_clamp(sW,0.5,2.0);sH=_clamp(sH,0.5,2.0);
-    var nW=srcBox.wN*sW,nH=srcBox.hN*sH,nX=_clamp(srcBox.x0n+oX,0,1-nW),nY=_clamp(srcBox.y0n+oY,0,1-nH);
-    nW=_clamp(nW,0.001,1);nH=_clamp(nH,0.001,1);
+    if(totalW>0){avgCX/=totalW;avgCY/=totalW;avgW/=totalW;avgH/=totalW;}
+    else{avgCX=srcCenter.x;avgCY=srcCenter.y;avgW=srcBox.wN;avgH=srcBox.hN;}
+    var nW=_clamp(avgW,0.001,1),nH=_clamp(avgH,0.001,1);
+    var nX=avgCX-nW/2, nY=avgCY-nH/2;
+    // Stage 4: Local anchor-based adjustment
+    var tgtRegs2=targetDoc.regionDescriptors||[];
+    if(tgtRegs2.length>0){
+      var txC={x:avgCX,y:avgCY},txNB={x0n:nX,y0n:nY,wN:nW,hN:nH};
+      var bestNudge=null,bestNS=0;
+      var diagTh=Math.sqrt(nW*nW+nH*nH)*0.75;
+      for(var lri=0;lri<tgtRegs2.length;lri++){
+        var lr=tgtRegs2[lri],lrC=lr.centroid,lrD=_pointDist(txC,lrC);
+        if(lrD>diagTh)continue;
+        var lrNB={x0n:lr.normalizedBbox.x,y0n:lr.normalizedBbox.y,wN:lr.normalizedBbox.w,hN:lr.normalizedBbox.h};
+        var iou=_normBoxIoU(txNB,lrNB);
+        var szSim=1-Math.abs(lr.normalizedBbox.w*lr.normalizedBbox.h-nW*nH)/Math.max(lr.normalizedBbox.w*lr.normalizedBbox.h,nW*nH,0.001);
+        szSim=_clamp(szSim,0,1);
+        var ns=iou*0.6+szSim*0.2+(1-lrD/diagTh)*0.2;
+        if(ns>bestNS&&ns>0.15){bestNS=ns;bestNudge={center:lrC,score:ns};}
+      }
+      if(bestNudge){
+        var nStr=_clamp(bestNS*0.3,0,0.3);
+        nX=(avgCX+(bestNudge.center.x-avgCX)*nStr)-nW/2;
+        nY=(avgCY+(bestNudge.center.y-avgCY)*nStr)-nH/2;
+      }
+    }
+    nX=_clamp(nX,0,1-nW);nY=_clamp(nY,0,1-nH);nW=_clamp(nW,0.001,1);nH=_clamp(nH,0.001,1);
     var avgMS=_mean(anchorPairs.slice(0,maxA).map(function(p){return p.match.similarity;}));
     var conf=_clamp(avgMS*(0.5+0.5*Math.min(maxA,3)/3),0,1);
-    return{transferredNormBox:{x0n:_round(nX,6),y0n:_round(nY,6),wN:_round(nW,6),hN:_round(nH,6)},confidence:_round(conf,4),method:'anchor_weighted_transfer',anchorsUsed:maxA,offset:{x:_round(oX,6),y:_round(oY,6)},scale:{w:_round(sW,4),h:_round(sH,4)}};
+    var netOX=(nX+nW/2)-srcCenter.x, netOY=(nY+nH/2)-srcCenter.y;
+    return{transferredNormBox:{x0n:_round(nX,6),y0n:_round(nY,6),wN:_round(nW,6),hN:_round(nH,6)},confidence:_round(conf,4),method:'anchor_relative_projection',anchorsUsed:maxA,offset:{x:_round(netOX,6),y:_round(netOY,6)},scale:{w:_round(nW/srcBox.wN,4),h:_round(nH/srcBox.hN,4)}};
   }
 
   function extractTextFromNormBox(normBox,tokens,viewport){

@@ -340,35 +340,58 @@ function refineAnchors(correspondenceResult, extractionTargets, refDoc, opts) {
 
 /**
  * Transfer a user-defined BBOX from the reference document to a target
- * document using refined anchors.
+ * document using the reference document's refined-anchor graph as the
+ * coordinate template.
  *
- * The transfer uses nearby anchor correspondences to compute an affine-like
- * offset between the reference and target coordinate spaces. If no anchors
- * are nearby the target, it falls back to identity (same normalized position).
+ * ── Algorithm ──────────────────────────────────────────────────────────
  *
- * This mirrors the intent of the normal WrokitVision run pipeline's
- * geometry transfer, designed so it can later inform the standard run flow.
+ * Stage 1 – Reference Template Frame
+ *   Record the BBOX's position relative to each refined anchor on the
+ *   reference document. Each anchor acts as a local origin: the BBOX
+ *   center's offset from the anchor center and the ratio of BBOX size
+ *   to anchor region size define the "template relationship".
+ *
+ * Stage 2 – Graph Projection / Structural Matching
+ *   For each refined anchor, find its corresponding region on the target
+ *   document via Phase 2 correspondences. This projects the reference
+ *   structural frame into the target.
+ *
+ * Stage 3 – Global Anchor-Based Transformation
+ *   For each anchor pair (ref → target):
+ *     relativeOffset = bboxCenter − refAnchorCenter
+ *     scale          = tgtRegionSize / refRegionSize
+ *     candidatePos   = tgtAnchorCenter + relativeOffset × scale
+ *     candidateSize  = bboxSize × scale
+ *   Compute a weighted average of all candidates. Anchors specifically
+ *   relevant to this field (bestTargetKey match) receive a bonus.
+ *
+ * Stage 4 – Local Anchor-Based Adjustment
+ *   After the global transform, check the target document's local
+ *   structural context around the transferred position. If a structurally
+ *   similar region (high neighborhood + centroid similarity) exists near
+ *   the transferred box, nudge toward it.
  *
  * @param {object}   target      - { fieldKey, label, normBox }
  * @param {object[]} refinedAnchors  - Anchors from refineAnchors()
  * @param {object}   correspondenceResult - Phase 2 output
  * @param {string}   targetDocId - ID of the document to transfer to
  * @param {object}   targetDoc   - Target document summary
- * @returns {object} { transferredNormBox, confidence, method, anchorUsed }
+ * @returns {object} { transferredNormBox, confidence, method, anchorsUsed }
  */
 function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId, targetDoc) {
   var srcBox = target.normBox;
   var srcCenter = normBoxCenter(srcBox);
 
-  // Find correspondences for this target document
+  // ── Stage 2: Find correspondences for this target document ──────────
   var docCorrespondences = (correspondenceResult.correspondences || []).filter(
     function (c) { return c.tgtDocumentId === targetDocId; }
   );
 
-  // Find the nearest relevant anchors that have a match in the target doc
+  // ── Stage 1+2: Build anchor pairs with relative-position data ───────
   var anchorPairs = [];
   for (var ai = 0; ai < refinedAnchors.length; ai++) {
     var anchor = refinedAnchors[ai];
+
     // Find this anchor's correspondence in the target doc
     var match = null;
     for (var ci = 0; ci < docCorrespondences.length; ci++) {
@@ -390,13 +413,44 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
     }
     if (!tgtRegion) continue;
 
-    var dist = pointDist(srcCenter, anchor.normalizedPosition);
+    // Stage 1: BBOX's position relative to this anchor on the reference doc
+    var refCenter = anchor.normalizedPosition;
+    var relOffsetX = srcCenter.x - refCenter.x;
+    var relOffsetY = srcCenter.y - refCenter.y;
+
+    // Scale = target region size / reference region size
+    var refBbox = anchor.normalizedBbox;
+    var tgtBbox = tgtRegion.normalizedBbox;
+    var scaleX = refBbox.w > 0 ? tgtBbox.w / refBbox.w : 1;
+    var scaleY = refBbox.h > 0 ? tgtBbox.h / refBbox.h : 1;
+    // Clamp individual scales to reasonable range
+    scaleX = clamp(scaleX, 0.5, 2.0);
+    scaleY = clamp(scaleY, 0.5, 2.0);
+
+    // Stage 3: Project — reconstruct BBOX from target anchor position
+    var tgtCenter = tgtRegion.centroid;
+    var candidateCenterX = tgtCenter.x + relOffsetX * scaleX;
+    var candidateCenterY = tgtCenter.y + relOffsetY * scaleY;
+    var candidateW = srcBox.wN * scaleX;
+    var candidateH = srcBox.hN * scaleY;
+
+    // Distance from BBOX center to this anchor on reference doc
+    var dist = pointDist(srcCenter, refCenter);
+
+    // Weight: proximity × match similarity, with bonus for field-specific anchors
+    var proximityWeight = clamp(1 - dist / 0.5, 0.1, 1);
+    var fieldBonus = (anchor.bestTargetKey === target.fieldKey) ? 1.5 : 1.0;
+    var weight = proximityWeight * match.similarity * fieldBonus;
+
     anchorPairs.push({
       anchor: anchor,
       match: match,
       tgtRegion: tgtRegion,
       distance: dist,
-      weight: clamp(1 - dist / 0.5, 0.1, 1) * match.similarity
+      weight: weight,
+      candidateCenter: { x: candidateCenterX, y: candidateCenterY },
+      candidateSize: { w: candidateW, h: candidateH },
+      scale: { x: scaleX, y: scaleY }
     });
   }
 
@@ -413,52 +467,88 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
     };
   }
 
-  // Use the top-N nearest anchor pairs to compute a weighted offset
+  // ── Stage 3: Weighted average of projected candidates ───────────────
   var maxAnchors = Math.min(anchorPairs.length, 5);
   var totalWeight = 0;
-  var offsetX = 0, offsetY = 0;
-  var scaleW = 0, scaleH = 0;
+  var avgCX = 0, avgCY = 0;
+  var avgW = 0, avgH = 0;
 
   for (var pi = 0; pi < maxAnchors; pi++) {
     var pair = anchorPairs[pi];
-    var refCenter = pair.anchor.normalizedPosition;
-    var tgtCenter = pair.tgtRegion.centroid;
-
-    // Offset = how much the anchor shifted from ref to target
-    var dx = tgtCenter.x - refCenter.x;
-    var dy = tgtCenter.y - refCenter.y;
-
-    // Scale = ratio of target region size to reference region size
-    var refBbox = pair.anchor.normalizedBbox;
-    var tgtBbox = pair.tgtRegion.normalizedBbox;
-    var sw = refBbox.w > 0 ? tgtBbox.w / refBbox.w : 1;
-    var sh = refBbox.h > 0 ? tgtBbox.h / refBbox.h : 1;
-
-    offsetX += dx * pair.weight;
-    offsetY += dy * pair.weight;
-    scaleW += sw * pair.weight;
-    scaleH += sh * pair.weight;
+    avgCX += pair.candidateCenter.x * pair.weight;
+    avgCY += pair.candidateCenter.y * pair.weight;
+    avgW += pair.candidateSize.w * pair.weight;
+    avgH += pair.candidateSize.h * pair.weight;
     totalWeight += pair.weight;
   }
 
   if (totalWeight > 0) {
-    offsetX /= totalWeight;
-    offsetY /= totalWeight;
-    scaleW /= totalWeight;
-    scaleH /= totalWeight;
+    avgCX /= totalWeight;
+    avgCY /= totalWeight;
+    avgW /= totalWeight;
+    avgH /= totalWeight;
   } else {
-    offsetX = 0; offsetY = 0; scaleW = 1; scaleH = 1;
+    avgCX = srcCenter.x;
+    avgCY = srcCenter.y;
+    avgW = srcBox.wN;
+    avgH = srcBox.hN;
   }
 
-  // Clamp scale to reasonable range (50% - 200% of original)
-  scaleW = clamp(scaleW, 0.5, 2.0);
-  scaleH = clamp(scaleH, 0.5, 2.0);
+  // Convert center + size back to x0n/y0n/wN/hN
+  var newW = clamp(avgW, 0.001, 1);
+  var newH = clamp(avgH, 0.001, 1);
+  var newX = avgCX - newW / 2;
+  var newY = avgCY - newH / 2;
 
-  // Apply offset and scale to source box
-  var newW = srcBox.wN * scaleW;
-  var newH = srcBox.hN * scaleH;
-  var newX = srcBox.x0n + offsetX;
-  var newY = srcBox.y0n + offsetY;
+  // ── Stage 4: Local Anchor-Based Adjustment ──────────────────────────
+  // After global transform, check for nearby structural regions on the
+  // target doc that could refine placement (small nudge, not repositioning).
+  var tgtRegions = targetDoc.regionDescriptors || [];
+  if (tgtRegions.length > 0) {
+    var txCenter = { x: avgCX, y: avgCY };
+    var txNormBox = { x0n: newX, y0n: newY, wN: newW, hN: newH };
+    var bestNudge = null;
+    var bestNudgeScore = 0;
+
+    for (var lri = 0; lri < tgtRegions.length; lri++) {
+      var lr = tgtRegions[lri];
+      var lrCenter = lr.centroid;
+      var lrDist = pointDist(txCenter, lrCenter);
+
+      // Only consider regions very close to the transferred position
+      // (within half the BBOX diagonal to avoid pulling toward distant regions)
+      var diagThreshold = Math.sqrt(newW * newW + newH * newH) * 0.75;
+      if (lrDist > diagThreshold) continue;
+
+      // Compute structural similarity: overlap + size match
+      var lrNormBox = regionToNormBox(lr);
+      var iou = normBoxIoU(txNormBox, lrNormBox);
+      var sizeSim = 1 - Math.abs(lr.normalizedBbox.w * lr.normalizedBbox.h - newW * newH) /
+        Math.max(lr.normalizedBbox.w * lr.normalizedBbox.h, newW * newH, 0.001);
+      sizeSim = clamp(sizeSim, 0, 1);
+
+      // The region must overlap meaningfully or be very close
+      var nudgeScore = iou * 0.6 + sizeSim * 0.2 + (1 - lrDist / diagThreshold) * 0.2;
+      if (nudgeScore > bestNudgeScore && nudgeScore > 0.15) {
+        bestNudgeScore = nudgeScore;
+        bestNudge = {
+          center: lrCenter,
+          normBox: lrNormBox,
+          score: nudgeScore
+        };
+      }
+    }
+
+    if (bestNudge) {
+      // Nudge: blend the transferred center toward the region center
+      // proportional to the nudge score (max 30% adjustment)
+      var nudgeStrength = clamp(bestNudgeScore * 0.3, 0, 0.3);
+      var nudgedCX = avgCX + (bestNudge.center.x - avgCX) * nudgeStrength;
+      var nudgedCY = avgCY + (bestNudge.center.y - avgCY) * nudgeStrength;
+      newX = nudgedCX - newW / 2;
+      newY = nudgedCY - newH / 2;
+    }
+  }
 
   // Clamp to page bounds
   newX = clamp(newX, 0, 1 - newW);
@@ -470,13 +560,19 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
   var avgMatchSim = mean(anchorPairs.slice(0, maxAnchors).map(function (p) { return p.match.similarity; }));
   var confidence = clamp(avgMatchSim * (0.5 + 0.5 * Math.min(maxAnchors, 3) / 3), 0, 1);
 
+  // Compute net offset and scale for diagnostics
+  var netOffsetX = (newX + newW / 2) - srcCenter.x;
+  var netOffsetY = (newY + newH / 2) - srcCenter.y;
+  var netScaleW = newW / srcBox.wN;
+  var netScaleH = newH / srcBox.hN;
+
   return {
     transferredNormBox: { x0n: round(newX, 6), y0n: round(newY, 6), wN: round(newW, 6), hN: round(newH, 6) },
     confidence: round(confidence, 4),
-    method: 'anchor_weighted_transfer',
+    method: 'anchor_relative_projection',
     anchorsUsed: maxAnchors,
-    offset: { x: round(offsetX, 6), y: round(offsetY, 6) },
-    scale: { w: round(scaleW, 4), h: round(scaleH, 4) }
+    offset: { x: round(netOffsetX, 6), y: round(netOffsetY, 6) },
+    scale: { w: round(netScaleW, 4), h: round(netScaleH, 4) }
   };
 }
 
