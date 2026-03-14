@@ -135,11 +135,14 @@ function analyzeRegionAreaStability(documents) {
   const avgAreas = documents.map(function (d) { return d.metrics.avgRegionArea; });
   const cv = coefficientOfVariation(avgAreas);
 
-  // Also measure per-region area variance across documents
+  // Also measure per-region area variance across documents.
+  // Supports both full summaries (regionDescriptors) and compact summaries (_regionAreas).
   const allAreas = [];
   for (const doc of documents) {
-    for (const rd of doc.regionDescriptors) {
-      allAreas.push(rd.normalizedArea);
+    if (doc._regionAreas) {
+      for (var ai = 0; ai < doc._regionAreas.length; ai++) allAreas.push(doc._regionAreas[ai]);
+    } else if (doc.regionDescriptors) {
+      for (const rd of doc.regionDescriptors) allAreas.push(rd.normalizedArea);
     }
   }
 
@@ -176,12 +179,18 @@ function analyzeAdjacencyGraphStability(documents) {
   const edgeCounts = documents.map(function (d) { return d.metrics.edgeCount; });
   const cvEdges = coefficientOfVariation(edgeCounts);
 
-  // Edge type distribution similarity
+  // Edge type distribution similarity.
+  // Supports both full summaries (adjacencyEdges array) and compact summaries (_adjacencyStats).
   const edgeTypeDistributions = documents.map(function (d) {
+    if (d._adjacencyStats) {
+      return d._adjacencyStats.typeDistribution;
+    }
     const types = { spatial_proximity: 0, contains: 0, other: 0 };
-    const total = d.adjacencyEdges.length || 1;
-    for (const e of d.adjacencyEdges) {
-      if (types.hasOwnProperty(e.edgeType)) types[e.edgeType]++;
+    const edges = d.adjacencyEdges || [];
+    const total = edges.length || 1;
+    for (var ei = 0; ei < edges.length; ei++) {
+      var et = edges[ei].edgeType;
+      if (types.hasOwnProperty(et)) types[et]++;
       else types.other++;
     }
     return [types.spatial_proximity / total, types.contains / total, types.other / total];
@@ -200,8 +209,10 @@ function analyzeAdjacencyGraphStability(documents) {
 
   // Average edge weight consistency
   const avgWeights = documents.map(function (d) {
-    if (!d.adjacencyEdges.length) return 0;
-    return d.adjacencyEdges.reduce(function (s, e) { return s + e.weight; }, 0) / d.adjacencyEdges.length;
+    if (d._adjacencyStats) return d._adjacencyStats.avgWeight;
+    var edges = d.adjacencyEdges || [];
+    if (!edges.length) return 0;
+    return edges.reduce(function (s, e) { return s + e.weight; }, 0) / edges.length;
   });
   const cvWeights = coefficientOfVariation(avgWeights);
 
@@ -569,7 +580,8 @@ function analyzeBatchStability(documents) {
     stable: 'Structural outputs are consistent across the batch. Parameters are well-tuned for this document type.'
   };
 
-  // Preserve intermediate data for future phases
+  // Preserve intermediate data for future phases.
+  // Compact summaries may not have regionSignatures — handle gracefully.
   const intermediateData = {
     perDocumentMetrics: documents.map(function (d) {
       return {
@@ -577,19 +589,10 @@ function analyzeBatchStability(documents) {
         documentName: d.documentName,
         metrics: d.metrics,
         normalizedSpatialDistribution: d.normalizedSpatialDistribution,
-        regionSignatureCount: d.regionSignatures.length
+        regionSignatureCount: d.regionSignatures ? d.regionSignatures.length : (d.metrics.regionCount || 0)
       };
     }),
-    batchRegionSignatures: documents.flatMap(function (d) {
-      return d.regionSignatures.map(function (rs) {
-        return {
-          documentId: d.documentId,
-          regionId: rs.regionId,
-          featureVector: rs.featureVector,
-          spatialBin: rs.spatialBin
-        };
-      });
-    }),
+    batchRegionSignatures: [],
     batchSpatialDistributions: documents.map(function (d) {
       return {
         documentId: d.documentId,
@@ -597,6 +600,21 @@ function analyzeBatchStability(documents) {
       };
     })
   };
+  // Only populate batchRegionSignatures from full (non-compact) summaries
+  for (var bsi = 0; bsi < documents.length; bsi++) {
+    var bsDoc = documents[bsi];
+    if (bsDoc.regionSignatures) {
+      for (var rsi = 0; rsi < bsDoc.regionSignatures.length; rsi++) {
+        var rs = bsDoc.regionSignatures[rsi];
+        intermediateData.batchRegionSignatures.push({
+          documentId: bsDoc.documentId,
+          regionId: rs.regionId,
+          featureVector: rs.featureVector,
+          spatialBin: rs.spatialBin
+        });
+      }
+    }
+  }
 
   return {
     status: status,

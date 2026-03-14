@@ -264,10 +264,81 @@ function extractDocumentSummary(analysisResult, opts) {
   };
 }
 
+/* ── Compact summary for storage ──────────────────────────────────────── */
+
+/**
+ * Strips a full document summary down to the minimum data the stability
+ * analyst needs.  Reduces per-document size from ~150 KB to ~2 KB by
+ * replacing large per-region arrays with pre-aggregated statistics.
+ *
+ * Full summaries are kept in memory for the active session; only compact
+ * summaries are written to localStorage.
+ */
+function compactForStorage(doc) {
+  if (!doc) return doc;
+  // Pre-aggregate adjacency edge statistics so the full edge array
+  // does not need to be persisted.
+  var edgeTypes = { spatial_proximity: 0, contains: 0, other: 0 };
+  var weightSum = 0;
+  var edges = doc.adjacencyEdges || [];
+  for (var i = 0; i < edges.length; i++) {
+    var et = edges[i].edgeType;
+    if (edgeTypes.hasOwnProperty(et)) edgeTypes[et]++;
+    else edgeTypes.other++;
+    weightSum += (edges[i].weight || 0);
+  }
+  var edgeTotal = edges.length || 1;
+
+  return {
+    documentId: doc.documentId,
+    documentName: doc.documentName,
+    timestamp: doc.timestamp,
+    viewport: doc.viewport,
+    structurallyValid: doc.structurallyValid,
+    validationReason: doc.validationReason,
+    metrics: doc.metrics,
+    surfaceTypeCounts: doc.surfaceTypeCounts,
+    normalizedSpatialDistribution: doc.normalizedSpatialDistribution,
+    textStructure: {
+      lineCount: doc.textStructure.lineCount,
+      blockCount: doc.textStructure.blockCount,
+      tokenCount: doc.textStructure.tokenCount,
+      avgTokensPerLine: doc.textStructure.avgTokensPerLine,
+      avgLinesPerBlock: doc.textStructure.avgLinesPerBlock
+      // blockDescriptors intentionally omitted — large, not needed for stability analysis
+    },
+    // Compact replacements for large arrays:
+    _regionAreas: (doc.regionDescriptors || []).map(function (r) {
+      return Math.round((r.normalizedArea || 0) * 100000) / 100000;
+    }),
+    _adjacencyStats: {
+      count: edges.length,
+      typeDistribution: [
+        edgeTypes.spatial_proximity / edgeTotal,
+        edgeTypes.contains / edgeTotal,
+        edgeTypes.other / edgeTotal
+      ],
+      avgWeight: edges.length ? weightSum / edges.length : 0
+    },
+    _compact: true  // marker so analyst knows this is a compact summary
+  };
+}
+
 /* ── Batch session store ────────────────────────────────────────────────── */
 
+/**
+ * Hybrid store: full document summaries live in memory for the active
+ * browser session; only compact (~2 KB) summaries are written to
+ * localStorage so multi-document batches never exceed the 5 MB quota.
+ *
+ * When the page reloads, in-memory data is lost but compact summaries
+ * are loaded from localStorage — enough for re-running stability analysis.
+ */
 function createBatchSessionStore(storage) {
   const backend = storage || _memoryBackend();
+
+  // In-memory map: sessionId → full document summary array
+  const _memDocs = {};
 
   function _load() {
     try {
@@ -277,7 +348,12 @@ function createBatchSessionStore(storage) {
   }
 
   function _save(sessions) {
-    backend.setItem(BATCH_SESSION_STORAGE_KEY, JSON.stringify(sessions));
+    try {
+      backend.setItem(BATCH_SESSION_STORAGE_KEY, JSON.stringify(sessions));
+    } catch (e) {
+      // If storage still fails after compaction, warn but don't crash
+      console.warn('[BatchSessionStore] localStorage write failed:', e.message || e);
+    }
   }
 
   return {
@@ -296,6 +372,7 @@ function createBatchSessionStore(storage) {
         status: 'open'
       };
       sessions.push(session);
+      _memDocs[session.sessionId] = [];
       _save(sessions);
       return session;
     },
@@ -305,19 +382,40 @@ function createBatchSessionStore(storage) {
       return _load();
     },
 
-    /** Get a session by ID. */
+    /**
+     * Get a session by ID.
+     * Returns documents from in-memory (full) if available,
+     * otherwise falls back to compact localStorage copies.
+     */
     getSession(sessionId) {
-      return _load().find(function (s) { return s.sessionId === sessionId; }) || null;
+      const sessions = _load();
+      const session = sessions.find(function (s) { return s.sessionId === sessionId; }) || null;
+      if (!session) return null;
+      // Merge in-memory full documents if available
+      if (_memDocs[sessionId] && _memDocs[sessionId].length) {
+        session.documents = _memDocs[sessionId];
+      }
+      return session;
     },
 
-    /** Add a document summary to a session. */
+    /**
+     * Add a document summary to a session.
+     * Full summary is kept in memory; compact version is persisted.
+     */
     addDocument(sessionId, documentSummary) {
       const sessions = _load();
       const session = sessions.find(function (s) { return s.sessionId === sessionId; });
       if (!session) return null;
-      session.documents.push(documentSummary);
+
+      // Keep full summary in memory
+      if (!_memDocs[sessionId]) _memDocs[sessionId] = [];
+      _memDocs[sessionId].push(documentSummary);
+
+      // Persist only compact summary to localStorage
+      session.documents.push(compactForStorage(documentSummary));
       session.updatedAt = new Date().toISOString();
       _save(sessions);
+
       return documentSummary.documentId;
     },
 
@@ -331,6 +429,11 @@ function createBatchSessionStore(storage) {
       session.documents.splice(idx, 1);
       session.updatedAt = new Date().toISOString();
       _save(sessions);
+      // Also remove from in-memory
+      if (_memDocs[sessionId]) {
+        const mIdx = _memDocs[sessionId].findIndex(function (d) { return d.documentId === documentId; });
+        if (mIdx >= 0) _memDocs[sessionId].splice(mIdx, 1);
+      }
       return true;
     },
 
@@ -339,7 +442,14 @@ function createBatchSessionStore(storage) {
       const sessions = _load();
       const session = sessions.find(function (s) { return s.sessionId === sessionId; });
       if (!session) return false;
-      session.stabilityReport = report;
+      // Strip intermediateData from persisted report — it contains large
+      // per-region signature arrays that are only useful in-memory.
+      var persistReport = report;
+      if (report && report.intermediateData) {
+        persistReport = Object.assign({}, report);
+        persistReport.intermediateData = null;
+      }
+      session.stabilityReport = persistReport;
       session.updatedAt = new Date().toISOString();
       _save(sessions);
       return true;
@@ -349,10 +459,12 @@ function createBatchSessionStore(storage) {
     deleteSession(sessionId) {
       const sessions = _load().filter(function (s) { return s.sessionId !== sessionId; });
       _save(sessions);
+      delete _memDocs[sessionId];
     },
 
     /** Get document count for a session. */
     documentCount(sessionId) {
+      if (_memDocs[sessionId]) return _memDocs[sessionId].length;
       const session = this.getSession(sessionId);
       return session ? session.documents.length : 0;
     },
@@ -360,6 +472,7 @@ function createBatchSessionStore(storage) {
     /** Clear all batch sessions. */
     clear() {
       _save([]);
+      for (var k in _memDocs) delete _memDocs[k];
     }
   };
 }
@@ -378,6 +491,7 @@ function _memoryBackend() {
 
 module.exports = {
   extractDocumentSummary,
+  compactForStorage,
   createBatchSessionStore,
   BATCH_SESSION_STORAGE_KEY
 };
