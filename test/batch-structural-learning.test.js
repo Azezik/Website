@@ -1466,6 +1466,172 @@ function buildExtractionTargets() {
   console.log('transferBBox relative-position projection tests passed.');
 })();
 
+// ── transferBBox edge-relative + no-offset-scaling correctness ───────────
+
+(function testTransferBBoxEdgeRelativeNoScaling() {
+  // This test verifies the fix for the systematic upward drift bug.
+  //
+  // Scenario: An anchor region on the ref doc is SMALLER (h=0.05) than the
+  // corresponding region on the target doc (h=0.15). The BBOX is placed 0.03
+  // below the anchor region's bottom edge.
+  //
+  // OLD BUG: offset was scaled by region size ratio (scaleY = 0.15/0.05 = 3.0),
+  // so the 0.03 offset became 0.09, pushing the box way too far down (or up
+  // if the box was above the anchor). This caused systematic row-level drift.
+  //
+  // FIX: Edge-relative offset is NOT scaled. The 0.03 offset from the bottom
+  // edge stays 0.03 on the target, regardless of region size differences.
+
+  var refDoc = {
+    documentId: 'ref-scale', documentName: 'ref-scale.png',
+    regionDescriptors: [
+      { regionId: 'rs1', centroid: { x: 0.3, y: 0.2 },
+        normalizedBbox: { x: 0.1, y: 0.175, w: 0.4, h: 0.05 },
+        normalizedArea: 0.02, aspectRatio: 8, surfaceType: 'text', textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  var tgtDoc = {
+    documentId: 'tgt-scale', documentName: 'tgt-scale.png',
+    regionDescriptors: [
+      // Same region but 3× taller (e.g., address block with more lines)
+      { regionId: 'ts1', centroid: { x: 0.3, y: 0.25 },
+        normalizedBbox: { x: 0.1, y: 0.175, w: 0.4, h: 0.15 },
+        normalizedArea: 0.06, aspectRatio: 2.67, surfaceType: 'text', textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  var refinedAnchors = [{
+    anchorId: 'anchor-rs1', refRegionId: 'rs1',
+    normalizedPosition: { x: 0.3, y: 0.2 },
+    normalizedBbox: { x: 0.1, y: 0.175, w: 0.4, h: 0.05 },
+    relevanceScore: 0.9, bestTargetKey: 'field_below',
+    confidence: 0.95
+  }];
+
+  var correspondenceResult = {
+    referenceDocument: { documentId: 'ref-scale' },
+    correspondences: [
+      { refRegionId: 'rs1', tgtDocumentId: 'tgt-scale', tgtRegionId: 'ts1', similarity: 0.9 }
+    ]
+  };
+
+  // BBOX placed just below the anchor region's bottom edge on ref doc
+  // Ref region bottom = 0.175 + 0.05 = 0.225
+  // BBOX top = 0.24, center Y = 0.24 + 0.015 = 0.255
+  // Distance from bottom edge (0.225) = 0.03
+  var targetBelow = {
+    fieldKey: 'field_below',
+    label: 'Below Region',
+    normBox: { x0n: 0.15, y0n: 0.24, wN: 0.2, hN: 0.03 }
+  };
+
+  var result = transferBBox(targetBelow, refinedAnchors, correspondenceResult, 'tgt-scale', tgtDoc);
+  var txCenter = {
+    x: result.transferredNormBox.x0n + result.transferredNormBox.wN / 2,
+    y: result.transferredNormBox.y0n + result.transferredNormBox.hN / 2
+  };
+
+  // Target region bottom = 0.175 + 0.15 = 0.325
+  // BBOX center should be at: tgt bottom edge + (srcCenterY - refBottomEdge) = 0.325 + 0.03 = 0.355
+  // NOT at: tgt centroid + (srcCenterY - refCentroid) * scaleY = 0.25 + 0.055 * 3 = 0.415 (old bug)
+  assert.ok(Math.abs(txCenter.y - 0.355) < 0.02,
+    'Edge-relative: Y should be ~0.355 (below tgt bottom edge): got ' + txCenter.y.toFixed(4) +
+    ' (old bug would give ~0.415)');
+
+  // Width should be scaled by region width ratio (1.0 since same width)
+  // Height should be tightly clamped, not 3× the original
+  assert.ok(result.transferredNormBox.hN < srcBox_hN_times3(),
+    'Height should not be 3x original');
+
+  function srcBox_hN_times3() { return 0.03 * 3; }
+
+  console.log('transferBBox edge-relative no-offset-scaling tests passed.');
+})();
+
+// ── transferBBox Y-axis proximity weighting ──────────────────────────────
+
+(function testTransferBBoxYAxisPriority() {
+  // Verify that anchors sharing the same Y band as the BBOX dominate over
+  // anchors that are the same Euclidean distance away but on a different row.
+
+  var refDoc = {
+    documentId: 'ref-yp', documentName: 'ref-yp.png',
+    regionDescriptors: [
+      // Anchor A: same row as BBOX (y=0.20), left side
+      { regionId: 'ry1', centroid: { x: 0.1, y: 0.20 },
+        normalizedBbox: { x: 0.05, y: 0.18, w: 0.1, h: 0.04 },
+        normalizedArea: 0.004, aspectRatio: 2.5, surfaceType: 'text', textDensity: 0.5 },
+      // Anchor B: different row (y=0.10), closer X to BBOX
+      { regionId: 'ry2', centroid: { x: 0.4, y: 0.10 },
+        normalizedBbox: { x: 0.35, y: 0.08, w: 0.1, h: 0.04 },
+        normalizedArea: 0.004, aspectRatio: 2.5, surfaceType: 'text', textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  var tgtDoc = {
+    documentId: 'tgt-yp', documentName: 'tgt-yp.png',
+    regionDescriptors: [
+      // Anchor A moved right by 0.02
+      { regionId: 'ty1', centroid: { x: 0.12, y: 0.20 },
+        normalizedBbox: { x: 0.07, y: 0.18, w: 0.1, h: 0.04 },
+        normalizedArea: 0.004, aspectRatio: 2.5, surfaceType: 'text', textDensity: 0.5 },
+      // Anchor B moved down by 0.05 (different row shift)
+      { regionId: 'ty2', centroid: { x: 0.4, y: 0.15 },
+        normalizedBbox: { x: 0.35, y: 0.13, w: 0.1, h: 0.04 },
+        normalizedArea: 0.004, aspectRatio: 2.5, surfaceType: 'text', textDensity: 0.5 }
+    ],
+    neighborhoodDescriptors: {},
+    structurallyValid: true
+  };
+
+  var refinedAnchors = [
+    { anchorId: 'anchor-ry1', refRegionId: 'ry1',
+      normalizedPosition: { x: 0.1, y: 0.20 },
+      normalizedBbox: { x: 0.05, y: 0.18, w: 0.1, h: 0.04 },
+      relevanceScore: 0.7, bestTargetKey: 'test_field', confidence: 0.8 },
+    { anchorId: 'anchor-ry2', refRegionId: 'ry2',
+      normalizedPosition: { x: 0.4, y: 0.10 },
+      normalizedBbox: { x: 0.35, y: 0.08, w: 0.1, h: 0.04 },
+      relevanceScore: 0.7, bestTargetKey: 'test_field', confidence: 0.8 }
+  ];
+
+  var correspondenceResult = {
+    referenceDocument: { documentId: 'ref-yp' },
+    correspondences: [
+      { refRegionId: 'ry1', tgtDocumentId: 'tgt-yp', tgtRegionId: 'ty1', similarity: 0.9 },
+      { refRegionId: 'ry2', tgtDocumentId: 'tgt-yp', tgtRegionId: 'ty2', similarity: 0.9 }
+    ]
+  };
+
+  // BBOX at (0.30, 0.19, 0.08, 0.03) — on the same row as anchor A (y≈0.20)
+  var targetSameRow = {
+    fieldKey: 'test_field',
+    label: 'Same Row',
+    normBox: { x0n: 0.30, y0n: 0.19, wN: 0.08, hN: 0.03 }
+  };
+
+  var result = transferBBox(targetSameRow, refinedAnchors, correspondenceResult, 'tgt-yp', tgtDoc);
+  var txCenter = {
+    x: result.transferredNormBox.x0n + result.transferredNormBox.wN / 2,
+    y: result.transferredNormBox.y0n + result.transferredNormBox.hN / 2
+  };
+
+  // Anchor A (same row) should dominate. A shifted right by 0.02,
+  // so the BBOX should shift right by ~0.02 and stay on the same Y.
+  // If anchor B dominated instead, Y would shift down by ~0.05.
+  assert.ok(Math.abs(txCenter.y - 0.205) < 0.03,
+    'Y should stay near 0.205 (same row as anchor A): got ' + txCenter.y.toFixed(4));
+
+  console.log('transferBBox Y-axis priority tests passed.');
+})();
+
 // ── extractTextFromNormBox ───────────────────────────────────────────────
 
 (function testExtractTextFromNormBox() {

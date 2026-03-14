@@ -1526,8 +1526,9 @@
 
   function transferBBox(target,refinedAnchors,correspondenceResult,targetDocId,targetDoc){
     var srcBox=target.normBox,srcCenter=_normBoxCenter(srcBox);
+    var srcTop=srcBox.y0n,srcBot=srcBox.y0n+srcBox.hN,srcLeft=srcBox.x0n,srcRight=srcBox.x0n+srcBox.wN;
     var docCorr=(correspondenceResult.correspondences||[]).filter(function(c){return c.tgtDocumentId===targetDocId;});
-    // Stage 1+2: Build anchor pairs with relative-position data
+    // Stage 1+2: Build anchor pairs with edge-relative position data
     var anchorPairs=[];
     for(var ai=0;ai<refinedAnchors.length;ai++){
       var anchor=refinedAnchors[ai],match=null;
@@ -1536,25 +1537,41 @@
       var tgtRegion=null,tgtRegs=targetDoc.regionDescriptors||[];
       for(var ri=0;ri<tgtRegs.length;ri++){if(tgtRegs[ri].regionId===match.tgtRegionId){tgtRegion=tgtRegs[ri];break;}}
       if(!tgtRegion)continue;
-      // Stage 1: BBOX position relative to this anchor on reference doc
-      var refCenter=anchor.normalizedPosition;
-      var relOX=srcCenter.x-refCenter.x, relOY=srcCenter.y-refCenter.y;
-      // Scale = target region / reference region
+      // Edge-relative offset: use nearest edge, not centroid
       var refBb=anchor.normalizedBbox, tgtBb=tgtRegion.normalizedBbox;
+      var refTop=refBb.y,refBot=refBb.y+refBb.h,refLeft=refBb.x,refRight=refBb.x+refBb.w;
+      var tgtTopE=tgtBb.y,tgtBotE=tgtBb.y+tgtBb.h,tgtLeftE=tgtBb.x,tgtRightE=tgtBb.x+tgtBb.w;
+      // Y: nearest horizontal edge
+      var dRefTop=Math.abs(srcCenter.y-refTop),dRefBot=Math.abs(srcCenter.y-refBot);
+      var candY;
+      if(dRefTop<=dRefBot){candY=tgtTopE+(srcCenter.y-refTop);}
+      else{candY=tgtBotE+(srcCenter.y-refBot);}
+      // X: nearest vertical edge
+      var dRefLeft=Math.abs(srcCenter.x-refLeft),dRefRight=Math.abs(srcCenter.x-refRight);
+      var candX;
+      if(dRefLeft<=dRefRight){candX=tgtLeftE+(srcCenter.x-refLeft);}
+      else{candX=tgtRightE+(srcCenter.x-refRight);}
+      // Scale for dimensions only (tight clamp)
       var scX=refBb.w>0?tgtBb.w/refBb.w:1, scY=refBb.h>0?tgtBb.h/refBb.h:1;
-      scX=_clamp(scX,0.5,2.0); scY=_clamp(scY,0.5,2.0);
-      // Stage 3: Project — reconstruct BBOX from target anchor position
-      var tgtC=tgtRegion.centroid;
-      var candCX=tgtC.x+relOX*scX, candCY=tgtC.y+relOY*scY;
+      scX=_clamp(scX,0.7,1.5); scY=_clamp(scY,0.7,1.5);
       var candW=srcBox.wN*scX, candH=srcBox.hN*scY;
-      var dist=_pointDist(srcCenter,refCenter);
-      var proxW=_clamp(1-dist/0.5,0.1,1);
+      // Weighting: tight proximity with Y-axis priority + overlap bonus
+      var refCenter=anchor.normalizedPosition,dist=_pointDist(srcCenter,refCenter);
+      var yDist=Math.abs(srcCenter.y-refCenter.y),xDist=Math.abs(srcCenter.x-refCenter.x);
+      var yProx=_clamp(1-yDist/0.15,0,1),xProx=_clamp(1-xDist/0.25,0,1);
+      var proxW=yProx*0.7+xProx*0.3;
+      var ancNB={x0n:refBb.x,y0n:refBb.y,wN:refBb.w,hN:refBb.h};
+      var ovIoU=_normBoxIoU(srcBox,ancNB);
+      var yOv=Math.max(0,Math.min(srcBot,refBot)-Math.max(srcTop,refTop));
+      var yOvF=srcBox.hN>0?yOv/srcBox.hN:0;
+      var ovB=ovIoU>0?0.4+ovIoU*0.6:(yOvF>0.3?0.3:0);
       var fieldBonus=(anchor.bestTargetKey===target.fieldKey)?1.5:1.0;
-      var weight=proxW*match.similarity*fieldBonus;
+      var weight=(proxW+ovB)*match.similarity*fieldBonus;
+      if(weight<0.01)continue;
       anchorPairs.push({anchor:anchor,match:match,tgtRegion:tgtRegion,distance:dist,weight:weight,
-        candidateCenter:{x:candCX,y:candCY},candidateSize:{w:candW,h:candH},scale:{x:scX,y:scY}});
+        candidateCenter:{x:candX,y:candY},candidateSize:{w:candW,h:candH},scale:{x:scX,y:scY}});
     }
-    anchorPairs.sort(function(a,b){return a.distance-b.distance;});
+    anchorPairs.sort(function(a,b){return b.weight-a.weight;});
     if(anchorPairs.length===0)return{transferredNormBox:{x0n:srcBox.x0n,y0n:srcBox.y0n,wN:srcBox.wN,hN:srcBox.hN},confidence:0.3,method:'identity_fallback',anchorsUsed:0};
     // Stage 3: Weighted average of projected candidates
     var maxA=Math.min(anchorPairs.length,5),totalW=0,avgCX=0,avgCY=0,avgW=0,avgH=0;
