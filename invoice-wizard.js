@@ -20514,6 +20514,20 @@ var _batchStore = _learningAPI && _learningAPI.createBatchSessionStore
   : null;
 var _activeBatchSessionId = null;
 
+// In-memory token store for Phase 2B extraction (tokens are too large for localStorage)
+var _batchTokenStore = {};
+// In-memory canvas data URL store for Phase 2B viewport rendering
+var _batchCanvasStore = {};
+
+function _storeBatchTokens(sessionId, documentId, tokens, viewport) {
+  if (!_batchTokenStore[sessionId]) _batchTokenStore[sessionId] = {};
+  _batchTokenStore[sessionId][documentId] = { tokens: tokens, viewport: viewport };
+}
+
+function _getBatchTokens(sessionId) {
+  return _batchTokenStore[sessionId] || {};
+}
+
 /* ── Batch session UI helpers ──────────────────────────────────────── */
 
 function refreshBatchSessionUI(){
@@ -20859,6 +20873,9 @@ function _batchProcessQueue(fileList){
             console.log('[BatchLearning] imageData for ' + fileName + ':',
               imageData ? imageData.width + 'x' + imageData.height : 'null');
 
+            // Store canvas image for Phase 2B viewport
+            try { _batchCanvasStore[fileName] = cvs.toDataURL('image/png'); } catch(_e){}
+
             // Run WrokitVision structural analysis
             _batchRunAnalysis(fileName, tokens, viewport, imageData, done);
           });
@@ -20894,6 +20911,9 @@ function _batchProcessQueue(fileList){
       ctx.drawImage(img, 0, 0);
 
       var imageData = _batchExtractImageData(cvs);
+
+      // Store canvas image for Phase 2B viewport
+      try { _batchCanvasStore[fileName] = cvs.toDataURL('image/png'); } catch(_e){}
 
       // OCR via Tesseract if available
       if(window.Tesseract && window.Tesseract.recognize){
@@ -20998,6 +21018,9 @@ function _batchProcessQueue(fileList){
         'reason=' + (summary.validationReason || 'none'));
 
       _batchStore.addDocument(_activeBatchSessionId, summary);
+
+      // Store tokens in memory for Phase 2B extraction
+      _storeBatchTokens(_activeBatchSessionId, summary.documentId, tokens, viewport);
 
       if(summary.structurallyValid){
         setFileStatus(fileName, 'valid',
@@ -21187,6 +21210,13 @@ function _renderCorrespondenceResult(result){
     exportBtn.disabled = false;
     exportBtn.style.display = '';
   }
+
+  // Show Phase 2B panel after successful Phase 2
+  if(result.status === 'complete' || result.status === 'low_confidence'){
+    var phase2bPanel = document.getElementById('batch-phase2b-panel');
+    if(phase2bPanel) phase2bPanel.style.display = 'block';
+    _populatePhase2BDocSelect();
+  }
 }
 
 // Run Correspondence Analysis button
@@ -21292,6 +21322,564 @@ function _renderCorrespondenceResult(result){
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  });
+})();
+
+/* ── Phase 2B: Refine Anchors + BBOX-Guided Extraction ─────────────────── */
+
+var _phase2bState = {
+  selectedDocId: null,
+  selectedDocName: null,
+  canvasDataUrl: null,
+  drawingFieldIdx: -1,   // which field is currently being drawn (-1 = none)
+  extractionTargets: [null, null, null],  // 3 normBox targets
+  pendingDraw: null,     // { startX, startY } during drag
+  refinementResult: null,
+  extractionResult: null,
+  correspondenceResult: null
+};
+
+/** Populate the document selector for Phase 2B from the current batch session. */
+function _populatePhase2BDocSelect(){
+  var select = document.getElementById('batch-phase2b-doc-select');
+  if(!select || !_batchStore || !_activeBatchSessionId) return;
+  var session = _batchStore.getSession(_activeBatchSessionId);
+  if(!session) return;
+  select.innerHTML = '<option value="">— Select a document —</option>';
+  for(var i = 0; i < session.documents.length; i++){
+    var d = session.documents[i];
+    if(!d.structurallyValid) continue;
+    var opt = document.createElement('option');
+    opt.value = d.documentId;
+    opt.textContent = d.documentName || d.documentId;
+    select.appendChild(opt);
+  }
+}
+
+/** Load a document image into the Phase 2B viewport canvas. */
+function _loadPhase2BDocument(docId){
+  if(!_batchStore || !_activeBatchSessionId) return;
+  var session = _batchStore.getSession(_activeBatchSessionId);
+  if(!session) return;
+  var doc = session.documents.find(function(d){ return d.documentId === docId; });
+  if(!doc){
+    alert('Document not found in session.');
+    return;
+  }
+
+  _phase2bState.selectedDocId = docId;
+  _phase2bState.selectedDocName = doc.documentName || docId;
+  _phase2bState.extractionTargets = [null, null, null];
+  _phase2bState.refinementResult = null;
+  _phase2bState.extractionResult = null;
+
+  // Find canvas data URL by document name
+  var dataUrl = _batchCanvasStore[doc.documentName];
+  if(!dataUrl){
+    alert('Document image not available in memory. Documents must be uploaded in this session for the Phase 2B viewport to work.');
+    return;
+  }
+
+  _phase2bState.canvasDataUrl = dataUrl;
+
+  // Show wizard and viewport
+  var wizard = document.getElementById('batch-phase2b-wizard');
+  if(wizard) wizard.style.display = 'block';
+  var viewport = document.getElementById('batch-phase2b-viewport');
+  if(viewport) viewport.style.display = 'block';
+
+  // Load image into canvas
+  var canvas = document.getElementById('batch-phase2b-canvas');
+  var overlay = document.getElementById('batch-phase2b-overlay');
+  if(!canvas) return;
+
+  var img = new Image();
+  img.onload = function(){
+    // Scale down for display — max 700px wide
+    var maxW = 700;
+    var scale = img.width > maxW ? maxW / img.width : 1;
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    canvas.style.width = canvas.width + 'px';
+    canvas.style.height = canvas.height + 'px';
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // Sync overlay
+    if(overlay){
+      overlay.width = canvas.width;
+      overlay.height = canvas.height;
+      overlay.style.width = canvas.width + 'px';
+      overlay.style.height = canvas.height + 'px';
+    }
+
+    _resetPhase2BFields();
+    console.log('[Phase2B] Loaded document:', doc.documentName, canvas.width + 'x' + canvas.height);
+  };
+  img.src = dataUrl;
+}
+
+function _resetPhase2BFields(){
+  _phase2bState.extractionTargets = [null, null, null];
+  _phase2bState.drawingFieldIdx = -1;
+  _phase2bState.pendingDraw = null;
+  _phase2bState.refinementResult = null;
+  _phase2bState.extractionResult = null;
+
+  for(var fi = 0; fi < 3; fi++){
+    var indicator = document.getElementById('batch-phase2b-field-' + (fi+1) + '-indicator');
+    var statusEl = document.getElementById('batch-phase2b-field-' + (fi+1) + '-status');
+    if(indicator) indicator.style.background = 'var(--border,#ccc)';
+    if(statusEl) statusEl.textContent = 'not drawn';
+  }
+
+  var stepEl = document.getElementById('batch-phase2b-wizard-step');
+  if(stepEl) stepEl.textContent = 'Step 1 of 3';
+
+  var refineBtn = document.getElementById('batch-phase2b-refine-btn');
+  if(refineBtn) refineBtn.disabled = true;
+
+  var resultsDiv = document.getElementById('batch-phase2b-results');
+  if(resultsDiv) resultsDiv.style.display = 'none';
+  var extractionDiv = document.getElementById('batch-phase2b-extraction');
+  if(extractionDiv) extractionDiv.style.display = 'none';
+
+  _drawPhase2BOverlay();
+}
+
+/** Draw all BBOX overlays on the Phase 2B canvas. */
+function _drawPhase2BOverlay(){
+  var overlay = document.getElementById('batch-phase2b-overlay');
+  if(!overlay) return;
+  var ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  var colors = ['#2a7', '#e67e22', '#3498db'];
+
+  for(var fi = 0; fi < 3; fi++){
+    var target = _phase2bState.extractionTargets[fi];
+    if(!target) continue;
+    var nb = target.normBox;
+    var x = nb.x0n * overlay.width;
+    var y = nb.y0n * overlay.height;
+    var w = nb.wN * overlay.width;
+    var h = nb.hN * overlay.height;
+
+    ctx.strokeStyle = colors[fi];
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = colors[fi] + '22';
+    ctx.fillRect(x, y, w, h);
+
+    // Label
+    ctx.fillStyle = colors[fi];
+    ctx.font = '11px sans-serif';
+    var label = target.label || ('Field ' + (fi + 1));
+    ctx.fillText(label, x + 3, y - 4 > 12 ? y - 4 : y + 12);
+  }
+
+  // Draw pending selection
+  if(_phase2bState.pendingDraw && _phase2bState.drawingFieldIdx >= 0){
+    var pd = _phase2bState.pendingDraw;
+    if(pd.endX !== undefined){
+      var dx = Math.min(pd.startX, pd.endX);
+      var dy = Math.min(pd.startY, pd.endY);
+      var dw = Math.abs(pd.endX - pd.startX);
+      var dh = Math.abs(pd.endY - pd.startY);
+      ctx.strokeStyle = colors[_phase2bState.drawingFieldIdx];
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(dx, dy, dw, dh);
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+/** Enter drawing mode for a specific field index (0, 1, 2). */
+function _startPhase2BDraw(fieldIdx){
+  if(!_phase2bState.canvasDataUrl) return;
+  _phase2bState.drawingFieldIdx = fieldIdx;
+  _phase2bState.pendingDraw = null;
+
+  var hint = document.getElementById('batch-phase2b-drawing-hint');
+  var names = ['Field 1', 'Field 2', 'Field 3'];
+  var nameInput = document.getElementById('batch-phase2b-field-' + (fieldIdx+1) + '-name');
+  var fieldName = (nameInput && nameInput.value.trim()) || names[fieldIdx];
+  if(hint) hint.textContent = 'Draw a box around: ' + fieldName;
+
+  // Enable pointer events on overlay for drawing
+  var overlay = document.getElementById('batch-phase2b-overlay');
+  if(overlay) overlay.style.pointerEvents = 'auto';
+
+  // Update button states
+  var buttons = document.querySelectorAll('.batch-phase2b-draw-btn');
+  buttons.forEach(function(btn){
+    btn.disabled = parseInt(btn.getAttribute('data-field-idx')) !== fieldIdx;
+  });
+}
+
+/** Finalize a drawn BBOX for the current field. */
+function _finishPhase2BDraw(x0, y0, x1, y1){
+  var overlay = document.getElementById('batch-phase2b-overlay');
+  if(!overlay) return;
+
+  var fieldIdx = _phase2bState.drawingFieldIdx;
+  if(fieldIdx < 0 || fieldIdx > 2) return;
+
+  // Normalize to 0-1
+  var nx = Math.min(x0, x1) / overlay.width;
+  var ny = Math.min(y0, y1) / overlay.height;
+  var nw = Math.abs(x1 - x0) / overlay.width;
+  var nh = Math.abs(y1 - y0) / overlay.height;
+
+  if(nw < 0.005 || nh < 0.005) return; // too small
+
+  var nameInput = document.getElementById('batch-phase2b-field-' + (fieldIdx+1) + '-name');
+  var label = (nameInput && nameInput.value.trim()) || ('Field ' + (fieldIdx+1));
+  var fieldKey = 'field_' + (fieldIdx+1);
+
+  _phase2bState.extractionTargets[fieldIdx] = {
+    fieldKey: fieldKey,
+    label: label,
+    normBox: {
+      x0n: Math.round(nx * 10000) / 10000,
+      y0n: Math.round(ny * 10000) / 10000,
+      wN: Math.round(nw * 10000) / 10000,
+      hN: Math.round(nh * 10000) / 10000
+    },
+    fieldType: 'static'
+  };
+
+  // Update UI
+  var indicator = document.getElementById('batch-phase2b-field-' + (fieldIdx+1) + '-indicator');
+  var statusEl = document.getElementById('batch-phase2b-field-' + (fieldIdx+1) + '-status');
+  var colors = ['#2a7', '#e67e22', '#3498db'];
+  if(indicator) indicator.style.background = colors[fieldIdx];
+  if(statusEl) statusEl.textContent = 'drawn';
+
+  _phase2bState.drawingFieldIdx = -1;
+  _phase2bState.pendingDraw = null;
+
+  // Disable drawing on overlay
+  if(overlay) overlay.style.pointerEvents = 'none';
+  var hint = document.getElementById('batch-phase2b-drawing-hint');
+  if(hint) hint.textContent = '';
+
+  // Re-enable draw buttons
+  var buttons = document.querySelectorAll('.batch-phase2b-draw-btn');
+  buttons.forEach(function(btn){ btn.disabled = false; });
+
+  // Update step indicator
+  var drawnCount = _phase2bState.extractionTargets.filter(function(t){ return t !== null; }).length;
+  var stepEl = document.getElementById('batch-phase2b-wizard-step');
+  if(stepEl) stepEl.textContent = drawnCount >= 3 ? 'All fields drawn' : 'Step ' + (drawnCount + 1) + ' of 3';
+
+  // Enable refine button if at least 1 target drawn
+  var refineBtn = document.getElementById('batch-phase2b-refine-btn');
+  if(refineBtn) refineBtn.disabled = drawnCount === 0;
+
+  _drawPhase2BOverlay();
+}
+
+/* ── Phase 2B: Pointer event handlers for BBOX drawing ─────────────────── */
+
+(function(){
+  var overlay = document.getElementById('batch-phase2b-overlay');
+  if(!overlay) return;
+
+  overlay.addEventListener('pointerdown', function(e){
+    if(_phase2bState.drawingFieldIdx < 0) return;
+    e.preventDefault();
+    var rect = overlay.getBoundingClientRect();
+    _phase2bState.pendingDraw = {
+      startX: e.clientX - rect.left,
+      startY: e.clientY - rect.top
+    };
+    overlay.setPointerCapture(e.pointerId);
+  });
+
+  overlay.addEventListener('pointermove', function(e){
+    if(!_phase2bState.pendingDraw || _phase2bState.drawingFieldIdx < 0) return;
+    var rect = overlay.getBoundingClientRect();
+    _phase2bState.pendingDraw.endX = e.clientX - rect.left;
+    _phase2bState.pendingDraw.endY = e.clientY - rect.top;
+    _drawPhase2BOverlay();
+  });
+
+  overlay.addEventListener('pointerup', function(e){
+    if(!_phase2bState.pendingDraw || _phase2bState.drawingFieldIdx < 0) return;
+    var rect = overlay.getBoundingClientRect();
+    var endX = e.clientX - rect.left;
+    var endY = e.clientY - rect.top;
+    var pd = _phase2bState.pendingDraw;
+    overlay.releasePointerCapture(e.pointerId);
+    _finishPhase2BDraw(pd.startX, pd.startY, endX, endY);
+  });
+})();
+
+/* ── Phase 2B: Button event handlers ───────────────────────────────────── */
+
+// Load Document button
+(function(){
+  var btn = document.getElementById('batch-phase2b-load-doc-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    var select = document.getElementById('batch-phase2b-doc-select');
+    if(!select || !select.value){
+      alert('Please select a document first.');
+      return;
+    }
+    _loadPhase2BDocument(select.value);
+  });
+})();
+
+// Draw BBOX buttons
+(function(){
+  var buttons = document.querySelectorAll('.batch-phase2b-draw-btn');
+  buttons.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var idx = parseInt(btn.getAttribute('data-field-idx'));
+      _startPhase2BDraw(idx);
+    });
+  });
+})();
+
+// Reset button
+(function(){
+  var btn = document.getElementById('batch-phase2b-reset-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    _resetPhase2BFields();
+  });
+})();
+
+// Refine Anchors button
+(function(){
+  var btn = document.getElementById('batch-phase2b-refine-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!_batchStore || !_activeBatchSessionId || !_learningAPI) return;
+    var session = _batchStore.getSession(_activeBatchSessionId);
+    if(!session || !session.correspondenceResult) {
+      alert('Run Phase 2 correspondence analysis first.');
+      return;
+    }
+
+    // Collect drawn targets
+    var targets = _phase2bState.extractionTargets.filter(function(t){ return t !== null; });
+    if(targets.length === 0){
+      alert('Draw at least one extraction target first.');
+      return;
+    }
+
+    // Find reference document (use the one selected in Phase 2B, or Phase 2 reference)
+    var refDocId = _phase2bState.selectedDocId || session.correspondenceResult.referenceDocument.documentId;
+    var refDoc = session.documents.find(function(d){ return d.documentId === refDocId; });
+    if(!refDoc || refDoc._compact){
+      alert('Selected document does not have full structural data. Choose a different document.');
+      return;
+    }
+
+    var statusEl = document.getElementById('batch-phase2b-status');
+    if(statusEl) statusEl.textContent = 'Refining anchors...';
+    btn.disabled = true;
+
+    setTimeout(function(){
+      try {
+        var result = _learningAPI.refineAnchors(
+          session.correspondenceResult,
+          targets,
+          refDoc
+        );
+
+        _phase2bState.refinementResult = result;
+        _phase2bState.correspondenceResult = session.correspondenceResult;
+        _renderPhase2BRefinementResult(result);
+
+        if(statusEl) statusEl.textContent = result.status === 'refined' ? 'Refinement complete' : result.status.replace(/_/g, ' ');
+      } catch(err){
+        console.error('[Phase2B] Refinement failed:', err);
+        if(statusEl) statusEl.textContent = 'Refinement failed';
+        alert('Anchor refinement failed: ' + (err.message || String(err)));
+      }
+      btn.disabled = false;
+    }, 50);
+  });
+})();
+
+function _renderPhase2BRefinementResult(result){
+  var resultsDiv = document.getElementById('batch-phase2b-results');
+  if(resultsDiv) resultsDiv.style.display = 'block';
+
+  // Anchor counts
+  var keptEl = document.getElementById('batch-phase2b-anchor-kept');
+  var removedEl = document.getElementById('batch-phase2b-anchor-removed');
+  if(keptEl) keptEl.textContent = result.refinedAnchors.length;
+  if(removedEl) removedEl.textContent = result.removedAnchors.length;
+
+  // Refined anchors list
+  var anchorsContent = document.getElementById('batch-phase2b-refined-anchors-content');
+  if(anchorsContent){
+    if(result.refinedAnchors.length === 0){
+      anchorsContent.innerHTML = '<p class="sub" style="color:#c44;">No anchors are relevant to the extraction targets.</p>';
+    } else {
+      var html = '';
+      for(var ai = 0; ai < result.refinedAnchors.length; ai++){
+        var a = result.refinedAnchors[ai];
+        var relPct = (a.relevanceScore * 100).toFixed(1);
+        var confPct = (a.confidence * 100).toFixed(1);
+        var relColor = a.relevanceScore >= 0.5 ? '#2a7' : a.relevanceScore >= 0.3 ? '#b87e0a' : '#c44';
+        html += '<div style="padding:6px 8px;margin-bottom:6px;border:1px solid var(--border,#eee);border-radius:6px;border-left:3px solid ' + relColor + ';font-size:13px;">';
+        html += '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;">';
+        html += '<span><strong>' + a.anchorId + '</strong></span>';
+        html += '<span style="color:' + relColor + ';font-weight:600;">relevance ' + relPct + '%</span>';
+        html += '</div>';
+        html += '<div class="sub" style="color:var(--muted);font-size:12px;margin-top:2px;">';
+        html += 'conf=' + confPct + '%  target=' + (a.bestTargetKey || 'none');
+        html += '  pos=(' + (a.normalizedPosition.x * 100).toFixed(0) + '%, ' + (a.normalizedPosition.y * 100).toFixed(0) + '%)';
+        html += '  type=' + a.surfaceType;
+        html += '</div></div>';
+      }
+      anchorsContent.innerHTML = html;
+    }
+  }
+
+  // Refined alignment model
+  var modelContent = document.getElementById('batch-phase2b-refinement-model-content');
+  if(modelContent && result.refinedAlignmentModel){
+    var m = result.refinedAlignmentModel;
+    var mHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:8px;">';
+    mHtml += '<div class="panel minimal" style="padding:6px;text-align:center;"><div class="sub" style="font-size:11px;">Kept</div><strong>' + m.anchorCount + '</strong></div>';
+    mHtml += '<div class="panel minimal" style="padding:6px;text-align:center;"><div class="sub" style="font-size:11px;">Removed</div><strong>' + m.removedCount + '</strong></div>';
+    mHtml += '<div class="panel minimal" style="padding:6px;text-align:center;"><div class="sub" style="font-size:11px;">Retention</div><strong>' + (m.anchorRetentionRate * 100).toFixed(0) + '%</strong></div>';
+    mHtml += '<div class="panel minimal" style="padding:6px;text-align:center;"><div class="sub" style="font-size:11px;">Avg Relevance</div><strong>' + (m.avgRelevanceScore * 100).toFixed(1) + '%</strong></div>';
+    mHtml += '</div>';
+    mHtml += '<p class="sub" style="margin:4px 0;color:var(--muted);">' + result.message + '</p>';
+    modelContent.innerHTML = mHtml;
+  }
+}
+
+// Extract button
+(function(){
+  var btn = document.getElementById('batch-phase2b-extract-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!_phase2bState.refinementResult || !_phase2bState.correspondenceResult) {
+      alert('Run anchor refinement first.');
+      return;
+    }
+    if(!_batchStore || !_activeBatchSessionId) return;
+    var session = _batchStore.getSession(_activeBatchSessionId);
+    if(!session) return;
+
+    var refDocId = _phase2bState.correspondenceResult.referenceDocument.documentId;
+    var refDoc = session.documents.find(function(d){ return d.documentId === refDocId; });
+    if(!refDoc) {
+      alert('Reference document not found.');
+      return;
+    }
+
+    var batchTokens = _getBatchTokens(_activeBatchSessionId);
+    var statusEl = document.getElementById('batch-phase2b-extraction-status');
+    if(statusEl) statusEl.textContent = 'Extracting...';
+    btn.disabled = true;
+
+    setTimeout(function(){
+      try {
+        var result = _learningAPI.extractFromBatch(
+          _phase2bState.refinementResult,
+          _phase2bState.correspondenceResult,
+          refDoc,
+          session.documents,
+          batchTokens
+        );
+
+        _phase2bState.extractionResult = result;
+        _renderPhase2BExtractionResult(result);
+        if(statusEl) statusEl.textContent = result.status === 'complete' ? 'Extraction complete' : result.status;
+      } catch(err){
+        console.error('[Phase2B] Extraction failed:', err);
+        if(statusEl) statusEl.textContent = 'Extraction failed';
+        alert('Extraction failed: ' + (err.message || String(err)));
+      }
+      btn.disabled = false;
+    }, 50);
+  });
+})();
+
+function _renderPhase2BExtractionResult(result){
+  var container = document.getElementById('batch-phase2b-extraction');
+  var content = document.getElementById('batch-phase2b-extraction-content');
+  if(!container || !content) return;
+  container.style.display = 'block';
+
+  if(!result || !result.results || result.results.length === 0){
+    content.innerHTML = '<p class="sub" style="color:var(--muted);">No extraction results.</p>';
+    return;
+  }
+
+  // Build extraction results table/cards
+  var targets = result.extractionTargets || [];
+  var html = '';
+
+  // Header row
+  html += '<div style="display:grid;grid-template-columns:180px ' + targets.map(function(){ return '1fr'; }).join(' ') + ';gap:1px;background:var(--border,#ddd);border-radius:6px;overflow:hidden;margin-bottom:12px;">';
+  html += '<div style="padding:8px;background:var(--surface,#f5f5f5);font-weight:600;font-size:12px;">Document</div>';
+  for(var ti = 0; ti < targets.length; ti++){
+    var colors = ['#2a7', '#e67e22', '#3498db'];
+    html += '<div style="padding:8px;background:var(--surface,#f5f5f5);font-weight:600;font-size:12px;border-left:3px solid ' + colors[ti] + ';">' + targets[ti].label + '</div>';
+  }
+
+  // Data rows
+  for(var di = 0; di < result.results.length; di++){
+    var docResult = result.results[di];
+    var bgColor = di % 2 === 0 ? '#fff' : 'var(--surface,#fafafa)';
+    var nameStyle = docResult.isReference ? 'font-weight:600;' : '';
+
+    html += '<div style="padding:8px;background:' + bgColor + ';' + nameStyle + 'font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + docResult.documentName + '">';
+    html += docResult.documentName;
+    if(docResult.isReference) html += ' <span style="font-size:10px;color:#2a7;">(ref)</span>';
+    html += '</div>';
+
+    for(var fi = 0; fi < docResult.fields.length; fi++){
+      var f = docResult.fields[fi];
+      var textDisplay = f.extractedText || '<span style="color:var(--muted);font-style:italic;">—</span>';
+      var confColor = f.transferConfidence >= 0.7 ? '#2a7' : f.transferConfidence >= 0.4 ? '#b87e0a' : '#c44';
+
+      html += '<div style="padding:8px;background:' + bgColor + ';font-size:13px;">';
+      html += '<div style="margin-bottom:2px;">' + textDisplay + '</div>';
+      html += '<div class="sub" style="font-size:10px;color:var(--muted);">';
+      html += '<span style="color:' + confColor + ';">' + f.transferMethod.replace(/_/g, ' ') + '</span>';
+      if(f.tokenCount > 0) html += ' · ' + f.tokenCount + ' tokens';
+      html += '</div></div>';
+    }
+  }
+  html += '</div>';
+
+  // Summary
+  html += '<p class="sub" style="color:var(--muted);margin:4px 0;">' + result.message + '</p>';
+
+  content.innerHTML = html;
+}
+
+// Export refinement report
+(function(){
+  var btn = document.getElementById('batch-phase2b-export-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!_phase2bState.refinementResult || !_learningAPI || !_learningAPI.formatRefinementReport){
+      alert('No refinement data to export.');
+      return;
+    }
+    var text = _learningAPI.formatRefinementReport(_phase2bState.refinementResult);
+    var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    var filename = 'wrokit-refinement-' + timestamp + '.txt';
+    var blob = new Blob([text], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
   });
 })();
 
