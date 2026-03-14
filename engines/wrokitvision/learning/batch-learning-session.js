@@ -210,11 +210,43 @@ function extractDocumentSummary(analysisResult, opts) {
     surfaceTypeCounts[rd.surfaceType] = (surfaceTypeCounts[rd.surfaceType] || 0) + 1;
   }
 
+  const metrics = {
+    regionCount: regionNodes.length,
+    edgeCount: adjacencyEdges.length,
+    avgRegionArea: regionDescriptors.length
+      ? regionDescriptors.reduce(function (s, r) { return s + r.normalizedArea; }, 0) / regionDescriptors.length
+      : 0,
+    avgTextDensity: regionDescriptors.length
+      ? regionDescriptors.reduce(function (s, r) { return s + r.textDensity; }, 0) / regionDescriptors.length
+      : 0,
+    avgConfidence: regionDescriptors.length
+      ? regionDescriptors.reduce(function (s, r) { return s + r.confidence; }, 0) / regionDescriptors.length
+      : 0,
+    textLineCount: textLines.length,
+    textBlockCount: textBlocks.length,
+    surfaceCandidateCount: surfaceCandidates.length
+  };
+
+  // Structural validity check: a document must have real structural outputs
+  // to participate in batch stability analysis.
+  const hasRegions = metrics.regionCount > 0;
+  const hasViewport = vpW > 1 && vpH > 1;
+  const structurallyValid = hasRegions && hasViewport;
+  const validationReason = !hasViewport
+    ? 'Missing or zero viewport dimensions'
+    : !hasRegions
+      ? 'No regions detected — WrokitVision analysis may not have run or the image produced no structural output'
+      : '';
+
   return {
     documentId: opts.documentId || _genId('bdoc'),
     documentName: opts.documentName || '',
     timestamp: new Date().toISOString(),
     viewport: { w: vpW, h: vpH },
+
+    // Structural validity flag — batch analysis must exclude invalid documents
+    structurallyValid: structurallyValid,
+    validationReason: validationReason,
 
     // Per-document structural data (preserved for future phases)
     regionDescriptors: regionDescriptors,
@@ -228,22 +260,7 @@ function extractDocumentSummary(analysisResult, opts) {
     regionSignatures: regionSignatures,
 
     // Aggregate scalars for quick comparison
-    metrics: {
-      regionCount: regionNodes.length,
-      edgeCount: adjacencyEdges.length,
-      avgRegionArea: regionDescriptors.length
-        ? regionDescriptors.reduce(function (s, r) { return s + r.normalizedArea; }, 0) / regionDescriptors.length
-        : 0,
-      avgTextDensity: regionDescriptors.length
-        ? regionDescriptors.reduce(function (s, r) { return s + r.textDensity; }, 0) / regionDescriptors.length
-        : 0,
-      avgConfidence: regionDescriptors.length
-        ? regionDescriptors.reduce(function (s, r) { return s + r.confidence; }, 0) / regionDescriptors.length
-        : 0,
-      textLineCount: textLines.length,
-      textBlockCount: textBlocks.length,
-      surfaceCandidateCount: surfaceCandidates.length
-    }
+    metrics: metrics
   };
 }
 

@@ -519,4 +519,136 @@ assert.ok(BSA.cosineSimilarity);
 assert.ok(BSA.jensenShannonDivergence);
 
 console.log('learning/index.js batch module exports test passed.');
-console.log('All Batch Structural Learning Phase 1 tests passed.');
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Validation & Invalid Data Rejection Tests
+   ══════════════════════════════════════════════════════════════════════════ */
+
+// ── extractDocumentSummary: structurallyValid flag ──────────────────────
+
+// Valid summary (has regions and viewport)
+const validSummary = extractDocumentSummary(mockAnalysis, { documentName: 'valid.png' });
+assert.strictEqual(validSummary.structurallyValid, true, 'Summary with regions should be structurallyValid');
+assert.strictEqual(validSummary.validationReason, '');
+
+// Empty analysis → invalid
+const emptyInvalid = extractDocumentSummary({});
+assert.strictEqual(emptyInvalid.structurallyValid, false, 'Empty analysis should not be structurallyValid');
+assert.ok(emptyInvalid.validationReason.length > 0, 'Should have a validationReason');
+
+// Zero viewport → invalid
+const zeroVpSummary = extractDocumentSummary({
+  regionNodes: [{ id: 'r1', geometry: { bbox: { x: 0, y: 0, w: 10, h: 10 } }, confidence: 0.5 }],
+  regionGraph: { nodes: [], edges: [] },
+  textLines: [], textBlocks: [], textTokens: [], surfaceCandidates: [],
+  viewport: { width: 0, height: 0 }
+});
+assert.strictEqual(zeroVpSummary.structurallyValid, false, 'Zero viewport should be invalid');
+assert.ok(zeroVpSummary.validationReason.includes('viewport'), 'Reason should mention viewport');
+
+// Has viewport but no regions → invalid
+const noRegionsSummary = extractDocumentSummary({
+  regionNodes: [],
+  regionGraph: { nodes: [], edges: [] },
+  textLines: [{ id: 'l1', geometry: { bbox: { x: 0, y: 0, w: 100, h: 20 } }, tokenIds: [], text: 'test' }],
+  textBlocks: [], textTokens: [], surfaceCandidates: [],
+  viewport: { width: 800, height: 1000 }
+});
+assert.strictEqual(noRegionsSummary.structurallyValid, false, 'No regions should be invalid');
+assert.ok(noRegionsSummary.validationReason.includes('region'), 'Reason should mention regions');
+
+// All-zero metrics from empty input → invalid
+const allZeroSummary = extractDocumentSummary(
+  { regionNodes: [], regionGraph: { nodes: [], edges: [] }, textLines: [], textBlocks: [], textTokens: [], surfaceCandidates: [], viewport: { width: 0, height: 0 } },
+  { documentName: 'zeroed.png' }
+);
+assert.strictEqual(allZeroSummary.structurallyValid, false, 'All-zero summary should be invalid');
+assert.strictEqual(allZeroSummary.metrics.regionCount, 0);
+assert.strictEqual(allZeroSummary.metrics.textBlockCount, 0);
+
+console.log('extractDocumentSummary validation tests passed.');
+
+// ── analyzeBatchStability: rejects batches with only invalid documents ──
+
+const invalidDoc1 = extractDocumentSummary({}, { documentName: 'empty1.png' });
+const invalidDoc2 = extractDocumentSummary({}, { documentName: 'empty2.png' });
+
+const allInvalidReport = analyzeBatchStability([invalidDoc1, invalidDoc2]);
+assert.strictEqual(allInvalidReport.status, 'insufficient_valid_data',
+  'Should report insufficient_valid_data for all-invalid batch, got: ' + allInvalidReport.status);
+assert.strictEqual(allInvalidReport.stabilityMetrics, null, 'Should not compute metrics for invalid batch');
+assert.strictEqual(allInvalidReport.validDocumentCount, 0);
+assert.strictEqual(allInvalidReport.invalidDocuments.length, 2);
+
+console.log('analyzeBatchStability all-invalid batch test passed.');
+
+// ── analyzeBatchStability: rejects mixed batch with < 2 valid ──────────
+
+const oneValidDoc = extractDocumentSummary(mockAnalysis, { documentName: 'real.png' });
+const mixedReport = analyzeBatchStability([oneValidDoc, invalidDoc1, invalidDoc2]);
+assert.strictEqual(mixedReport.status, 'insufficient_valid_data',
+  'Should reject batch with only 1 valid doc, got: ' + mixedReport.status);
+assert.strictEqual(mixedReport.validDocumentCount, 1);
+assert.strictEqual(mixedReport.invalidDocuments.length, 2);
+
+console.log('analyzeBatchStability mixed batch (1 valid) test passed.');
+
+// ── analyzeBatchStability: succeeds when 2+ valid docs present ─────────
+
+const validDoc1 = extractDocumentSummary(mockAnalysis, { documentName: 'a.png' });
+const validDoc2 = extractDocumentSummary(mockAnalysis, { documentName: 'b.png' });
+const validBatchReport = analyzeBatchStability([validDoc1, validDoc2, invalidDoc1]);
+assert.ok(validBatchReport.status !== 'insufficient_valid_data' && validBatchReport.status !== 'insufficient_data',
+  'Should succeed with 2 valid docs, got status: ' + validBatchReport.status);
+assert.ok(validBatchReport.stabilityMetrics !== null, 'Should have stability metrics');
+assert.strictEqual(validBatchReport.documentCount, 2, 'documentCount should be valid docs only');
+assert.strictEqual(validBatchReport.invalidDocuments.length, 1, 'Should track 1 invalid doc');
+assert.strictEqual(validBatchReport.invalidDocuments[0].documentName, 'empty1.png');
+
+console.log('analyzeBatchStability mixed batch (2 valid) test passed.');
+
+// ── analyzeBatchStability: backwards compat with old summaries (no structurallyValid field) ──
+
+const legacyDoc = buildMockDocSummary({ regionCount: 5, name: 'legacy.png' });
+delete legacyDoc.structurallyValid;  // simulate old format
+const legacyDoc2 = buildMockDocSummary({ regionCount: 3, name: 'legacy2.png' });
+delete legacyDoc2.structurallyValid;
+const legacyReport = analyzeBatchStability([legacyDoc, legacyDoc2]);
+assert.ok(legacyReport.status !== 'insufficient_valid_data',
+  'Should accept old-format docs with regions as valid');
+assert.ok(legacyReport.stabilityMetrics !== null);
+
+console.log('analyzeBatchStability backwards compatibility test passed.');
+
+// ── formatStabilityReport: handles insufficient_valid_data ─────────────
+
+const insuffValidText = formatStabilityReport(allInvalidReport);
+assert.ok(insuffValidText.includes('structural outputs'),
+  'Should explain need for structural outputs');
+
+// Report with invalid docs should list them
+const mixedValidReport = analyzeBatchStability([validDoc1, validDoc2, invalidDoc1]);
+const mixedReportText = formatStabilityReport(mixedValidReport);
+assert.ok(mixedReportText.includes('EXCLUDED') || mixedReportText.includes('excluded'),
+  'Report should mention excluded documents');
+
+console.log('formatStabilityReport validation tests passed.');
+
+// ── Wrong object shape passed to extractDocumentSummary ────────────────
+
+// Pass a raw file-like object (wrong shape) instead of analysis result
+const wrongShapeSummary = extractDocumentSummary({ name: 'file.png', size: 12345, type: 'image/png' });
+assert.strictEqual(wrongShapeSummary.structurallyValid, false, 'Wrong shape should be invalid');
+assert.strictEqual(wrongShapeSummary.metrics.regionCount, 0);
+
+// Pass null
+const nullSummary = extractDocumentSummary(null);
+assert.strictEqual(nullSummary.structurallyValid, false, 'null input should be invalid');
+
+// Pass undefined
+const undefSummary = extractDocumentSummary(undefined);
+assert.strictEqual(undefSummary.structurallyValid, false, 'undefined input should be invalid');
+
+console.log('extractDocumentSummary wrong object shape tests passed.');
+
+console.log('All Batch Structural Learning Phase 1 tests passed (including validation).');

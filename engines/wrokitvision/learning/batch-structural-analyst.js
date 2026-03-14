@@ -466,12 +466,57 @@ function analyzeBatchStability(documents) {
         ? 'Need at least 2 documents for batch stability analysis. Currently have 1.'
         : 'No documents in this batch session.',
       documentCount: documents ? documents.length : 0,
+      validDocumentCount: 0,
+      invalidDocuments: [],
       stabilityMetrics: null,
       parameterDiagnoses: null,
       overallStability: null,
       intermediateData: null
     };
   }
+
+  // Filter to structurally valid documents only — do not analyze empty/placeholder summaries
+  var validDocs = [];
+  var invalidDocs = [];
+  for (var di = 0; di < documents.length; di++) {
+    var doc = documents[di];
+    // A document is valid if it has the structurallyValid flag (new summaries)
+    // OR if it has regions > 0 and a real viewport (backwards compat with old summaries)
+    var isValid = doc.structurallyValid === true ||
+      (doc.structurallyValid === undefined &&
+       doc.metrics && doc.metrics.regionCount > 0 &&
+       doc.viewport && doc.viewport.w > 1 && doc.viewport.h > 1);
+    if (isValid) {
+      validDocs.push(doc);
+    } else {
+      invalidDocs.push({
+        documentId: doc.documentId || '(unknown)',
+        documentName: doc.documentName || '(unnamed)',
+        reason: doc.validationReason || 'No structural outputs (0 regions detected)'
+      });
+    }
+  }
+
+  if (validDocs.length < 2) {
+    var invalidMsg = invalidDocs.length > 0
+      ? ' ' + invalidDocs.length + ' document(s) were excluded because they have no structural outputs.'
+      : '';
+    return {
+      status: 'insufficient_valid_data',
+      message: 'Need at least 2 documents with real structural outputs for batch stability analysis. ' +
+        'Found ' + validDocs.length + ' valid out of ' + documents.length + ' total.' + invalidMsg,
+      documentCount: documents.length,
+      validDocumentCount: validDocs.length,
+      invalidDocuments: invalidDocs,
+      stabilityMetrics: null,
+      parameterDiagnoses: null,
+      overallStability: null,
+      intermediateData: null
+    };
+  }
+
+  // Use only valid documents for metric computation
+  documents = validDocs;
 
   // Compute all stability metrics
   const regionCount = analyzeRegionCountStability(documents);
@@ -557,6 +602,8 @@ function analyzeBatchStability(documents) {
     status: status,
     message: statusMessages[status],
     documentCount: documents.length,
+    validDocumentCount: validDocs.length,
+    invalidDocuments: invalidDocs,
     analyzedAt: new Date().toISOString(),
     overallStability: overallStability,
     stabilityMetrics: stabilityMetrics,
@@ -569,7 +616,7 @@ function analyzeBatchStability(documents) {
 
 function formatStabilityReport(report) {
   if (!report) return '[No report data]';
-  if (report.status === 'insufficient_data') return report.message;
+  if (report.status === 'insufficient_data' || report.status === 'insufficient_valid_data') return report.message;
 
   let out = '';
   out += '══════════════════════════════════════════════════════════════\n';
@@ -578,8 +625,18 @@ function formatStabilityReport(report) {
   out += '  Status: ' + report.status.toUpperCase() + '\n';
   out += '  Overall Stability: ' + (report.overallStability * 100).toFixed(1) + '%\n';
   out += '  Documents analyzed: ' + report.documentCount + '\n';
+  if (report.invalidDocuments && report.invalidDocuments.length > 0) {
+    out += '  Documents excluded (invalid): ' + report.invalidDocuments.length + '\n';
+  }
   out += '  Analyzed at: ' + report.analyzedAt + '\n\n';
   out += '  ' + report.message + '\n';
+
+  if (report.invalidDocuments && report.invalidDocuments.length > 0) {
+    out += '\n  ⚠ EXCLUDED DOCUMENTS:\n';
+    for (const inv of report.invalidDocuments) {
+      out += '    • ' + (inv.documentName || inv.documentId) + ': ' + inv.reason + '\n';
+    }
+  }
 
   out += '\n──────────────────────────────────────────────────────────────\n';
   out += '  STABILITY METRICS\n';

@@ -20559,19 +20559,39 @@ function showBatchSessionDetails(sessionId){
   if(countEl) countEl.textContent = session.documents.length;
   if(listCountEl) listCountEl.textContent = session.documents.length;
   if(statusEl) statusEl.textContent = 'Created: ' + new Date(session.createdAt).toLocaleDateString();
-  if(analyzeBtn) analyzeBtn.disabled = session.documents.length < 2;
+  if(analyzeBtn){
+    analyzeBtn.disabled = validCount < 2;
+    analyzeBtn.title = validCount < 2
+      ? 'Need at least 2 documents with real structural outputs (' + validCount + ' valid)'
+      : '';
+  }
 
-  // Render document list
+  // Render document list with validity states
   var listEl = document.getElementById('batch-doc-list');
+  var validCount = 0;
   if(listEl){
     if(!session.documents.length){
       listEl.innerHTML = '<p class="sub" style="color:var(--muted);">No documents yet. Upload documents to add them.</p>';
     } else {
+      for(var vi = 0; vi < session.documents.length; vi++){
+        if(session.documents[vi].structurallyValid) validCount++;
+      }
       listEl.innerHTML = session.documents.map(function(d, idx){
-        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border,#eee);">' +
+        var isValid = d.structurallyValid === true;
+        var statusBadge = isValid
+          ? '<span style="color:#2a7;font-size:11px;font-weight:600;">analyzed</span>'
+          : '<span style="color:#c44;font-size:11px;font-weight:600;" title="' +
+            (d.validationReason || 'No structural outputs').replace(/"/g, '&quot;') +
+            '">invalid</span>';
+        var metricsText = isValid
+          ? d.metrics.regionCount + ' regions, ' + d.metrics.textBlockCount + ' blocks'
+          : (d.validationReason || 'Missing structural data');
+        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border,#eee);' +
+          (isValid ? '' : 'opacity:0.6;') + '">' +
           '<span class="sub" style="min-width:24px;text-align:right;">' + (idx+1) + '.</span>' +
+          statusBadge + ' ' +
           '<span style="flex:1;">' + (d.documentName || d.documentId) + '</span>' +
-          '<span class="sub" style="color:var(--muted);">' + d.metrics.regionCount + ' regions, ' + d.metrics.textBlockCount + ' blocks</span>' +
+          '<span class="sub" style="color:var(--muted);font-size:12px;">' + metricsText + '</span>' +
           '<button class="btn ghost" style="padding:2px 8px;font-size:12px;" data-remove-doc="' + d.documentId + '">Remove</button>' +
           '</div>';
       }).join('');
@@ -20666,51 +20686,133 @@ function showBatchSessionDetails(sessionId){
 
     var processCount = 0;
     var totalFiles = files.length;
+    var statusEl = document.getElementById('batch-session-status');
+
+    function onFileComplete(){
+      processCount++;
+      if(statusEl) statusEl.textContent = 'Processing ' + processCount + '/' + totalFiles + '...';
+      if(processCount >= totalFiles){
+        if(statusEl) statusEl.textContent = '';
+        showBatchSessionDetails(_activeBatchSessionId);
+        refreshBatchSessionUI();
+      }
+    }
+
+    if(statusEl) statusEl.textContent = 'Processing 0/' + totalFiles + '...';
 
     for(var fi = 0; fi < files.length; fi++){
       (function(file){
         var reader = new FileReader();
         reader.onload = function(){
-          // Use the WrokitVision precompute pipeline if available
+          // Require the WrokitVision precompute pipeline — do not silently
+          // accept empty summaries when it is unavailable.
           var precompute = window.WrokitVisionPrecompute || null;
-          if(!precompute || !precompute.runUploadAnalysis){
-            // Fallback: create a minimal summary from file metadata
-            var minimalSummary = _learningAPI.extractDocumentSummary(
-              {regionNodes:[],regionGraph:{nodes:[],edges:[]},textLines:[],textBlocks:[],textTokens:[],surfaceCandidates:[],viewport:{width:0,height:0}},
-              {documentName: file.name}
-            );
-            _batchStore.addDocument(_activeBatchSessionId, minimalSummary);
-            processCount++;
-            if(processCount >= totalFiles) showBatchSessionDetails(_activeBatchSessionId);
+          if(!precompute || !precompute.buildPrecomputedStructuralMap){
+            console.warn('[BatchLearning] WrokitVisionPrecompute.buildPrecomputedStructuralMap not available – skipping ' + file.name);
+            var placeholder = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
+            // Placeholder will be marked invalid by validation and excluded from analysis
+            _batchStore.addDocument(_activeBatchSessionId, placeholder);
+            onFileComplete();
             return;
           }
 
-          // Process the image through the analysis pipeline
+          // Load the image to extract pixel data and viewport dimensions
           var img = new Image();
           img.onload = function(){
             var viewport = {width: img.naturalWidth, height: img.naturalHeight};
-            // Run OCR if available, otherwise use empty tokens
+
+            // Extract imageData (grayscale + RGB channels) from canvas
+            var imageData = null;
+            try {
+              var cvs = document.createElement('canvas');
+              cvs.width = img.naturalWidth;
+              cvs.height = img.naturalHeight;
+              var ctx = cvs.getContext('2d', { willReadFrequently: true });
+              ctx.drawImage(img, 0, 0);
+              var raw = ctx.getImageData(0, 0, cvs.width, cvs.height);
+              var px = cvs.width * cvs.height;
+              var gray = new Uint8Array(px);
+              var rCh = new Uint8Array(px);
+              var gCh = new Uint8Array(px);
+              var bCh = new Uint8Array(px);
+              for(var i = 0, j = 0; j < px; i += 4, j++){
+                var rv = raw.data[i] || 0, gv = raw.data[i+1] || 0, bv = raw.data[i+2] || 0;
+                gray[j] = Math.round(rv * 0.299 + gv * 0.587 + bv * 0.114);
+                rCh[j] = rv; gCh[j] = gv; bCh[j] = bv;
+              }
+              imageData = { gray: gray, r: rCh, g: gCh, b: bCh, width: cvs.width, height: cvs.height };
+            } catch(ex){
+              console.warn('[BatchLearning] Failed to extract imageData for ' + file.name, ex);
+            }
+
+            // Run OCR via Tesseract if available, otherwise use empty tokens.
+            // Visual segmentation will still produce regions from imageData alone.
             var tokens = [];
-            var analysisResult = precompute.runUploadAnalysis({
-              tokens: tokens,
-              viewport: viewport,
-              page: 1,
-              imageRef: file.name
-            });
-            var summary = _learningAPI.extractDocumentSummary(analysisResult, {documentName: file.name});
-            _batchStore.addDocument(_activeBatchSessionId, summary);
-            processCount++;
-            if(processCount >= totalFiles){
-              showBatchSessionDetails(_activeBatchSessionId);
-              refreshBatchSessionUI();
+            var runWithTokens = function(toks){
+              try {
+                var structuralMap = precompute.buildPrecomputedStructuralMap({
+                  tokens: toks,
+                  viewport: viewport,
+                  page: 1,
+                  geometryId: 'batch-learning',
+                  imageData: imageData
+                });
+                var analysisResult = structuralMap && structuralMap.uploadedImageAnalysis
+                  ? structuralMap.uploadedImageAnalysis
+                  : {};
+                // Attach viewport since the analysis pipeline may not always embed it
+                if(!analysisResult.viewport) analysisResult.viewport = viewport;
+                console.log('[BatchLearning] Analysis for ' + file.name + ':',
+                  'regions=' + ((analysisResult.regionNodes||[]).length),
+                  'blocks=' + ((analysisResult.textBlocks||[]).length),
+                  'lines=' + ((analysisResult.textLines||[]).length),
+                  'surfaces=' + ((analysisResult.surfaceCandidates||[]).length));
+                var summary = _learningAPI.extractDocumentSummary(analysisResult, {documentName: file.name, viewport: viewport});
+                console.log('[BatchLearning] Summary for ' + file.name + ':',
+                  'valid=' + summary.structurallyValid,
+                  'regionCount=' + summary.metrics.regionCount,
+                  'blockCount=' + summary.metrics.textBlockCount);
+                _batchStore.addDocument(_activeBatchSessionId, summary);
+              } catch(err){
+                console.error('[BatchLearning] Pipeline error for ' + file.name, err);
+                var errSummary = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
+                _batchStore.addDocument(_activeBatchSessionId, errSummary);
+              }
+              onFileComplete();
+            };
+
+            // Try to get OCR tokens from Tesseract if available
+            if(window.Tesseract && window.Tesseract.recognize){
+              window.Tesseract.recognize(img, 'eng', {}).then(function(result){
+                var toks = [];
+                if(result && result.data && result.data.words){
+                  toks = result.data.words.map(function(w){
+                    return {
+                      x: w.bbox.x0, y: w.bbox.y0,
+                      w: w.bbox.x1 - w.bbox.x0,
+                      h: w.bbox.y1 - w.bbox.y0,
+                      text: w.text,
+                      confidence: (w.confidence || 0) / 100
+                    };
+                  });
+                }
+                console.log('[BatchLearning] OCR produced ' + toks.length + ' tokens for ' + file.name);
+                runWithTokens(toks);
+              }).catch(function(err){
+                console.warn('[BatchLearning] OCR failed for ' + file.name + ', proceeding with visual-only analysis', err);
+                runWithTokens([]);
+              });
+            } else {
+              // No OCR available – visual segmentation only
+              console.log('[BatchLearning] No OCR engine available, proceeding with visual-only analysis for ' + file.name);
+              runWithTokens([]);
             }
           };
           img.onerror = function(){
-            processCount++;
-            if(processCount >= totalFiles){
-              showBatchSessionDetails(_activeBatchSessionId);
-              refreshBatchSessionUI();
-            }
+            console.error('[BatchLearning] Failed to load image: ' + file.name);
+            var errSummary = _learningAPI.extractDocumentSummary({}, {documentName: file.name});
+            _batchStore.addDocument(_activeBatchSessionId, errSummary);
+            onFileComplete();
           };
           img.src = reader.result;
         };
@@ -20733,14 +20835,22 @@ function showBatchSessionDetails(sessionId){
       return;
     }
     var report = _learningAPI.analyzeBatchStability(session.documents);
-    _batchStore.saveStabilityReport(_activeBatchSessionId, report);
 
     // Show report
     var reportEl = document.getElementById('batch-report-content');
-    if(reportEl) reportEl.textContent = _learningAPI.formatStabilityReport(report);
-
-    // Show metrics detail
     var metricsEl = document.getElementById('batch-metrics-content');
+
+    if(report.status === 'insufficient_valid_data'){
+      if(reportEl) reportEl.textContent = report.message;
+      if(metricsEl) metricsEl.innerHTML = '<p style="color:#c44;">Batch analysis cannot proceed. ' +
+        'Ensure documents have been processed through the WrokitVision analysis pipeline.</p>';
+      // Do not save a misleading report
+      return;
+    }
+
+    _batchStore.saveStabilityReport(_activeBatchSessionId, report);
+
+    if(reportEl) reportEl.textContent = _learningAPI.formatStabilityReport(report);
     if(metricsEl && report.stabilityMetrics){
       metricsEl.innerHTML = '<pre class="code" style="white-space:pre-wrap;">' +
         JSON.stringify(report.stabilityMetrics, null, 2).replace(/</g, '&lt;') + '</pre>';
