@@ -9,6 +9,7 @@ const assert = require('assert');
 const {
   extractDocumentSummary,
   createBatchSessionStore,
+  compactForStorage,
   BATCH_SESSION_STORAGE_KEY
 } = require('../engines/wrokitvision/learning/batch-learning-session.js');
 
@@ -651,4 +652,147 @@ assert.strictEqual(undefSummary.structurallyValid, false, 'undefined input shoul
 
 console.log('extractDocumentSummary wrong object shape tests passed.');
 
-console.log('All Batch Structural Learning Phase 1 tests passed (including validation).');
+/* ══════════════════════════════════════════════════════════════════════════
+   Compact Storage & Hybrid Store Tests
+   ══════════════════════════════════════════════════════════════════════════ */
+
+// ── compactForStorage: produces compact summary ─────────────────────────
+
+const fullDoc = extractDocumentSummary(mockAnalysis, { documentName: 'compact-test.png' });
+const compact = compactForStorage(fullDoc);
+
+assert.strictEqual(compact._compact, true, 'Should have _compact marker');
+assert.strictEqual(compact.documentId, fullDoc.documentId);
+assert.strictEqual(compact.documentName, 'compact-test.png');
+assert.ok(compact.metrics, 'Should preserve metrics');
+assert.ok(compact.textStructure, 'Should preserve textStructure');
+assert.strictEqual(compact.textStructure.lineCount, fullDoc.textStructure.lineCount);
+assert.strictEqual(compact.textStructure.blockCount, fullDoc.textStructure.blockCount);
+assert.ok(compact.normalizedSpatialDistribution, 'Should preserve spatial distribution');
+assert.ok(compact.surfaceTypeCounts, 'Should preserve surface type counts');
+
+// Should have compact replacements instead of large arrays
+assert.ok(Array.isArray(compact._regionAreas), 'Should have _regionAreas');
+assert.strictEqual(compact._regionAreas.length, fullDoc.regionDescriptors.length);
+assert.ok(compact._adjacencyStats, 'Should have _adjacencyStats');
+assert.strictEqual(compact._adjacencyStats.count, fullDoc.adjacencyEdges.length);
+assert.ok(Array.isArray(compact._adjacencyStats.typeDistribution));
+assert.strictEqual(compact._adjacencyStats.typeDistribution.length, 3);
+
+// Should NOT have large arrays
+assert.strictEqual(compact.regionDescriptors, undefined, 'Should not have regionDescriptors');
+assert.strictEqual(compact.adjacencyEdges, undefined, 'Should not have adjacencyEdges');
+assert.strictEqual(compact.regionSignatures, undefined, 'Should not have regionSignatures');
+assert.strictEqual(compact.neighborhoodDescriptors, undefined, 'Should not have neighborhoodDescriptors');
+
+// Should be significantly smaller
+const fullSize = JSON.stringify(fullDoc).length;
+const compactSize = JSON.stringify(compact).length;
+assert.ok(compactSize < fullSize * 0.5,
+  'Compact should be much smaller: full=' + fullSize + ' compact=' + compactSize);
+
+// Null/undefined handling
+assert.strictEqual(compactForStorage(null), null);
+assert.strictEqual(compactForStorage(undefined), undefined);
+
+console.log('compactForStorage tests passed.');
+
+// ── Hybrid store: compact in storage, full in memory ────────────────────
+
+const hybridStore = createBatchSessionStore();
+const hs = hybridStore.createSession({ name: 'Hybrid Test' });
+
+const fullDoc1 = extractDocumentSummary(mockAnalysis, { documentName: 'hybrid1.png' });
+const fullDoc2 = extractDocumentSummary(mockAnalysis, { documentName: 'hybrid2.png' });
+hybridStore.addDocument(hs.sessionId, fullDoc1);
+hybridStore.addDocument(hs.sessionId, fullDoc2);
+
+// getSession should return full docs from memory
+const hybridSession = hybridStore.getSession(hs.sessionId);
+assert.strictEqual(hybridSession.documents.length, 2);
+assert.ok(hybridSession.documents[0].regionDescriptors, 'In-memory docs should have full regionDescriptors');
+assert.ok(hybridSession.documents[0].adjacencyEdges, 'In-memory docs should have full adjacencyEdges');
+assert.ok(hybridSession.documents[0].regionSignatures, 'In-memory docs should have full regionSignatures');
+
+// getAllSessions returns compact docs from localStorage
+const allHybrid = hybridStore.getAllSessions();
+const storedSession = allHybrid.find(function(s){ return s.sessionId === hs.sessionId; });
+assert.ok(storedSession, 'Should find session in localStorage');
+assert.strictEqual(storedSession.documents.length, 2);
+assert.strictEqual(storedSession.documents[0]._compact, true, 'localStorage docs should be compact');
+assert.strictEqual(storedSession.documents[0].regionDescriptors, undefined, 'Compact docs should not have regionDescriptors');
+
+// saveStabilityReport should strip intermediateData
+const mockReport = { status: 'stable', overallStability: 0.9, intermediateData: { big: 'data' } };
+hybridStore.saveStabilityReport(hs.sessionId, mockReport);
+const savedHybrid = hybridStore.getAllSessions().find(function(s){ return s.sessionId === hs.sessionId; });
+assert.strictEqual(savedHybrid.stabilityReport.intermediateData, null,
+  'Persisted report should have intermediateData stripped');
+assert.strictEqual(savedHybrid.stabilityReport.status, 'stable',
+  'Persisted report should keep other fields');
+
+// removeDocument should remove from both memory and storage
+hybridStore.removeDocument(hs.sessionId, fullDoc1.documentId);
+assert.strictEqual(hybridStore.documentCount(hs.sessionId), 1);
+const afterRemove = hybridStore.getAllSessions().find(function(s){ return s.sessionId === hs.sessionId; });
+assert.strictEqual(afterRemove.documents.length, 1);
+
+// deleteSession should clean up in-memory docs
+hybridStore.deleteSession(hs.sessionId);
+assert.strictEqual(hybridStore.getSession(hs.sessionId), null);
+
+console.log('Hybrid store tests passed.');
+
+// ── Analyst handles compact-format documents ────────────────────────────
+
+const compactDocs = [];
+for (let ci = 0; ci < 5; ci++) {
+  const full = buildMockDocSummary({ regionCount: 5, edgeCount: 4, name: 'compact-' + ci + '.png' });
+  full.structurallyValid = true;
+  compactDocs.push(compactForStorage(full));
+}
+
+const compactReport = analyzeBatchStability(compactDocs);
+assert.ok(compactReport.status !== 'insufficient_data' && compactReport.status !== 'insufficient_valid_data',
+  'Should analyze compact docs successfully, got: ' + compactReport.status);
+assert.ok(compactReport.stabilityMetrics, 'Should produce stability metrics from compact docs');
+assert.ok(compactReport.stabilityMetrics.regionCount, 'Should compute region count from compact docs');
+assert.ok(compactReport.stabilityMetrics.adjacencyGraph, 'Should compute adjacency graph from compact docs');
+assert.ok(typeof compactReport.stabilityMetrics.adjacencyGraph.edgeTypeDistributionStability === 'number',
+  'Should compute edge type distribution from _adjacencyStats');
+assert.ok(typeof compactReport.stabilityMetrics.adjacencyGraph.edgeWeightStability === 'number',
+  'Should compute edge weight from _adjacencyStats');
+
+// intermediateData should handle missing regionSignatures gracefully
+assert.ok(compactReport.intermediateData, 'Should have intermediateData');
+assert.ok(Array.isArray(compactReport.intermediateData.perDocumentMetrics));
+assert.strictEqual(compactReport.intermediateData.perDocumentMetrics[0].regionSignatureCount, 5,
+  'Compact docs should fall back to metrics.regionCount for signature count');
+
+// Region count stability should still work (uses metrics.regionCount, not regionDescriptors)
+assert.strictEqual(compactReport.stabilityMetrics.regionCount.stability, 1,
+  'All compact docs with same region count should be perfectly stable');
+
+console.log('Analyst compact format tests passed.');
+
+// ── Mixed full + compact docs in analyst ────────────────────────────────
+
+const mixedFormatDocs = [];
+for (let mi = 0; mi < 3; mi++) {
+  const full = buildMockDocSummary({ regionCount: 5, edgeCount: 4, name: 'full-' + mi + '.png' });
+  full.structurallyValid = true;
+  mixedFormatDocs.push(full);  // full format
+}
+for (let mi = 0; mi < 3; mi++) {
+  const full = buildMockDocSummary({ regionCount: 5, edgeCount: 4, name: 'compact-mix-' + mi + '.png' });
+  full.structurallyValid = true;
+  mixedFormatDocs.push(compactForStorage(full));  // compact format
+}
+
+const mixedFormatReport = analyzeBatchStability(mixedFormatDocs);
+assert.ok(mixedFormatReport.stabilityMetrics, 'Should handle mixed full+compact docs');
+assert.strictEqual(mixedFormatReport.documentCount, 6, 'Should count all valid docs');
+
+console.log('Mixed format (full + compact) analyst tests passed.');
+
+console.log('All Batch Structural Learning Phase 1 tests passed (including validation, compact storage).');

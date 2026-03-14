@@ -852,10 +852,12 @@
     var egCounts = documents.map(function(d){return d.metrics.edgeCount;});
     var egCV = _cv(egCounts);
     var etDists = documents.map(function(d){
+      if(d._adjacencyStats) return d._adjacencyStats.typeDistribution;
+      var edges = d.adjacencyEdges || [];
       var types={spatial_proximity:0,contains:0,other:0};
-      var total = d.adjacencyEdges.length||1;
-      for(var i=0;i<d.adjacencyEdges.length;i++){
-        var et=d.adjacencyEdges[i].edgeType;
+      var total = edges.length||1;
+      for(var i=0;i<edges.length;i++){
+        var et=edges[i].edgeType;
         if(types.hasOwnProperty(et)) types[et]++; else types.other++;
       }
       return [types.spatial_proximity/total, types.contains/total, types.other/total];
@@ -864,8 +866,10 @@
     for(var i=0;i<etDists.length;i++) for(var j=i+1;j<etDists.length;j++){ totalJSD+=_jsd(etDists[i],etDists[j]); pc++; }
     var avgJSD = pc>0 ? totalJSD/pc : 0;
     var awVals = documents.map(function(d){
-      if(!d.adjacencyEdges.length) return 0;
-      return d.adjacencyEdges.reduce(function(s,e){return s+e.weight;},0)/d.adjacencyEdges.length;
+      if(d._adjacencyStats) return d._adjacencyStats.avgWeight;
+      var edges = d.adjacencyEdges || [];
+      if(!edges.length) return 0;
+      return edges.reduce(function(s,e){return s+e.weight;},0)/edges.length;
     });
     var awCV = _cv(awVals);
     var ecStab = _cvToStability(egCV), edStab = _clamp(1-avgJSD,0,1), ewStab = _cvToStability(awCV);
@@ -986,8 +990,9 @@
 
     var intermediateData = {
       perDocumentMetrics: documents.map(function(d){
+        var sigs = d.regionSignatures || [];
         return {documentId:d.documentId,documentName:d.documentName,metrics:d.metrics,
-          normalizedSpatialDistribution:d.normalizedSpatialDistribution,regionSignatureCount:d.regionSignatures.length};
+          normalizedSpatialDistribution:d.normalizedSpatialDistribution,regionSignatureCount:sigs.length};
       }),
       batchRegionSignatures: [],
       batchSpatialDistributions: documents.map(function(d){
@@ -996,8 +1001,9 @@
     };
     for(var bdi=0;bdi<documents.length;bdi++){
       var bdoc = documents[bdi];
-      for(var bri=0;bri<bdoc.regionSignatures.length;bri++){
-        var rs = bdoc.regionSignatures[bri];
+      var bdocSigs = bdoc.regionSignatures || [];
+      for(var bri=0;bri<bdocSigs.length;bri++){
+        var rs = bdocSigs[bri];
         intermediateData.batchRegionSignatures.push({documentId:bdoc.documentId,regionId:rs.regionId,featureVector:rs.featureVector,spatialBin:rs.spatialBin});
       }
     }
@@ -1074,6 +1080,53 @@
     return out;
   }
 
+  /* ── Compact storage helper ───────────────────────────────────────────── */
+
+  function compactForStorage(doc) {
+    if (!doc) return doc;
+    var edgeTypes = { spatial_proximity: 0, contains: 0, other: 0 };
+    var weightSum = 0;
+    var edges = doc.adjacencyEdges || [];
+    for (var i = 0; i < edges.length; i++) {
+      var et = edges[i].edgeType;
+      if (edgeTypes.hasOwnProperty(et)) edgeTypes[et]++;
+      else edgeTypes.other++;
+      weightSum += (edges[i].weight || 0);
+    }
+    var edgeTotal = edges.length || 1;
+    return {
+      documentId: doc.documentId,
+      documentName: doc.documentName,
+      timestamp: doc.timestamp,
+      viewport: doc.viewport,
+      structurallyValid: doc.structurallyValid,
+      validationReason: doc.validationReason,
+      metrics: doc.metrics,
+      surfaceTypeCounts: doc.surfaceTypeCounts,
+      normalizedSpatialDistribution: doc.normalizedSpatialDistribution,
+      textStructure: {
+        lineCount: doc.textStructure.lineCount,
+        blockCount: doc.textStructure.blockCount,
+        tokenCount: doc.textStructure.tokenCount,
+        avgTokensPerLine: doc.textStructure.avgTokensPerLine,
+        avgLinesPerBlock: doc.textStructure.avgLinesPerBlock
+      },
+      _regionAreas: (doc.regionDescriptors || []).map(function (r) {
+        return Math.round((r.normalizedArea || 0) * 100000) / 100000;
+      }),
+      _adjacencyStats: {
+        count: edges.length,
+        typeDistribution: [
+          edgeTypes.spatial_proximity / edgeTotal,
+          edgeTypes.contains / edgeTotal,
+          edgeTypes.other / edgeTotal
+        ],
+        avgWeight: edges.length ? weightSum / edges.length : 0
+      },
+      _compact: true
+    };
+  }
+
   /* ── Batch session store ──────────────────────────────────────────────── */
 
   function createBatchSessionStore(storage){
@@ -1082,11 +1135,16 @@
       return {getItem:function(k){return m[k]||null;},setItem:function(k,v){m[k]=v;}};
     })();
 
+    var _memDocs = {};
+
     function _load(){
       try { var raw=backend.getItem(BATCH_SESSION_STORAGE_KEY); return raw ? JSON.parse(raw) : []; }
       catch(_e){ return []; }
     }
-    function _save(sessions){ backend.setItem(BATCH_SESSION_STORAGE_KEY, JSON.stringify(sessions)); }
+    function _save(sessions){
+      try { backend.setItem(BATCH_SESSION_STORAGE_KEY, JSON.stringify(sessions)); }
+      catch(e){ console.warn('[BatchSessionStore] localStorage write failed:', e.message || e); }
+    }
 
     return {
       createSession: function(opts){
@@ -1098,18 +1156,27 @@
           updatedAt:new Date().toISOString(), documents:[], stabilityReport:null, status:'open'
         };
         sessions.push(session);
+        _memDocs[session.sessionId] = [];
         _save(sessions);
         return session;
       },
       getAllSessions: function(){ return _load(); },
       getSession: function(sessionId){
-        return _load().find(function(s){return s.sessionId===sessionId;})||null;
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;})||null;
+        if(!session) return null;
+        if(_memDocs[sessionId] && _memDocs[sessionId].length){
+          session.documents = _memDocs[sessionId];
+        }
+        return session;
       },
       addDocument: function(sessionId, docSummary){
         var sessions = _load();
         var session = sessions.find(function(s){return s.sessionId===sessionId;});
         if(!session) return null;
-        session.documents.push(docSummary);
+        if(!_memDocs[sessionId]) _memDocs[sessionId] = [];
+        _memDocs[sessionId].push(docSummary);
+        session.documents.push(compactForStorage(docSummary));
         session.updatedAt = new Date().toISOString();
         _save(sessions);
         return docSummary.documentId;
@@ -1124,13 +1191,24 @@
         session.documents.splice(idx,1);
         session.updatedAt = new Date().toISOString();
         _save(sessions);
+        if(_memDocs[sessionId]){
+          var mIdx = -1;
+          for(var j=0;j<_memDocs[sessionId].length;j++){ if(_memDocs[sessionId][j].documentId===documentId){mIdx=j;break;} }
+          if(mIdx>=0) _memDocs[sessionId].splice(mIdx,1);
+        }
         return true;
       },
       saveStabilityReport: function(sessionId, report){
         var sessions = _load();
         var session = sessions.find(function(s){return s.sessionId===sessionId;});
         if(!session) return false;
-        session.stabilityReport = report;
+        var persistReport = report;
+        if(report && report.intermediateData){
+          persistReport = {};
+          for(var rk in report) if(report.hasOwnProperty(rk)) persistReport[rk] = report[rk];
+          persistReport.intermediateData = null;
+        }
+        session.stabilityReport = persistReport;
         session.updatedAt = new Date().toISOString();
         _save(sessions);
         return true;
@@ -1138,12 +1216,14 @@
       deleteSession: function(sessionId){
         var sessions = _load().filter(function(s){return s.sessionId!==sessionId;});
         _save(sessions);
+        delete _memDocs[sessionId];
       },
       documentCount: function(sessionId){
+        if(_memDocs[sessionId]) return _memDocs[sessionId].length;
         var session = this.getSession(sessionId);
         return session ? session.documents.length : 0;
       },
-      clear: function(){ _save([]); }
+      clear: function(){ _save([]); for(var k in _memDocs) delete _memDocs[k]; }
     };
   }
 
@@ -1170,6 +1250,7 @@
     analyzeBatchStability: analyzeBatchStability,
     formatStabilityReport: formatStabilityReport,
     createBatchSessionStore: createBatchSessionStore,
+    compactForStorage: compactForStorage,
     BATCH_SESSION_STORAGE_KEY: BATCH_SESSION_STORAGE_KEY
   };
 
