@@ -345,31 +345,29 @@ function refineAnchors(correspondenceResult, extractionTargets, refDoc, opts) {
  *
  * ── Algorithm ──────────────────────────────────────────────────────────
  *
- * Stage 1 – Reference Template Frame
- *   Record the BBOX's position relative to each refined anchor on the
- *   reference document. Each anchor acts as a local origin: the BBOX
- *   center's offset from the anchor center and the ratio of BBOX size
- *   to anchor region size define the "template relationship".
+ * Stage 1 – Reference Template Frame (Edge-Relative)
+ *   For each refined anchor, compute the BBOX's position relative to the
+ *   nearest edge of the anchor region (not centroid). Edge-relative offsets
+ *   are more stable because structural edges (row boundaries, column edges)
+ *   stay consistent across documents even when region content varies.
  *
  * Stage 2 – Graph Projection / Structural Matching
  *   For each refined anchor, find its corresponding region on the target
- *   document via Phase 2 correspondences. This projects the reference
- *   structural frame into the target.
+ *   document via Phase 2 correspondences.
  *
  * Stage 3 – Global Anchor-Based Transformation
  *   For each anchor pair (ref → target):
- *     relativeOffset = bboxCenter − refAnchorCenter
- *     scale          = tgtRegionSize / refRegionSize
- *     candidatePos   = tgtAnchorCenter + relativeOffset × scale
- *     candidateSize  = bboxSize × scale
- *   Compute a weighted average of all candidates. Anchors specifically
- *   relevant to this field (bestTargetKey match) receive a bonus.
+ *     edgeOffset = bbox edge offset from nearest ref anchor edge
+ *     candidatePos = corresponding target anchor edge + edgeOffset
+ *   The positional offset is NOT scaled by region size ratio — only
+ *   BBOX dimensions are scaled. This prevents row-level drift caused
+ *   by region height/width variation between documents.
+ *   Weighting uses tight proximity (15% radius) with Y-axis priority
+ *   and overlap bonus for overlapping anchors.
  *
  * Stage 4 – Local Anchor-Based Adjustment
- *   After the global transform, check the target document's local
- *   structural context around the transferred position. If a structurally
- *   similar region (high neighborhood + centroid similarity) exists near
- *   the transferred box, nudge toward it.
+ *   After global transform, nudge toward nearby structurally-similar
+ *   regions on the target document for fine alignment.
  *
  * @param {object}   target      - { fieldKey, label, normBox }
  * @param {object[]} refinedAnchors  - Anchors from refineAnchors()
@@ -381,13 +379,18 @@ function refineAnchors(correspondenceResult, extractionTargets, refDoc, opts) {
 function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId, targetDoc) {
   var srcBox = target.normBox;
   var srcCenter = normBoxCenter(srcBox);
+  // Source box edges
+  var srcTop = srcBox.y0n;
+  var srcBot = srcBox.y0n + srcBox.hN;
+  var srcLeft = srcBox.x0n;
+  var srcRight = srcBox.x0n + srcBox.wN;
 
   // ── Stage 2: Find correspondences for this target document ──────────
   var docCorrespondences = (correspondenceResult.correspondences || []).filter(
     function (c) { return c.tgtDocumentId === targetDocId; }
   );
 
-  // ── Stage 1+2: Build anchor pairs with relative-position data ───────
+  // ── Stage 1+2: Build anchor pairs with edge-relative position data ──
   var anchorPairs = [];
   for (var ai = 0; ai < refinedAnchors.length; ai++) {
     var anchor = refinedAnchors[ai];
@@ -404,43 +407,96 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
 
     // Find the target region descriptor
     var tgtRegion = null;
-    var tgtRegions = targetDoc.regionDescriptors || [];
-    for (var ri = 0; ri < tgtRegions.length; ri++) {
-      if (tgtRegions[ri].regionId === match.tgtRegionId) {
-        tgtRegion = tgtRegions[ri];
+    var tgtRegionsArr = targetDoc.regionDescriptors || [];
+    for (var ri = 0; ri < tgtRegionsArr.length; ri++) {
+      if (tgtRegionsArr[ri].regionId === match.tgtRegionId) {
+        tgtRegion = tgtRegionsArr[ri];
         break;
       }
     }
     if (!tgtRegion) continue;
 
-    // Stage 1: BBOX's position relative to this anchor on the reference doc
-    var refCenter = anchor.normalizedPosition;
-    var relOffsetX = srcCenter.x - refCenter.x;
-    var relOffsetY = srcCenter.y - refCenter.y;
-
-    // Scale = target region size / reference region size
+    // ── Stage 1: Edge-relative offset computation ─────────────────────
+    // Instead of centroid-to-centroid, compute offset from the nearest
+    // edge of the anchor region. This preserves row/column alignment
+    // because structural edges (table row boundaries, label edges) are
+    // more consistent across documents than region centroids.
     var refBbox = anchor.normalizedBbox;
     var tgtBbox = tgtRegion.normalizedBbox;
+
+    // Reference anchor edges
+    var refTop = refBbox.y;
+    var refBot = refBbox.y + refBbox.h;
+    var refLeft = refBbox.x;
+    var refRight = refBbox.x + refBbox.w;
+
+    // Target anchor edges
+    var tgtTop = tgtBbox.y;
+    var tgtBot = tgtBbox.y + tgtBbox.h;
+    var tgtLeft = tgtBbox.x;
+    var tgtRight = tgtBbox.x + tgtBbox.w;
+
+    // Y-axis: use the nearest horizontal edge
+    var distFromRefTop = Math.abs(srcCenter.y - refTop);
+    var distFromRefBot = Math.abs(srcCenter.y - refBot);
+    var candidateY;
+    if (distFromRefTop <= distFromRefBot) {
+      // BBOX is closer to/above the top edge → preserve offset from top
+      candidateY = tgtTop + (srcCenter.y - refTop);
+    } else {
+      // BBOX is closer to/below the bottom edge → preserve offset from bottom
+      candidateY = tgtBot + (srcCenter.y - refBot);
+    }
+
+    // X-axis: use the nearest vertical edge
+    var distFromRefLeft = Math.abs(srcCenter.x - refLeft);
+    var distFromRefRight = Math.abs(srcCenter.x - refRight);
+    var candidateX;
+    if (distFromRefLeft <= distFromRefRight) {
+      candidateX = tgtLeft + (srcCenter.x - refLeft);
+    } else {
+      candidateX = tgtRight + (srcCenter.x - refRight);
+    }
+
+    // Scale for BBOX dimensions only (NOT for positional offset)
     var scaleX = refBbox.w > 0 ? tgtBbox.w / refBbox.w : 1;
     var scaleY = refBbox.h > 0 ? tgtBbox.h / refBbox.h : 1;
-    // Clamp individual scales to reasonable range
-    scaleX = clamp(scaleX, 0.5, 2.0);
-    scaleY = clamp(scaleY, 0.5, 2.0);
-
-    // Stage 3: Project — reconstruct BBOX from target anchor position
-    var tgtCenter = tgtRegion.centroid;
-    var candidateCenterX = tgtCenter.x + relOffsetX * scaleX;
-    var candidateCenterY = tgtCenter.y + relOffsetY * scaleY;
+    // Tight clamp: prevent dimension blowup
+    scaleX = clamp(scaleX, 0.7, 1.5);
+    scaleY = clamp(scaleY, 0.7, 1.5);
     var candidateW = srcBox.wN * scaleX;
     var candidateH = srcBox.hN * scaleY;
 
-    // Distance from BBOX center to this anchor on reference doc
+    // ── Weighting ─────────────────────────────────────────────────────
+    // Tight proximity with separate X/Y distance and overlap bonus.
+    var refCenter = anchor.normalizedPosition;
     var dist = pointDist(srcCenter, refCenter);
 
-    // Weight: proximity × match similarity, with bonus for field-specific anchors
-    var proximityWeight = clamp(1 - dist / 0.5, 0.1, 1);
+    // Y-distance matters more than X for row-level precision
+    var yDist = Math.abs(srcCenter.y - refCenter.y);
+    var xDist = Math.abs(srcCenter.x - refCenter.x);
+
+    // Tight proximity: 15% radius for Y, 25% for X
+    var yProx = clamp(1 - yDist / 0.15, 0, 1);
+    var xProx = clamp(1 - xDist / 0.25, 0, 1);
+    var proximityWeight = yProx * 0.7 + xProx * 0.3;
+
+    // Overlap bonus: anchors whose regions overlap the BBOX are most reliable
+    var anchorNb = { x0n: refBbox.x, y0n: refBbox.y, wN: refBbox.w, hN: refBbox.h };
+    var overlapIoU = normBoxIoU(srcBox, anchorNb);
+    // Vertical overlap specifically (do the Y ranges intersect?)
+    var yOverlap = Math.max(0, Math.min(srcBot, refBot) - Math.max(srcTop, refTop));
+    var yOverlapFrac = srcBox.hN > 0 ? yOverlap / srcBox.hN : 0;
+    var overlapBonus = overlapIoU > 0 ? 0.4 + overlapIoU * 0.6 : (yOverlapFrac > 0.3 ? 0.3 : 0);
+
+    // Field-specific anchor bonus
     var fieldBonus = (anchor.bestTargetKey === target.fieldKey) ? 1.5 : 1.0;
-    var weight = proximityWeight * match.similarity * fieldBonus;
+
+    // Combined weight: proximity base + overlap bonus, × match quality × field bonus
+    var weight = (proximityWeight + overlapBonus) * match.similarity * fieldBonus;
+
+    // Skip anchors with negligible weight
+    if (weight < 0.01) continue;
 
     anchorPairs.push({
       anchor: anchor,
@@ -448,14 +504,14 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
       tgtRegion: tgtRegion,
       distance: dist,
       weight: weight,
-      candidateCenter: { x: candidateCenterX, y: candidateCenterY },
+      candidateCenter: { x: candidateX, y: candidateY },
       candidateSize: { w: candidateW, h: candidateH },
       scale: { x: scaleX, y: scaleY }
     });
   }
 
-  // Sort by distance (closest first)
-  anchorPairs.sort(function (a, b) { return a.distance - b.distance; });
+  // Sort by weight descending (highest quality first)
+  anchorPairs.sort(function (a, b) { return b.weight - a.weight; });
 
   if (anchorPairs.length === 0) {
     // Fallback: identity transfer (same normalized position)
@@ -468,6 +524,7 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
   }
 
   // ── Stage 3: Weighted average of projected candidates ───────────────
+  // Use up to 5 best-weighted anchors
   var maxAnchors = Math.min(anchorPairs.length, 5);
   var totalWeight = 0;
   var avgCX = 0, avgCY = 0;
