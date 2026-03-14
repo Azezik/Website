@@ -1213,6 +1213,22 @@
         _save(sessions);
         return true;
       },
+      saveCorrespondenceResult: function(sessionId, result){
+        var sessions = _load();
+        var session = sessions.find(function(s){return s.sessionId===sessionId;});
+        if(!session) return false;
+        var persistResult = result;
+        if(result && result.correspondences && result.correspondences.length > 50){
+          persistResult = {};
+          for(var ck in result) if(result.hasOwnProperty(ck)) persistResult[ck] = result[ck];
+          persistResult.correspondences = null;
+          persistResult._correspondencesStripped = true;
+        }
+        session.correspondenceResult = persistResult;
+        session.updatedAt = new Date().toISOString();
+        _save(sessions);
+        return true;
+      },
       deleteSession: function(sessionId){
         var sessions = _load().filter(function(s){return s.sessionId!==sessionId;});
         _save(sessions);
@@ -1225,6 +1241,203 @@
       },
       clear: function(){ _save([]); for(var k in _memDocs) delete _memDocs[k]; }
     };
+  }
+
+  /* ── Phase 2: Structural Correspondence ────────────────────────────────── */
+
+  function _euclideanDist(a,b){
+    var sum=0;for(var i=0;i<a.length;i++){var d=(a[i]||0)-(b[i]||0);sum+=d*d;}
+    return Math.sqrt(sum);
+  }
+
+  function _cosineSim(a,b){
+    if(!a||!b||a.length!==b.length||a.length===0)return 0;
+    var dot=0,magA=0,magB=0;
+    for(var i=0;i<a.length;i++){dot+=a[i]*b[i];magA+=a[i]*a[i];magB+=b[i]*b[i];}
+    var d=Math.sqrt(magA)*Math.sqrt(magB);return d>0?dot/d:0;
+  }
+
+  function _mean(arr){return arr.length?arr.reduce(function(s,v){return s+v;},0)/arr.length:0;}
+  function _round(v,dec){var f=Math.pow(10,dec||3);return Math.round(v*f)/f;}
+  function _clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+
+  function selectReferenceDocument(documents){
+    if(!documents||!documents.length)return null;
+    if(documents.length===1){
+      return {documentId:documents[0].documentId,documentName:documents[0].documentName||'',centralityScore:1,scores:[{documentId:documents[0].documentId,avgSimilarity:1}]};
+    }
+    var fvs=documents.map(function(d){
+      var sd=d.normalizedSpatialDistribution||[];var m=d.metrics||{};
+      return sd.concat([(m.regionCount||0)/50,m.avgRegionArea||0,m.avgTextDensity||0,m.avgConfidence||0,(m.edgeCount||0)/100]);
+    });
+    var scores=[];
+    for(var i=0;i<documents.length;i++){
+      var ts=0,cnt=0;
+      for(var j=0;j<documents.length;j++){if(i===j)continue;ts+=_cosineSim(fvs[i],fvs[j]);cnt++;}
+      scores.push({documentId:documents[i].documentId,documentName:documents[i].documentName||'',avgSimilarity:cnt>0?ts/cnt:0});
+    }
+    scores.sort(function(a,b){return b.avgSimilarity-a.avgSimilarity;});
+    var best=scores[0];
+    return {documentId:best.documentId,documentName:best.documentName,centralityScore:_round(best.avgSimilarity),
+      scores:scores.map(function(s){return{documentId:s.documentId,documentName:s.documentName,avgSimilarity:_round(s.avgSimilarity)};})};
+  }
+
+  function computeRegionSimilarity(rA,rB,nhA,nhB){
+    nhA=nhA||{};nhB=nhB||{};
+    var posDist=Math.sqrt(Math.pow(rA.centroid.x-rB.centroid.x,2)+Math.pow(rA.centroid.y-rB.centroid.y,2));
+    var posSim=_clamp(1-posDist/1.414,0,1);
+    var areaDiff=Math.abs(rA.normalizedArea-rB.normalizedArea);var maxArea=Math.max(rA.normalizedArea,rB.normalizedArea,0.001);
+    var areaSim=_clamp(1-areaDiff/maxArea,0,1);
+    var arA=Math.min(rA.aspectRatio,10),arB=Math.min(rB.aspectRatio,10);
+    var aspectSim=_clamp(1-Math.abs(arA-arB)/Math.max(arA,arB,0.1),0,1);
+    var sizeSim=areaSim*0.6+aspectSim*0.4;
+    var dimSim=_clamp(1-(Math.abs(rA.normalizedBbox.w-rB.normalizedBbox.w)+Math.abs(rA.normalizedBbox.h-rB.normalizedBbox.h)),0,1);
+    var ncA=nhA.neighborCount||0,ncB=nhB.neighborCount||0;
+    var nhSim=_clamp((1-Math.abs(ncA-ncB)/Math.max(ncA,ncB,1))*0.6+(1-Math.abs((nhA.avgEdgeWeight||0)-(nhB.avgEdgeWeight||0)))*0.4,0,1);
+    var semSim=_clamp((1-Math.abs(rA.textDensity-rB.textDensity))*0.3+(1-Math.abs(rA.confidence-rB.confidence))*0.3+(rA.surfaceType===rB.surfaceType?1:0.3)*0.4,0,1);
+    var combined=posSim*0.35+sizeSim*0.15+dimSim*0.15+nhSim*0.15+semSim*0.20;
+    return {similarity:_round(combined,4),dimensions:{position:_round(posSim,4),size:_round(sizeSim,4),dimension:_round(dimSim,4),neighborhood:_round(nhSim,4),semantic:_round(semSim,4)}};
+  }
+
+  function matchDocumentRegions(refDoc,targetDoc,opts){
+    opts=opts||{};var minSim=opts.minSimilarity||0.4;
+    var rr=refDoc.regionDescriptors||[],tr=targetDoc.regionDescriptors||[];
+    var rnh=refDoc.neighborhoodDescriptors||{},tnh=targetDoc.neighborhoodDescriptors||{};
+    if(!rr.length||!tr.length)return[];
+    var cands=[];
+    for(var ri=0;ri<rr.length;ri++){for(var ti=0;ti<tr.length;ti++){
+      var sim=computeRegionSimilarity(rr[ri],tr[ti],rnh[rr[ri].regionId],tnh[tr[ti].regionId]);
+      if(sim.similarity>=minSim)cands.push({refId:rr[ri].regionId,tgtId:tr[ti].regionId,sim:sim.similarity,dims:sim.dimensions});
+    }}
+    cands.sort(function(a,b){return b.sim-a.sim;});
+    var usedR={},usedT={},matches=[];
+    for(var ci=0;ci<cands.length;ci++){
+      var c=cands[ci];if(usedR[c.refId]||usedT[c.tgtId])continue;
+      usedR[c.refId]=true;usedT[c.tgtId]=true;
+      matches.push({refRegionId:c.refId,tgtRegionId:c.tgtId,tgtDocumentId:targetDoc.documentId,tgtDocumentName:targetDoc.documentName||'',similarity:c.sim,dimensions:c.dims});
+    }
+    return matches;
+  }
+
+  function analyzeCorrespondence(documents,opts){
+    opts=opts||{};var minSim=opts.minSimilarity||0.4;var anchorMinFreq=opts.anchorMinFrequency||0.5;
+    if(!Array.isArray(documents)||documents.length<2){
+      return{status:'insufficient_data',message:documents&&documents.length===1?'Need at least 2 documents.':'No documents provided.',
+        referenceDocument:null,correspondences:[],anchors:[],alignmentModel:null,analyzedAt:new Date().toISOString()};
+    }
+    var validDocs=[],skippedDocs=[];
+    for(var di=0;di<documents.length;di++){
+      var doc=documents[di];
+      if(doc.structurallyValid!==false&&doc.regionDescriptors&&doc.regionDescriptors.length>0&&!doc._compact){validDocs.push(doc);}
+      else{skippedDocs.push({documentId:doc.documentId||'(unknown)',documentName:doc.documentName||'(unnamed)',
+        reason:doc._compact?'Compact summary — re-upload document':doc.structurallyValid===false?(doc.validationReason||'Not valid'):'No region descriptors'});}
+    }
+    if(validDocs.length<2){
+      return{status:'insufficient_valid_data',message:'Need at least 2 documents with full structural data. Found '+validDocs.length+' valid out of '+documents.length+'.',
+        skippedDocuments:skippedDocs,referenceDocument:null,correspondences:[],anchors:[],alignmentModel:null,analyzedAt:new Date().toISOString()};
+    }
+    var refSel;
+    if(opts.referenceDocumentId){
+      var fr=validDocs.find(function(d){return d.documentId===opts.referenceDocumentId;});
+      refSel=fr?{documentId:fr.documentId,documentName:fr.documentName||'',centralityScore:null,scores:null}:selectReferenceDocument(validDocs);
+    }else{refSel=selectReferenceDocument(validDocs);}
+    var refDoc=validDocs.find(function(d){return d.documentId===refSel.documentId;});
+    var otherDocs=validDocs.filter(function(d){return d.documentId!==refDoc.documentId;});
+    var allCorr=[];
+    for(var oi=0;oi<otherDocs.length;oi++){
+      var ms=matchDocumentRegions(refDoc,otherDocs[oi],{minSimilarity:minSim});
+      for(var mi=0;mi<ms.length;mi++)allCorr.push(ms[mi]);
+    }
+    var refRegions=refDoc.regionDescriptors||[];var refNH=refDoc.neighborhoodDescriptors||{};
+    var anchorCands={};
+    for(var ri=0;ri<refRegions.length;ri++){
+      var rr=refRegions[ri];
+      anchorCands[rr.regionId]={refRegionId:rr.regionId,normalizedBbox:rr.normalizedBbox,centroid:rr.centroid,
+        normalizedArea:rr.normalizedArea,aspectRatio:rr.aspectRatio,surfaceType:rr.surfaceType,
+        textDensity:rr.textDensity,confidence:rr.confidence,neighborhoodDescriptor:refNH[rr.regionId]||{},
+        matchedDocuments:[],matchSimilarities:[],matchDimensions:[]};
+    }
+    for(var ci=0;ci<allCorr.length;ci++){
+      var corr=allCorr[ci];var ac=anchorCands[corr.refRegionId];
+      if(ac){ac.matchedDocuments.push(corr.tgtDocumentId);ac.matchSimilarities.push(corr.similarity);ac.matchDimensions.push(corr.dimensions);}
+    }
+    var totalOther=otherDocs.length;var anchors=[];
+    for(var regionId in anchorCands){
+      if(!anchorCands.hasOwnProperty(regionId))continue;
+      var a=anchorCands[regionId];var freq=totalOther>0?a.matchedDocuments.length/totalOther:0;
+      if(freq>=anchorMinFreq){
+        var avgSim=_mean(a.matchSimilarities);
+        var avgDims={};
+        if(a.matchDimensions.length>0){var dks=Object.keys(a.matchDimensions[0]);
+          for(var dki=0;dki<dks.length;dki++){var dk=dks[dki];avgDims[dk]=_round(_mean(a.matchDimensions.map(function(md){return md[dk]||0;})),4);}
+        }
+        anchors.push({anchorId:'anchor-'+regionId,refRegionId:a.refRegionId,normalizedPosition:a.centroid,normalizedBbox:a.normalizedBbox,
+          normalizedArea:a.normalizedArea,aspectRatio:_round(a.aspectRatio,4),surfaceType:a.surfaceType,textDensity:_round(a.textDensity,4),
+          frequency:_round(freq,4),matchCount:a.matchedDocuments.length,totalDocuments:totalOther,
+          avgSimilarity:_round(avgSim,4),avgDimensions:avgDims,confidence:_round(_clamp(freq*0.5+avgSim*0.5,0,1),4),matchedDocumentIds:a.matchedDocuments});
+      }
+    }
+    anchors.sort(function(a,b){return b.confidence-a.confidence;});
+    var am={referenceDocumentId:refDoc.documentId,referenceDocumentName:refDoc.documentName||'',
+      anchorCount:anchors.length,totalRegionsInReference:refRegions.length,
+      anchorCoverage:refRegions.length>0?_round(anchors.length/refRegions.length,4):0,
+      avgAnchorConfidence:anchors.length>0?_round(_mean(anchors.map(function(a){return a.confidence;})),4):0,
+      avgAnchorFrequency:anchors.length>0?_round(_mean(anchors.map(function(a){return a.frequency;})),4):0,
+      documentCount:validDocs.length,anchors:anchors,createdAt:new Date().toISOString()};
+    var status='complete',message='';
+    if(anchors.length===0){status='no_anchors_found';message='No recurring structural anchors found across the batch.';}
+    else if(am.avgAnchorConfidence<0.5){status='low_confidence';message='Correspondences found but with low confidence.';}
+    else{message='Discovered '+anchors.length+' structural anchor(s) across '+validDocs.length+' documents with '+_round(am.avgAnchorConfidence*100,1)+'% avg confidence.';}
+    return{status:status,message:message,analyzedAt:new Date().toISOString(),documentCount:documents.length,
+      validDocumentCount:validDocs.length,skippedDocuments:skippedDocs,
+      referenceDocument:{documentId:refSel.documentId,documentName:refSel.documentName,centralityScore:refSel.centralityScore,centralityScores:refSel.scores},
+      correspondences:allCorr,anchors:anchors,alignmentModel:am};
+  }
+
+  function formatCorrespondenceReport(result){
+    if(!result)return'[No correspondence data]';
+    if(result.status==='insufficient_data'||result.status==='insufficient_valid_data')return result.message;
+    var out='';
+    out+='══════════════════════════════════════════════════════════════\n';
+    out+='  STRUCTURAL CORRESPONDENCE REPORT (Phase 2)\n';
+    out+='══════════════════════════════════════════════════════════════\n\n';
+    out+='  Status: '+result.status.toUpperCase().replace(/_/g,' ')+'\n';
+    out+='  Documents analyzed: '+result.validDocumentCount+(result.skippedDocuments&&result.skippedDocuments.length>0?' ('+result.skippedDocuments.length+' skipped)':'')+'\n';
+    out+='  Analyzed at: '+result.analyzedAt+'\n\n';
+    out+='  '+result.message+'\n';
+    if(result.skippedDocuments&&result.skippedDocuments.length>0){
+      out+='\n  SKIPPED DOCUMENTS:\n';
+      for(var si=0;si<result.skippedDocuments.length;si++){var sd=result.skippedDocuments[si];out+='    - '+(sd.documentName||sd.documentId)+': '+sd.reason+'\n';}
+    }
+    if(result.referenceDocument){
+      out+='\n──────────────────────────────────────────────────────────────\n  REFERENCE DOCUMENT\n──────────────────────────────────────────────────────────────\n\n';
+      out+='  Selected: '+(result.referenceDocument.documentName||result.referenceDocument.documentId)+'\n';
+      if(result.referenceDocument.centralityScore!=null)out+='  Centrality Score: '+(result.referenceDocument.centralityScore*100).toFixed(1)+'%\n';
+    }
+    if(result.anchors&&result.anchors.length>0){
+      out+='\n──────────────────────────────────────────────────────────────\n  STRUCTURAL ANCHORS ('+result.anchors.length+' discovered)\n──────────────────────────────────────────────────────────────\n';
+      for(var ai=0;ai<result.anchors.length;ai++){
+        var a=result.anchors[ai];
+        out+='\n  Anchor '+(ai+1)+': '+a.anchorId+'\n';
+        out+='    Position: ('+(a.normalizedPosition.x*100).toFixed(1)+'%, '+(a.normalizedPosition.y*100).toFixed(1)+'%)\n';
+        out+='    Size: '+(a.normalizedArea*100).toFixed(2)+'% of page\n';
+        out+='    Type: '+a.surfaceType+'\n';
+        out+='    Frequency: '+a.matchCount+'/'+a.totalDocuments+' ('+(a.frequency*100).toFixed(0)+'%)\n';
+        var filled=Math.round(a.confidence*20);
+        out+='    Confidence: ['+'\u2588'.repeat(filled)+'\u2591'.repeat(20-filled)+']  '+(a.confidence*100).toFixed(1)+'%\n';
+        out+='    Avg Similarity: '+(a.avgSimilarity*100).toFixed(1)+'%\n';
+      }
+    }else{out+='\n  No structural anchors discovered.\n';}
+    if(result.alignmentModel){
+      var am=result.alignmentModel;
+      out+='\n──────────────────────────────────────────────────────────────\n  TEMPLATE ALIGNMENT MODEL\n──────────────────────────────────────────────────────────────\n\n';
+      out+='  Anchors: '+am.anchorCount+' / '+am.totalRegionsInReference+' reference regions\n';
+      out+='  Anchor Coverage: '+(am.anchorCoverage*100).toFixed(1)+'%\n';
+      out+='  Avg Anchor Confidence: '+(am.avgAnchorConfidence*100).toFixed(1)+'%\n';
+      out+='  Avg Anchor Frequency: '+(am.avgAnchorFrequency*100).toFixed(1)+'%\n';
+    }
+    out+='\n══════════════════════════════════════════════════════════════\n';
+    return out;
   }
 
   /* ── Public API ────────────────────────────────────────────────────────── */
@@ -1251,7 +1464,13 @@
     formatStabilityReport: formatStabilityReport,
     createBatchSessionStore: createBatchSessionStore,
     compactForStorage: compactForStorage,
-    BATCH_SESSION_STORAGE_KEY: BATCH_SESSION_STORAGE_KEY
+    BATCH_SESSION_STORAGE_KEY: BATCH_SESSION_STORAGE_KEY,
+    // Structural Correspondence (Phase 2)
+    analyzeCorrespondence: analyzeCorrespondence,
+    formatCorrespondenceReport: formatCorrespondenceReport,
+    selectReferenceDocument: selectReferenceDocument,
+    computeRegionSimilarity: computeRegionSimilarity,
+    matchDocumentRegions: matchDocumentRegions
   };
 
 })(typeof self !== 'undefined' ? self : this);

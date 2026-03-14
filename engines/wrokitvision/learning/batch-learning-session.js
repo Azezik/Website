@@ -455,6 +455,25 @@ function createBatchSessionStore(storage) {
       return true;
     },
 
+    /** Store a correspondence result (Phase 2) for a session. */
+    saveCorrespondenceResult(sessionId, result) {
+      const sessions = _load();
+      const session = sessions.find(function (s) { return s.sessionId === sessionId; });
+      if (!session) return false;
+      // Strip large correspondences array from persisted result — keep only
+      // the alignment model and anchors for storage efficiency.
+      var persistResult = result;
+      if (result && result.correspondences && result.correspondences.length > 50) {
+        persistResult = Object.assign({}, result);
+        persistResult.correspondences = null;
+        persistResult._correspondencesStripped = true;
+      }
+      session.correspondenceResult = persistResult;
+      session.updatedAt = new Date().toISOString();
+      _save(sessions);
+      return true;
+    },
+
     /** Delete a session. */
     deleteSession(sessionId) {
       const sessions = _load().filter(function (s) { return s.sessionId !== sessionId; });

@@ -796,3 +796,328 @@ assert.strictEqual(mixedFormatReport.documentCount, 6, 'Should count all valid d
 console.log('Mixed format (full + compact) analyst tests passed.');
 
 console.log('All Batch Structural Learning Phase 1 tests passed (including validation, compact storage).');
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Phase 2: Structural Correspondence Tests
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const {
+  analyzeCorrespondence,
+  formatCorrespondenceReport,
+  selectReferenceDocument,
+  computeRegionSimilarity,
+  matchDocumentRegions
+} = require('../engines/wrokitvision/learning/batch-correspondence-analyst.js');
+
+// ── Helper: build a mock doc with neighborhood descriptors ────────────────
+
+function buildMockDocWithNeighborhood(opts) {
+  opts = opts || {};
+  var doc = buildMockDocSummary(opts);
+  doc.structurallyValid = true;
+
+  // Populate neighborhood descriptors from adjacency edges
+  var nhMap = {};
+  for (var i = 0; i < doc.regionDescriptors.length; i++) {
+    nhMap[doc.regionDescriptors[i].regionId] = {
+      neighborCount: 0,
+      avgEdgeWeight: 0,
+      containsCount: 0,
+      proximityCount: 0
+    };
+  }
+  var edgesByRegion = {};
+  for (var ei = 0; ei < doc.adjacencyEdges.length; ei++) {
+    var e = doc.adjacencyEdges[ei];
+    if (!edgesByRegion[e.sourceId]) edgesByRegion[e.sourceId] = [];
+    if (!edgesByRegion[e.targetId]) edgesByRegion[e.targetId] = [];
+    edgesByRegion[e.sourceId].push(e);
+    edgesByRegion[e.targetId].push(e);
+  }
+  for (var rid in edgesByRegion) {
+    if (!nhMap[rid]) continue;
+    var edges = edgesByRegion[rid];
+    nhMap[rid].neighborCount = edges.length;
+    nhMap[rid].avgEdgeWeight = edges.reduce(function (s, e) { return s + e.weight; }, 0) / edges.length;
+    nhMap[rid].containsCount = edges.filter(function (e) { return e.edgeType === 'contains'; }).length;
+    nhMap[rid].proximityCount = edges.filter(function (e) { return e.edgeType === 'spatial_proximity'; }).length;
+  }
+  doc.neighborhoodDescriptors = nhMap;
+  return doc;
+}
+
+// ── selectReferenceDocument ──────────────────────────────────────────────
+
+(function testSelectReferenceDocument() {
+  var docs = [];
+  for (var i = 0; i < 4; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'ref-test-' + i + '.png' }));
+  }
+
+  var ref = selectReferenceDocument(docs);
+  assert.ok(ref, 'Should return a reference selection');
+  assert.ok(ref.documentId, 'Should have a documentId');
+  assert.ok(typeof ref.centralityScore === 'number', 'Should have a centrality score');
+  assert.ok(ref.scores.length === 4, 'Should have scores for all documents');
+
+  // Single doc
+  var singleRef = selectReferenceDocument([docs[0]]);
+  assert.strictEqual(singleRef.documentId, docs[0].documentId);
+  assert.strictEqual(singleRef.centralityScore, 1);
+
+  // Null/empty
+  assert.strictEqual(selectReferenceDocument(null), null);
+  assert.strictEqual(selectReferenceDocument([]), null);
+
+  console.log('selectReferenceDocument tests passed.');
+})();
+
+// ── computeRegionSimilarity ──────────────────────────────────────────────
+
+(function testComputeRegionSimilarity() {
+  var regionA = {
+    centroid: { x: 0.2, y: 0.3 },
+    normalizedBbox: { x: 0.15, y: 0.25, w: 0.1, h: 0.1 },
+    normalizedArea: 0.01,
+    aspectRatio: 1.0,
+    textDensity: 0.6,
+    confidence: 0.8,
+    surfaceType: 'text_dense_surface'
+  };
+
+  // Identical region
+  var simSelf = computeRegionSimilarity(regionA, regionA, {}, {});
+  assert.ok(simSelf.similarity > 0.9, 'Identical regions should have very high similarity: ' + simSelf.similarity);
+
+  // Very different region
+  var regionB = {
+    centroid: { x: 0.8, y: 0.9 },
+    normalizedBbox: { x: 0.7, y: 0.8, w: 0.2, h: 0.2 },
+    normalizedArea: 0.04,
+    aspectRatio: 3.0,
+    textDensity: 0.1,
+    confidence: 0.3,
+    surfaceType: 'visual_component'
+  };
+  var simDiff = computeRegionSimilarity(regionA, regionB, {}, {});
+  assert.ok(simDiff.similarity < 0.6, 'Very different regions should have low similarity: ' + simDiff.similarity);
+  assert.ok(simDiff.similarity > 0, 'Similarity should be positive');
+
+  // Check dimensions are present
+  assert.ok(simDiff.dimensions.position !== undefined);
+  assert.ok(simDiff.dimensions.size !== undefined);
+  assert.ok(simDiff.dimensions.dimension !== undefined);
+  assert.ok(simDiff.dimensions.neighborhood !== undefined);
+  assert.ok(simDiff.dimensions.semantic !== undefined);
+
+  // Nearby region with same type
+  var regionC = {
+    centroid: { x: 0.22, y: 0.32 },
+    normalizedBbox: { x: 0.17, y: 0.27, w: 0.1, h: 0.1 },
+    normalizedArea: 0.01,
+    aspectRatio: 1.1,
+    textDensity: 0.55,
+    confidence: 0.78,
+    surfaceType: 'text_dense_surface'
+  };
+  var simNear = computeRegionSimilarity(regionA, regionC, {}, {});
+  assert.ok(simNear.similarity > simDiff.similarity, 'Nearby similar region should score higher than distant different one');
+
+  console.log('computeRegionSimilarity tests passed.');
+})();
+
+// ── matchDocumentRegions ─────────────────────────────────────────────────
+
+(function testMatchDocumentRegions() {
+  // Create two similar documents
+  var doc1 = buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'match-1.png' });
+  var doc2 = buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'match-2.png' });
+
+  var matches = matchDocumentRegions(doc1, doc2);
+  assert.ok(Array.isArray(matches), 'Should return an array');
+  // With similar structure, expect some matches
+  assert.ok(matches.length > 0, 'Similar docs should produce matches');
+
+  // Each match should have required fields
+  for (var i = 0; i < matches.length; i++) {
+    assert.ok(matches[i].refRegionId, 'Match should have refRegionId');
+    assert.ok(matches[i].tgtRegionId, 'Match should have tgtRegionId');
+    assert.ok(typeof matches[i].similarity === 'number', 'Match should have similarity');
+    assert.ok(matches[i].similarity >= 0.4, 'Match similarity should be >= minSimilarity');
+  }
+
+  // No duplicate assignments
+  var usedRef = {};
+  var usedTgt = {};
+  for (var j = 0; j < matches.length; j++) {
+    assert.ok(!usedRef[matches[j].refRegionId], 'Each ref region should be matched at most once');
+    assert.ok(!usedTgt[matches[j].tgtRegionId], 'Each tgt region should be matched at most once');
+    usedRef[matches[j].refRegionId] = true;
+    usedTgt[matches[j].tgtRegionId] = true;
+  }
+
+  // Empty docs
+  var emptyMatches = matchDocumentRegions({ regionDescriptors: [] }, doc2);
+  assert.strictEqual(emptyMatches.length, 0, 'Empty doc should produce no matches');
+
+  // High threshold
+  var strictMatches = matchDocumentRegions(doc1, doc2, { minSimilarity: 0.99 });
+  assert.ok(strictMatches.length <= matches.length, 'Stricter threshold should produce fewer or equal matches');
+
+  console.log('matchDocumentRegions tests passed.');
+})();
+
+// ── analyzeCorrespondence: full pipeline ─────────────────────────────────
+
+(function testAnalyzeCorrespondence() {
+  // Build a batch of similar documents
+  var batchDocs = [];
+  for (var i = 0; i < 5; i++) {
+    batchDocs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'batch-' + i + '.png' }));
+  }
+
+  var result = analyzeCorrespondence(batchDocs);
+
+  assert.ok(result, 'Should return a result');
+  assert.ok(['complete', 'no_anchors_found', 'low_confidence'].indexOf(result.status) >= 0,
+    'Status should be a valid value: ' + result.status);
+  assert.ok(result.analyzedAt, 'Should have analyzedAt timestamp');
+  assert.strictEqual(result.documentCount, 5, 'Should report correct document count');
+  assert.strictEqual(result.validDocumentCount, 5, 'All docs should be valid');
+
+  // Reference document
+  assert.ok(result.referenceDocument, 'Should have reference document');
+  assert.ok(result.referenceDocument.documentId, 'Reference should have documentId');
+
+  // Correspondences
+  assert.ok(Array.isArray(result.correspondences), 'Should have correspondences array');
+
+  // Anchors
+  assert.ok(Array.isArray(result.anchors), 'Should have anchors array');
+  for (var ai = 0; ai < result.anchors.length; ai++) {
+    var a = result.anchors[ai];
+    assert.ok(a.anchorId, 'Anchor should have anchorId');
+    assert.ok(a.refRegionId, 'Anchor should have refRegionId');
+    assert.ok(a.normalizedPosition, 'Anchor should have normalizedPosition');
+    assert.ok(a.normalizedBbox, 'Anchor should have normalizedBbox');
+    assert.ok(typeof a.frequency === 'number', 'Anchor should have frequency');
+    assert.ok(typeof a.confidence === 'number', 'Anchor should have confidence');
+    assert.ok(a.confidence >= 0 && a.confidence <= 1, 'Confidence should be 0-1');
+    assert.ok(a.frequency >= 0 && a.frequency <= 1, 'Frequency should be 0-1');
+    assert.ok(a.matchCount >= 0, 'matchCount should be non-negative');
+  }
+
+  // Alignment model
+  assert.ok(result.alignmentModel, 'Should have alignment model');
+  assert.ok(result.alignmentModel.referenceDocumentId, 'Model should have referenceDocumentId');
+  assert.ok(typeof result.alignmentModel.anchorCount === 'number', 'Model should have anchorCount');
+  assert.ok(typeof result.alignmentModel.anchorCoverage === 'number', 'Model should have anchorCoverage');
+
+  console.log('analyzeCorrespondence full pipeline tests passed.');
+})();
+
+// ── analyzeCorrespondence: edge cases ────────────────────────────────────
+
+(function testAnalyzeCorrespondenceEdgeCases() {
+  // Insufficient data
+  var r1 = analyzeCorrespondence([]);
+  assert.strictEqual(r1.status, 'insufficient_data');
+
+  var r2 = analyzeCorrespondence([buildMockDocWithNeighborhood()]);
+  assert.strictEqual(r2.status, 'insufficient_data');
+
+  // Compact documents should be skipped
+  var compactDocs = [];
+  for (var i = 0; i < 3; i++) {
+    var full = buildMockDocWithNeighborhood({ name: 'compact-' + i + '.png' });
+    compactDocs.push(compactForStorage(full));
+  }
+  var r3 = analyzeCorrespondence(compactDocs);
+  assert.strictEqual(r3.status, 'insufficient_valid_data', 'Compact docs should not be usable for correspondence');
+  assert.ok(r3.skippedDocuments.length > 0, 'Should report skipped documents');
+
+  // Mix of compact and full — should work if at least 2 full
+  var mixedDocs = [
+    buildMockDocWithNeighborhood({ name: 'full-a.png' }),
+    buildMockDocWithNeighborhood({ name: 'full-b.png' }),
+    compactForStorage(buildMockDocWithNeighborhood({ name: 'compact-c.png' }))
+  ];
+  var r4 = analyzeCorrespondence(mixedDocs);
+  assert.notStrictEqual(r4.status, 'insufficient_valid_data', 'Should work with 2 full docs + 1 compact');
+  assert.strictEqual(r4.validDocumentCount, 2);
+  assert.strictEqual(r4.skippedDocuments.length, 1);
+
+  // Force reference document
+  var docs = [
+    buildMockDocWithNeighborhood({ name: 'forced-ref.png' }),
+    buildMockDocWithNeighborhood({ name: 'other.png' }),
+    buildMockDocWithNeighborhood({ name: 'other2.png' })
+  ];
+  var r5 = analyzeCorrespondence(docs, { referenceDocumentId: docs[1].documentId });
+  assert.strictEqual(r5.referenceDocument.documentId, docs[1].documentId,
+    'Should use forced reference document');
+
+  console.log('analyzeCorrespondence edge case tests passed.');
+})();
+
+// ── formatCorrespondenceReport ───────────────────────────────────────────
+
+(function testFormatCorrespondenceReport() {
+  // Null input
+  assert.strictEqual(formatCorrespondenceReport(null), '[No correspondence data]');
+
+  // Insufficient data result
+  var insuffResult = { status: 'insufficient_data', message: 'Not enough docs.' };
+  assert.strictEqual(formatCorrespondenceReport(insuffResult), 'Not enough docs.');
+
+  // Full result
+  var docs = [];
+  for (var i = 0; i < 4; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'fmt-' + i + '.png' }));
+  }
+  var result = analyzeCorrespondence(docs);
+  var report = formatCorrespondenceReport(result);
+
+  assert.ok(typeof report === 'string', 'Report should be a string');
+  assert.ok(report.length > 100, 'Report should have substantial content');
+  assert.ok(report.indexOf('STRUCTURAL CORRESPONDENCE REPORT') >= 0, 'Should contain report title');
+  assert.ok(report.indexOf('REFERENCE DOCUMENT') >= 0, 'Should contain reference section');
+  assert.ok(report.indexOf('TEMPLATE ALIGNMENT MODEL') >= 0 || report.indexOf('No structural anchors') >= 0,
+    'Should contain alignment model or no anchors message');
+
+  console.log('formatCorrespondenceReport tests passed.');
+})();
+
+// ── Session store: saveCorrespondenceResult ──────────────────────────────
+
+(function testSaveCorrespondenceResult() {
+  var store = createBatchSessionStore();
+  var session = store.createSession({ name: 'Corr Test' });
+
+  // Add docs
+  for (var i = 0; i < 3; i++) {
+    var doc = buildMockDocWithNeighborhood({ name: 'store-test-' + i + '.png' });
+    store.addDocument(session.sessionId, doc);
+  }
+
+  // Run correspondence
+  var sess = store.getSession(session.sessionId);
+  var result = analyzeCorrespondence(sess.documents);
+
+  // Save result
+  var saved = store.saveCorrespondenceResult(session.sessionId, result);
+  assert.strictEqual(saved, true, 'saveCorrespondenceResult should return true');
+
+  // Retrieve and verify
+  var loaded = store.getSession(session.sessionId);
+  assert.ok(loaded.correspondenceResult, 'Session should have correspondenceResult');
+  assert.strictEqual(loaded.correspondenceResult.status, result.status, 'Status should match');
+
+  // Non-existent session
+  var r = store.saveCorrespondenceResult('nonexistent', result);
+  assert.strictEqual(r, false, 'Should return false for non-existent session');
+
+  console.log('saveCorrespondenceResult tests passed.');
+})();
+
+console.log('All Phase 2 Structural Correspondence tests passed.');
