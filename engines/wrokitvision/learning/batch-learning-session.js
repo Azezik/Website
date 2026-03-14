@@ -474,6 +474,17 @@ function createBatchSessionStore(storage) {
       return true;
     },
 
+    /** Store geometry profiles (Phase 3A) for a session. */
+    saveGeometryProfiles(sessionId, profiles) {
+      const sessions = _load();
+      const session = sessions.find(function (s) { return s.sessionId === sessionId; });
+      if (!session) return false;
+      session.geometryProfiles = profiles;
+      session.updatedAt = new Date().toISOString();
+      _save(sessions);
+      return true;
+    },
+
     /** Delete a session. */
     deleteSession(sessionId) {
       const sessions = _load().filter(function (s) { return s.sessionId !== sessionId; });

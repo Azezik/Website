@@ -796,6 +796,78 @@
               </div>
             </div>
 
+            <div id="batch-phase3a-panel" style="display:none;margin-top:16px;">
+              <div style="border-top:2px solid var(--border,#ddd);padding-top:12px;">
+                <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+                  <h4 style="margin:0;">Phase 3A — Field Intelligence</h4>
+                  <span id="batch-phase3a-status" class="sub" style="color:var(--muted);"></span>
+                </div>
+                <p class="sub" style="margin:0 0 12px;color:var(--muted);">
+                  Review extraction results and provide corrections to improve extraction geometry.
+                  Correct 2–3 documents for best results. Text corrections are used only to evaluate
+                  where the system should extract from, not to normalize text.
+                </p>
+
+                <!-- Corrections Grid -->
+                <div id="batch-phase3a-corrections" style="margin-bottom:12px;">
+                  <div class="actions" style="gap:8px;margin-bottom:8px;align-items:center;">
+                    <label class="sub" style="font-weight:600;">Select document to correct:</label>
+                    <select id="batch-phase3a-doc-select" style="max-width:320px;">
+                      <option value="">— Select a document —</option>
+                    </select>
+                    <button id="batch-phase3a-view-doc-btn" class="btn ghost" type="button" style="font-size:12px;padding:4px 10px;">View Document</button>
+                  </div>
+
+                  <div id="batch-phase3a-correction-fields" style="display:none;margin-bottom:12px;">
+                    <div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;background:var(--surface,#fafafa);">
+                      <div class="actions" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <strong style="font-size:14px;">Field Corrections</strong>
+                        <span id="batch-phase3a-doc-label" class="sub" style="color:var(--muted);font-size:12px;"></span>
+                      </div>
+                      <div id="batch-phase3a-fields-container"></div>
+                      <div class="actions" style="gap:8px;margin-top:8px;">
+                        <button id="batch-phase3a-save-correction-btn" class="btn ghost" type="button" style="font-size:12px;padding:4px 10px;">Save Correction</button>
+                        <span id="batch-phase3a-correction-status" class="sub" style="color:var(--muted);font-size:12px;"></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Saved corrections list -->
+                  <div id="batch-phase3a-saved-corrections" style="margin-bottom:12px;"></div>
+
+                  <div class="actions" style="gap:8px;margin-top:8px;">
+                    <button id="batch-phase3a-learn-btn" class="btn primary" type="button" disabled>Learn Geometry</button>
+                    <button id="batch-phase3a-clear-corrections-btn" class="btn ghost" type="button" style="font-size:12px;">Clear Corrections</button>
+                  </div>
+                </div>
+
+                <!-- Learning Results -->
+                <div id="batch-phase3a-results" style="display:none;margin-top:12px;">
+                  <div style="border-top:1px solid var(--border,#ddd);padding-top:12px;">
+                    <div class="actions" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+                      <h4 style="margin:0;">Geometry Learning Results</h4>
+                      <span id="batch-phase3a-results-status" class="sub" style="color:var(--muted);"></span>
+                    </div>
+
+                    <details id="batch-phase3a-profiles-panel" class="panel minimal" style="margin-bottom:12px;" open>
+                      <summary>Field Geometry Profiles (<span id="batch-phase3a-profile-count">0</span>)</summary>
+                      <div id="batch-phase3a-profiles-content" style="margin-top:8px;"></div>
+                    </details>
+
+                    <details id="batch-phase3a-details-panel" class="panel minimal" style="margin-bottom:12px;">
+                      <summary>Per-Document Details</summary>
+                      <div id="batch-phase3a-details-content" style="margin-top:8px;"></div>
+                    </details>
+
+                    <div class="actions" style="gap:8px;margin-top:12px;">
+                      <button id="batch-phase3a-export-btn" class="btn ghost" type="button">Export Geometry Report (.txt)</button>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
           </div>
         </div><!-- /learning-batch-tab -->
 

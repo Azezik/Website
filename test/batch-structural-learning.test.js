@@ -1536,3 +1536,290 @@ function buildExtractionTargets() {
 })();
 
 console.log('All Phase 2B Anchor Refinement + Extraction tests passed.');
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Phase 3A: Field Intelligence Tests
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const {
+  learnFieldGeometry,
+  optimizeFieldGeometry,
+  generateCandidates,
+  scoreCandidate,
+  applyGeometryProfile,
+  formatGeometryReport,
+  textSimilarity,
+  levenshteinDistance,
+  tokenOverlap
+} = require('../engines/wrokitvision/learning/batch-field-intelligence.js');
+
+// ── textSimilarity helpers ───────────────────────────────────────────────
+
+(function testTextSimilarityHelpers() {
+  assert.strictEqual(levenshteinDistance('abc', 'abc'), 0, 'Identical strings = 0');
+  assert.ok(levenshteinDistance('abc', 'xyz') > 0.5, 'Very different strings');
+  assert.strictEqual(levenshteinDistance('', 'abc'), 1, 'Empty vs non-empty = 1');
+
+  assert.strictEqual(tokenOverlap('Invoice 12345', '12345'), 1, 'Full token overlap');
+  assert.strictEqual(tokenOverlap('Invoice 12345', 'abcde'), 0, 'No token overlap');
+  assert.ok(tokenOverlap('Invoice 12345 Total', 'Invoice Total') === 1, 'Partial match');
+
+  var sim1 = textSimilarity('Invoice 12345', 'Invoice 12345');
+  assert.ok(sim1 > 0.95, 'Identical text similarity should be ~1: ' + sim1);
+  var sim2 = textSimilarity('Invoice 12345', 'totally different');
+  assert.ok(sim2 < 0.3, 'Very different text similarity should be low: ' + sim2);
+  var sim3 = textSimilarity('', 'abc');
+  assert.strictEqual(sim3, 0, 'Empty extracted = 0');
+  var sim4 = textSimilarity('abc', '');
+  assert.strictEqual(sim4, 0, 'Empty corrected = 0 when extracted has text');
+
+  console.log('textSimilarity helper tests passed.');
+})();
+
+// ── generateCandidates ───────────────────────────────────────────────────
+
+(function testGenerateCandidates() {
+  var box = { x0n: 0.3, y0n: 0.2, wN: 0.15, hN: 0.05 };
+  var doc = buildMockDocWithNeighborhood({ regionCount: 6, edgeCount: 4 });
+
+  var candidates = generateCandidates(box, doc);
+  assert.ok(candidates.length > 10, 'Should generate multiple candidates: ' + candidates.length);
+
+  // First candidate should be the original
+  assert.strictEqual(candidates[0].family, 'original', 'First candidate is original');
+  assert.strictEqual(candidates[0].normBox.x0n, box.x0n);
+
+  // Should have all three families
+  var families = {};
+  for (var i = 0; i < candidates.length; i++) families[candidates[i].family] = true;
+  assert.ok(families['original'], 'Has original family');
+  assert.ok(families['local_search'], 'Has local_search family');
+  // structural_expansion may or may not be present depending on mock doc regions
+
+  // All candidates should have valid normBox values
+  for (var ci = 0; ci < candidates.length; ci++) {
+    var nb = candidates[ci].normBox;
+    assert.ok(nb.x0n >= 0 && nb.x0n <= 1, 'x0n in range: ' + nb.x0n);
+    assert.ok(nb.y0n >= 0 && nb.y0n <= 1, 'y0n in range: ' + nb.y0n);
+    assert.ok(nb.wN > 0, 'wN positive: ' + nb.wN);
+    assert.ok(nb.hN > 0, 'hN positive: ' + nb.hN);
+  }
+
+  // Without refDoc
+  var noCandidates = generateCandidates(box, null);
+  assert.ok(noCandidates.length > 5, 'Should still generate candidates without refDoc');
+
+  console.log('generateCandidates tests passed.');
+})();
+
+// ── scoreCandidate ───────────────────────────────────────────────────────
+
+(function testScoreCandidate() {
+  var origBox = { x0n: 0.3, y0n: 0.2, wN: 0.15, hN: 0.05 };
+
+  // Original candidate (identical box) with matching text should score well
+  var cand1 = { normBox: { x0n: 0.3, y0n: 0.2, wN: 0.15, hN: 0.05 } };
+  var s1 = scoreCandidate(cand1, 'Invoice 12345', 0.9, 'Invoice 12345', origBox, 3);
+  assert.ok(s1.totalScore > 0.5, 'Good match should score > 0.5: ' + s1.totalScore);
+  assert.ok(s1.alignmentScore > 0.8, 'Same box alignment should be high: ' + s1.alignmentScore);
+
+  // Far-away candidate with matching text should score lower
+  var cand2 = { normBox: { x0n: 0.8, y0n: 0.8, wN: 0.15, hN: 0.05 } };
+  var s2 = scoreCandidate(cand2, 'Invoice 12345', 0.9, 'Invoice 12345', origBox, 3);
+  assert.ok(s2.totalScore < s1.totalScore, 'Misaligned candidate should score lower');
+  assert.ok(s2.alignmentScore < 0.3, 'Far alignment should be low: ' + s2.alignmentScore);
+
+  // Original position with wrong text
+  var s3 = scoreCandidate(cand1, 'wrong text', 0.5, 'Invoice 12345', origBox, 2);
+  assert.ok(s3.similarityScore < 0.3, 'Wrong text similarity should be low: ' + s3.similarityScore);
+
+  // Zero tokens
+  var s4 = scoreCandidate(cand1, '', 0, 'Invoice 12345', origBox, 0);
+  assert.strictEqual(s4.confidenceScore, 0, 'Zero tokens = zero confidence');
+
+  console.log('scoreCandidate tests passed.');
+})();
+
+// ── optimizeFieldGeometry ────────────────────────────────────────────────
+
+(function testOptimizeFieldGeometry() {
+  var doc = buildMockDocWithNeighborhood({ regionCount: 6, edgeCount: 4 });
+  var tokens = [
+    { x: 240, y: 200, w: 60, h: 14, text: 'Invoice', confidence: 0.9 },
+    { x: 305, y: 200, w: 50, h: 14, text: '12345', confidence: 0.95 },
+    { x: 240, y: 220, w: 40, h: 14, text: 'Date:', confidence: 0.85 }
+  ];
+  var viewport = { width: 800, height: 1000 };
+
+  var fieldResult = {
+    fieldKey: 'field_1',
+    label: 'Invoice Number',
+    transferredNormBox: { x0n: 0.3, y0n: 0.2, wN: 0.15, hN: 0.04 }
+  };
+
+  var result = optimizeFieldGeometry(fieldResult, 'Invoice 12345', tokens, viewport, doc);
+  assert.ok(result, 'Should return result');
+  assert.strictEqual(result.fieldKey, 'field_1');
+  assert.ok(result.candidateCount > 10, 'Should evaluate multiple candidates: ' + result.candidateCount);
+  assert.ok(result.bestCandidate, 'Should have best candidate');
+  assert.ok(result.originalCandidate, 'Should have original candidate');
+  assert.ok(typeof result.improved === 'boolean');
+  assert.ok(result.offset, 'Should have offset');
+  assert.ok(result.expansion, 'Should have expansion');
+  assert.ok(result.topCandidates.length <= 5, 'Top candidates capped at 5');
+
+  console.log('optimizeFieldGeometry tests passed.');
+})();
+
+// ── learnFieldGeometry ───────────────────────────────────────────────────
+
+(function testLearnFieldGeometry() {
+  // Build mock extraction result
+  var docs = [];
+  for (var i = 0; i < 3; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'geom-' + i + '.png' }));
+  }
+
+  var corrResult = analyzeCorrespondence(docs);
+  var targets = buildExtractionTargets();
+  var refDocId = corrResult.referenceDocument.documentId;
+  var refDoc = docs.find(function(d) { return d.documentId === refDocId; });
+  var refinement = refineAnchors(corrResult, targets, refDoc);
+
+  var batchTokens = {};
+  for (var di = 0; di < docs.length; di++) {
+    batchTokens[docs[di].documentId] = {
+      tokens: [
+        { x: 480, y: 50, w: 80, h: 14, text: 'INV-001', confidence: 0.9 },
+        { x: 560, y: 850, w: 60, h: 14, text: '$1,234', confidence: 0.85 },
+        { x: 480, y: 100, w: 70, h: 14, text: '2024-01-15', confidence: 0.9 }
+      ],
+      viewport: { width: 800, height: 1000 }
+    };
+  }
+
+  var extractionResult = extractFromBatch(refinement, corrResult, refDoc, docs, batchTokens);
+
+  // Create corrections for 2 documents
+  var corrections = [];
+  for (var ci = 0; ci < Math.min(2, extractionResult.results.length); ci++) {
+    var dr = extractionResult.results[ci];
+    corrections.push({
+      documentId: dr.documentId,
+      fields: [
+        { fieldKey: 'field_1', correctedText: 'INV-001' },
+        { fieldKey: 'field_2', correctedText: '$1,234' }
+      ]
+    });
+  }
+
+  var result = learnFieldGeometry(extractionResult, corrections, batchTokens, refDoc);
+  assert.ok(result, 'Should return result');
+  assert.ok(['improved', 'no_improvement'].indexOf(result.status) >= 0, 'Status should be valid: ' + result.status);
+  assert.ok(result.fieldProfiles.length > 0, 'Should have field profiles');
+  assert.ok(result.perDocumentResults.length > 0, 'Should have per-document results');
+  assert.strictEqual(result.correctionDocCount, corrections.length);
+
+  for (var pi = 0; pi < result.fieldProfiles.length; pi++) {
+    var p = result.fieldProfiles[pi];
+    assert.ok(p.fieldKey, 'Profile has fieldKey');
+    assert.ok(p.preferredOffset, 'Profile has preferredOffset');
+    assert.ok(p.preferredExpansion, 'Profile has preferredExpansion');
+    assert.ok(typeof p.geometryConfidence === 'number', 'Profile has geometryConfidence');
+    assert.ok(p.dominantFamily, 'Profile has dominantFamily');
+    assert.ok(typeof p.improvedCount === 'number');
+  }
+
+  // No data case
+  var noDataResult = learnFieldGeometry(null, null, batchTokens, refDoc);
+  assert.strictEqual(noDataResult.status, 'no_data');
+
+  console.log('learnFieldGeometry tests passed.');
+})();
+
+// ── applyGeometryProfile ─────────────────────────────────────────────────
+
+(function testApplyGeometryProfile() {
+  var box = { x0n: 0.3, y0n: 0.2, wN: 0.15, hN: 0.05 };
+
+  // With a valid profile
+  var profile = {
+    preferredOffset: { dx: 0.02, dy: -0.01 },
+    preferredExpansion: { dw: 0.01, dh: 0.005 },
+    geometryConfidence: 0.7
+  };
+  var result = applyGeometryProfile(box, profile);
+  assert.ok(result.applied, 'Should apply profile');
+  assert.ok(Math.abs(result.refinedBox.x0n - 0.32) < 0.001, 'X shifted: ' + result.refinedBox.x0n);
+  assert.ok(Math.abs(result.refinedBox.y0n - 0.19) < 0.001, 'Y shifted: ' + result.refinedBox.y0n);
+  assert.ok(result.refinedBox.wN > box.wN, 'Width expanded');
+
+  // Low confidence profile should not apply
+  var lowProfile = { preferredOffset: { dx: 0.1, dy: 0.1 }, preferredExpansion: { dw: 0, dh: 0 }, geometryConfidence: 0.05 };
+  var lowResult = applyGeometryProfile(box, lowProfile);
+  assert.ok(!lowResult.applied, 'Low confidence should not apply');
+
+  // Null profile
+  var nullResult = applyGeometryProfile(box, null);
+  assert.ok(!nullResult.applied, 'Null profile should not apply');
+
+  console.log('applyGeometryProfile tests passed.');
+})();
+
+// ── formatGeometryReport ─────────────────────────────────────────────────
+
+(function testFormatGeometryReport() {
+  assert.strictEqual(formatGeometryReport(null), '[No geometry learning data]');
+
+  var noData = { status: 'no_data', message: 'No data.' };
+  assert.strictEqual(formatGeometryReport(noData), 'No data.');
+
+  var mockResult = {
+    status: 'improved',
+    message: 'Geometry improved.',
+    correctionDocCount: 2,
+    fieldProfiles: [{
+      label: 'Test', fieldKey: 'f1', preferredOffset: { dx: 0.01, dy: 0.02 },
+      preferredExpansion: { dw: 0.005, dh: 0 }, geometryConfidence: 0.8,
+      dominantFamily: 'local_search', improvedCount: 2, correctionCount: 2
+    }],
+    perDocumentResults: [{
+      documentName: 'doc1.pdf',
+      fields: [{ label: 'Test', improved: true, improvement: 0.15, bestCandidate: { family: 'local_search' } }]
+    }]
+  };
+  var report = formatGeometryReport(mockResult);
+  assert.ok(report.indexOf('FIELD INTELLIGENCE REPORT') >= 0, 'Has title');
+  assert.ok(report.indexOf('IMPROVED') >= 0, 'Has status');
+  assert.ok(report.indexOf('FIELD GEOMETRY PROFILES') >= 0, 'Has profiles section');
+
+  console.log('formatGeometryReport tests passed.');
+})();
+
+// ── saveGeometryProfiles in session store ─────────────────────────────────
+
+(function testSaveGeometryProfiles() {
+  var store = createBatchSessionStore();
+  var session = store.createSession({ name: 'Geometry Test' });
+
+  var profiles = [
+    { fieldKey: 'f1', label: 'Test', preferredOffset: { dx: 0.01, dy: 0 }, preferredExpansion: { dw: 0, dh: 0 }, geometryConfidence: 0.8 }
+  ];
+
+  var saved = store.saveGeometryProfiles(session.sessionId, profiles);
+  assert.ok(saved, 'Should save successfully');
+
+  var loaded = store.getSession(session.sessionId);
+  assert.ok(loaded.geometryProfiles, 'Should have geometryProfiles');
+  assert.strictEqual(loaded.geometryProfiles.length, 1);
+  assert.strictEqual(loaded.geometryProfiles[0].fieldKey, 'f1');
+
+  // Non-existent session
+  var bad = store.saveGeometryProfiles('nope', profiles);
+  assert.ok(!bad, 'Should return false for non-existent session');
+
+  store.clear();
+  console.log('saveGeometryProfiles tests passed.');
+})();
+
+console.log('All Phase 3A Field Intelligence tests passed.');
