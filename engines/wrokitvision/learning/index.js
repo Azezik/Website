@@ -61,6 +61,7 @@ const LearningExport = require('./learning-export');
 const BatchLearningSession = require('./batch-learning-session');
 const BatchStructuralAnalyst = require('./batch-structural-analyst');
 const BatchCorrespondenceAnalyst = require('./batch-correspondence-analyst');
+const BatchAnchorRefinement = require('./batch-anchor-refinement');
 
 module.exports = {
   LearningStore,
@@ -70,5 +71,6 @@ module.exports = {
   LearningExport,
   BatchLearningSession,
   BatchStructuralAnalyst,
-  BatchCorrespondenceAnalyst
+  BatchCorrespondenceAnalyst,
+  BatchAnchorRefinement
 };

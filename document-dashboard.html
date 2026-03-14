@@ -690,6 +690,112 @@
               </div>
             </div>
 
+            <!-- ═══ Phase 2B: Refine Anchors + BBOX-Guided Extraction ═══ -->
+            <div id="batch-phase2b-panel" style="display:none;margin-top:16px;">
+              <div style="border-top:2px solid var(--border,#ddd);padding-top:12px;">
+                <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+                  <h4 style="margin:0;">Phase 2B — Refine Anchors</h4>
+                  <span id="batch-phase2b-status" class="sub" style="color:var(--muted);"></span>
+                </div>
+                <p class="sub" style="margin:0 0 12px;color:var(--muted);">
+                  Draw extraction targets on a reference document to refine which anchors
+                  are relevant for locating specific regions across the batch.
+                </p>
+
+                <!-- Step 1: Document selector -->
+                <div id="batch-phase2b-doc-select-section" style="margin-bottom:12px;">
+                  <label class="sub" style="font-weight:600;display:block;margin-bottom:4px;">Select refinement document:</label>
+                  <div class="actions" style="gap:8px;flex-wrap:wrap;">
+                    <select id="batch-phase2b-doc-select" style="max-width:320px;">
+                      <option value="">— Select a document —</option>
+                    </select>
+                    <button id="batch-phase2b-load-doc-btn" class="btn ghost" type="button">Load Document</button>
+                  </div>
+                </div>
+
+                <!-- Step 2: BBOX Drawing Wizard -->
+                <div id="batch-phase2b-wizard" style="display:none;margin-bottom:12px;">
+                  <div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;background:var(--surface,#fafafa);">
+                    <div class="actions" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+                      <strong style="font-size:14px;">Extraction Target Wizard</strong>
+                      <span id="batch-phase2b-wizard-step" class="sub" style="color:var(--muted);">Step 1 of 3</span>
+                    </div>
+
+                    <!-- Wizard fields -->
+                    <div id="batch-phase2b-field-1" class="batch-wizard-field" data-field-idx="0" style="margin-bottom:8px;">
+                      <div class="actions" style="gap:8px;align-items:center;">
+                        <span id="batch-phase2b-field-1-indicator" style="width:10px;height:10px;border-radius:50%;background:var(--border,#ccc);display:inline-block;flex-shrink:0;"></span>
+                        <label class="sub" style="flex:1;font-weight:600;">Field 1:</label>
+                        <input id="batch-phase2b-field-1-name" type="text" placeholder="e.g., Invoice Number" value="Field 1" style="max-width:180px;font-size:13px;" />
+                        <button class="btn ghost batch-phase2b-draw-btn" data-field-idx="0" type="button" style="font-size:12px;padding:4px 10px;">Draw BBOX</button>
+                        <span id="batch-phase2b-field-1-status" class="sub" style="color:var(--muted);font-size:12px;min-width:70px;">not drawn</span>
+                      </div>
+                    </div>
+                    <div id="batch-phase2b-field-2" class="batch-wizard-field" data-field-idx="1" style="margin-bottom:8px;">
+                      <div class="actions" style="gap:8px;align-items:center;">
+                        <span id="batch-phase2b-field-2-indicator" style="width:10px;height:10px;border-radius:50%;background:var(--border,#ccc);display:inline-block;flex-shrink:0;"></span>
+                        <label class="sub" style="flex:1;font-weight:600;">Field 2:</label>
+                        <input id="batch-phase2b-field-2-name" type="text" placeholder="e.g., Total Amount" value="Field 2" style="max-width:180px;font-size:13px;" />
+                        <button class="btn ghost batch-phase2b-draw-btn" data-field-idx="1" type="button" style="font-size:12px;padding:4px 10px;">Draw BBOX</button>
+                        <span id="batch-phase2b-field-2-status" class="sub" style="color:var(--muted);font-size:12px;min-width:70px;">not drawn</span>
+                      </div>
+                    </div>
+                    <div id="batch-phase2b-field-3" class="batch-wizard-field" data-field-idx="2" style="margin-bottom:8px;">
+                      <div class="actions" style="gap:8px;align-items:center;">
+                        <span id="batch-phase2b-field-3-indicator" style="width:10px;height:10px;border-radius:50%;background:var(--border,#ccc);display:inline-block;flex-shrink:0;"></span>
+                        <label class="sub" style="flex:1;font-weight:600;">Field 3:</label>
+                        <input id="batch-phase2b-field-3-name" type="text" placeholder="e.g., Date" value="Field 3" style="max-width:180px;font-size:13px;" />
+                        <button class="btn ghost batch-phase2b-draw-btn" data-field-idx="2" type="button" style="font-size:12px;padding:4px 10px;">Draw BBOX</button>
+                        <span id="batch-phase2b-field-3-status" class="sub" style="color:var(--muted);font-size:12px;min-width:70px;">not drawn</span>
+                      </div>
+                    </div>
+
+                    <!-- Viewport for drawing -->
+                    <div id="batch-phase2b-viewport" style="display:none;position:relative;margin:12px 0;border:1px solid var(--border,#ddd);border-radius:4px;overflow:hidden;background:#f5f5f5;">
+                      <div id="batch-phase2b-drawing-hint" style="position:absolute;top:8px;left:8px;z-index:10;background:rgba(0,0,0,0.7);color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;pointer-events:none;"></div>
+                      <canvas id="batch-phase2b-canvas" style="display:block;max-width:100%;cursor:crosshair;"></canvas>
+                      <canvas id="batch-phase2b-overlay" style="position:absolute;top:0;left:0;pointer-events:none;"></canvas>
+                    </div>
+
+                    <div class="actions" style="gap:8px;margin-top:8px;">
+                      <button id="batch-phase2b-refine-btn" class="btn primary" type="button" disabled>Refine Anchors</button>
+                      <button id="batch-phase2b-reset-btn" class="btn ghost" type="button">Reset</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Refinement Results -->
+                <div id="batch-phase2b-results" style="display:none;margin-top:12px;">
+                  <details id="batch-phase2b-refined-anchors-panel" class="panel minimal" style="margin-bottom:12px;" open>
+                    <summary>Refined Anchors (<span id="batch-phase2b-anchor-kept">0</span> kept, <span id="batch-phase2b-anchor-removed">0</span> removed)</summary>
+                    <div id="batch-phase2b-refined-anchors-content" style="margin-top:8px;"></div>
+                  </details>
+
+                  <details id="batch-phase2b-refinement-model-panel" class="panel minimal" style="margin-bottom:12px;">
+                    <summary>Refined Alignment Model</summary>
+                    <div id="batch-phase2b-refinement-model-content" style="margin-top:8px;"></div>
+                  </details>
+
+                  <div class="actions" style="gap:8px;margin-top:12px;">
+                    <button id="batch-phase2b-extract-btn" class="btn primary" type="button">Extract</button>
+                    <button id="batch-phase2b-export-btn" class="btn ghost" type="button">Export Refinement Report (.txt)</button>
+                  </div>
+                </div>
+
+                <!-- Extraction Results -->
+                <div id="batch-phase2b-extraction" style="display:none;margin-top:12px;">
+                  <div style="border-top:1px solid var(--border,#ddd);padding-top:12px;">
+                    <div class="actions" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+                      <h4 style="margin:0;">Extraction Results</h4>
+                      <span id="batch-phase2b-extraction-status" class="sub" style="color:var(--muted);"></span>
+                    </div>
+                    <div id="batch-phase2b-extraction-content"></div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
           </div>
         </div><!-- /learning-batch-tab -->
 

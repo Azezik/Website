@@ -1440,6 +1440,194 @@
     return out;
   }
 
+  /* ── Phase 2B: Anchor Refinement + BBOX-Guided Extraction ──────────────── */
+
+  function _normBoxCenter(nb){return{x:nb.x0n+nb.wN/2,y:nb.y0n+nb.hN/2};}
+  function _normBoxIoU(a,b){
+    var ax1=a.x0n+a.wN,ay1=a.y0n+a.hN,bx1=b.x0n+b.wN,by1=b.y0n+b.hN;
+    var ix0=Math.max(a.x0n,b.x0n),iy0=Math.max(a.y0n,b.y0n),ix1=Math.min(ax1,bx1),iy1=Math.min(ay1,by1);
+    if(ix1<=ix0||iy1<=iy0)return 0;
+    var inter=(ix1-ix0)*(iy1-iy0),union=a.wN*a.hN+b.wN*b.hN-inter;
+    return union>0?inter/union:0;
+  }
+  function _pointDist(a,b){return Math.sqrt(Math.pow(a.x-b.x,2)+Math.pow(a.y-b.y,2));}
+
+  function computeTargetNeighborhood(target,refDoc){
+    var nb=target.normBox,tc=_normBoxCenter(nb),regions=refDoc.regionDescriptors||[],nhDescs=refDoc.neighborhoodDescriptors||{};
+    var neighbors=[];
+    for(var i=0;i<regions.length;i++){
+      var r=regions[i],rNb={x0n:r.normalizedBbox.x,y0n:r.normalizedBbox.y,wN:r.normalizedBbox.w,hN:r.normalizedBbox.h};
+      var dist=_pointDist(tc,r.centroid),overlap=_normBoxIoU(nb,rNb);
+      var prox=_clamp(1-dist/0.5,0,1),overlapS=overlap>0?0.5+overlap*0.5:0,combined=Math.max(prox,overlapS);
+      if(combined>0.05)neighbors.push({regionId:r.regionId,centroid:r.centroid,normalizedBbox:r.normalizedBbox,
+        normalizedArea:r.normalizedArea,surfaceType:r.surfaceType,textDensity:r.textDensity,confidence:r.confidence,
+        distance:_round(dist,4),overlap:_round(overlap,4),proximity:_round(combined,4),neighborhoodDescriptor:nhDescs[r.regionId]||{}});
+    }
+    neighbors.sort(function(a,b){return b.proximity-a.proximity;});
+    return{fieldKey:target.fieldKey,targetCenter:tc,targetNormBox:nb,neighborCount:neighbors.length,neighbors:neighbors,
+      avgDistance:neighbors.length>0?_round(_mean(neighbors.map(function(n){return n.distance;})),4):0,
+      avgTextDensity:neighbors.length>0?_round(_mean(neighbors.map(function(n){return n.textDensity;})),4):0,
+      overlappingRegionCount:neighbors.filter(function(n){return n.overlap>0;}).length};
+  }
+
+  function scoreAnchorRelevance(anchor,neighborhoods){
+    var bestScore=0,bestKey=null,allDetails=[];
+    for(var ni=0;ni<neighborhoods.length;ni++){
+      var nh=neighborhoods[ni],tc=nh.targetCenter,ac=anchor.normalizedPosition;
+      var dist=_pointDist(tc,ac),proxS=_clamp(1-dist/0.4,0,1);
+      var anb={x0n:anchor.normalizedBbox.x,y0n:anchor.normalizedBbox.y,wN:anchor.normalizedBbox.w,hN:anchor.normalizedBbox.h};
+      var overlap=_normBoxIoU(nh.targetNormBox,anb),overlapS=overlap>0?0.3+overlap*0.7:0;
+      var isMember=false;
+      for(var j=0;j<nh.neighbors.length;j++){if(nh.neighbors[j].regionId===anchor.refRegionId){isMember=true;break;}}
+      var memberS=isMember?0.8:0;
+      var sizeP=1;if(anchor.normalizedArea>0.15)sizeP=_clamp(1-(anchor.normalizedArea-0.15)/0.35,0.2,1);
+      var stabB=anchor.confidence*0.3;
+      var local=(proxS*0.30+overlapS*0.20+memberS*0.25+stabB*0.25)*sizeP;
+      allDetails.push({targetFieldKey:nh.fieldKey,proximity:_round(proxS,4),overlap:_round(overlapS,4),membership:_round(memberS,4),sizePenalty:_round(sizeP,4),stabilityBonus:_round(stabB,4),localRelevance:_round(local,4)});
+      if(local>bestScore){bestScore=local;bestKey=nh.fieldKey;}
+    }
+    return{relevanceScore:_round(bestScore,4),bestTargetKey:bestKey,details:allDetails};
+  }
+
+  function refineAnchors(correspondenceResult,extractionTargets,refDoc,opts){
+    opts=opts||{};var relThresh=opts.relevanceThreshold||0.15;
+    if(!correspondenceResult||!correspondenceResult.anchors)return{status:'no_correspondence',message:'No Phase 2 correspondence results.',refinedAnchors:[],removedAnchors:[],extractionTargets:extractionTargets||[],targetNeighborhoods:[],refinedAlignmentModel:null};
+    if(!extractionTargets||extractionTargets.length===0)return{status:'no_targets',message:'No extraction targets.',refinedAnchors:[],removedAnchors:[],extractionTargets:[],targetNeighborhoods:[],refinedAlignmentModel:null};
+    var neighborhoods=[];
+    for(var ti=0;ti<extractionTargets.length;ti++)neighborhoods.push(computeTargetNeighborhood(extractionTargets[ti],refDoc));
+    var anchors=correspondenceResult.anchors,refined=[],removed=[];
+    for(var ai=0;ai<anchors.length;ai++){
+      var a=anchors[ai],scoring=scoreAnchorRelevance(a,neighborhoods);
+      var ea={};for(var k in a)if(a.hasOwnProperty(k))ea[k]=a[k];
+      ea.relevanceScore=scoring.relevanceScore;ea.bestTargetKey=scoring.bestTargetKey;ea.relevanceDetails=scoring.details;
+      if(scoring.relevanceScore>=relThresh)refined.push(ea);else removed.push(ea);
+    }
+    refined.sort(function(a,b){return b.relevanceScore-a.relevanceScore;});
+    var rm={referenceDocumentId:correspondenceResult.referenceDocument.documentId,referenceDocumentName:correspondenceResult.referenceDocument.documentName,
+      anchorCount:refined.length,removedCount:removed.length,originalCount:anchors.length,
+      anchorRetentionRate:anchors.length>0?_round(refined.length/anchors.length,4):0,
+      avgRelevanceScore:refined.length>0?_round(_mean(refined.map(function(a){return a.relevanceScore;})),4):0,
+      avgConfidence:refined.length>0?_round(_mean(refined.map(function(a){return a.confidence;})),4):0,
+      extractionTargetCount:extractionTargets.length,anchors:refined,createdAt:new Date().toISOString()};
+    var status='refined',message='';
+    if(refined.length===0){status='no_relevant_anchors';message='No anchors relevant to the extraction targets.';}
+    else{message='Refined from '+anchors.length+' to '+refined.length+' anchors. Removed '+removed.length+'. Avg relevance: '+_round(rm.avgRelevanceScore*100,1)+'%.';}
+    return{status:status,message:message,refinedAnchors:refined,removedAnchors:removed,extractionTargets:extractionTargets,targetNeighborhoods:neighborhoods,refinedAlignmentModel:rm,analyzedAt:new Date().toISOString()};
+  }
+
+  function transferBBox(target,refinedAnchors,correspondenceResult,targetDocId,targetDoc){
+    var srcBox=target.normBox,srcCenter=_normBoxCenter(srcBox);
+    var docCorr=(correspondenceResult.correspondences||[]).filter(function(c){return c.tgtDocumentId===targetDocId;});
+    var anchorPairs=[];
+    for(var ai=0;ai<refinedAnchors.length;ai++){
+      var anchor=refinedAnchors[ai],match=null;
+      for(var ci=0;ci<docCorr.length;ci++){if(docCorr[ci].refRegionId===anchor.refRegionId){match=docCorr[ci];break;}}
+      if(!match)continue;
+      var tgtRegion=null,tgtRegs=targetDoc.regionDescriptors||[];
+      for(var ri=0;ri<tgtRegs.length;ri++){if(tgtRegs[ri].regionId===match.tgtRegionId){tgtRegion=tgtRegs[ri];break;}}
+      if(!tgtRegion)continue;
+      var dist=_pointDist(srcCenter,anchor.normalizedPosition);
+      anchorPairs.push({anchor:anchor,match:match,tgtRegion:tgtRegion,distance:dist,weight:_clamp(1-dist/0.5,0.1,1)*match.similarity});
+    }
+    anchorPairs.sort(function(a,b){return a.distance-b.distance;});
+    if(anchorPairs.length===0)return{transferredNormBox:{x0n:srcBox.x0n,y0n:srcBox.y0n,wN:srcBox.wN,hN:srcBox.hN},confidence:0.3,method:'identity_fallback',anchorsUsed:0};
+    var maxA=Math.min(anchorPairs.length,5),totalW=0,oX=0,oY=0,sW=0,sH=0;
+    for(var pi=0;pi<maxA;pi++){
+      var p=anchorPairs[pi],rc=p.anchor.normalizedPosition,tc=p.tgtRegion.centroid;
+      var dx=tc.x-rc.x,dy=tc.y-rc.y;
+      var sw=p.anchor.normalizedBbox.w>0?p.tgtRegion.normalizedBbox.w/p.anchor.normalizedBbox.w:1;
+      var sh=p.anchor.normalizedBbox.h>0?p.tgtRegion.normalizedBbox.h/p.anchor.normalizedBbox.h:1;
+      oX+=dx*p.weight;oY+=dy*p.weight;sW+=sw*p.weight;sH+=sh*p.weight;totalW+=p.weight;
+    }
+    if(totalW>0){oX/=totalW;oY/=totalW;sW/=totalW;sH/=totalW;}else{oX=0;oY=0;sW=1;sH=1;}
+    sW=_clamp(sW,0.5,2.0);sH=_clamp(sH,0.5,2.0);
+    var nW=srcBox.wN*sW,nH=srcBox.hN*sH,nX=_clamp(srcBox.x0n+oX,0,1-nW),nY=_clamp(srcBox.y0n+oY,0,1-nH);
+    nW=_clamp(nW,0.001,1);nH=_clamp(nH,0.001,1);
+    var avgMS=_mean(anchorPairs.slice(0,maxA).map(function(p){return p.match.similarity;}));
+    var conf=_clamp(avgMS*(0.5+0.5*Math.min(maxA,3)/3),0,1);
+    return{transferredNormBox:{x0n:_round(nX,6),y0n:_round(nY,6),wN:_round(nW,6),hN:_round(nH,6)},confidence:_round(conf,4),method:'anchor_weighted_transfer',anchorsUsed:maxA,offset:{x:_round(oX,6),y:_round(oY,6)},scale:{w:_round(sW,4),h:_round(sH,4)}};
+  }
+
+  function extractTextFromNormBox(normBox,tokens,viewport){
+    if(!normBox||!tokens||!tokens.length||!viewport)return{text:'',tokenCount:0,confidence:0};
+    var vpW=viewport.width||viewport.w||1,vpH=viewport.height||viewport.h||1;
+    var bx=normBox.x0n*vpW,by=normBox.y0n*vpH,bw=normBox.wN*vpW,bh=normBox.hN*vpH;
+    var matched=[];
+    for(var i=0;i<tokens.length;i++){
+      var t=tokens[i],ox=Math.min(t.x+t.w,bx+bw)-Math.max(t.x,bx),oy=Math.min(t.y+t.h,by+bh)-Math.max(t.y,by);
+      if(ox<=0||oy<=0)continue;
+      var cx=t.x+t.w/2,cy=t.y+t.h/2;
+      if(cx<bx||cx>bx+bw||cy<by||cy>by+bh)continue;
+      matched.push(t);
+    }
+    matched.sort(function(a,b){var ay=a.y+a.h/2,by2=b.y+b.h/2;if(Math.abs(ay-by2)>Math.min(a.h,b.h)*0.5)return ay-by2;return a.x-b.x;});
+    var lines=[],curLine=[],lastY=-Infinity;
+    for(var mi=0;mi<matched.length;mi++){
+      var tk=matched[mi],tkY=tk.y+tk.h/2;
+      if(curLine.length>0&&Math.abs(tkY-lastY)>tk.h*0.5){lines.push(curLine.map(function(t){return t.text;}).join(' '));curLine=[];}
+      curLine.push(tk);lastY=tkY;
+    }
+    if(curLine.length>0)lines.push(curLine.map(function(t){return t.text;}).join(' '));
+    var text=lines.join('\n').trim();
+    var avgC=matched.length>0?_mean(matched.map(function(t){return t.confidence||0.5;})):0;
+    return{text:text,tokenCount:matched.length,confidence:_round(avgC,4)};
+  }
+
+  function extractFromBatch(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens){
+    if(!refinementResult||refinementResult.status==='no_relevant_anchors')return{status:'no_anchors',message:'No refined anchors available.',results:[]};
+    var targets=refinementResult.extractionTargets,ra=refinementResult.refinedAnchors;
+    var refDocId=correspondenceResult.referenceDocument.documentId,results=[];
+    for(var di=0;di<batchDocuments.length;di++){
+      var doc=batchDocuments[di];if(doc._compact||doc.structurallyValid===false)continue;
+      var dt=batchTokens[doc.documentId],isRef=doc.documentId===refDocId;
+      var dr={documentId:doc.documentId,documentName:doc.documentName||'',isReference:isRef,fields:[]};
+      for(var ti=0;ti<targets.length;ti++){
+        var target=targets[ti],tr;
+        if(isRef)tr={transferredNormBox:target.normBox,confidence:1,method:'reference_identity',anchorsUsed:0};
+        else tr=transferBBox(target,ra,correspondenceResult,doc.documentId,doc);
+        var ext={text:'',tokenCount:0,confidence:0};
+        if(dt&&dt.tokens)ext=extractTextFromNormBox(tr.transferredNormBox,dt.tokens,dt.viewport);
+        dr.fields.push({fieldKey:target.fieldKey,label:target.label,sourceNormBox:target.normBox,transferredNormBox:tr.transferredNormBox,
+          transferConfidence:tr.confidence,transferMethod:tr.method,anchorsUsed:tr.anchorsUsed,extractedText:ext.text,tokenCount:ext.tokenCount,textConfidence:ext.confidence});
+      }
+      results.push(dr);
+    }
+    return{status:'complete',message:'Extracted '+targets.length+' field(s) from '+results.length+' document(s).',extractionTargets:targets,documentCount:results.length,results:results,extractedAt:new Date().toISOString()};
+  }
+
+  function formatRefinementReport(result){
+    if(!result)return'[No refinement data]';
+    if(result.status==='no_correspondence'||result.status==='no_targets')return result.message;
+    var out='';
+    out+='══════════════════════════════════════════════════════════════\n';
+    out+='  ANCHOR REFINEMENT REPORT (Phase 2B)\n';
+    out+='══════════════════════════════════════════════════════════════\n\n';
+    out+='  Status: '+result.status.toUpperCase().replace(/_/g,' ')+'\n';
+    out+='  '+result.message+'\n';
+    if(result.refinedAlignmentModel){
+      var m=result.refinedAlignmentModel;
+      out+='\n  Anchors: '+m.anchorCount+' kept / '+m.removedCount+' removed (of '+m.originalCount+')\n';
+      out+='  Retention: '+(m.anchorRetentionRate*100).toFixed(1)+'%\n';
+      out+='  Avg Relevance: '+(m.avgRelevanceScore*100).toFixed(1)+'%\n';
+    }
+    if(result.extractionTargets&&result.extractionTargets.length>0){
+      out+='\n──────────────────────────────────────────────────────────────\n  EXTRACTION TARGETS\n──────────────────────────────────────────────────────────────\n';
+      for(var ti=0;ti<result.extractionTargets.length;ti++){
+        var t=result.extractionTargets[ti];
+        out+='\n  '+t.label+' ('+t.fieldKey+'): ('+(t.normBox.x0n*100).toFixed(1)+'%, '+(t.normBox.y0n*100).toFixed(1)+'%) '+(t.normBox.wN*100).toFixed(1)+'% x '+(t.normBox.hN*100).toFixed(1)+'%\n';
+      }
+    }
+    if(result.refinedAnchors&&result.refinedAnchors.length>0){
+      out+='\n──────────────────────────────────────────────────────────────\n  REFINED ANCHORS ('+result.refinedAnchors.length+')\n──────────────────────────────────────────────────────────────\n';
+      for(var ai=0;ai<result.refinedAnchors.length;ai++){
+        var a=result.refinedAnchors[ai];
+        out+='\n  '+a.anchorId+'  rel='+(a.relevanceScore*100).toFixed(1)+'%  conf='+(a.confidence*100).toFixed(1)+'%  target='+(a.bestTargetKey||'none')+'\n';
+      }
+    }
+    out+='\n══════════════════════════════════════════════════════════════\n';
+    return out;
+  }
+
   /* ── Public API ────────────────────────────────────────────────────────── */
 
   root.WrokitVisionLearning = {
@@ -1470,7 +1658,15 @@
     formatCorrespondenceReport: formatCorrespondenceReport,
     selectReferenceDocument: selectReferenceDocument,
     computeRegionSimilarity: computeRegionSimilarity,
-    matchDocumentRegions: matchDocumentRegions
+    matchDocumentRegions: matchDocumentRegions,
+    // Anchor Refinement + Extraction (Phase 2B)
+    refineAnchors: refineAnchors,
+    computeTargetNeighborhood: computeTargetNeighborhood,
+    scoreAnchorRelevance: scoreAnchorRelevance,
+    transferBBox: transferBBox,
+    extractTextFromNormBox: extractTextFromNormBox,
+    extractFromBatch: extractFromBatch,
+    formatRefinementReport: formatRefinementReport
   };
 
 })(typeof self !== 'undefined' ? self : this);

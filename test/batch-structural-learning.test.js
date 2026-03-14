@@ -1121,3 +1121,330 @@ function buildMockDocWithNeighborhood(opts) {
 })();
 
 console.log('All Phase 2 Structural Correspondence tests passed.');
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Phase 2B: Anchor Refinement + BBOX-Guided Extraction Tests
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const {
+  refineAnchors,
+  computeTargetNeighborhood,
+  scoreAnchorRelevance,
+  transferBBox,
+  extractTextFromNormBox,
+  extractFromBatch,
+  formatRefinementReport
+} = require('../engines/wrokitvision/learning/batch-anchor-refinement.js');
+
+// ── Helper: build extraction targets ─────────────────────────────────────
+
+function buildExtractionTargets() {
+  return [
+    { fieldKey: 'field_1', label: 'Invoice Number', normBox: { x0n: 0.6, y0n: 0.05, wN: 0.15, hN: 0.04 }, fieldType: 'static' },
+    { fieldKey: 'field_2', label: 'Total Amount', normBox: { x0n: 0.7, y0n: 0.85, wN: 0.12, hN: 0.04 }, fieldType: 'static' },
+    { fieldKey: 'field_3', label: 'Date', normBox: { x0n: 0.6, y0n: 0.1, wN: 0.1, hN: 0.03 }, fieldType: 'static' }
+  ];
+}
+
+// ── computeTargetNeighborhood ────────────────────────────────────────────
+
+(function testComputeTargetNeighborhood() {
+  var doc = buildMockDocWithNeighborhood({ regionCount: 8, edgeCount: 6 });
+  var target = { fieldKey: 'field_1', normBox: { x0n: 0.15, y0n: 0.15, wN: 0.1, hN: 0.05 } };
+
+  var nh = computeTargetNeighborhood(target, doc);
+  assert.ok(nh, 'Should return a neighborhood');
+  assert.strictEqual(nh.fieldKey, 'field_1');
+  assert.ok(nh.targetCenter.x > 0 && nh.targetCenter.y > 0, 'Should have target center');
+  assert.ok(Array.isArray(nh.neighbors), 'Should have neighbors array');
+  assert.ok(nh.neighborCount >= 0, 'Should have non-negative neighbor count');
+
+  // Each neighbor should have required fields
+  for (var i = 0; i < nh.neighbors.length; i++) {
+    var n = nh.neighbors[i];
+    assert.ok(n.regionId, 'Neighbor should have regionId');
+    assert.ok(typeof n.distance === 'number', 'Should have distance');
+    assert.ok(typeof n.proximity === 'number', 'Should have proximity');
+    assert.ok(n.proximity > 0, 'Proximity should be positive (filtered)');
+  }
+
+  // Neighbors should be sorted by proximity descending
+  for (var j = 1; j < nh.neighbors.length; j++) {
+    assert.ok(nh.neighbors[j].proximity <= nh.neighbors[j-1].proximity,
+      'Neighbors should be sorted by proximity descending');
+  }
+
+  console.log('computeTargetNeighborhood tests passed.');
+})();
+
+// ── scoreAnchorRelevance ─────────────────────────────────────────────────
+
+(function testScoreAnchorRelevance() {
+  var doc = buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4 });
+  var targets = buildExtractionTargets();
+  var neighborhoods = targets.map(function(t) { return computeTargetNeighborhood(t, doc); });
+
+  // Create a mock anchor near the first target
+  var nearAnchor = {
+    anchorId: 'anchor-near',
+    refRegionId: doc.regionDescriptors[0].regionId,
+    normalizedPosition: { x: 0.65, y: 0.07 },
+    normalizedBbox: { x: 0.6, y: 0.03, w: 0.1, h: 0.08 },
+    normalizedArea: 0.008,
+    confidence: 0.8,
+    surfaceType: 'text_dense_surface'
+  };
+
+  var result = scoreAnchorRelevance(nearAnchor, neighborhoods);
+  assert.ok(typeof result.relevanceScore === 'number', 'Should have relevance score');
+  assert.ok(result.relevanceScore >= 0 && result.relevanceScore <= 1, 'Score should be 0-1');
+  assert.ok(result.details.length === neighborhoods.length, 'Should have details per neighborhood');
+
+  // Create a far-away anchor
+  var farAnchor = {
+    anchorId: 'anchor-far',
+    refRegionId: 'r-nonexistent',
+    normalizedPosition: { x: 0.05, y: 0.5 },
+    normalizedBbox: { x: 0.0, y: 0.45, w: 0.1, h: 0.1 },
+    normalizedArea: 0.01,
+    confidence: 0.7,
+    surfaceType: 'visual_component'
+  };
+
+  var farResult = scoreAnchorRelevance(farAnchor, neighborhoods);
+  // Far anchor should generally score lower (but not necessarily 0 due to stability bonus)
+  assert.ok(typeof farResult.relevanceScore === 'number');
+
+  // Giant anchor should be penalized
+  var giantAnchor = {
+    anchorId: 'anchor-giant',
+    refRegionId: 'r-nonexistent',
+    normalizedPosition: { x: 0.5, y: 0.5 },
+    normalizedBbox: { x: 0, y: 0, w: 1, h: 1 },
+    normalizedArea: 0.5,
+    confidence: 0.9,
+    surfaceType: 'text_dense_surface'
+  };
+
+  var giantResult = scoreAnchorRelevance(giantAnchor, neighborhoods);
+  assert.ok(typeof giantResult.relevanceScore === 'number');
+
+  console.log('scoreAnchorRelevance tests passed.');
+})();
+
+// ── refineAnchors ────────────────────────────────────────────────────────
+
+(function testRefineAnchors() {
+  var docs = [];
+  for (var i = 0; i < 5; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'refine-' + i + '.png' }));
+  }
+
+  var corrResult = analyzeCorrespondence(docs);
+  var targets = buildExtractionTargets();
+  var refDocId = corrResult.referenceDocument.documentId;
+  var refDoc = docs.find(function(d) { return d.documentId === refDocId; });
+
+  var result = refineAnchors(corrResult, targets, refDoc);
+
+  assert.ok(result, 'Should return a result');
+  assert.ok(['refined', 'no_relevant_anchors'].indexOf(result.status) >= 0, 'Valid status: ' + result.status);
+  assert.ok(Array.isArray(result.refinedAnchors), 'Should have refinedAnchors');
+  assert.ok(Array.isArray(result.removedAnchors), 'Should have removedAnchors');
+  assert.strictEqual(result.refinedAnchors.length + result.removedAnchors.length, corrResult.anchors.length,
+    'All anchors should be accounted for');
+
+  // Each refined anchor should have relevance fields
+  for (var ai = 0; ai < result.refinedAnchors.length; ai++) {
+    var a = result.refinedAnchors[ai];
+    assert.ok(typeof a.relevanceScore === 'number', 'Should have relevanceScore');
+    assert.ok(a.relevanceScore >= 0.15, 'Relevance should be >= threshold');
+    assert.ok(a.bestTargetKey, 'Should have bestTargetKey');
+  }
+
+  // Refined model
+  if (result.refinedAlignmentModel) {
+    assert.strictEqual(result.refinedAlignmentModel.anchorCount, result.refinedAnchors.length);
+    assert.strictEqual(result.refinedAlignmentModel.removedCount, result.removedAnchors.length);
+  }
+
+  // Target neighborhoods
+  assert.strictEqual(result.targetNeighborhoods.length, targets.length);
+
+  console.log('refineAnchors tests passed.');
+})();
+
+// ── refineAnchors edge cases ─────────────────────────────────────────────
+
+(function testRefineAnchorsEdgeCases() {
+  // No correspondence
+  var r1 = refineAnchors(null, buildExtractionTargets(), {});
+  assert.strictEqual(r1.status, 'no_correspondence');
+
+  // No targets
+  var r2 = refineAnchors({ anchors: [] }, [], {});
+  assert.strictEqual(r2.status, 'no_targets');
+
+  // Empty anchors
+  var r3 = refineAnchors({ anchors: [], referenceDocument: { documentId: 'x' } }, buildExtractionTargets(),
+    buildMockDocWithNeighborhood());
+  assert.strictEqual(r3.refinedAnchors.length, 0);
+  assert.strictEqual(r3.removedAnchors.length, 0);
+
+  console.log('refineAnchors edge case tests passed.');
+})();
+
+// ── transferBBox ─────────────────────────────────────────────────────────
+
+(function testTransferBBox() {
+  var docs = [];
+  for (var i = 0; i < 4; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'transfer-' + i + '.png' }));
+  }
+
+  var corrResult = analyzeCorrespondence(docs);
+  var targets = buildExtractionTargets();
+  var refDocId = corrResult.referenceDocument.documentId;
+  var refDoc = docs.find(function(d) { return d.documentId === refDocId; });
+  var refinement = refineAnchors(corrResult, targets, refDoc);
+  var targetDoc = docs.find(function(d) { return d.documentId !== refDocId; });
+
+  if (targetDoc && refinement.refinedAnchors.length > 0) {
+    var transfer = transferBBox(targets[0], refinement.refinedAnchors, corrResult, targetDoc.documentId, targetDoc);
+    assert.ok(transfer.transferredNormBox, 'Should have transferredNormBox');
+    assert.ok(typeof transfer.transferredNormBox.x0n === 'number');
+    assert.ok(typeof transfer.transferredNormBox.y0n === 'number');
+    assert.ok(typeof transfer.transferredNormBox.wN === 'number');
+    assert.ok(typeof transfer.transferredNormBox.hN === 'number');
+    assert.ok(transfer.transferredNormBox.x0n >= 0 && transfer.transferredNormBox.x0n <= 1, 'x0n in bounds');
+    assert.ok(transfer.transferredNormBox.y0n >= 0 && transfer.transferredNormBox.y0n <= 1, 'y0n in bounds');
+    assert.ok(typeof transfer.confidence === 'number');
+    assert.ok(transfer.method, 'Should have method');
+  }
+
+  // Fallback when no anchors match
+  var emptyTransfer = transferBBox(targets[0], [], corrResult, 'nonexistent', docs[1]);
+  assert.strictEqual(emptyTransfer.method, 'identity_fallback');
+  assert.strictEqual(emptyTransfer.anchorsUsed, 0);
+
+  console.log('transferBBox tests passed.');
+})();
+
+// ── extractTextFromNormBox ───────────────────────────────────────────────
+
+(function testExtractTextFromNormBox() {
+  var tokens = [
+    { x: 100, y: 50, w: 40, h: 12, text: 'Invoice', confidence: 0.9 },
+    { x: 145, y: 50, w: 20, h: 12, text: '#', confidence: 0.9 },
+    { x: 170, y: 50, w: 50, h: 12, text: '12345', confidence: 0.95 },
+    { x: 100, y: 70, w: 30, h: 12, text: 'Date:', confidence: 0.85 },
+    { x: 140, y: 70, w: 60, h: 12, text: '2024-01-15', confidence: 0.9 },
+    { x: 500, y: 500, w: 40, h: 12, text: 'Footer', confidence: 0.8 }
+  ];
+  var viewport = { width: 800, height: 1000 };
+
+  // Box covering the invoice area
+  var normBox = { x0n: 0.1, y0n: 0.04, wN: 0.2, hN: 0.05 };
+  var result = extractTextFromNormBox(normBox, tokens, viewport);
+  assert.ok(result.tokenCount > 0, 'Should find tokens in box: ' + result.tokenCount);
+  assert.ok(result.text.length > 0, 'Should extract text: ' + result.text);
+  assert.ok(typeof result.confidence === 'number');
+
+  // Empty box (far from tokens)
+  var emptyBox = { x0n: 0.9, y0n: 0.9, wN: 0.05, hN: 0.05 };
+  var emptyResult = extractTextFromNormBox(emptyBox, tokens, viewport);
+  assert.strictEqual(emptyResult.tokenCount, 0);
+  assert.strictEqual(emptyResult.text, '');
+
+  // Null inputs
+  var nullResult = extractTextFromNormBox(null, tokens, viewport);
+  assert.strictEqual(nullResult.tokenCount, 0);
+
+  console.log('extractTextFromNormBox tests passed.');
+})();
+
+// ── extractFromBatch ─────────────────────────────────────────────────────
+
+(function testExtractFromBatch() {
+  var docs = [];
+  for (var i = 0; i < 4; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'extract-' + i + '.png' }));
+  }
+
+  var corrResult = analyzeCorrespondence(docs);
+  var targets = buildExtractionTargets();
+  var refDocId = corrResult.referenceDocument.documentId;
+  var refDoc = docs.find(function(d) { return d.documentId === refDocId; });
+  var refinement = refineAnchors(corrResult, targets, refDoc);
+
+  // Create mock token data for each document
+  var batchTokens = {};
+  for (var di = 0; di < docs.length; di++) {
+    batchTokens[docs[di].documentId] = {
+      tokens: [
+        { x: 480, y: 50, w: 80, h: 14, text: 'INV-001', confidence: 0.9 },
+        { x: 560, y: 850, w: 60, h: 14, text: '$1,234', confidence: 0.85 },
+        { x: 480, y: 100, w: 70, h: 14, text: '2024-01-15', confidence: 0.9 }
+      ],
+      viewport: { width: 800, height: 1000 }
+    };
+  }
+
+  var result = extractFromBatch(refinement, corrResult, refDoc, docs, batchTokens);
+  assert.ok(result, 'Should return result');
+  assert.strictEqual(result.status, 'complete');
+  assert.ok(result.results.length > 0, 'Should have document results');
+
+  for (var ri = 0; ri < result.results.length; ri++) {
+    var docResult = result.results[ri];
+    assert.ok(docResult.documentId, 'Should have documentId');
+    assert.ok(docResult.documentName, 'Should have documentName');
+    assert.strictEqual(docResult.fields.length, targets.length, 'Should have field per target');
+
+    for (var fi = 0; fi < docResult.fields.length; fi++) {
+      var f = docResult.fields[fi];
+      assert.ok(f.fieldKey, 'Field should have fieldKey');
+      assert.ok(f.transferredNormBox, 'Field should have transferredNormBox');
+      assert.ok(typeof f.transferConfidence === 'number');
+      assert.ok(f.transferMethod, 'Should have transferMethod');
+    }
+
+    // Reference doc should use identity method
+    if (docResult.isReference) {
+      assert.strictEqual(docResult.fields[0].transferMethod, 'reference_identity');
+    }
+  }
+
+  // No anchors case
+  var noAnchorResult = extractFromBatch({ status: 'no_relevant_anchors' }, corrResult, refDoc, docs, batchTokens);
+  assert.strictEqual(noAnchorResult.status, 'no_anchors');
+
+  console.log('extractFromBatch tests passed.');
+})();
+
+// ── formatRefinementReport ───────────────────────────────────────────────
+
+(function testFormatRefinementReport() {
+  assert.strictEqual(formatRefinementReport(null), '[No refinement data]');
+
+  var r1 = { status: 'no_correspondence', message: 'No data.' };
+  assert.strictEqual(formatRefinementReport(r1), 'No data.');
+
+  var docs = [];
+  for (var i = 0; i < 4; i++) {
+    docs.push(buildMockDocWithNeighborhood({ regionCount: 5, edgeCount: 4, name: 'fmt2b-' + i + '.png' }));
+  }
+  var corrResult = analyzeCorrespondence(docs);
+  var refDoc = docs.find(function(d) { return d.documentId === corrResult.referenceDocument.documentId; });
+  var refinement = refineAnchors(corrResult, buildExtractionTargets(), refDoc);
+  var report = formatRefinementReport(refinement);
+
+  assert.ok(typeof report === 'string');
+  assert.ok(report.length > 50, 'Report should have content');
+  assert.ok(report.indexOf('ANCHOR REFINEMENT REPORT') >= 0, 'Should have title');
+  assert.ok(report.indexOf('EXTRACTION TARGETS') >= 0, 'Should have targets section');
+
+  console.log('formatRefinementReport tests passed.');
+})();
+
+console.log('All Phase 2B Anchor Refinement + Extraction tests passed.');
