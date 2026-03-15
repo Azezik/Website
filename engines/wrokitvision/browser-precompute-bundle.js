@@ -791,8 +791,44 @@
   function boxDistance(a, b){
     return Math.hypot((a.x + a.w / 2) - (b.x + b.w / 2), (a.y + a.h / 2) - (b.y + b.h / 2));
   }
+  function bboxAreaGraph(b){ return b.w * b.h; }
   function contains(a, b){
     return a.x <= b.x && a.y <= b.y && (a.x + a.w) >= (b.x + b.w) && (a.y + a.h) >= (b.y + b.h);
+  }
+  function bboxIntersectionGraph(a, b){
+    var x0 = Math.max(a.x, b.x);
+    var y0 = Math.max(a.y, b.y);
+    var x1 = Math.min(a.x + a.w, b.x + b.w);
+    var y1 = Math.min(a.y + a.h, b.y + b.h);
+    if(x1 <= x0 || y1 <= y0) return 0;
+    return (x1 - x0) * (y1 - y0);
+  }
+  function confidenceSimilarity(a, b){
+    var sameSource = (a.provenance?.sourceType === b.provenance?.sourceType) ? 1.0 : 0.85;
+    var confDelta = Math.abs((Number(a.confidence) || 0.5) - (Number(b.confidence) || 0.5));
+    return sameSource * Math.max(0, 1 - confDelta * 2);
+  }
+  function detectAdjacency(boxA, boxB, tolerance){
+    if(!tolerance) tolerance = 8;
+    var overlapX = Math.min(boxA.x + boxA.w, boxB.x + boxB.w) - Math.max(boxA.x, boxB.x);
+    var overlapY = Math.min(boxA.y + boxA.h, boxB.y + boxB.h) - Math.max(boxA.y, boxB.y);
+    if(overlapY > tolerance){
+      var gapX = Math.max(boxA.x, boxB.x) - Math.min(boxA.x + boxA.w, boxB.x + boxB.w);
+      if(gapX >= -tolerance && gapX <= tolerance){
+        var sharedLen = overlapY;
+        var minH = Math.min(boxA.h, boxB.h);
+        return { axis: 'horizontal', sharedLength: sharedLen, sharedRatio: sharedLen / Math.max(1, minH) };
+      }
+    }
+    if(overlapX > tolerance){
+      var gapY = Math.max(boxA.y, boxB.y) - Math.min(boxA.y + boxA.h, boxB.y + boxB.h);
+      if(gapY >= -tolerance && gapY <= tolerance){
+        var sharedLenV = overlapX;
+        var minW = Math.min(boxA.w, boxB.w);
+        return { axis: 'vertical', sharedLength: sharedLenV, sharedRatio: sharedLenV / Math.max(1, minW) };
+      }
+    }
+    return null;
   }
   function buildRegionGraph(regionNodes, { idFactory } = {}){
     const edges = [];
@@ -801,12 +837,34 @@
       for(let j = i + 1; j < nodes.length; j++){
         const a = nodes[i]; const b = nodes[j];
         const boxA = ensureBBox(a.geometry?.bbox || {}); const boxB = ensureBBox(b.geometry?.bbox || {});
-        const proximity = Math.max(0, 1 - (boxDistance(boxA, boxB) / 800));
+        const distance = boxDistance(boxA, boxB);
+        const proximity = Math.max(0, 1 - (distance / 800));
         if(proximity > 0.1){
-          edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'spatial_proximity', weight: proximity, rationale: createScoreBreakdown({ total: proximity, components: [{ key: 'distance', value: proximity }] }), provenance: { stage: 'region-graph' } }));
+          const similarity = confidenceSimilarity(a, b);
+          const weight = proximity * similarity;
+          if(weight > 0.08){
+            edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'spatial_proximity', weight, rationale: createScoreBreakdown({ total: weight, components: [{ key: 'distance', value: proximity }, { key: 'similarity', value: similarity }] }), provenance: { stage: 'region-graph' } }));
+          }
         }
-        if(contains(boxA, boxB) || contains(boxB, boxA)){
-          edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: contains(boxA, boxB) ? a.id : b.id, targetNodeId: contains(boxA, boxB) ? b.id : a.id, edgeType: 'contains', weight: 0.95, rationale: createScoreBreakdown({ total: 0.95, notes: ['region containment relationship'] }), provenance: { stage: 'region-graph' } }));
+        const aContainsB = contains(boxA, boxB);
+        const bContainsA = contains(boxB, boxA);
+        if(aContainsB || bContainsA){
+          const container = aContainsB ? a : b;
+          const contained = aContainsB ? b : a;
+          const containerBox = aContainsB ? boxA : boxB;
+          const containedBox = aContainsB ? boxB : boxA;
+          const areaRatio = bboxAreaGraph(containedBox) / Math.max(1, bboxAreaGraph(containerBox));
+          const depthDelta = Math.abs(
+            (Number(container.features?.containmentDepth) || 0) -
+            (Number(contained.features?.containmentDepth) || 0)
+          );
+          const depthWeight = depthDelta <= 1 ? 0.95 : Math.max(0.5, 0.95 - (depthDelta - 1) * 0.15);
+          edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: container.id, targetNodeId: contained.id, edgeType: 'contains', weight: depthWeight, rationale: createScoreBreakdown({ total: depthWeight, components: [{ key: 'areaRatio', value: areaRatio }, { key: 'depthDelta', value: depthDelta }], notes: ['region containment relationship'] }), provenance: { stage: 'region-graph' } }));
+        }
+        const adjacency = detectAdjacency(boxA, boxB, 8);
+        if(adjacency && adjacency.sharedRatio > 0.15){
+          const adjWeight = Math.min(0.9, 0.4 + adjacency.sharedRatio * 0.5);
+          edges.push(createGraphEdge({ edgeId: idFactory('edge_region'), sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'spatial_adjacency', weight: adjWeight, rationale: createScoreBreakdown({ total: adjWeight, components: [{ key: 'sharedLength', value: adjacency.sharedLength }, { key: 'sharedRatio', value: adjacency.sharedRatio }, { key: 'axis', value: adjacency.axis === 'horizontal' ? 1 : 0 }], notes: ['adjacent along ' + adjacency.axis + ' axis'] }), provenance: { stage: 'region-graph' } }));
         }
       }
     }
@@ -853,6 +911,326 @@
       .filter(c => c.features.regionArea > 2000);
   }
 
+  // ── refine-region-coherence.js ────────────────────────────────────────────
+  function bboxAreaCoherence(b){ return b.w * b.h; }
+  function bboxIntersectionCoherence(a, b){
+    var x0 = Math.max(a.x, b.x);
+    var y0 = Math.max(a.y, b.y);
+    var x1 = Math.min(a.x + a.w, b.x + b.w);
+    var y1 = Math.min(a.y + a.h, b.y + b.h);
+    if(x1 <= x0 || y1 <= y0) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+  function iouCoherence(a, b){
+    var inter = bboxIntersectionCoherence(a, b);
+    if(!inter) return 0;
+    var interArea = bboxAreaCoherence(inter);
+    return interArea / (bboxAreaCoherence(a) + bboxAreaCoherence(b) - interArea);
+  }
+  function overlapFractionCoherence(a, b){
+    var inter = bboxIntersectionCoherence(a, b);
+    if(!inter) return 0;
+    return bboxAreaCoherence(inter) / Math.max(1, Math.min(bboxAreaCoherence(a), bboxAreaCoherence(b)));
+  }
+  function fullyContainsCoherence(outer, inner){
+    return outer.x <= inner.x && outer.y <= inner.y &&
+      (outer.x + outer.w) >= (inner.x + inner.w) &&
+      (outer.y + outer.h) >= (inner.y + inner.h);
+  }
+  function rectContourFromBboxCoherence(bbox){
+    var x = Number(bbox.x) || 0, y = Number(bbox.y) || 0;
+    var w = Math.max(0, Number(bbox.w) || 0), h = Math.max(0, Number(bbox.h) || 0);
+    return [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+  }
+  function applyBboxToRegion(region, bbox){
+    region.geometry.bbox = { ...bbox };
+    region.geometry.contour = rectContourFromBboxCoherence(bbox);
+    region.geometry.polygon = rectContourFromBboxCoherence(bbox);
+    if(region.geometry.hull) region.geometry.hull = rectContourFromBboxCoherence(bbox);
+    if(region.geometry.rotatedRect){
+      region.geometry.rotatedRect = {
+        center: { x: bbox.x + bbox.w / 2, y: bbox.y + bbox.h / 2 },
+        size: { w: bbox.w, h: bbox.h },
+        angleDeg: region.geometry.rotatedRect.angleDeg || 0
+      };
+    }
+  }
+  function classifyContainmentLayers(regions){
+    var boxes = regions.map(function(r){ return ensureBBox(r.geometry?.bbox || {}); });
+    var n = regions.length;
+    var containedBy = new Array(n).fill(-1);
+    var depth = new Array(n).fill(0);
+    var byArea = regions.map(function(_, i){ return i; }).sort(function(a, b){ return bboxAreaCoherence(boxes[b]) - bboxAreaCoherence(boxes[a]); });
+    for(var pi = 0; pi < byArea.length; pi++){
+      var i = byArea[pi];
+      for(var pj = pi + 1; pj < byArea.length; pj++){
+        var j = byArea[pj];
+        if(fullyContainsCoherence(boxes[i], boxes[j])){
+          if(containedBy[j] === -1 || bboxAreaCoherence(boxes[i]) < bboxAreaCoherence(boxes[containedBy[j]])){
+            containedBy[j] = i;
+          }
+        }
+      }
+    }
+    function getDepth(i){
+      if(depth[i] > 0) return depth[i];
+      if(containedBy[i] === -1) return 0;
+      depth[i] = getDepth(containedBy[i]) + 1;
+      return depth[i];
+    }
+    for(var k = 0; k < n; k++) getDepth(k);
+    return { containedBy, depth };
+  }
+  function scoreRegionForRetention(region){
+    var score = Number(region.confidence) || 0;
+    if(region.provenance?.sourceType === 'ocr') score += 0.3;
+    if(region.features?.hasRealContour) score += 0.1;
+    if(region.textDensity > 0.5) score += 0.2;
+    return score;
+  }
+  function trimOverlappingBoundary(boxes, largerIdx, smallerIdx){
+    var lg = boxes[largerIdx], sm = boxes[smallerIdx];
+    var inter = bboxIntersectionCoherence(lg, sm);
+    if(!inter) return;
+    var trimLeft = inter.x === lg.x ? inter.w : 0;
+    var trimRight = (inter.x + inter.w === lg.x + lg.w) ? inter.w : 0;
+    var trimTop = inter.y === lg.y ? inter.h : 0;
+    var trimBottom = (inter.y + inter.h === lg.y + lg.h) ? inter.h : 0;
+    var trims = [
+      { side: 'left', amount: trimLeft },
+      { side: 'right', amount: trimRight },
+      { side: 'top', amount: trimTop },
+      { side: 'bottom', amount: trimBottom }
+    ].filter(function(t){ return t.amount > 0; });
+    if(trims.length === 0) return;
+    trims.sort(function(a, b){ return a.amount - b.amount; });
+    var best = trims[0];
+    switch(best.side){
+      case 'left': lg.w -= best.amount; lg.x += best.amount; break;
+      case 'right': lg.w -= best.amount; break;
+      case 'top': lg.h -= best.amount; lg.y += best.amount; break;
+      case 'bottom': lg.h -= best.amount; break;
+    }
+  }
+  function resolveOverlaps(regions, containedBy){
+    var boxes = regions.map(function(r){ return ensureBBox(r.geometry?.bbox || {}); });
+    var n = regions.length;
+    var removed = new Set();
+    for(var i = 0; i < n; i++){
+      if(removed.has(i)) continue;
+      for(var j = i + 1; j < n; j++){
+        if(removed.has(j)) continue;
+        if(containedBy[j] === i || containedBy[i] === j){
+          var containerIdx = containedBy[j] === i ? i : j;
+          var containedIdx = containedBy[j] === i ? j : i;
+          var areaRatio = bboxAreaCoherence(boxes[containedIdx]) / Math.max(1, bboxAreaCoherence(boxes[containerIdx]));
+          if(areaRatio < 0.80) continue;
+        }
+        var ofrac = overlapFractionCoherence(boxes[i], boxes[j]);
+        if(ofrac < 0.3) continue;
+        var iouVal = iouCoherence(boxes[i], boxes[j]);
+        if(iouVal > 0.7){
+          var keepI = scoreRegionForRetention(regions[i]);
+          var keepJ = scoreRegionForRetention(regions[j]);
+          if(keepI >= keepJ){ removed.add(j); }
+          else { removed.add(i); break; }
+          continue;
+        }
+        if(ofrac >= 0.3 && ofrac < 0.85){
+          var areaI = bboxAreaCoherence(boxes[i]), areaJ = bboxAreaCoherence(boxes[j]);
+          var largerIdx2 = areaI >= areaJ ? i : j;
+          var smallerIdx2 = areaI >= areaJ ? j : i;
+          if(containedBy[largerIdx2] === containedBy[smallerIdx2]){
+            trimOverlappingBoundary(boxes, largerIdx2, smallerIdx2);
+            applyBboxToRegion(regions[largerIdx2], boxes[largerIdx2]);
+          }
+        }
+      }
+    }
+    return regions.filter(function(_, i){ return !removed.has(i); });
+  }
+  function clusterValues(values, tolerance){
+    if(!values.length) return [];
+    var sorted = values.slice().sort(function(a, b){ return a - b; });
+    var clusters = [];
+    var clusterStart = 0;
+    for(var i = 1; i <= sorted.length; i++){
+      if(i === sorted.length || sorted[i] - sorted[i - 1] > tolerance){
+        var sum = 0, count = 0;
+        for(var j = clusterStart; j < i; j++){ sum += sorted[j]; count++; }
+        clusters.push({ center: sum / count, count });
+        clusterStart = i;
+      }
+    }
+    return clusters;
+  }
+  function snapToCluster(value, clusters, tolerance){
+    var bestDist = tolerance + 1, bestCenter = value;
+    for(var ci = 0; ci < clusters.length; ci++){
+      var dist = Math.abs(value - clusters[ci].center);
+      if(dist < bestDist){ bestDist = dist; bestCenter = clusters[ci].center; }
+    }
+    return bestDist <= tolerance ? Math.round(bestCenter * 100) / 100 : value;
+  }
+  function snapBoundariesToEdges(regions, tolerance){
+    if(!tolerance) tolerance = 6;
+    var boxes = regions.map(function(r){ return ensureBBox(r.geometry?.bbox || {}); });
+    var n = regions.length;
+    var hLines = [], vLines = [];
+    for(var i = 0; i < n; i++){
+      var b = boxes[i];
+      hLines.push(b.y, b.y + b.h);
+      vLines.push(b.x, b.x + b.w);
+    }
+    var hClusters = clusterValues(hLines, tolerance);
+    var vClusters = clusterValues(vLines, tolerance);
+    var changed = false;
+    for(var ri = 0; ri < n; ri++){
+      var rb = boxes[ri];
+      var origX = rb.x, origY = rb.y, origR = rb.x + rb.w, origB = rb.y + rb.h;
+      var snappedTop = snapToCluster(rb.y, hClusters, tolerance);
+      var snappedBottom = snapToCluster(rb.y + rb.h, hClusters, tolerance);
+      var snappedLeft = snapToCluster(rb.x, vClusters, tolerance);
+      var snappedRight = snapToCluster(rb.x + rb.w, vClusters, tolerance);
+      var newX = snappedLeft, newY = snappedTop;
+      var newW = Math.max(2, snappedRight - snappedLeft);
+      var newH = Math.max(2, snappedBottom - snappedTop);
+      if(newX !== origX || newY !== origY || newW !== (origR - origX) || newH !== (origB - origY)){
+        boxes[ri] = { x: newX, y: newY, w: newW, h: newH };
+        applyBboxToRegion(regions[ri], boxes[ri]);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function medianCoherence(values){
+    if(!values.length) return 0;
+    var sorted = values.slice().sort(function(a, b){ return a - b; });
+    var mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  function detectAlignedGroups(boxes, axis){
+    var n = boxes.length;
+    var groups = [];
+    var tolerance = 8;
+    var indices = boxes.map(function(_, i){ return i; });
+    if(axis === 'horizontal'){
+      indices.sort(function(a, b){ return (boxes[a].y + boxes[a].h / 2) - (boxes[b].y + boxes[b].h / 2); });
+      var groupStart = 0;
+      for(var i = 1; i <= indices.length; i++){
+        if(i === indices.length ||
+          Math.abs((boxes[indices[i]].y + boxes[indices[i]].h / 2) -
+            (boxes[indices[i - 1]].y + boxes[indices[i - 1]].h / 2)) > tolerance){
+          if(i - groupStart >= 3){
+            var groupIndices = indices.slice(groupStart, i);
+            groupIndices.sort(function(a, b){ return boxes[a].x - boxes[b].x; });
+            var heights = groupIndices.map(function(idx){ return boxes[idx].h; });
+            var medianH = medianCoherence(heights);
+            var consistent = heights.every(function(h){ return Math.abs(h - medianH) / Math.max(1, medianH) < 0.3; });
+            if(consistent){
+              var widths = groupIndices.map(function(idx){ return boxes[idx].w; });
+              var medianW = medianCoherence(widths);
+              var wConsistent = widths.every(function(w){ return Math.abs(w - medianW) / Math.max(1, medianW) < 0.3; });
+              groups.push({ axis: axis, indices: groupIndices, medianSize: medianH, sizeKey: 'h' });
+              if(wConsistent) groups.push({ axis: axis, indices: groupIndices, medianSize: medianW, sizeKey: 'w' });
+            }
+          }
+          groupStart = i;
+        }
+      }
+    } else {
+      indices.sort(function(a, b){ return (boxes[a].x + boxes[a].w / 2) - (boxes[b].x + boxes[b].w / 2); });
+      var groupStart2 = 0;
+      for(var i2 = 1; i2 <= indices.length; i2++){
+        if(i2 === indices.length ||
+          Math.abs((boxes[indices[i2]].x + boxes[indices[i2]].w / 2) -
+            (boxes[indices[i2 - 1]].x + boxes[indices[i2 - 1]].w / 2)) > tolerance){
+          if(i2 - groupStart2 >= 3){
+            var groupIndices2 = indices.slice(groupStart2, i2);
+            groupIndices2.sort(function(a, b){ return boxes[a].y - boxes[b].y; });
+            var widths2 = groupIndices2.map(function(idx){ return boxes[idx].w; });
+            var medianW2 = medianCoherence(widths2);
+            var consistent2 = widths2.every(function(w){ return Math.abs(w - medianW2) / Math.max(1, medianW2) < 0.3; });
+            if(consistent2){
+              groups.push({ axis: axis, indices: groupIndices2, medianSize: medianW2, sizeKey: 'w' });
+              var heights2 = groupIndices2.map(function(idx){ return boxes[idx].h; });
+              var medianH2 = medianCoherence(heights2);
+              var hConsistent = heights2.every(function(h){ return Math.abs(h - medianH2) / Math.max(1, medianH2) < 0.3; });
+              if(hConsistent) groups.push({ axis: axis, indices: groupIndices2, medianSize: medianH2, sizeKey: 'h' });
+            }
+          }
+          groupStart2 = i2;
+        }
+      }
+    }
+    return groups;
+  }
+  function normalizeGroupDimensions(regions, boxes, group){
+    var indices = group.indices, medianSize = group.medianSize, sizeKey = group.sizeKey, axis = group.axis;
+    for(var gi = 0; gi < indices.length; gi++){
+      var idx = indices[gi];
+      var b = boxes[idx];
+      var currentSize = b[sizeKey];
+      var delta = Math.abs(currentSize - medianSize);
+      if(delta / Math.max(1, medianSize) < 0.20 && delta > 0.5){
+        var center = sizeKey === 'h' ? b.y + b.h / 2 : b.x + b.w / 2;
+        if(sizeKey === 'h'){ b.h = medianSize; b.y = center - medianSize / 2; }
+        else { b.w = medianSize; b.x = center - medianSize / 2; }
+        applyBboxToRegion(regions[idx], b);
+      }
+    }
+    for(var si = 1; si < indices.length; si++){
+      var prev = boxes[indices[si - 1]], curr = boxes[indices[si]];
+      if(axis === 'horizontal'){
+        var gapX = curr.x - (prev.x + prev.w);
+        if(gapX > 0 && gapX < 8){
+          var mid = prev.x + prev.w + gapX / 2;
+          prev.w = mid - prev.x;
+          curr.w = (curr.x + curr.w) - mid;
+          curr.x = mid;
+          applyBboxToRegion(regions[indices[si - 1]], prev);
+          applyBboxToRegion(regions[indices[si]], curr);
+        }
+      } else {
+        var gapY = curr.y - (prev.y + prev.h);
+        if(gapY > 0 && gapY < 8){
+          var midY = prev.y + prev.h + gapY / 2;
+          prev.h = midY - prev.y;
+          curr.h = (curr.y + curr.h) - midY;
+          curr.y = midY;
+          applyBboxToRegion(regions[indices[si - 1]], prev);
+          applyBboxToRegion(regions[indices[si]], curr);
+        }
+      }
+    }
+  }
+  function normalizeRepeatingStructures(regions){
+    var boxes = regions.map(function(r){ return ensureBBox(r.geometry?.bbox || {}); });
+    if(regions.length < 3) return;
+    var hGroups = detectAlignedGroups(boxes, 'horizontal');
+    var vGroups = detectAlignedGroups(boxes, 'vertical');
+    var allGroups = hGroups.concat(vGroups);
+    for(var gi = 0; gi < allGroups.length; gi++){
+      if(allGroups[gi].indices.length < 3) continue;
+      normalizeGroupDimensions(regions, boxes, allGroups[gi]);
+    }
+  }
+  function refineRegionCoherence(regions){
+    if(!Array.isArray(regions) || regions.length < 2) return regions;
+    var result = classifyContainmentLayers(regions);
+    var containedBy = result.containedBy, depth = result.depth;
+    for(var i = 0; i < regions.length; i++){
+      regions[i].features = regions[i].features || {};
+      regions[i].features.containmentDepth = depth[i];
+      regions[i].features.containmentParentIdx = containedBy[i];
+    }
+    var refined = resolveOverlaps(regions, containedBy);
+    snapBoundariesToEdges(refined, 6);
+    normalizeRepeatingStructures(refined);
+    snapBoundariesToEdges(refined, 4);
+    return refined;
+  }
+
   // ── upload-analysis-pipeline.js ───────────────────────────────────────────
   function createIdFactory(seed){
     let index = 0;
@@ -865,7 +1243,8 @@
     const textLines = groupTextLines(textTokens, { idFactory });
     const textBlocks = groupTextBlocks(textLines, textTokens, { idFactory });
     const proposalRegions = detectRegionProposals({ textLines, viewport: resolvedViewport, idFactory, imageData });
-    const regionNodes = computeRegionFeatures(proposalRegions, textTokens);
+    const refinedRegions = refineRegionCoherence(proposalRegions);
+    const regionNodes = computeRegionFeatures(refinedRegions, textTokens);
     const regionGraph = buildRegionGraph(regionNodes, { idFactory });
     const textGraph = buildTextGraph({ textTokens, textLines, textBlocks, idFactory });
     const surfaceCandidates = detectSurfaceCandidates(regionNodes, { idFactory });
