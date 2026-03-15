@@ -1136,6 +1136,7 @@
     })();
 
     var _memDocs = {};
+    var _memCorrespondence = {};
 
     function _load(){
       try { var raw=backend.getItem(BATCH_SESSION_STORAGE_KEY); return raw ? JSON.parse(raw) : []; }
@@ -1167,6 +1168,9 @@
         if(!session) return null;
         if(_memDocs[sessionId] && _memDocs[sessionId].length){
           session.documents = _memDocs[sessionId];
+        }
+        if(_memCorrespondence[sessionId]){
+          session.correspondenceResult = _memCorrespondence[sessionId];
         }
         return session;
       },
@@ -1217,6 +1221,7 @@
         var sessions = _load();
         var session = sessions.find(function(s){return s.sessionId===sessionId;});
         if(!session) return false;
+        if(result){ _memCorrespondence[sessionId] = result; }
         var persistResult = result;
         if(result && result.correspondences && result.correspondences.length > 50){
           persistResult = {};
@@ -1242,6 +1247,7 @@
         var sessions = _load().filter(function(s){return s.sessionId!==sessionId;});
         _save(sessions);
         delete _memDocs[sessionId];
+        delete _memCorrespondence[sessionId];
       },
       documentCount: function(sessionId){
         if(_memDocs[sessionId]) return _memDocs[sessionId].length;

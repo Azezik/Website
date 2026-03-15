@@ -340,6 +340,11 @@ function createBatchSessionStore(storage) {
   // In-memory map: sessionId → full document summary array
   const _memDocs = {};
 
+  // In-memory map: sessionId → full correspondence result (with correspondences[])
+  // localStorage strips the correspondences array when > 50 entries for quota
+  // reasons, but the spatial transform pipeline needs them for BBOX transfer.
+  const _memCorrespondence = {};
+
   function _load() {
     try {
       const raw = backend.getItem(BATCH_SESSION_STORAGE_KEY);
@@ -394,6 +399,11 @@ function createBatchSessionStore(storage) {
       // Merge in-memory full documents if available
       if (_memDocs[sessionId] && _memDocs[sessionId].length) {
         session.documents = _memDocs[sessionId];
+      }
+      // Merge in-memory full correspondence result (localStorage version may
+      // have correspondences[] stripped — the spatial transform needs them)
+      if (_memCorrespondence[sessionId]) {
+        session.correspondenceResult = _memCorrespondence[sessionId];
       }
       return session;
     },
@@ -460,6 +470,13 @@ function createBatchSessionStore(storage) {
       const sessions = _load();
       const session = sessions.find(function (s) { return s.sessionId === sessionId; });
       if (!session) return false;
+
+      // Keep full result in memory — the spatial transform pipeline needs
+      // the correspondences array to build anchor pairs for BBOX transfer.
+      if (result) {
+        _memCorrespondence[sessionId] = result;
+      }
+
       // Strip large correspondences array from persisted result — keep only
       // the alignment model and anchors for storage efficiency.
       var persistResult = result;
@@ -490,6 +507,7 @@ function createBatchSessionStore(storage) {
       const sessions = _load().filter(function (s) { return s.sessionId !== sessionId; });
       _save(sessions);
       delete _memDocs[sessionId];
+      delete _memCorrespondence[sessionId];
     },
 
     /** Get document count for a session. */
