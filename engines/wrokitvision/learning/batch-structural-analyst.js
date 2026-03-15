@@ -73,6 +73,34 @@ function median(arr) {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 /**
+ * Filter outliers from an array using the IQR (Interquartile Range) method.
+ * Returns the array with values outside [Q1 - 1.5*IQR, Q3 + 1.5*IQR] removed.
+ * If the filtered result has fewer than 2 values, returns the original array.
+ */
+function filterOutliersIQR(arr) {
+  if (arr.length < 4) return arr;
+  var sorted = arr.slice().sort(function (a, b) { return a - b; });
+  var q1Idx = Math.floor(sorted.length * 0.25);
+  var q3Idx = Math.floor(sorted.length * 0.75);
+  var q1 = sorted[q1Idx];
+  var q3 = sorted[q3Idx];
+  var iqr = q3 - q1;
+  var lo = q1 - 1.5 * iqr;
+  var hi = q3 + 1.5 * iqr;
+  var filtered = arr.filter(function (v) { return v >= lo && v <= hi; });
+  return filtered.length >= 2 ? filtered : arr;
+}
+
+/**
+ * Compute a robust coefficient of variation using IQR-filtered values.
+ * Falls back to standard CV if there aren't enough values after filtering.
+ */
+function robustCoefficientOfVariation(arr) {
+  var filtered = filterOutliersIQR(arr);
+  return coefficientOfVariation(filtered);
+}
+
+/**
  * Compute cosine similarity between two vectors.
  */
 function cosineSimilarity(a, b) {
@@ -116,13 +144,17 @@ function cvToStability(cv) {
 function analyzeRegionCountStability(documents) {
   const counts = documents.map(function (d) { return d.metrics.regionCount; });
   const cv = coefficientOfVariation(counts);
+  const robustCV = robustCoefficientOfVariation(counts);
+  // Use the robust CV for stability scoring to reduce outlier impact,
+  // but report both for diagnostics
   return {
     metric: 'region_count',
-    stability: cvToStability(cv),
+    stability: cvToStability(robustCV),
     values: counts,
     mean: Math.round(mean(counts) * 100) / 100,
     stddev: Math.round(stddev(counts) * 100) / 100,
     cv: Math.round(cv * 1000) / 1000,
+    robustCV: Math.round(robustCV * 1000) / 1000,
     min: Math.min.apply(null, counts),
     max: Math.max.apply(null, counts),
     median: median(counts)
@@ -134,6 +166,7 @@ function analyzeRegionCountStability(documents) {
 function analyzeRegionAreaStability(documents) {
   const avgAreas = documents.map(function (d) { return d.metrics.avgRegionArea; });
   const cv = coefficientOfVariation(avgAreas);
+  const robustCV = robustCoefficientOfVariation(avgAreas);
 
   // Also measure per-region area variance across documents.
   // Supports both full summaries (regionDescriptors) and compact summaries (_regionAreas).
@@ -148,11 +181,12 @@ function analyzeRegionAreaStability(documents) {
 
   return {
     metric: 'region_area',
-    stability: cvToStability(cv),
+    stability: cvToStability(robustCV),
     avgAreaPerDocument: avgAreas,
     mean: Math.round(mean(avgAreas) * 10000) / 10000,
     stddev: Math.round(stddev(avgAreas) * 10000) / 10000,
     cv: Math.round(cv * 1000) / 1000,
+    robustCV: Math.round(robustCV * 1000) / 1000,
     globalAreaMean: Math.round(mean(allAreas) * 10000) / 10000,
     globalAreaStddev: Math.round(stddev(allAreas) * 10000) / 10000
   };
@@ -163,13 +197,15 @@ function analyzeRegionAreaStability(documents) {
 function analyzeRegionDensityStability(documents) {
   const densities = documents.map(function (d) { return d.metrics.avgTextDensity; });
   const cv = coefficientOfVariation(densities);
+  const robustCV = robustCoefficientOfVariation(densities);
   return {
     metric: 'region_density',
-    stability: cvToStability(cv),
+    stability: cvToStability(robustCV),
     values: densities,
     mean: Math.round(mean(densities) * 1000) / 1000,
     stddev: Math.round(stddev(densities) * 1000) / 1000,
-    cv: Math.round(cv * 1000) / 1000
+    cv: Math.round(cv * 1000) / 1000,
+    robustCV: Math.round(robustCV * 1000) / 1000
   };
 }
 
@@ -216,10 +252,12 @@ function analyzeAdjacencyGraphStability(documents) {
   });
   const cvWeights = coefficientOfVariation(avgWeights);
 
-  // Combined graph stability
-  const edgeCountStability = cvToStability(cvEdges);
+  // Combined graph stability (use robust CV for edge counts and weights)
+  const robustCvEdges = robustCoefficientOfVariation(edgeCounts);
+  const robustCvWeights = robustCoefficientOfVariation(avgWeights);
+  const edgeCountStability = cvToStability(robustCvEdges);
   const edgeDistStability = clamp(1 - avgJSD, 0, 1);
-  const edgeWeightStability = cvToStability(cvWeights);
+  const edgeWeightStability = cvToStability(robustCvWeights);
   const combinedStability = (edgeCountStability * 0.4 + edgeDistStability * 0.35 + edgeWeightStability * 0.25);
 
   return {
@@ -279,9 +317,9 @@ function analyzeTextStructureStability(documents) {
   const cvBlocks = coefficientOfVariation(blockCounts);
   const cvTokens = coefficientOfVariation(tokenCounts);
 
-  const lineStability = cvToStability(cvLines);
-  const blockStability = cvToStability(cvBlocks);
-  const tokenStability = cvToStability(cvTokens);
+  const lineStability = cvToStability(robustCoefficientOfVariation(lineCounts));
+  const blockStability = cvToStability(robustCoefficientOfVariation(blockCounts));
+  const tokenStability = cvToStability(robustCoefficientOfVariation(tokenCounts));
   const combined = (lineStability * 0.35 + blockStability * 0.35 + tokenStability * 0.3);
 
   return {
@@ -728,5 +766,7 @@ module.exports = {
   analyzeParameterSensitivity,
   // Expose statistical helpers for testing
   cosineSimilarity,
-  jensenShannonDivergence
+  jensenShannonDivergence,
+  filterOutliersIQR,
+  robustCoefficientOfVariation
 };

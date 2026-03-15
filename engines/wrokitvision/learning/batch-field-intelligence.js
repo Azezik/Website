@@ -134,9 +134,14 @@ function extractTextFromNormBox(normBox, tokens, viewport) {
     var ox = Math.min(t.x + t.w, bx + bw) - Math.max(t.x, bx);
     var oy = Math.min(t.y + t.h, by + bh) - Math.max(t.y, by);
     if (ox <= 0 || oy <= 0) continue;
+    // Include token if >=50% of its area overlaps, or center is inside box
+    var overlapArea = ox * oy;
+    var tokenArea = (t.w * t.h) || 1;
     var cx = t.x + t.w / 2, cy = t.y + t.h / 2;
-    if (cx < bx || cx > bx + bw || cy < by || cy > by + bh) continue;
-    matched.push(t);
+    var centerInside = cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh;
+    if (centerInside || (overlapArea / tokenArea) >= 0.5) {
+      matched.push(t);
+    }
   }
 
   matched.sort(function (a, b) {
@@ -242,9 +247,11 @@ function generateCandidates(originalBox, refDoc) {
   }
 
   // ── Family 3: Local Geometry Search ──────────────────────────────────
-  var stepX = originalBox.wN * 0.2;
-  var stepY = originalBox.hN * 0.2;
-  var expandFrac = 0.15;
+  // Use wider search range (±30% shift, ±25% expand) to avoid missing
+  // optimal positions that fall outside the previous ±20%/±15% range.
+  var stepX = originalBox.wN * 0.3;
+  var stepY = originalBox.hN * 0.3;
+  var expandFrac = 0.25;
 
   // Horizontal shifts
   var shifts = [
@@ -529,12 +536,24 @@ function learnFieldGeometry(extractionResult, corrections, batchTokens, refDoc, 
 
     var target = targets.find(function (t) { return t.fieldKey === fk; });
 
-    // Compute consensus offset/expansion by averaging across corrected docs
-    var avgDx = mean(opts2.map(function (o) { return o.offset ? o.offset.dx : 0; }));
-    var avgDy = mean(opts2.map(function (o) { return o.offset ? o.offset.dy : 0; }));
-    var avgDw = mean(opts2.map(function (o) { return o.expansion ? o.expansion.dw : 0; }));
-    var avgDh = mean(opts2.map(function (o) { return o.expansion ? o.expansion.dh : 0; }));
-    var avgConf = mean(opts2.map(function (o) { return o.geometryConfidence; }));
+    // Compute consensus offset/expansion using confidence-weighted averages
+    // so that higher-confidence corrections have more influence.
+    var totalWeight = 0;
+    var wDx = 0, wDy = 0, wDw = 0, wDh = 0, wConf = 0;
+    for (var wi = 0; wi < opts2.length; wi++) {
+      var optW = Math.max(opts2[wi].geometryConfidence, 0.01); // avoid zero weight
+      totalWeight += optW;
+      wDx += (opts2[wi].offset ? opts2[wi].offset.dx : 0) * optW;
+      wDy += (opts2[wi].offset ? opts2[wi].offset.dy : 0) * optW;
+      wDw += (opts2[wi].expansion ? opts2[wi].expansion.dw : 0) * optW;
+      wDh += (opts2[wi].expansion ? opts2[wi].expansion.dh : 0) * optW;
+      wConf += opts2[wi].geometryConfidence * optW;
+    }
+    var avgDx = totalWeight > 0 ? wDx / totalWeight : 0;
+    var avgDy = totalWeight > 0 ? wDy / totalWeight : 0;
+    var avgDw = totalWeight > 0 ? wDw / totalWeight : 0;
+    var avgDh = totalWeight > 0 ? wDh / totalWeight : 0;
+    var avgConf = totalWeight > 0 ? wConf / totalWeight : 0;
     var improvedCount = opts2.filter(function (o) { return o.improved; }).length;
 
     // Find the dominant winning family
