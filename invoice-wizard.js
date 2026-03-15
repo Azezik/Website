@@ -20519,6 +20519,70 @@ var _batchTokenStore = {};
 // In-memory canvas data URL store for Phase 2B viewport rendering
 var _batchCanvasStore = {};
 
+// Wrap _batchStore.addDocument to auto-invalidate stale analysis on doc changes
+if (_batchStore && _batchStore.addDocument) {
+  var _origAddDocument = _batchStore.addDocument.bind(_batchStore);
+  _batchStore.addDocument = function(sessionId, docSummary) {
+    var result = _origAddDocument(sessionId, docSummary);
+    _invalidateLearningArtifacts(sessionId);
+    return result;
+  };
+}
+// Wrap _batchStore.removeDocument to auto-invalidate stale analysis on doc changes
+if (_batchStore && _batchStore.removeDocument) {
+  var _origRemoveDocument = _batchStore.removeDocument.bind(_batchStore);
+  _batchStore.removeDocument = function(sessionId, documentId) {
+    var result = _origRemoveDocument(sessionId, documentId);
+    _invalidateLearningArtifacts(sessionId);
+    return result;
+  };
+}
+
+/**
+ * Invalidate all downstream learning artifacts for the current session.
+ * Called when documents are added/removed to ensure stale results
+ * cannot contaminate new analysis.
+ */
+function _invalidateLearningArtifacts(sessionId) {
+  if (!_batchStore || !sessionId) return;
+  var sessions;
+  try {
+    var raw = localStorage.getItem('wrokit.learning.batchSessions');
+    sessions = raw ? JSON.parse(raw) : [];
+  } catch(_e) { return; }
+  var session = sessions.find(function(s) { return s.sessionId === sessionId; });
+  if (!session) return;
+  var changed = false;
+  if (session.stabilityReport) { session.stabilityReport = null; changed = true; }
+  if (session.correspondenceResult) { session.correspondenceResult = null; changed = true; }
+  if (session.geometryProfiles) { session.geometryProfiles = null; changed = true; }
+  if (changed) {
+    session.updatedAt = new Date().toISOString();
+    try { localStorage.setItem('wrokit.learning.batchSessions', JSON.stringify(sessions)); }
+    catch(_e2) {}
+  }
+  // Also clear in-memory Phase 2B state since it depends on correspondence
+  _resetPhase2bState();
+}
+
+/**
+ * Reset Phase 2B in-memory state. Called on session switch, document
+ * changes, or any event that invalidates downstream artifacts.
+ */
+function _resetPhase2bState() {
+  if (typeof _phase2bState !== 'undefined') {
+    _phase2bState.selectedDocId = null;
+    _phase2bState.selectedDocName = null;
+    _phase2bState.canvasDataUrl = null;
+    _phase2bState.drawingFieldIdx = -1;
+    _phase2bState.extractionTargets = [null, null, null];
+    _phase2bState.pendingDraw = null;
+    _phase2bState.refinementResult = null;
+    _phase2bState.extractionResult = null;
+    _phase2bState.correspondenceResult = null;
+  }
+}
+
 function _storeBatchTokens(sessionId, documentId, tokens, viewport) {
   if (!_batchTokenStore[sessionId]) _batchTokenStore[sessionId] = {};
   _batchTokenStore[sessionId][documentId] = { tokens: tokens, viewport: viewport };
@@ -20673,6 +20737,7 @@ function showBatchSessionDetails(sessionId){
   if(select){
     select.addEventListener('change', function(){
       _activeBatchSessionId = select.value || null;
+      _resetPhase2bState();
       if(_activeBatchSessionId) showBatchSessionDetails(_activeBatchSessionId);
       else {
         var d = document.getElementById('batch-session-details'); if(d) d.style.display = 'none';
