@@ -338,234 +338,121 @@ function refineAnchors(correspondenceResult, extractionTargets, refDoc, opts) {
 
 /* ── 4. BBOX Transfer / Extraction ───────────────────────────────────────── */
 
+var spatialTransform = require('./spatial-transform-estimator');
+
 /**
  * Transfer a user-defined BBOX from the reference document to a target
- * document using the reference document's refined-anchor graph as the
- * coordinate template.
+ * document using a spatial transformation model estimated from anchor
+ * correspondences.
  *
  * ── Algorithm ──────────────────────────────────────────────────────────
  *
- * Stage 1 – Reference Template Frame (Edge-Relative)
- *   For each refined anchor, compute the BBOX's position relative to the
- *   nearest edge of the anchor region (not centroid). Edge-relative offsets
- *   are more stable because structural edges (row boundaries, column edges)
- *   stay consistent across documents even when region content varies.
+ * Stage 1 – Build Anchor Pairs
+ *   Match refined anchors to their corresponding regions in the target
+ *   document via Phase 2 correspondences. Each pair provides a
+ *   source→destination point correspondence.
  *
- * Stage 2 – Graph Projection / Structural Matching
- *   For each refined anchor, find its corresponding region on the target
- *   document via Phase 2 correspondences.
+ * Stage 2 – Estimate Global Affine Transform
+ *   Use all anchor pairs to estimate a best-fit affine transformation
+ *   (translation + scale + rotation + skew) via weighted least squares.
+ *   Apply RANSAC-like outlier rejection (iterative re-estimation after
+ *   removing pairs with large residuals).
  *
- * Stage 3 – Global Anchor-Based Transformation
- *   For each anchor pair (ref → target):
- *     edgeOffset = bbox edge offset from nearest ref anchor edge
- *     candidatePos = corresponding target anchor edge + edgeOffset
- *   The positional offset is NOT scaled by region size ratio — only
- *   BBOX dimensions are scaled. This prevents row-level drift caused
- *   by region height/width variation between documents.
- *   Weighting uses tight proximity (15% radius) with Y-axis priority
- *   and overlap bonus for overlapping anchors.
+ * Stage 3 – Estimate Field-Local Transform
+ *   For each field, compute a spatially-weighted local transform using
+ *   nearby anchors with Gaussian distance weighting. Blend with the
+ *   global transform based on local anchor density.
  *
- * Stage 4 – Local Anchor-Based Adjustment
- *   After global transform, nudge toward nearby structurally-similar
- *   regions on the target document for fine alignment.
+ * Stage 4 – Transform BBOX Through Model
+ *   Apply the blended transform to all 4 corners of the BBOX, then
+ *   take the axis-aligned bounding box of the result.
+ *
+ * Stage 5 – Local Structural Refinement
+ *   After transform, compare the predicted region against nearby
+ *   structural regions on the target document. Use the reference
+ *   document's local neighborhood to verify structural consistency
+ *   and apply small adjustments.
  *
  * @param {object}   target      - { fieldKey, label, normBox }
  * @param {object[]} refinedAnchors  - Anchors from refineAnchors()
  * @param {object}   correspondenceResult - Phase 2 output
  * @param {string}   targetDocId - ID of the document to transfer to
  * @param {object}   targetDoc   - Target document summary
- * @returns {object} { transferredNormBox, confidence, method, anchorsUsed }
+ * @param {object}   [opts]
+ * @param {object}   [opts.precomputedTransform] - Pre-computed spatial transform model
+ * @param {object}   [opts.targetNeighborhood]   - Target neighborhood from refinement
+ * @returns {object} { transferredNormBox, confidence, method, anchorsUsed, transformModel }
  */
-function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId, targetDoc) {
+function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId, targetDoc, opts) {
+  opts = opts || {};
   var srcBox = target.normBox;
   var srcCenter = normBoxCenter(srcBox);
-  // Source box edges
-  var srcTop = srcBox.y0n;
-  var srcBot = srcBox.y0n + srcBox.hN;
-  var srcLeft = srcBox.x0n;
-  var srcRight = srcBox.x0n + srcBox.wN;
 
-  // ── Stage 2: Find correspondences for this target document ──────────
-  var docCorrespondences = (correspondenceResult.correspondences || []).filter(
-    function (c) { return c.tgtDocumentId === targetDocId; }
-  );
+  // ── Stage 1+2: Estimate spatial transform model ─────────────────────
+  var transformModel = opts.precomputedTransform || null;
 
-  // ── Stage 1+2: Build anchor pairs with edge-relative position data ──
-  var anchorPairs = [];
-  for (var ai = 0; ai < refinedAnchors.length; ai++) {
-    var anchor = refinedAnchors[ai];
-
-    // Find this anchor's correspondence in the target doc
-    var match = null;
-    for (var ci = 0; ci < docCorrespondences.length; ci++) {
-      if (docCorrespondences[ci].refRegionId === anchor.refRegionId) {
-        match = docCorrespondences[ci];
-        break;
-      }
-    }
-    if (!match) continue;
-
-    // Find the target region descriptor
-    var tgtRegion = null;
-    var tgtRegionsArr = targetDoc.regionDescriptors || [];
-    for (var ri = 0; ri < tgtRegionsArr.length; ri++) {
-      if (tgtRegionsArr[ri].regionId === match.tgtRegionId) {
-        tgtRegion = tgtRegionsArr[ri];
-        break;
-      }
-    }
-    if (!tgtRegion) continue;
-
-    // ── Stage 1: Edge-relative offset computation ─────────────────────
-    // Instead of centroid-to-centroid, compute offset from the nearest
-    // edge of the anchor region. This preserves row/column alignment
-    // because structural edges (table row boundaries, label edges) are
-    // more consistent across documents than region centroids.
-    var refBbox = anchor.normalizedBbox;
-    var tgtBbox = tgtRegion.normalizedBbox;
-
-    // Reference anchor edges
-    var refTop = refBbox.y;
-    var refBot = refBbox.y + refBbox.h;
-    var refLeft = refBbox.x;
-    var refRight = refBbox.x + refBbox.w;
-
-    // Target anchor edges
-    var tgtTop = tgtBbox.y;
-    var tgtBot = tgtBbox.y + tgtBbox.h;
-    var tgtLeft = tgtBbox.x;
-    var tgtRight = tgtBbox.x + tgtBbox.w;
-
-    // Y-axis: use the nearest horizontal edge
-    var distFromRefTop = Math.abs(srcCenter.y - refTop);
-    var distFromRefBot = Math.abs(srcCenter.y - refBot);
-    var candidateY;
-    if (distFromRefTop <= distFromRefBot) {
-      // BBOX is closer to/above the top edge → preserve offset from top
-      candidateY = tgtTop + (srcCenter.y - refTop);
-    } else {
-      // BBOX is closer to/below the bottom edge → preserve offset from bottom
-      candidateY = tgtBot + (srcCenter.y - refBot);
-    }
-
-    // X-axis: use the nearest vertical edge
-    var distFromRefLeft = Math.abs(srcCenter.x - refLeft);
-    var distFromRefRight = Math.abs(srcCenter.x - refRight);
-    var candidateX;
-    if (distFromRefLeft <= distFromRefRight) {
-      candidateX = tgtLeft + (srcCenter.x - refLeft);
-    } else {
-      candidateX = tgtRight + (srcCenter.x - refRight);
-    }
-
-    // Scale for BBOX dimensions only (NOT for positional offset)
-    var scaleX = refBbox.w > 0 ? tgtBbox.w / refBbox.w : 1;
-    var scaleY = refBbox.h > 0 ? tgtBbox.h / refBbox.h : 1;
-    // Tight clamp: prevent dimension blowup
-    scaleX = clamp(scaleX, 0.7, 1.5);
-    scaleY = clamp(scaleY, 0.7, 1.5);
-    var candidateW = srcBox.wN * scaleX;
-    var candidateH = srcBox.hN * scaleY;
-
-    // ── Weighting ─────────────────────────────────────────────────────
-    // Tight proximity with separate X/Y distance and overlap bonus.
-    var refCenter = anchor.normalizedPosition;
-    var dist = pointDist(srcCenter, refCenter);
-
-    // Y-distance matters more than X for row-level precision
-    var yDist = Math.abs(srcCenter.y - refCenter.y);
-    var xDist = Math.abs(srcCenter.x - refCenter.x);
-
-    // Tight proximity: 15% radius for Y, 25% for X
-    var yProx = clamp(1 - yDist / 0.15, 0, 1);
-    var xProx = clamp(1 - xDist / 0.25, 0, 1);
-    var proximityWeight = yProx * 0.7 + xProx * 0.3;
-
-    // Overlap bonus: anchors whose regions overlap the BBOX are most reliable
-    var anchorNb = { x0n: refBbox.x, y0n: refBbox.y, wN: refBbox.w, hN: refBbox.h };
-    var overlapIoU = normBoxIoU(srcBox, anchorNb);
-    // Vertical overlap specifically (do the Y ranges intersect?)
-    var yOverlap = Math.max(0, Math.min(srcBot, refBot) - Math.max(srcTop, refTop));
-    var yOverlapFrac = srcBox.hN > 0 ? yOverlap / srcBox.hN : 0;
-    var overlapBonus = overlapIoU > 0 ? 0.4 + overlapIoU * 0.6 : (yOverlapFrac > 0.3 ? 0.3 : 0);
-
-    // Field-specific anchor bonus
-    var fieldBonus = (anchor.bestTargetKey === target.fieldKey) ? 1.5 : 1.0;
-
-    // Combined weight: proximity base + overlap bonus, × match quality × field bonus
-    var weight = (proximityWeight + overlapBonus) * match.similarity * fieldBonus;
-
-    // Skip anchors with negligible weight
-    if (weight < 0.01) continue;
-
-    anchorPairs.push({
-      anchor: anchor,
-      match: match,
-      tgtRegion: tgtRegion,
-      distance: dist,
-      weight: weight,
-      candidateCenter: { x: candidateX, y: candidateY },
-      candidateSize: { w: candidateW, h: candidateH },
-      scale: { x: scaleX, y: scaleY }
-    });
+  if (!transformModel) {
+    transformModel = spatialTransform.estimateSpatialTransform(
+      refinedAnchors, correspondenceResult, targetDocId, targetDoc
+    );
   }
 
-  // Sort by weight descending (highest quality first)
-  anchorPairs.sort(function (a, b) { return b.weight - a.weight; });
-
-  if (anchorPairs.length === 0) {
+  if (!transformModel || transformModel.pairCount === 0) {
     // Fallback: identity transfer (same normalized position)
     return {
       transferredNormBox: { x0n: srcBox.x0n, y0n: srcBox.y0n, wN: srcBox.wN, hN: srcBox.hN },
       confidence: 0.3,
       method: 'identity_fallback',
-      anchorsUsed: 0
+      anchorsUsed: 0,
+      transformModel: transformModel
     };
   }
 
-  // ── Stage 3: Weighted average of projected candidates ───────────────
-  // Use up to 5 best-weighted anchors
-  var maxAnchors = Math.min(anchorPairs.length, 5);
-  var totalWeight = 0;
-  var avgCX = 0, avgCY = 0;
-  var avgW = 0, avgH = 0;
+  // ── Stage 3: Estimate field-local transform ─────────────────────────
+  var usedPairs = transformModel.pairs || [];
+  var localResult = spatialTransform.estimateLocalTransform(
+    srcBox, usedPairs, transformModel.transform,
+    { localRadius: 0.2, minLocalPairs: 2, globalBlend: 0.3 }
+  );
+  var effectiveTransform = localResult.blendedTransform || transformModel.transform;
 
-  for (var pi = 0; pi < maxAnchors; pi++) {
-    var pair = anchorPairs[pi];
-    avgCX += pair.candidateCenter.x * pair.weight;
-    avgCY += pair.candidateCenter.y * pair.weight;
-    avgW += pair.candidateSize.w * pair.weight;
-    avgH += pair.candidateSize.h * pair.weight;
-    totalWeight += pair.weight;
-  }
+  // ── Stage 4: Transform BBOX through the model ──────────────────────
+  var transformedBox = spatialTransform.transformNormBox(effectiveTransform, srcBox);
 
-  if (totalWeight > 0) {
-    avgCX /= totalWeight;
-    avgCY /= totalWeight;
-    avgW /= totalWeight;
-    avgH /= totalWeight;
-  } else {
-    avgCX = srcCenter.x;
-    avgCY = srcCenter.y;
-    avgW = srcBox.wN;
-    avgH = srcBox.hN;
-  }
+  var newX = transformedBox.x0n;
+  var newY = transformedBox.y0n;
+  var newW = transformedBox.wN;
+  var newH = transformedBox.hN;
 
-  // Convert center + size back to x0n/y0n/wN/hN
-  var newW = clamp(avgW, 0.001, 1);
-  var newH = clamp(avgH, 0.001, 1);
-  var newX = avgCX - newW / 2;
-  var newY = avgCY - newH / 2;
-
-  // ── Stage 4: Local Anchor-Based Adjustment ──────────────────────────
-  // After global transform, check for nearby structural regions on the
-  // target doc that could refine placement (small nudge, not repositioning).
+  // ── Stage 5: Local structural refinement ───────────────────────────
+  // After transform, nudge toward nearby structurally-similar regions
+  // on the target document for fine alignment.
   var tgtRegions = targetDoc.regionDescriptors || [];
+  var txCenter = { x: newX + newW / 2, y: newY + newH / 2 };
+
   if (tgtRegions.length > 0) {
-    var txCenter = { x: avgCX, y: avgCY };
     var txNormBox = { x0n: newX, y0n: newY, wN: newW, hN: newH };
     var bestNudge = null;
     var bestNudgeScore = 0;
+
+    // Use the target neighborhood if available to identify expected
+    // structural features near the field
+    var expectedSurfaceTypes = null;
+    var expectedTextDensity = null;
+    if (opts.targetNeighborhood) {
+      var nh = opts.targetNeighborhood;
+      if (nh.neighbors && nh.neighbors.length > 0) {
+        expectedSurfaceTypes = {};
+        expectedTextDensity = 0;
+        var nhCount = Math.min(nh.neighbors.length, 5);
+        for (var nhi = 0; nhi < nhCount; nhi++) {
+          var nhRegion = nh.neighbors[nhi];
+          expectedSurfaceTypes[nhRegion.surfaceType] = true;
+          expectedTextDensity += nhRegion.textDensity;
+        }
+        expectedTextDensity /= nhCount;
+      }
+    }
 
     for (var lri = 0; lri < tgtRegions.length; lri++) {
       var lr = tgtRegions[lri];
@@ -573,19 +460,30 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
       var lrDist = pointDist(txCenter, lrCenter);
 
       // Only consider regions very close to the transferred position
-      // (within half the BBOX diagonal to avoid pulling toward distant regions)
       var diagThreshold = Math.sqrt(newW * newW + newH * newH) * 0.75;
       if (lrDist > diagThreshold) continue;
 
-      // Compute structural similarity: overlap + size match
+      // Compute structural similarity: overlap + size match + neighborhood match
       var lrNormBox = regionToNormBox(lr);
       var iou = normBoxIoU(txNormBox, lrNormBox);
       var sizeSim = 1 - Math.abs(lr.normalizedBbox.w * lr.normalizedBbox.h - newW * newH) /
         Math.max(lr.normalizedBbox.w * lr.normalizedBbox.h, newW * newH, 0.001);
       sizeSim = clamp(sizeSim, 0, 1);
 
-      // The region must overlap meaningfully or be very close
-      var nudgeScore = iou * 0.6 + sizeSim * 0.2 + (1 - lrDist / diagThreshold) * 0.2;
+      var proxSim = 1 - lrDist / diagThreshold;
+
+      // Neighborhood consistency bonus: if this region matches the expected
+      // structural type from the reference neighborhood, boost it
+      var nhBonus = 0;
+      if (expectedSurfaceTypes && expectedSurfaceTypes[lr.surfaceType]) {
+        nhBonus += 0.1;
+      }
+      if (expectedTextDensity !== null) {
+        var tdSim = 1 - Math.abs(lr.textDensity - expectedTextDensity);
+        nhBonus += tdSim * 0.1;
+      }
+
+      var nudgeScore = iou * 0.5 + sizeSim * 0.15 + proxSim * 0.15 + nhBonus;
       if (nudgeScore > bestNudgeScore && nudgeScore > 0.15) {
         bestNudgeScore = nudgeScore;
         bestNudge = {
@@ -598,10 +496,10 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
 
     if (bestNudge) {
       // Nudge: blend the transferred center toward the region center
-      // proportional to the nudge score (max 30% adjustment)
+      // proportional to nudge score (max 30% adjustment)
       var nudgeStrength = clamp(bestNudgeScore * 0.3, 0, 0.3);
-      var nudgedCX = avgCX + (bestNudge.center.x - avgCX) * nudgeStrength;
-      var nudgedCY = avgCY + (bestNudge.center.y - avgCY) * nudgeStrength;
+      var nudgedCX = txCenter.x + (bestNudge.center.x - txCenter.x) * nudgeStrength;
+      var nudgedCY = txCenter.y + (bestNudge.center.y - txCenter.y) * nudgeStrength;
       newX = nudgedCX - newW / 2;
       newY = nudgedCY - newH / 2;
     }
@@ -613,9 +511,11 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
   newW = clamp(newW, 0.001, 1);
   newH = clamp(newH, 0.001, 1);
 
-  // Confidence based on anchor quality and count
-  var avgMatchSim = mean(anchorPairs.slice(0, maxAnchors).map(function (p) { return p.match.similarity; }));
-  var confidence = clamp(avgMatchSim * (0.5 + 0.5 * Math.min(maxAnchors, 3) / 3), 0, 1);
+  // Confidence based on transform coherence + anchor count
+  var coherenceScore = (transformModel.coherence && transformModel.coherence.coherenceScore) || 0.5;
+  var pairCountFactor = clamp(transformModel.pairCount / 5, 0.3, 1);
+  var localFactor = localResult.isLocal ? 1.1 : 1.0;
+  var confidence = clamp(coherenceScore * pairCountFactor * localFactor, 0, 1);
 
   // Compute net offset and scale for diagnostics
   var netOffsetX = (newX + newW / 2) - srcCenter.x;
@@ -626,10 +526,17 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
   return {
     transferredNormBox: { x0n: round(newX, 6), y0n: round(newY, 6), wN: round(newW, 6), hN: round(newH, 6) },
     confidence: round(confidence, 4),
-    method: 'anchor_relative_projection',
-    anchorsUsed: maxAnchors,
+    method: transformModel.isIdentity ? 'identity_fallback' : 'spatial_transform',
+    anchorsUsed: transformModel.pairCount,
     offset: { x: round(netOffsetX, 6), y: round(netOffsetY, 6) },
-    scale: { w: round(netScaleW, 4), h: round(netScaleH, 4) }
+    scale: { w: round(netScaleW, 4), h: round(netScaleH, 4) },
+    transformModel: {
+      status: transformModel.status,
+      coherenceScore: coherenceScore,
+      decomposed: transformModel.decomposed || null,
+      localTransformUsed: localResult.isLocal,
+      localPairCount: localResult.localPairCount
+    }
   };
 }
 
@@ -757,6 +664,24 @@ function extractFromBatch(refinementResult, correspondenceResult, refDoc, batchD
       fields: []
     };
 
+    // Pre-compute spatial transform model once per target document
+    // (shared across all fields for this doc)
+    var precomputedTransform = null;
+    if (!isRefDoc) {
+      precomputedTransform = spatialTransform.estimateSpatialTransform(
+        refinedAnchors, correspondenceResult, doc.documentId, doc
+      );
+    }
+
+    // Build target neighborhood lookup for local refinement
+    var targetNeighborhoods = {};
+    if (refinementResult.targetNeighborhoods) {
+      for (var nhi = 0; nhi < refinementResult.targetNeighborhoods.length; nhi++) {
+        var nh = refinementResult.targetNeighborhoods[nhi];
+        targetNeighborhoods[nh.fieldKey] = nh;
+      }
+    }
+
     for (var ti = 0; ti < targets.length; ti++) {
       var target = targets[ti];
       var transferResult;
@@ -770,8 +695,14 @@ function extractFromBatch(refinementResult, correspondenceResult, refDoc, batchD
           anchorsUsed: 0
         };
       } else {
-        // Transfer BBOX using refined anchors
-        transferResult = transferBBox(target, refinedAnchors, correspondenceResult, doc.documentId, doc);
+        // Transfer BBOX using spatial transform model
+        transferResult = transferBBox(
+          target, refinedAnchors, correspondenceResult, doc.documentId, doc,
+          {
+            precomputedTransform: precomputedTransform,
+            targetNeighborhood: targetNeighborhoods[target.fieldKey] || null
+          }
+        );
       }
 
       // Extract text if tokens available
@@ -797,6 +728,22 @@ function extractFromBatch(refinementResult, correspondenceResult, refDoc, batchD
         textConfidence: extraction.confidence,
         textSource: extraction.textSource || 'no_tokens'
       });
+    }
+
+    // Attach per-document transform diagnostics
+    if (precomputedTransform && !precomputedTransform.isIdentity) {
+      docResult.transformDiagnostics = {
+        status: precomputedTransform.status,
+        pairCount: precomputedTransform.pairCount,
+        coherenceScore: precomputedTransform.coherence
+          ? round(precomputedTransform.coherence.coherenceScore, 4)
+          : 0,
+        decomposed: precomputedTransform.decomposed || null,
+        outlierCount: precomputedTransform.coherence
+          ? precomputedTransform.coherence.outlierCount || 0
+          : 0,
+        iterations: precomputedTransform.iterations || 0
+      };
     }
 
     results.push(docResult);
@@ -862,6 +809,59 @@ function formatRefinementReport(result) {
   return out;
 }
 
+/**
+ * Format extraction results with per-document transform diagnostics.
+ */
+function formatExtractionReport(extractionResult) {
+  if (!extractionResult || !extractionResult.results) return '[No extraction data]';
+
+  var out = '';
+  out += '══════════════════════════════════════════════════════════════\n';
+  out += '  EXTRACTION REPORT (Phase 2B)\n';
+  out += '══════════════════════════════════════════════════════════════\n\n';
+  out += '  ' + extractionResult.message + '\n';
+
+  for (var di = 0; di < extractionResult.results.length; di++) {
+    var doc = extractionResult.results[di];
+    out += '\n──────────────────────────────────────────────────────────────\n';
+    out += '  ' + (doc.documentName || doc.documentId) +
+      (doc.isReference ? ' (REFERENCE)' : '') + '\n';
+
+    if (doc.transformDiagnostics) {
+      var td = doc.transformDiagnostics;
+      out += '  Transform: ' + td.status + '  pairs=' + td.pairCount +
+        '  coherence=' + (td.coherenceScore * 100).toFixed(1) + '%' +
+        '  outliers=' + td.outlierCount + '\n';
+      if (td.decomposed) {
+        out += '    Translation: (' + (td.decomposed.translateX * 100).toFixed(2) + '%, ' +
+          (td.decomposed.translateY * 100).toFixed(2) + '%)' +
+          '  Scale: (' + td.decomposed.scaleX.toFixed(3) + ', ' +
+          td.decomposed.scaleY.toFixed(3) + ')' +
+          (Math.abs(td.decomposed.rotation) > 0.1 ? '  Rot: ' + td.decomposed.rotation.toFixed(1) + '°' : '') + '\n';
+      }
+    }
+
+    for (var fi = 0; fi < doc.fields.length; fi++) {
+      var f = doc.fields[fi];
+      out += '    ' + f.label + ': ';
+      if (f.transferMethod === 'reference_identity') {
+        out += '(reference — original BBOX)\n';
+      } else {
+        out += f.transferMethod + '  conf=' + (f.transferConfidence * 100).toFixed(0) + '%';
+        if (f.transformModel) {
+          out += '  local=' + (f.transformModel.localTransformUsed ? 'yes(' + f.transformModel.localPairCount + ')' : 'no');
+        }
+        out += '\n';
+      }
+      out += '      Text: ' + (f.extractedText || '(empty)').substring(0, 60) +
+        '  tokens=' + f.tokenCount + '\n';
+    }
+  }
+
+  out += '\n══════════════════════════════════════════════════════════════\n';
+  return out;
+}
+
 /* ── Exports ─────────────────────────────────────────────────────────────── */
 
 module.exports = {
@@ -871,5 +871,6 @@ module.exports = {
   transferBBox,
   extractTextFromNormBox,
   extractFromBatch,
-  formatRefinementReport
+  formatRefinementReport,
+  formatExtractionReport
 };
