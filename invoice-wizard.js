@@ -12213,9 +12213,13 @@ async function openFile(file){
     }
     // Keep the blob URL alive while the image remains mounted in <img>.
     // cleanupDoc()/next upload will revoke it via replacePendingBlobUrl().
-    if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
-    else await calibrateIfNeeded();
-    drawOverlay();
+    // Skip profile-dependent operations for Graph Learning (WFG2) — it does
+    // not require a wizard/profile and only needs the rendered surface.
+    if(!state.graphLearning?.active){
+      if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
+      else await calibrateIfNeeded();
+      drawOverlay();
+    }
     return;
   }
 
@@ -12236,16 +12240,22 @@ async function openFile(file){
     els.viewer.scrollTop = 0;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
-    await ensureTokensForPage(1);
-    if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
-    else await calibrateIfNeeded();
-    drawOverlay();
+    // Skip profile-dependent operations for Graph Learning (WFG2) — it does
+    // not require a wizard/profile and only needs the rendered surface.
+    if(!state.graphLearning?.active){
+      await ensureTokensForPage(1);
+      if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
+      else await calibrateIfNeeded();
+      drawOverlay();
+    } else {
+      try { await ensureTokensForPage(1); } catch(_){ /* best-effort for graph learning */ }
+    }
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
     clearDocumentSurfaces();
     if(els.pageControls) els.pageControls.style.display = 'none';
-    alert('Failed to load PDF. Please try another file.');
+    if(!state.graphLearning?.active) alert('Failed to load PDF. Please try another file.');
     throw err;
   }
 }
