@@ -173,15 +173,18 @@ function scoreAnchorRelevance(anchor, neighborhoods) {
     var overlap = normBoxIoU(nh.targetNormBox, anchorNb);
     var overlapScore = overlap > 0 ? 0.3 + overlap * 0.7 : 0;
 
-    // 3. Neighborhood membership: is this anchor's region among the target's local neighbors?
-    var isLocalNeighbor = false;
+    // 3. Neighborhood membership: score based on proximity rank within the
+    //    target's local neighbors (graduated instead of binary 0/1).
+    var membershipScore = 0;
     for (var nni = 0; nni < nh.neighbors.length; nni++) {
       if (nh.neighbors[nni].regionId === anchor.refRegionId) {
-        isLocalNeighbor = true;
+        // Scale by proximity rank: top neighbors get higher scores
+        // neighbor[0] has highest proximity, so earlier = better
+        var rankFraction = 1 - (nni / Math.max(nh.neighbors.length, 1));
+        membershipScore = 0.4 + 0.4 * rankFraction; // range [0.4, 0.8]
         break;
       }
     }
-    var membershipScore = isLocalNeighbor ? 0.8 : 0;
 
     // 4. Size penalty: penalize giant page-level regions
     var sizePenalty = 1;
@@ -568,7 +571,10 @@ function extractTextFromNormBox(normBox, tokens, viewport) {
     h: normBox.hN * vpH
   };
 
-  // Find tokens within box (mirrors tokensInBox logic)
+  // Find tokens within box — use overlap-area threshold instead of strict
+  // center containment to avoid missing partially-overlapping tokens at edges.
+  // A token is included if >=50% of its area overlaps the box, OR if its
+  // center is inside the box.
   var matched = [];
   for (var i = 0; i < tokens.length; i++) {
     var t = tokens[i];
@@ -576,13 +582,19 @@ function extractTextFromNormBox(normBox, tokens, viewport) {
     var overlapY = Math.min(t.y + t.h, boxPx.y + boxPx.h) - Math.max(t.y, boxPx.y);
     if (overlapX <= 0 || overlapY <= 0) continue;
 
-    // Token center must be inside box
+    var overlapArea = overlapX * overlapY;
+    var tokenArea = (t.w * t.h) || 1;
+    var overlapRatio = overlapArea / tokenArea;
+
+    // Include if >=50% overlap or center is inside box
     var cx = t.x + t.w / 2;
     var cy = t.y + t.h / 2;
-    if (cx < boxPx.x || cx > boxPx.x + boxPx.w) continue;
-    if (cy < boxPx.y || cy > boxPx.y + boxPx.h) continue;
+    var centerInside = cx >= boxPx.x && cx <= boxPx.x + boxPx.w &&
+                       cy >= boxPx.y && cy <= boxPx.y + boxPx.h;
 
-    matched.push(t);
+    if (centerInside || overlapRatio >= 0.5) {
+      matched.push(t);
+    }
   }
 
   // Sort tokens by position (top-to-bottom, left-to-right)

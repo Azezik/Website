@@ -606,7 +606,8 @@ function estimateSpatialTransform(refinedAnchors, correspondenceResult, targetDo
   }
 
   // Step 2: Estimate robust global transform
-  var result = estimateRobustTransform(pairs, 3, 3);
+  // Use more iterations for better outlier rejection (5 instead of 3)
+  var result = estimateRobustTransform(pairs, 5, 3);
 
   if (!result.transform) {
     return {
@@ -622,11 +623,23 @@ function estimateSpatialTransform(refinedAnchors, correspondenceResult, targetDo
   // Step 3: Decompose transform for diagnostics
   var decomposed = decomposeAffine(result.transform);
 
-  // Step 4: Sanity check — reject transforms that are too extreme
+  // Step 4: Sanity check — reject transforms that are too extreme.
+  // Thresholds are adaptive: with more anchor pairs and higher coherence,
+  // we trust wider transforms (the data supports it). With few pairs,
+  // we are stricter to avoid overfitting noise.
+  var coherenceScore = (result.coherence && result.coherence.coherenceScore) || 0;
+  var pairTrust = clamp(result.usedPairs.length / 6, 0.5, 1.2); // 6+ pairs = full trust
+  var coherenceTrust = 0.7 + coherenceScore * 0.6; // range [0.7, 1.3]
+  var trustFactor = pairTrust * coherenceTrust;
+
+  var maxScaleDev = 0.5 * trustFactor;    // base 0.5, up to 0.78 with high trust
+  var maxRotation = 15 * trustFactor;      // base 15°, up to ~23° with high trust
+  var maxTranslation = 0.3 * trustFactor;  // base 0.3, up to ~0.47 with high trust
+
   var sane = true;
-  if (Math.abs(decomposed.scaleX - 1) > 0.5 || Math.abs(decomposed.scaleY - 1) > 0.5) sane = false;
-  if (Math.abs(decomposed.rotation) > 15) sane = false; // >15 degrees
-  if (Math.abs(decomposed.translateX) > 0.3 || Math.abs(decomposed.translateY) > 0.3) sane = false;
+  if (Math.abs(decomposed.scaleX - 1) > maxScaleDev || Math.abs(decomposed.scaleY - 1) > maxScaleDev) sane = false;
+  if (Math.abs(decomposed.rotation) > maxRotation) sane = false;
+  if (Math.abs(decomposed.translateX) > maxTranslation || Math.abs(decomposed.translateY) > maxTranslation) sane = false;
 
   if (!sane) {
     // Fall back to simpler model (translation + scale only)

@@ -269,24 +269,78 @@ function matchDocumentRegions(refDoc, targetDoc, opts) {
   // Sort by similarity descending
   candidates.sort(function (a, b) { return b.similarity - a.similarity; });
 
-  // Greedy assignment: each ref and target region matched at most once
+  // Two-pass greedy assignment: first pass assigns greedily, second pass
+  // attempts to improve by finding swaps that increase total similarity.
   var usedRef = {};
   var usedTgt = {};
   var matches = [];
+  var matchByRef = {};
+  var matchByTgt = {};
 
+  // Pass 1: Standard greedy assignment
   for (var ci = 0; ci < candidates.length; ci++) {
     var c = candidates[ci];
     if (usedRef[c.refRegionId] || usedTgt[c.tgtRegionId]) continue;
     usedRef[c.refRegionId] = true;
     usedTgt[c.tgtRegionId] = true;
-    matches.push({
+    var m = {
       refRegionId: c.refRegionId,
       tgtRegionId: c.tgtRegionId,
       tgtDocumentId: targetDoc.documentId,
       tgtDocumentName: targetDoc.documentName || '',
       similarity: c.similarity,
       dimensions: c.dimensions
-    });
+    };
+    matches.push(m);
+    matchByRef[c.refRegionId] = m;
+    matchByTgt[c.tgtRegionId] = m;
+  }
+
+  // Pass 2: Attempt improvement swaps — check if any unmatched pair would
+  // produce a higher total similarity by displacing an existing match
+  for (var ci2 = 0; ci2 < candidates.length; ci2++) {
+    var c2 = candidates[ci2];
+    if (usedRef[c2.refRegionId] && usedTgt[c2.tgtRegionId]) continue;
+    if (!usedRef[c2.refRegionId] && !usedTgt[c2.tgtRegionId]) continue; // both free, already handled
+
+    // Check if this candidate can improve by displacing an existing match
+    var existingRef = matchByRef[c2.refRegionId];
+    var existingTgt = matchByTgt[c2.tgtRegionId];
+
+    if (existingRef && !usedTgt[c2.tgtRegionId]) {
+      // c2 wants refRegion that's already matched; compare scores
+      if (c2.similarity > existingRef.similarity) {
+        // Displace existing match, free its target
+        delete usedTgt[existingRef.tgtRegionId];
+        delete matchByTgt[existingRef.tgtRegionId];
+        matches.splice(matches.indexOf(existingRef), 1);
+        // Assign new match
+        usedTgt[c2.tgtRegionId] = true;
+        var m2 = {
+          refRegionId: c2.refRegionId, tgtRegionId: c2.tgtRegionId,
+          tgtDocumentId: targetDoc.documentId, tgtDocumentName: targetDoc.documentName || '',
+          similarity: c2.similarity, dimensions: c2.dimensions
+        };
+        matches.push(m2);
+        matchByRef[c2.refRegionId] = m2;
+        matchByTgt[c2.tgtRegionId] = m2;
+      }
+    } else if (existingTgt && !usedRef[c2.refRegionId]) {
+      if (c2.similarity > existingTgt.similarity) {
+        delete usedRef[existingTgt.refRegionId];
+        delete matchByRef[existingTgt.refRegionId];
+        matches.splice(matches.indexOf(existingTgt), 1);
+        usedRef[c2.refRegionId] = true;
+        var m3 = {
+          refRegionId: c2.refRegionId, tgtRegionId: c2.tgtRegionId,
+          tgtDocumentId: targetDoc.documentId, tgtDocumentName: targetDoc.documentName || '',
+          similarity: c2.similarity, dimensions: c2.dimensions
+        };
+        matches.push(m3);
+        matchByRef[c2.refRegionId] = m3;
+        matchByTgt[c2.tgtRegionId] = m3;
+      }
+    }
   }
 
   return matches;
@@ -434,45 +488,57 @@ function analyzeCorrespondence(documents, opts) {
   var totalOtherDocs = otherDocs.length;
   var anchors = [];
 
+  // Soft frequency threshold: anchors below anchorMinFrequency are still
+  // included but with a penalized confidence, down to a hard floor of
+  // anchorMinFrequency * 0.5.  This captures "almost anchors" that appear
+  // in ~40% of docs instead of silently discarding them.
+  var softFloor = anchorMinFrequency * 0.5;
+
   for (var regionId in anchorCandidates) {
     if (!anchorCandidates.hasOwnProperty(regionId)) continue;
     var ac = anchorCandidates[regionId];
     var frequency = totalOtherDocs > 0 ? ac.matchedDocuments.length / totalOtherDocs : 0;
 
-    if (frequency >= anchorMinFrequency) {
-      var avgSimilarity = mean(ac.matchSimilarities);
+    // Hard floor: skip truly rare matches
+    if (frequency < softFloor) continue;
 
-      // Compute average dimension scores across matches
-      var avgDimensions = {};
-      if (ac.matchDimensions.length > 0) {
-        var dimKeys = Object.keys(ac.matchDimensions[0]);
-        for (var dki = 0; dki < dimKeys.length; dki++) {
-          var dk = dimKeys[dki];
-          avgDimensions[dk] = round(mean(ac.matchDimensions.map(function (md) { return md[dk] || 0; })), 4);
-        }
+    var avgSimilarity = mean(ac.matchSimilarities);
+
+    // Compute average dimension scores across matches
+    var avgDimensions = {};
+    if (ac.matchDimensions.length > 0) {
+      var dimKeys = Object.keys(ac.matchDimensions[0]);
+      for (var dki = 0; dki < dimKeys.length; dki++) {
+        var dk = dimKeys[dki];
+        avgDimensions[dk] = round(mean(ac.matchDimensions.map(function (md) { return md[dk] || 0; })), 4);
       }
-
-      // Confidence: combines frequency and avg similarity
-      var anchorConfidence = clamp(frequency * 0.5 + avgSimilarity * 0.5, 0, 1);
-
-      anchors.push({
-        anchorId: 'anchor-' + regionId,
-        refRegionId: ac.refRegionId,
-        normalizedPosition: ac.centroid,
-        normalizedBbox: ac.normalizedBbox,
-        normalizedArea: ac.normalizedArea,
-        aspectRatio: round(ac.aspectRatio, 4),
-        surfaceType: ac.surfaceType,
-        textDensity: round(ac.textDensity, 4),
-        frequency: round(frequency, 4),
-        matchCount: ac.matchedDocuments.length,
-        totalDocuments: totalOtherDocs,
-        avgSimilarity: round(avgSimilarity, 4),
-        avgDimensions: avgDimensions,
-        confidence: round(anchorConfidence, 4),
-        matchedDocumentIds: ac.matchedDocuments
-      });
     }
+
+    // Confidence: combines frequency and avg similarity.
+    // Apply a soft penalty for anchors below the frequency threshold
+    // instead of a hard cutoff.
+    var frequencyFactor = frequency >= anchorMinFrequency
+      ? frequency
+      : frequency * (frequency / anchorMinFrequency); // quadratic decay below threshold
+    var anchorConfidence = clamp(frequencyFactor * 0.5 + avgSimilarity * 0.5, 0, 1);
+
+    anchors.push({
+      anchorId: 'anchor-' + regionId,
+      refRegionId: ac.refRegionId,
+      normalizedPosition: ac.centroid,
+      normalizedBbox: ac.normalizedBbox,
+      normalizedArea: ac.normalizedArea,
+      aspectRatio: round(ac.aspectRatio, 4),
+      surfaceType: ac.surfaceType,
+      textDensity: round(ac.textDensity, 4),
+      frequency: round(frequency, 4),
+      matchCount: ac.matchedDocuments.length,
+      totalDocuments: totalOtherDocs,
+      avgSimilarity: round(avgSimilarity, 4),
+      avgDimensions: avgDimensions,
+      confidence: round(anchorConfidence, 4),
+      matchedDocumentIds: ac.matchedDocuments
+    });
   }
 
   // Sort anchors by confidence descending
