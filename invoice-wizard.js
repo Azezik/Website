@@ -12194,21 +12194,25 @@ async function openFile(file){
   if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
-    // Revoke any previously held blob URL before creating a new one
-    if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
     const url = URL.createObjectURL(file);
-    state._pendingBlobUrl = url;
+    replacePendingBlobUrl(url);
     await renderImage(url);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
-    const tokens = await ensureTokensForPage(1);
-    await buildKeywordIndexForPage(1, tokens);
-    // OCR is done — safe to revoke the blob URL now
-    if(state._pendingBlobUrl === url){
-      URL.revokeObjectURL(url);
-      state._pendingBlobUrl = null;
+    try {
+      const tokens = await ensureTokensForPage(1);
+      await buildKeywordIndexForPage(1, tokens);
+    } catch(err){
+      // Some images can fail OCR/tokenization (codec quirks, worker decode, etc.).
+      // Keep the loaded image available so view/normalization-only flows (e.g. WFG2 Graph Learning)
+      // can still proceed on the rendered bitmap.
+      console.warn('[openFile][image] tokenization failed; continuing with loaded image', err);
+      state.tokensByPage[1] = state.tokensByPage[1] || [];
+      state.keywordIndexByPage[1] = state.keywordIndexByPage[1] || [];
     }
+    // Keep the blob URL alive while the image remains mounted in <img>.
+    // cleanupDoc()/next upload will revoke it via replacePendingBlobUrl().
     if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
     else await calibrateIfNeeded();
     drawOverlay();
@@ -12239,8 +12243,10 @@ async function openFile(file){
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
+    clearDocumentSurfaces();
     if(els.pageControls) els.pageControls.style.display = 'none';
     alert('Failed to load PDF. Please try another file.');
+    throw err;
   }
 }
 function cleanupDoc(){
@@ -12268,7 +12274,34 @@ function cleanupDoc(){
   state.findTextTessSelectionPx = null; state.findTextTessSelectionCss = null;
   state.findTextPdfSelectionsPx = []; state.findTextPdfSelectionsCss = [];
   state.findTextTessSelectionsPx = []; state.findTextTessSelectionsCss = [];
+  state.pageNum = 1;
+  state.numPages = 0;
+  state.viewport = { w:0, h:0, scale:1 };
+  clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+}
+
+function clearDocumentSurfaces(){
+  if(els.pdfCanvas){
+    const pctx = els.pdfCanvas.getContext('2d');
+    if(pctx) pctx.clearRect(0, 0, els.pdfCanvas.width || 0, els.pdfCanvas.height || 0);
+    els.pdfCanvas.width = 0;
+    els.pdfCanvas.height = 0;
+    els.pdfCanvas.style.width = '0px';
+    els.pdfCanvas.style.height = '0px';
+  }
+  if(els.imgCanvas){
+    els.imgCanvas.removeAttribute('src');
+    els.imgCanvas.width = 0;
+    els.imgCanvas.height = 0;
+  }
+}
+
+function replacePendingBlobUrl(nextUrl){
+  if(state._pendingBlobUrl && state._pendingBlobUrl !== nextUrl){
+    try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){}
+  }
+  state._pendingBlobUrl = nextUrl || null;
 }
 
 function loadRunImageFromBuffer(arrayBuffer){
@@ -12330,19 +12363,14 @@ async function prepareRunDocument(file){
       state.viewport = { w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageViewports[0] = { width: imgMeta.width, height: imgMeta.height, w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageOffsets[0] = 0;
-      if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
       const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
-      state._pendingBlobUrl = blobUrl;
+      replacePendingBlobUrl(blobUrl);
       await renderImage(blobUrl);
       state.pageNum = 1; state.numPages = 1;
       if(els.pageControls) els.pageControls.style.display = 'none';
       const tokens = await ensureTokensForPage(1, null, state.pageViewports[0], els.imgCanvas);
       await buildKeywordIndexForPage(1, tokens, state.pageViewports[0]);
-      // OCR is done — safe to revoke the blob URL now
-      if(state._pendingBlobUrl === blobUrl){
-        URL.revokeObjectURL(blobUrl);
-        state._pendingBlobUrl = null;
-      }
+      // Keep URL alive while imgCanvas is active; cleanupDoc handles revocation.
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
       return { type:'image' };
@@ -20759,10 +20787,26 @@ async function graphLearningOpenFile(file){
   state.graphLearning.attemptNumber = 0;
   state.graphLearning.lastAttemptId = null;
   state.graphLearning.latestFeedback = null;
+  state.graphLearning.graph = null;
+  state.graphLearning.normalizedSurface = null;
+  clearGraphLearningViewer();
+  graphLearningStatus('Loading file…');
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
-  await openFile(file);
+  try {
+    await openFile(file);
+  } catch(err){
+    console.error('[WFG2][GraphLearning] openFile failed', err);
+    clearGraphLearningViewer();
+    graphLearningStatus('Could not load this file for Graph Learning.');
+    return;
+  }
   const page = state.pageNum || 1;
   const img = getPageGrayImageData(page);
+  if(!img || !img.width || !img.height){
+    clearGraphLearningViewer();
+    graphLearningStatus('File loaded but no render surface was available.');
+    return;
+  }
   state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
   if(!state.graphLearning.normalizedSurface){
     clearGraphLearningViewer();
