@@ -455,6 +455,7 @@
         <nav class="subtabs" id="learningSubTabs" style="margin:8px 0 12px;">
           <button class="tablink active" data-learning-target="learning-guided-tab">Guided Learning</button>
           <button class="tablink" data-learning-target="learning-batch-tab">Batch Structural</button>
+          <button class="tablink" data-learning-target="learning-graph-tab">Graph Learning</button>
         </nav>
 
         <!-- ═══ Guided Learning sub-tab (existing) ═══ -->
@@ -871,6 +872,77 @@
           </div>
         </div><!-- /learning-batch-tab -->
 
+        <!-- ═══ Graph Learning (WFG2) sub-tab ═══ -->
+        <div id="learning-graph-tab" style="display:none;">
+          <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
+            Evaluate WFG2 (WrokitFeatureGraph2), a visual-first structural graph engine that avoids OCR/text proposals.
+            Upload one file, inspect the graph overlays, mark Good/Bad, and regenerate with feedback.
+          </p>
+
+          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+            <label class="btn primary">
+              Upload File
+              <input id="graph-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
+            </label>
+            <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled>Regenerate</button>
+            <button id="graph-learning-clear-history-btn" class="btn ghost" type="button">Clear Attempt History</button>
+          </div>
+
+          <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <strong>Layers</strong>
+              <label><input type="checkbox" id="graph-learning-show-regions" checked /> Regions</label>
+              <label><input type="checkbox" id="graph-learning-show-contours" checked /> Contours / Hulls</label>
+              <label><input type="checkbox" id="graph-learning-show-adjacency" checked /> Adjacency</label>
+              <label><input type="checkbox" id="graph-learning-show-debug" /> Debug primitives</label>
+              <span class="sub" id="graph-learning-status" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
+            </div>
+          </div>
+
+          <div id="graph-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
+            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Normalized Surface (base) + WFG2 Overlay (top)</div>
+            <div style="position:relative;width:100%;max-height:70vh;overflow:auto;background:#111;border:1px solid var(--border);border-radius:8px;">
+              <canvas id="graph-learning-base-canvas" style="display:block;width:100%;height:auto;"></canvas>
+              <canvas id="graph-learning-overlay-canvas" style="position:absolute;left:0;top:0;width:100%;height:auto;pointer-events:none;"></canvas>
+            </div>
+          </div>
+
+          <div class="panel minimal" style="margin-bottom:12px;">
+            <div class="actions" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong>Result Review</strong>
+              <div class="actions" style="gap:8px;">
+                <button id="graph-learning-good-btn" class="btn" type="button" disabled>Good</button>
+                <button id="graph-learning-bad-btn" class="btn" type="button" disabled>Bad</button>
+              </div>
+            </div>
+            <div id="graph-learning-feedback-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+              <div style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:6px 12px;">
+                <label><input type="checkbox" data-feedback-tag="too_many_regions" /> too many regions</label>
+                <label><input type="checkbox" data-feedback-tag="too_few_regions" /> too few regions</label>
+                <label><input type="checkbox" data-feedback-tag="boundaries_inaccurate" /> boundaries inaccurate</label>
+                <label><input type="checkbox" data-feedback-tag="merged_objects" /> merged separate objects together</label>
+                <label><input type="checkbox" data-feedback-tag="split_object" /> split one object into too many parts</label>
+                <label><input type="checkbox" data-feedback-tag="missed_object" /> missed important object</label>
+                <label><input type="checkbox" data-feedback-tag="too_grid_like" /> too grid-like / too document-like</label>
+                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> regions don’t follow actual shapes</label>
+                <label><input type="checkbox" data-feedback-tag="noisy_fragmented" /> noisy or fragmented</label>
+                <label><input type="checkbox" data-feedback-tag="other" /> other</label>
+              </div>
+              <div class="actions" style="margin-top:8px;gap:10px;align-items:center;">
+                <label>Quality (1-5):
+                  <input id="graph-learning-rating" type="number" min="1" max="5" step="1" style="width:64px;margin-left:6px;" />
+                </label>
+                <button id="graph-learning-apply-feedback-btn" class="btn primary" type="button">Apply Feedback + Regenerate</button>
+              </div>
+            </div>
+          </div>
+
+          <details class="panel minimal" open>
+            <summary>Attempt History</summary>
+            <div id="graph-learning-attempts" style="margin-top:8px;max-height:220px;overflow:auto;"></div>
+          </details>
+        </div><!-- /learning-graph-tab -->
+
       </section>
 
       <section id="reports" class="panel" style="display:none">
@@ -1084,6 +1156,7 @@
   <script src="engines/core/wrokit-vision-engine.js"></script>
   <script src="engines/core/engine-registry.js"></script>
   <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
+  <script src="engines/wrokitvision/wfg2/wfg2-engine.js"></script>
   <!-- Data layer modules (loaded before invoice-wizard.js) -->
   <script src="js/data/telemetry.js"></script>
   <script src="js/data/write-queue.js"></script>
