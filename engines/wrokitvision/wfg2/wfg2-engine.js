@@ -4,11 +4,39 @@
   }
   root.WrokitFeatureGraph2 = factory();
 })(typeof window !== 'undefined' ? window : globalThis, function(){
-  const DEFAULT_PARAMS = Object.freeze({ gridSize: 10, edgeSensitivity: 28, mergeThreshold: 18, minRegionArea: 0.003, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35 });
-  const FEEDBACK_TAGS = Object.freeze(['too_many_regions','too_few_regions','boundaries_inaccurate','merged_objects','split_object','missed_object','too_grid_like','shape_mismatch','noisy_fragmented','other']);
+  const DEFAULT_PARAMS = Object.freeze({
+    gridSize: 10, edgeSensitivity: 28, mergeThreshold: 18,
+    minRegionArea: 0.003, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
+    /* Color-aware boundary evidence */
+    colorWeight: 0.45, luminanceWeight: 0.35, varianceWeight: 0.20,
+    colorMergePenalty: 0.55,
+    /* Continuity / closure */
+    closureRadius: 3, closureWeight: 0.30,
+    parentContourBonus: 0.25, minEnclosingArea: 0.01
+  });
+  const FEEDBACK_TAGS = Object.freeze([
+    'too_many_regions','too_few_regions','boundaries_inaccurate','merged_objects',
+    'split_object','missed_object','too_grid_like','shape_mismatch','noisy_fragmented',
+    'color_boundary_missed','enclosing_shape_broken','internal_detail_dominates','other'
+  ]);
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const copyParams = (params) => ({ ...DEFAULT_PARAMS, ...(params || {}) });
 
+  /* ─── sRGB → CIE Lab (D65) ────────────────────────────────────── */
+  function srgbToLab(r8, g8, b8){
+    let r = r8 / 255, g = g8 / 255, b = b8 / 255;
+    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+    let x = (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047;
+    let y = (r * 0.2126729 + g * 0.7151522 + b * 0.0721750);
+    let z = (r * 0.0193339 + g * 0.1191920 + b * 0.9503041) / 1.08883;
+    const f = t => t > 0.008856 ? Math.cbrt(t) : (7.787 * t) + (16 / 116);
+    const fx = f(x), fy = f(y), fz = f(z);
+    return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
+  }
+
+  /* ─── Normalization: preserve color channels alongside gray ──── */
   function normalizeVisualInput(imageData, options){
     const opts = options || {};
     const width = Number(imageData?.width) || 0;
@@ -19,16 +47,68 @@
     const scale = Math.min(1, targetMax / Math.max(width, height));
     const outW = Math.max(1, Math.round(width * scale));
     const outH = Math.max(1, Math.round(height * scale));
-    const outGray = new Uint8Array(outW * outH);
+    const n = outW * outH;
+    const outGray = new Uint8Array(n);
+
+    // Resolve source RGB channels
+    const srcRgba = imageData.rgba || imageData.data || null;
+    const srcR = imageData.r || null;
+    const srcG = imageData.g || null;
+    const srcB = imageData.b || null;
+    const hasRgb = (srcR && srcG && srcB && srcR.length >= width * height) ||
+                   (srcRgba && srcRgba.length >= width * height * 4);
+
+    const outR = hasRgb ? new Uint8Array(n) : null;
+    const outG = hasRgb ? new Uint8Array(n) : null;
+    const outB = hasRgb ? new Uint8Array(n) : null;
+
     for(let y = 0; y < outH; y++){
       const srcY = Math.min(height - 1, Math.round(y / scale));
       for(let x = 0; x < outW; x++){
         const srcX = Math.min(width - 1, Math.round(x / scale));
-        outGray[y * outW + x] = gray[srcY * width + srcX] || 0;
+        const si = srcY * width + srcX;
+        const di = y * outW + x;
+        outGray[di] = gray[si] || 0;
+        if(hasRgb){
+          if(srcR){
+            outR[di] = srcR[si] || 0;
+            outG[di] = srcG[si] || 0;
+            outB[di] = srcB[si] || 0;
+          } else {
+            const j = si * 4;
+            outR[di] = srcRgba[j] || 0;
+            outG[di] = srcRgba[j + 1] || 0;
+            outB[di] = srcRgba[j + 2] || 0;
+          }
+        }
       }
     }
+
     const stretched = stretchContrast(outGray);
-    return { kind: 'wfg2-normalized-surface', width: outW, height: outH, gray: boxBlur3x3(stretched, outW, outH), source: { width, height, scale }, artifacts: { contrastStretched: true, blurred: true } };
+    const blurred = boxBlur3x3(stretched, outW, outH);
+
+    // Build Lab channels for color-aware processing
+    let labL = null, labA = null, labB = null;
+    if(outR){
+      labL = new Float32Array(n);
+      labA = new Float32Array(n);
+      labB = new Float32Array(n);
+      for(let i = 0; i < n; i++){
+        const lab = srgbToLab(outR[i], outG[i], outB[i]);
+        labL[i] = lab.L;
+        labA[i] = lab.a;
+        labB[i] = lab.b;
+      }
+    }
+
+    return {
+      kind: 'wfg2-normalized-surface', width: outW, height: outH,
+      gray: blurred,
+      rgb: outR ? { r: outR, g: outG, b: outB } : null,
+      lab: labL ? { L: labL, a: labA, b: labB } : null,
+      source: { width, height, scale },
+      artifacts: { contrastStretched: true, blurred: true, hasColor: !!outR, hasLab: !!labL }
+    };
   }
 
   function stretchContrast(gray){
@@ -57,6 +137,7 @@
     return out;
   }
 
+  /* ─── Gradient helpers ─────────────────────────────────────────── */
   function computeGradient(gray, w, h){
     const mag = new Uint8Array(w * h);
     for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
@@ -68,48 +149,408 @@
     return mag;
   }
 
+  /* ─── Part 1: Color-aware boundary evidence ────────────────────── */
+  function computeColorBoundary(lab, w, h){
+    if(!lab) return null;
+    const out = new Float32Array(w * h);
+    const L = lab.L, a = lab.a, b = lab.b;
+    for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
+      const i = y * w + x;
+      // Compute max CIE76 ΔE across 4-connected neighbors
+      let maxDelta = 0;
+      const nbrs = [i - 1, i + 1, i - w, i + w];
+      for(const ni of nbrs){
+        const dL = L[i] - L[ni], da = a[i] - a[ni], db = b[i] - b[ni];
+        const de = Math.sqrt(dL * dL + da * da + db * db);
+        if(de > maxDelta) maxDelta = de;
+      }
+      // Normalize: ΔE of ~50 is a very strong color boundary; scale to 0-1
+      out[i] = Math.min(1, maxDelta / 50);
+    }
+    return out;
+  }
+
+  /* Per-cell color statistics in Lab space */
+  function computeCellLabStats(cells, lab, w){
+    if(!lab) return;
+    const L = lab.L, a = lab.a, b = lab.b;
+    for(const cell of cells){
+      let sumL = 0, sumA = 0, sumB = 0, cnt = 0;
+      for(let y = cell.y0; y < cell.y1; y++) for(let x = cell.x0; x < cell.x1; x++){
+        const pi = y * w + x;
+        sumL += L[pi]; sumA += a[pi]; sumB += b[pi]; cnt++;
+      }
+      cell.meanL = sumL / Math.max(1, cnt);
+      cell.meanA = sumA / Math.max(1, cnt);
+      cell.meanB = sumB / Math.max(1, cnt);
+    }
+  }
+
+  /* ─── Part 2: Continuity / Closure evidence ────────────────────── */
+
+  /* Morphological dilation of a binary edge map (3x3 square structuring element),
+     repeated `radius` times.  This bridges small gaps in contours. */
+  function dilate(map, w, h, radius){
+    let src = map;
+    for(let pass = 0; pass < radius; pass++){
+      const dst = new Uint8Array(w * h);
+      for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
+        let v = 0;
+        for(let dy = -1; dy <= 1; dy++){
+          const yy = y + dy; if(yy < 0 || yy >= h) continue;
+          for(let dx = -1; dx <= 1; dx++){
+            const xx = x + dx; if(xx < 0 || xx >= w) continue;
+            if(src[yy * w + xx]) { v = 1; break; }
+          }
+          if(v) break;
+        }
+        dst[y * w + x] = v;
+      }
+      src = dst;
+    }
+    return src;
+  }
+
+  /* Morphological erosion (3x3 square), repeated `radius` times. */
+  function erode(map, w, h, radius){
+    let src = map;
+    for(let pass = 0; pass < radius; pass++){
+      const dst = new Uint8Array(w * h);
+      for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
+        let all = 1;
+        for(let dy = -1; dy <= 1; dy++){
+          const yy = y + dy; if(yy < 0 || yy >= h){ all = 0; break; }
+          for(let dx = -1; dx <= 1; dx++){
+            const xx = x + dx; if(xx < 0 || xx >= w){ all = 0; break; }
+            if(!src[yy * w + xx]){ all = 0; break; }
+          }
+          if(!all) break;
+        }
+        dst[y * w + x] = all;
+      }
+      src = dst;
+    }
+    return src;
+  }
+
+  /* Morphological closing = dilate then erode.  Bridges small gaps in edge
+     maps, producing closure evidence that favors continuous contours. */
+  function morphClose(edgeMap, w, h, radius){
+    return erode(dilate(edgeMap, w, h, radius), w, h, radius);
+  }
+
+  /* Build a closure-evidence map from the gradient.  High values indicate
+     pixels that lie on or near a continuous closed contour. */
+  function buildClosureEvidence(grad, w, h, params){
+    const p = copyParams(params);
+    const radius = clamp(Math.round(p.closureRadius), 1, 8);
+    // Threshold gradient into a binary edge map (Otsu-like: use top-30% edges)
+    const sorted = Array.from(grad).sort((a, b) => b - a);
+    const cutoff = Math.max(8, sorted[Math.floor(sorted.length * 0.30)] || 15);
+    const binary = new Uint8Array(w * h);
+    for(let i = 0; i < grad.length; i++) binary[i] = grad[i] >= cutoff ? 1 : 0;
+    const closed = morphClose(binary, w, h, radius);
+    return closed; // Uint8Array, 0 or 1
+  }
+
+  /* Flood-fill to find enclosed regions in the closure map.
+     Returns an array of { area, bbox, enclosedPixels } for regions fully
+     surrounded by closed contour edges. */
+  function findEnclosedRegions(closureMap, w, h, minAreaFraction){
+    const labels = new Int32Array(w * h).fill(-1);
+    const regions = [];
+    let nextId = 0;
+    const minArea = Math.max(25, Math.round(w * h * minAreaFraction));
+
+    for(let i = 0; i < closureMap.length; i++){
+      if(closureMap[i] || labels[i] >= 0) continue;
+      // Flood-fill this non-edge region
+      const id = nextId++;
+      const queue = [i];
+      labels[i] = id;
+      let area = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+      let touchesBorder = false;
+      while(queue.length){
+        const idx = queue.pop();
+        area++;
+        const x = idx % w, y = (idx / w) | 0;
+        if(x < x0) x0 = x; if(y < y0) y0 = y;
+        if(x > x1) x1 = x; if(y > y1) y1 = y;
+        if(x === 0 || x === w - 1 || y === 0 || y === h - 1) touchesBorder = true;
+        const nbrs = [idx - 1, idx + 1, idx - w, idx + w];
+        for(const ni of nbrs){
+          if(ni < 0 || ni >= w * h) continue;
+          const nx = ni % w, ny = (ni / w) | 0;
+          if(Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+          if(labels[ni] >= 0 || closureMap[ni]) continue;
+          labels[ni] = id;
+          queue.push(ni);
+        }
+      }
+      regions.push({ id, area, bbox: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, touchesBorder });
+    }
+
+    // Enclosed = does not touch image border and meets minimum area
+    return regions.filter(r => !r.touchesBorder && r.area >= minArea);
+  }
+
+  /* Build a per-pixel "closure confidence" float map.  Pixels inside enclosed
+     contours get a boost; pixels on strong closed edges also get a boost. */
+  function buildClosureConfidence(closureMap, enclosedRegions, grad, w, h){
+    const conf = new Float32Array(w * h);
+    // Mark closure-edge pixels
+    for(let i = 0; i < closureMap.length; i++){
+      if(closureMap[i]) conf[i] = 0.3;
+    }
+    // Boost enclosed interior pixels
+    // Re-flood to mark which pixel belongs to which enclosed region
+    if(enclosedRegions.length > 0){
+      const enclosed = new Int32Array(w * h).fill(-1);
+      for(const reg of enclosedRegions){
+        const bx0 = reg.bbox.x, by0 = reg.bbox.y;
+        const bx1 = bx0 + reg.bbox.w, by1 = by0 + reg.bbox.h;
+        // Simple flood from region's bbox interior
+        for(let y = by0; y < by1 && y < h; y++) for(let x = bx0; x < bx1 && x < w; x++){
+          const idx = y * w + x;
+          if(!closureMap[idx] && enclosed[idx] < 0){
+            enclosed[idx] = reg.id;
+            conf[idx] = Math.max(conf[idx], 0.6);
+          }
+        }
+      }
+    }
+    return conf;
+  }
+
+  /* ─── Combined boundary evidence (color + luminance + closure) ── */
+  function buildCombinedBoundaryEvidence(gray, lab, grad, colorBoundary, closureMap, w, h, params){
+    const p = copyParams(params);
+    const evidence = new Uint8Array(w * h);
+    const wColor = clamp(p.colorWeight, 0, 1);
+    const wLum = clamp(p.luminanceWeight, 0, 1);
+    const wVar = clamp(p.varianceWeight, 0, 1);
+    const wClosure = clamp(p.closureWeight, 0, 1);
+
+    for(let i = 0; i < evidence.length; i++){
+      const lumEdge = grad[i] / 255;
+      const colEdge = colorBoundary ? colorBoundary[i] : 0;
+      const closureBit = closureMap ? closureMap[i] : 0;
+      // Compute local variance inline (3x3 window)
+      const x = i % w, y = (i / w) | 0;
+      let sum = 0, sumSq = 0, cnt = 0;
+      for(let dy = -1; dy <= 1; dy++){
+        const yy = y + dy; if(yy < 0 || yy >= h) continue;
+        for(let dx = -1; dx <= 1; dx++){
+          const xx = x + dx; if(xx < 0 || xx >= w) continue;
+          const v = gray[yy * w + xx]; sum += v; sumSq += v * v; cnt++;
+        }
+      }
+      const meanV = sum / Math.max(1, cnt);
+      const varV = Math.sqrt(Math.max(0, (sumSq / Math.max(1, cnt)) - (meanV * meanV))) / 64;
+      const varNorm = Math.min(1, varV);
+
+      // Combine: stronger of luminance edge or color edge drives the boundary
+      const edgeSignal = Math.max(lumEdge * wLum, colEdge * wColor) + varNorm * wVar;
+      // Closure boosts edge evidence where morphological closing bridged gaps
+      const closureBoost = closureBit ? wClosure : 0;
+      evidence[i] = clamp(Math.round((edgeSignal + closureBoost) * 255), 0, 255);
+    }
+    return evidence;
+  }
+
+  /* ─── Feature graph generation (enhanced with color + closure) ── */
   function generateFeatureGraph(normalizedSurface, params){
     if(!normalizedSurface?.gray) return null;
     const p = copyParams(params);
-    const w = normalizedSurface.width, h = normalizedSurface.height, gray = normalizedSurface.gray, grad = computeGradient(gray, w, h);
-    const grid = Math.max(4, Math.round(p.gridSize)), cols = Math.ceil(w / grid), rows = Math.ceil(h / grid), cells = new Array(cols * rows);
+    const w = normalizedSurface.width, h = normalizedSurface.height;
+    const gray = normalizedSurface.gray;
+    const lab = normalizedSurface.lab || null;
+    const grad = computeGradient(gray, w, h);
+
+    // Part 1: Color-aware boundary evidence
+    const colorBoundary = computeColorBoundary(lab, w, h);
+
+    // Part 2: Continuity / closure evidence
+    const closureMap = buildClosureEvidence(grad, w, h, p);
+    const enclosedRegions = findEnclosedRegions(closureMap, w, h, p.minEnclosingArea);
+    const closureConf = buildClosureConfidence(closureMap, enclosedRegions, grad, w, h);
+
+    // Combined boundary evidence for region growth decisions
+    const combinedEvidence = buildCombinedBoundaryEvidence(
+      gray, lab, grad, colorBoundary, closureMap, w, h, p
+    );
+
+    // Grid-based cell system
+    const grid = Math.max(4, Math.round(p.gridSize));
+    const cols = Math.ceil(w / grid), rows = Math.ceil(h / grid);
+    const cells = new Array(cols * rows);
     for(let cy = 0; cy < rows; cy++) for(let cx = 0; cx < cols; cx++){
       const idx = cy * cols + cx;
-      let sumGray = 0, sumGrad = 0, count = 0;
+      let sumGray = 0, sumGrad = 0, sumEvid = 0, sumClosure = 0, count = 0;
       const x0 = cx * grid, y0 = cy * grid, x1 = Math.min(w, x0 + grid), y1 = Math.min(h, y0 + grid);
-      for(let y = y0; y < y1; y++) for(let x = x0; x < x1; x++){ const pi = y * w + x; sumGray += gray[pi]; sumGrad += grad[pi]; count++; }
-      cells[idx] = { idx, cx, cy, x0, y0, x1, y1, meanGray: sumGray / Math.max(1, count), meanGrad: sumGrad / Math.max(1, count) };
+      for(let y = y0; y < y1; y++) for(let x = x0; x < x1; x++){
+        const pi = y * w + x;
+        sumGray += gray[pi]; sumGrad += grad[pi]; sumEvid += combinedEvidence[pi];
+        sumClosure += closureConf[pi]; count++;
+      }
+      cells[idx] = {
+        idx, cx, cy, x0, y0, x1, y1,
+        meanGray: sumGray / Math.max(1, count),
+        meanGrad: sumGrad / Math.max(1, count),
+        meanEvidence: sumEvid / Math.max(1, count),
+        meanClosure: sumClosure / Math.max(1, count)
+      };
     }
-    const visited = new Uint8Array(cells.length), regions = [], neighbors = [[1,0],[-1,0],[0,1],[0,-1]];
+
+    // Compute per-cell Lab stats for color-aware merge
+    if(lab) computeCellLabStats(cells, lab, w);
+
+    // Region growing with color + closure awareness
+    const visited = new Uint8Array(cells.length);
+    const rawRegions = [];
+    const neighbors = [[1,0],[-1,0],[0,1],[0,-1]];
+
     for(let i = 0; i < cells.length; i++){
       if(visited[i]) continue;
-      const seed = cells[i], queue = [seed], memberIdx = []; visited[i] = 1;
+      const seed = cells[i], queue = [seed], memberIdx = [];
+      visited[i] = 1;
       while(queue.length){
-        const cell = queue.pop(); memberIdx.push(cell.idx);
+        const cell = queue.pop();
+        memberIdx.push(cell.idx);
         for(const n of neighbors){
           const nx = cell.cx + n[0], ny = cell.cy + n[1];
           if(nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
-          const ni = ny * cols + nx; if(visited[ni]) continue;
-          const c2 = cells[ni], toneDiff = Math.abs(c2.meanGray - seed.meanGray), edgeBarrier = (c2.meanGrad + cell.meanGrad) * 0.5;
-          if(toneDiff <= p.mergeThreshold && edgeBarrier <= p.edgeSensitivity){ visited[ni] = 1; queue.push(c2); }
+          const ni = ny * cols + nx;
+          if(visited[ni]) continue;
+          const c2 = cells[ni];
+
+          // Luminance tone check
+          const toneDiff = Math.abs(c2.meanGray - seed.meanGray);
+
+          // Color difference in Lab (if available)
+          let colorDist = 0;
+          if(lab && seed.meanL !== undefined){
+            const dL = c2.meanL - seed.meanL;
+            const da = c2.meanA - seed.meanA;
+            const db = c2.meanB - seed.meanB;
+            colorDist = Math.sqrt(dL * dL + da * da + db * db);
+          }
+
+          // Edge barrier from combined evidence (color + luminance + closure)
+          const edgeBarrier = (c2.meanEvidence + cell.meanEvidence) * 0.5;
+
+          // Closure-aware: if both cells have high closure confidence,
+          // they are likely inside the same enclosing shape → relax merge
+          const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
+
+          // Color penalty: even if luminance is similar, large color distance blocks merge
+          const colorPenalty = colorDist > 0 ? colorDist * p.colorMergePenalty : 0;
+          const effectiveToneDiff = toneDiff + colorPenalty;
+
+          if(effectiveToneDiff <= p.mergeThreshold * closureRelax &&
+             edgeBarrier <= p.edgeSensitivity * closureRelax){
+            visited[ni] = 1;
+            queue.push(c2);
+          }
         }
       }
-      regions.push(makeRegionFromCells(memberIdx, cells, grid, w, h, p));
+      rawRegions.push(makeRegionFromCells(memberIdx, cells, grid, w, h, p, closureConf, enclosedRegions));
     }
+
+    // Filter by minimum area
     const minPixels = Math.max(25, Math.round(w * h * p.minRegionArea));
-    const filtered = regions.filter(r => r.area >= minPixels);
-    return { engine: 'WFG2', version: 1, parameters: p, normalizedSize: { width: w, height: h }, nodes: filtered, edges: buildAdjacency(filtered), artifacts: { contourLayer: filtered.map(r => ({ id: r.id, contour: r.contour })), debugPrimitives: filtered.map(r => ({ id: r.id, bbox: r.bbox, compactness: r.compactness })) } };
+    let filtered = rawRegions.filter(r => r.area >= minPixels);
+
+    // Part 2 integration: merge small interior regions into their enclosing parent
+    // if the parent has strong closure confidence (preserves containers with text)
+    filtered = mergeInteriorFragments(filtered, p);
+
+    const graph = {
+      engine: 'WFG2', version: 2, parameters: p,
+      normalizedSize: { width: w, height: h },
+      nodes: filtered,
+      edges: buildAdjacency(filtered),
+      artifacts: {
+        contourLayer: filtered.map(r => ({ id: r.id, contour: r.contour })),
+        debugPrimitives: filtered.map(r => ({ id: r.id, bbox: r.bbox, compactness: r.compactness, closureScore: r.closureScore, colorConfidence: r.colorConfidence })),
+        colorBoundaryActive: !!colorBoundary,
+        closureActive: true,
+        enclosedRegionCount: enclosedRegions.length
+      }
+    };
+    return graph;
   }
 
-  function makeRegionFromCells(memberIdx, cells, grid, w, h, params){
+  /* Merge small fragments that are fully contained inside a larger region
+     and where the larger region has high closure confidence. */
+  function mergeInteriorFragments(regions, params){
+    if(regions.length < 2) return regions;
+    const p = copyParams(params);
+    const bonus = clamp(p.parentContourBonus, 0, 1);
+    if(bonus <= 0) return regions;
+
+    // Sort largest first for containment checks
+    const sorted = regions.slice().sort((a, b) => b.area - a.area);
+    const absorbed = new Set();
+
+    for(let i = 0; i < sorted.length; i++){
+      const parent = sorted[i];
+      if(absorbed.has(parent.id)) continue;
+      if(parent.closureScore < 0.3) continue; // parent must have closure evidence
+
+      for(let j = i + 1; j < sorted.length; j++){
+        const child = sorted[j];
+        if(absorbed.has(child.id)) continue;
+        // Check containment: child bbox fully inside parent bbox
+        const pb = parent.bbox, cb = child.bbox;
+        if(cb.x >= pb.x && cb.y >= pb.y &&
+           cb.x + cb.w <= pb.x + pb.w &&
+           cb.y + cb.h <= pb.y + pb.h){
+          // Child is geometrically inside parent
+          // Absorb if child is much smaller (likely internal detail)
+          if(child.area < parent.area * 0.35){
+            absorbed.add(child.id);
+            parent.area += child.area;
+            parent.absorbedCount = (parent.absorbedCount || 0) + 1;
+          }
+        }
+      }
+    }
+
+    return sorted.filter(r => !absorbed.has(r.id));
+  }
+
+  function makeRegionFromCells(memberIdx, cells, grid, w, h, params, closureConf, enclosedRegions){
     let minX = w, minY = h, maxX = 0, maxY = 0;
     const points = [];
+    let sumClosure = 0;
+    let sumColorConf = 0;
     for(const idx of memberIdx){
       const c = cells[idx];
-      minX = Math.min(minX, c.x0); minY = Math.min(minY, c.y0); maxX = Math.max(maxX, c.x1); maxY = Math.max(maxY, c.y1);
+      minX = Math.min(minX, c.x0); minY = Math.min(minY, c.y0);
+      maxX = Math.max(maxX, c.x1); maxY = Math.max(maxY, c.y1);
       points.push([c.x0, c.y0], [c.x1, c.y0], [c.x1, c.y1], [c.x0, c.y1]);
+      sumClosure += c.meanClosure || 0;
+      // Color confidence: higher when cell has Lab stats (color is meaningful)
+      if(c.meanL !== undefined){
+        // Chroma magnitude indicates color richness
+        const chroma = Math.sqrt(c.meanA * c.meanA + c.meanB * c.meanB);
+        sumColorConf += Math.min(1, chroma / 40);
+      }
     }
-    const area = memberIdx.length * grid * grid, bboxArea = Math.max(1, (maxX - minX) * (maxY - minY)), fillRatio = clamp(area / bboxArea, 0, 1);
+    const area = memberIdx.length * grid * grid;
+    const bboxArea = Math.max(1, (maxX - minX) * (maxY - minY));
+    const fillRatio = clamp(area / bboxArea, 0, 1);
+
+    // Closure score: average closure confidence across member cells
+    const closureScore = clamp(sumClosure / Math.max(1, memberIdx.length), 0, 1);
+
+    // Color confidence: how much color contributed to this region's definition
+    const colorConfidence = clamp(sumColorConf / Math.max(1, memberIdx.length), 0, 1);
+
+    // Compactness: boosted by closure (enclosed regions are more compact/confident)
+    const baseCompactness = (fillRatio * 0.7) + (memberIdx.length > 1 ? 0.15 : 0) + (closureScore * 0.15);
+
     return {
       id: 'wfg2-r-' + Math.random().toString(36).slice(2, 10),
       type: 'visual_region',
@@ -117,7 +558,9 @@
       center: { x: minX + (maxX - minX) * 0.5, y: minY + (maxY - minY) * 0.5 },
       area,
       contour: hull(points).map(p => ({ x: p[0], y: p[1] })),
-      compactness: clamp((fillRatio * 0.8) + (memberIdx.length > 1 ? 0.2 : 0), 0, 1) - (1 - fillRatio) * params.rectangularBiasPenalty
+      compactness: clamp(baseCompactness, 0, 1) - (1 - fillRatio) * params.rectangularBiasPenalty,
+      closureScore,
+      colorConfidence
     };
   }
 
@@ -152,9 +595,43 @@
     if(tags.has('split_object') || tags.has('noisy_fragmented')){ p.mergeThreshold += 2; p.edgeSensitivity += 1; }
     if(tags.has('missed_object')){ p.minRegionArea -= 0.001; p.edgeSensitivity += 1; }
     if(tags.has('too_grid_like') || tags.has('shape_mismatch')){ p.rectangularBiasPenalty += 0.08; p.gridSize = Math.max(6, p.gridSize - 1); }
+
+    // New: color boundary feedback
+    if(tags.has('color_boundary_missed')){
+      p.colorWeight = Math.min(0.8, p.colorWeight + 0.08);
+      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.1);
+    }
+    // New: enclosing shape / continuity feedback
+    if(tags.has('enclosing_shape_broken')){
+      p.closureRadius = Math.min(8, p.closureRadius + 1);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.08);
+      p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.08);
+    }
+    if(tags.has('internal_detail_dominates')){
+      p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.1);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
+      p.mergeThreshold += 2;
+    }
+
     const rating = Number(feedback?.rating || 0);
-    if(Number.isFinite(rating) && rating > 0){ if(rating <= 2) p.edgeSensitivity = Math.max(8, p.edgeSensitivity - 1); if(rating >= 4) p.mergeThreshold = Math.min(60, p.mergeThreshold + 1); }
-    p.gridSize = clamp(Math.round(p.gridSize), 4, 24); p.edgeSensitivity = clamp(Math.round(p.edgeSensitivity), 8, 120); p.mergeThreshold = clamp(Math.round(p.mergeThreshold), 4, 60); p.minRegionArea = clamp(p.minRegionArea, 0.0004, 0.08); p.fragmentationTolerance = clamp(p.fragmentationTolerance, 0.05, 0.8); p.rectangularBiasPenalty = clamp(p.rectangularBiasPenalty, 0, 1);
+    if(Number.isFinite(rating) && rating > 0){
+      if(rating <= 2) p.edgeSensitivity = Math.max(8, p.edgeSensitivity - 1);
+      if(rating >= 4) p.mergeThreshold = Math.min(60, p.mergeThreshold + 1);
+    }
+    p.gridSize = clamp(Math.round(p.gridSize), 4, 24);
+    p.edgeSensitivity = clamp(Math.round(p.edgeSensitivity), 8, 120);
+    p.mergeThreshold = clamp(Math.round(p.mergeThreshold), 4, 60);
+    p.minRegionArea = clamp(p.minRegionArea, 0.0004, 0.08);
+    p.fragmentationTolerance = clamp(p.fragmentationTolerance, 0.05, 0.8);
+    p.rectangularBiasPenalty = clamp(p.rectangularBiasPenalty, 0, 1);
+    p.colorWeight = clamp(p.colorWeight, 0, 0.8);
+    p.luminanceWeight = clamp(p.luminanceWeight, 0.1, 0.8);
+    p.varianceWeight = clamp(p.varianceWeight, 0, 0.5);
+    p.colorMergePenalty = clamp(p.colorMergePenalty, 0, 1);
+    p.closureRadius = clamp(Math.round(p.closureRadius), 1, 8);
+    p.closureWeight = clamp(p.closureWeight, 0, 0.6);
+    p.parentContourBonus = clamp(p.parentContourBonus, 0, 0.6);
+    p.minEnclosingArea = clamp(p.minEnclosingArea, 0.002, 0.1);
     return p;
   }
 

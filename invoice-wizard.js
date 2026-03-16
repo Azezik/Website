@@ -20643,7 +20643,10 @@ function getGraphLearningLayerFlags(){
     regions: !!els.graphLearningShowRegions?.checked,
     contours: !!els.graphLearningShowContours?.checked,
     adjacency: !!els.graphLearningShowAdjacency?.checked,
-    debug: !!els.graphLearningShowDebug?.checked
+    debug: !!els.graphLearningShowDebug?.checked,
+    shapeFill: !!(document.getElementById('graph-learning-show-shape-fill') || {}).checked,
+    colorEvidence: !!(document.getElementById('graph-learning-show-color-evidence') || {}).checked,
+    closureEvidence: !!(document.getElementById('graph-learning-show-closure-evidence') || {}).checked
   };
 }
 
@@ -20683,11 +20686,18 @@ function renderGraphLearningBaseSurface(){
   const surf = gl.normalizedSurface;
   const ctx = synced.base.getContext('2d', { willReadFrequently: true });
   const out = new Uint8ClampedArray(surf.width * surf.height * 4);
+  const hasColor = surf.rgb && surf.rgb.r;
   for(let i = 0, j = 0; i < surf.gray.length; i++, j += 4){
-    const v = surf.gray[i] || 0;
-    out[j] = v;
-    out[j + 1] = v;
-    out[j + 2] = v;
+    if(hasColor){
+      out[j] = surf.rgb.r[i] || 0;
+      out[j + 1] = surf.rgb.g[i] || 0;
+      out[j + 2] = surf.rgb.b[i] || 0;
+    } else {
+      const v = surf.gray[i] || 0;
+      out[j] = v;
+      out[j + 1] = v;
+      out[j + 2] = v;
+    }
     out[j + 3] = 255;
   }
   ctx.putImageData(new ImageData(out, surf.width, surf.height), 0, 0);
@@ -20699,22 +20709,50 @@ function paintGraphLearningOverlay(ctx){
   const nodes = gl.graph?.nodes || [];
   const idMap = new Map(nodes.map(n => [n.id, n]));
 
+  // Shape-following fill: light fill inside contour polygons (primary view)
+  if(flags.shapeFill){
+    const hues = [210, 150, 30, 330, 270, 60, 180, 0, 120, 300];
+    for(let i = 0; i < nodes.length; i++){
+      const node = nodes[i];
+      const c = node.contour || [];
+      if(c.length < 3) continue;
+      const hue = hues[i % hues.length];
+      // Vary opacity by closure score: higher closure = more confident fill
+      const closureAlpha = 0.10 + (node.closureScore || 0) * 0.12;
+      ctx.fillStyle = 'hsla(' + hue + ',60%,55%,' + closureAlpha.toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.moveTo(c[0].x, c[0].y);
+      for(let j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Bbox region rectangles (secondary/debug aid now)
   if(flags.regions){
     for(const node of nodes){
       const b = node.bbox || {};
-      ctx.fillStyle = 'rgba(121,134,203,0.18)';
+      ctx.fillStyle = flags.shapeFill ? 'rgba(121,134,203,0.06)' : 'rgba(121,134,203,0.18)';
       ctx.strokeStyle = 'rgba(63,81,181,0.9)';
       ctx.lineWidth = 1.2;
       ctx.fillRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
       ctx.strokeRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
     }
   }
+
+  // Contour/hull strokes with color confidence indication
   if(flags.contours){
     for(const node of nodes){
       const c = node.contour || [];
       if(c.length < 3) continue;
-      ctx.strokeStyle = 'rgba(0,150,136,0.95)';
-      ctx.lineWidth = 1.4;
+      // Color-confident regions get a warmer stroke; pure-luminance get teal
+      const colorConf = node.colorConfidence || 0;
+      if(colorConf > 0.3){
+        ctx.strokeStyle = 'rgba(233,30,99,' + (0.6 + colorConf * 0.35).toFixed(2) + ')';
+      } else {
+        ctx.strokeStyle = 'rgba(0,150,136,0.95)';
+      }
+      ctx.lineWidth = node.closureScore > 0.4 ? 2.0 : 1.4;
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
       for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x, c[i].y);
@@ -20722,6 +20760,7 @@ function paintGraphLearningOverlay(ctx){
       ctx.stroke();
     }
   }
+
   if(flags.adjacency){
     for(const e of gl.graph?.edges || []){
       const a = idMap.get(e.from), b = idMap.get(e.to);
@@ -20734,12 +20773,15 @@ function paintGraphLearningOverlay(ctx){
       ctx.stroke();
     }
   }
+
   if(flags.debug){
     ctx.fillStyle = 'rgba(244,67,54,0.95)';
     ctx.font = '10px IBM Plex Mono, monospace';
     for(let i = 0; i < nodes.length; i++){
       const n = nodes[i];
-      ctx.fillText(String(i + 1), (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
+      const closureLabel = n.closureScore > 0.01 ? ' c' + (n.closureScore * 100).toFixed(0) : '';
+      const colorLabel = n.colorConfidence > 0.01 ? ' C' + (n.colorConfidence * 100).toFixed(0) : '';
+      ctx.fillText(String(i + 1) + closureLabel + colorLabel, (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
     }
   }
 }
@@ -20797,7 +20839,10 @@ function graphLearningRunGeneration(opts){
   if(els.graphLearningBadBtn) els.graphLearningBadBtn.disabled = false;
   if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
   updateGraphLearningPresetButtons();
-  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges.');
+  const artf = gl.graph?.artifacts || {};
+  const colorTag = artf.colorBoundaryActive ? ', color:on' : ', color:off';
+  const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
+  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + colorTag + closureTag + '.');
   renderGraphLearningViewer();
 }
 
@@ -20808,7 +20853,21 @@ function graphLearningCaptureGray(page){
   const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
   if(!src) return null;
   const isImg = state.isImage && src.tagName === 'IMG';
-  if(!isImg) return getPageGrayImageData(page);
+  if(!isImg){
+    // PDF path: capture gray + try to get RGBA for color evidence
+    const base = getPageGrayImageData(page);
+    if(!base) return base;
+    // Try to also capture RGBA from the PDF canvas
+    try {
+      const pdfC = els.pdfCanvas;
+      if(pdfC && pdfC.width > 0 && pdfC.height > 0){
+        const pctx = pdfC.getContext('2d', { willReadFrequently: true });
+        const praw = pctx.getImageData(0, 0, pdfC.width, pdfC.height);
+        base.rgba = praw.data;
+      }
+    } catch(e){ /* color not available for PDF, proceed with gray only */ }
+    return base;
+  }
   const w = src.naturalWidth || src.width;
   const h = src.naturalHeight || src.height;
   if(w <= 0 || h <= 0) return null;
@@ -20817,11 +20876,18 @@ function graphLearningCaptureGray(page){
   const ctx = tmp.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(src, 0, 0);
   const raw = ctx.getImageData(0, 0, w, h);
-  const gray = new Uint8Array(w * h);
+  const n = w * h;
+  const gray = new Uint8Array(n);
+  const r = new Uint8Array(n);
+  const g = new Uint8Array(n);
+  const b = new Uint8Array(n);
   for(let i = 0, j = 0; i < raw.data.length; i += 4, j++){
-    gray[j] = Math.round(0.299 * raw.data[i] + 0.587 * raw.data[i + 1] + 0.114 * raw.data[i + 2]);
+    r[j] = raw.data[i];
+    g[j] = raw.data[i + 1];
+    b[j] = raw.data[i + 2];
+    gray[j] = Math.round(0.299 * r[j] + 0.587 * g[j] + 0.114 * b[j]);
   }
-  return { gray, width: w, height: h };
+  return { gray, r, g, b, width: w, height: h };
 }
 
 async function graphLearningOpenFile(file){
@@ -20925,7 +20991,11 @@ if(els.graphLearningClearHistoryBtn){
     if(confirm('Clear WFG2 graph-learning attempt history?')){ _wfg2Store.clear(); renderGraphLearningAttemptHistory(); }
   });
 }
-[els.graphLearningShowRegions, els.graphLearningShowContours, els.graphLearningShowAdjacency, els.graphLearningShowDebug].forEach(function(el){
+[els.graphLearningShowRegions, els.graphLearningShowContours, els.graphLearningShowAdjacency, els.graphLearningShowDebug,
+ document.getElementById('graph-learning-show-shape-fill'),
+ document.getElementById('graph-learning-show-color-evidence'),
+ document.getElementById('graph-learning-show-closure-evidence')
+].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
 });
