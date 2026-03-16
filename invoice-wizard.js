@@ -511,7 +511,7 @@ const els = {
   graphLearningClearHistoryBtn: document.getElementById('graph-learning-clear-history-btn'),
   graphLearningStatus: document.getElementById('graph-learning-status'),
   graphLearningShowRegions: document.getElementById('graph-learning-show-regions'),
-  graphLearningShowContours: document.getElementById('graph-learning-show-contours'),
+  graphLearningShowCompiled: document.getElementById('graph-learning-show-compiled'),
   graphLearningShowAdjacency: document.getElementById('graph-learning-show-adjacency'),
   graphLearningShowDebug: document.getElementById('graph-learning-show-debug'),
   graphLearningGoodBtn: document.getElementById('graph-learning-good-btn'),
@@ -20640,11 +20640,10 @@ function renderGraphLearningAttemptHistory(){
 
 function getGraphLearningLayerFlags(){
   return {
+    compiled: !!(document.getElementById('graph-learning-show-compiled') || {}).checked,
     regions: !!els.graphLearningShowRegions?.checked,
-    contours: !!els.graphLearningShowContours?.checked,
     adjacency: !!els.graphLearningShowAdjacency?.checked,
     debug: !!els.graphLearningShowDebug?.checked,
-    shapeFill: !!(document.getElementById('graph-learning-show-shape-fill') || {}).checked,
     colorEvidence: !!(document.getElementById('graph-learning-show-color-evidence') || {}).checked,
     closureEvidence: !!(document.getElementById('graph-learning-show-closure-evidence') || {}).checked
   };
@@ -20711,79 +20710,59 @@ function paintGraphLearningOverlay(ctx){
   const artf = gl.graph?.artifacts || {};
   const nSize = gl.graph?.normalizedSize || {};
 
-  // ── Color Evidence heatmap: shows where color boundaries were detected ──
+  // ── Evidence layers (diagnostic) ──
+
   if(flags.colorEvidence && artf.colorBoundaryMap && nSize.width > 0 && nSize.height > 0){
     const cMap = artf.colorBoundaryMap;
     const mw = nSize.width, mh = nSize.height;
     const imgData = ctx.createImageData(mw, mh);
     const d = imgData.data;
     for(let i = 0, j = 0; i < cMap.length; i++, j += 4){
-      const v = cMap[i]; // 0-1 (already dead-zone/gamma filtered)
+      const v = cMap[i];
       if(v > 0.01){
-        d[j]     = 255;                             // R
-        d[j + 1] = Math.round(255 * (1 - v));       // G: 255→0 as v→1
-        d[j + 2] = 0;                               // B
-        d[j + 3] = Math.round(40 + v * 160);        // A: semi to opaque
+        d[j] = 255; d[j + 1] = Math.round(255 * (1 - v)); d[j + 2] = 0;
+        d[j + 3] = Math.round(40 + v * 160);
       }
     }
     ctx.putImageData(imgData, 0, 0);
   }
 
-  // ── Closure Evidence: shows where morphological closure bridged edge gaps ──
   if(flags.closureEvidence && artf.closureMap && nSize.width > 0 && nSize.height > 0){
     const clMap = artf.closureMap;
     const mw = nSize.width, mh = nSize.height;
     const imgData = ctx.createImageData(mw, mh);
     const d = imgData.data;
     for(let i = 0, j = 0; i < clMap.length; i++, j += 4){
-      if(clMap[i]){
-        d[j]     = 0;    // R
-        d[j + 1] = 180;  // G
-        d[j + 2] = 255;  // B
-        d[j + 3] = 110;  // A
-      }
+      if(clMap[i]){ d[j] = 0; d[j + 1] = 180; d[j + 2] = 255; d[j + 3] = 110; }
     }
     ctx.putImageData(imgData, 0, 0);
   }
 
-  // Shape-following fill: light fill inside contour polygons (primary view)
-  if(flags.shapeFill){
+  // ── Compiled Graph: unified final structural output ──
+  // Combines shape fills + contour strokes + adjacency into one
+  // coherent view representing the compiled result of all evidence layers.
+  if(flags.compiled){
     const hues = [210, 150, 30, 330, 270, 60, 180, 0, 120, 300];
+
+    // Pass 1: Filled regions (contour-following shapes)
     for(let i = 0; i < nodes.length; i++){
       const node = nodes[i];
       const c = node.contour || [];
       if(c.length < 3) continue;
       const hue = hues[i % hues.length];
-      // Vary opacity by closure score and surface uniformity:
-      // high closure = confident enclosure; high uniformity = coherent surface
-      const closureAlpha = 0.10 + (node.closureScore || 0) * 0.10 + (node.surfaceUniformity || 0) * 0.06;
-      ctx.fillStyle = 'hsla(' + hue + ',60%,55%,' + closureAlpha.toFixed(2) + ')';
+      const alpha = 0.10 + (node.closureScore || 0) * 0.08 + (node.surfaceUniformity || 0) * 0.05;
+      ctx.fillStyle = 'hsla(' + hue + ',55%,55%,' + alpha.toFixed(2) + ')';
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
       for(let j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
       ctx.closePath();
       ctx.fill();
     }
-  }
 
-  // Bbox region rectangles (secondary/debug aid now)
-  if(flags.regions){
-    for(const node of nodes){
-      const b = node.bbox || {};
-      ctx.fillStyle = flags.shapeFill ? 'rgba(121,134,203,0.06)' : 'rgba(121,134,203,0.18)';
-      ctx.strokeStyle = 'rgba(63,81,181,0.9)';
-      ctx.lineWidth = 1.2;
-      ctx.fillRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
-      ctx.strokeRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
-    }
-  }
-
-  // Contour/hull strokes with color confidence indication
-  if(flags.contours){
+    // Pass 2: Contour strokes (color-confident regions are warm, others teal)
     for(const node of nodes){
       const c = node.contour || [];
       if(c.length < 3) continue;
-      // Color-confident regions get a warmer stroke; pure-luminance get teal
       const colorConf = node.colorConfidence || 0;
       if(colorConf > 0.3){
         ctx.strokeStyle = 'rgba(233,30,99,' + (0.6 + colorConf * 0.35).toFixed(2) + ')';
@@ -20797,9 +20776,34 @@ function paintGraphLearningOverlay(ctx){
       ctx.closePath();
       ctx.stroke();
     }
+
+    // Pass 3: Adjacency edges
+    for(const e of gl.graph?.edges || []){
+      const a = idMap.get(e.from), b = idMap.get(e.to);
+      if(!a || !b) continue;
+      ctx.strokeStyle = 'rgba(255,152,0,0.55)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
+      ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
+      ctx.stroke();
+    }
   }
 
-  if(flags.adjacency){
+  // ── Optional standalone layers ──
+
+  if(flags.regions){
+    for(const node of nodes){
+      const b = node.bbox || {};
+      ctx.fillStyle = flags.compiled ? 'rgba(121,134,203,0.04)' : 'rgba(121,134,203,0.18)';
+      ctx.strokeStyle = 'rgba(63,81,181,0.9)';
+      ctx.lineWidth = 1.2;
+      ctx.fillRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
+      ctx.strokeRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
+    }
+  }
+
+  if(flags.adjacency && !flags.compiled){
     for(const e of gl.graph?.edges || []){
       const a = idMap.get(e.from), b = idMap.get(e.to);
       if(!a || !b) continue;
@@ -21032,8 +21036,8 @@ if(els.graphLearningClearHistoryBtn){
     if(confirm('Clear WFG2 graph-learning attempt history?')){ _wfg2Store.clear(); renderGraphLearningAttemptHistory(); }
   });
 }
-[els.graphLearningShowRegions, els.graphLearningShowContours, els.graphLearningShowAdjacency, els.graphLearningShowDebug,
- document.getElementById('graph-learning-show-shape-fill'),
+[els.graphLearningShowRegions, els.graphLearningShowAdjacency, els.graphLearningShowDebug,
+ document.getElementById('graph-learning-show-compiled'),
  document.getElementById('graph-learning-show-color-evidence'),
  document.getElementById('graph-learning-show-closure-evidence')
 ].forEach(function(el){

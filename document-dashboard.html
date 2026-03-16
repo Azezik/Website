@@ -894,20 +894,21 @@
 
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
-              <strong>Layers</strong>
-              <label><input type="checkbox" id="graph-learning-show-shape-fill" checked /> Shape Fill</label>
-              <label><input type="checkbox" id="graph-learning-show-regions" /> Regions (bbox)</label>
-              <label><input type="checkbox" id="graph-learning-show-contours" checked /> Contours / Hulls</label>
-              <label><input type="checkbox" id="graph-learning-show-adjacency" checked /> Adjacency</label>
-              <label><input type="checkbox" id="graph-learning-show-color-evidence" /> Color Evidence</label>
-              <label><input type="checkbox" id="graph-learning-show-closure-evidence" /> Closure Evidence</label>
-              <label><input type="checkbox" id="graph-learning-show-debug" /> Debug primitives</label>
+              <strong style="white-space:nowrap;">Output</strong>
+              <label><input type="checkbox" id="graph-learning-show-compiled" checked /> Compiled Graph</label>
+              <label><input type="checkbox" id="graph-learning-show-regions" /> Bounding Boxes</label>
+              <label><input type="checkbox" id="graph-learning-show-adjacency" /> Adjacency</label>
+              <span style="color:var(--border);">|</span>
+              <strong style="white-space:nowrap;">Evidence</strong>
+              <label><input type="checkbox" id="graph-learning-show-color-evidence" /> Color</label>
+              <label><input type="checkbox" id="graph-learning-show-closure-evidence" /> Closure</label>
+              <label><input type="checkbox" id="graph-learning-show-debug" /> Debug</label>
               <span class="sub" id="graph-learning-status" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
             </div>
           </div>
 
           <div id="graph-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
-            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Normalized Surface (color-preserved base) + Shape-following Overlay (top)</div>
+            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Compiled Graph — all evidence layers combined into final structural output</div>
             <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
               <canvas id="graph-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
               <canvas id="graph-learning-overlay-canvas" style="position:absolute;left:0;top:0;pointer-events:none;"></canvas>
@@ -924,13 +925,18 @@
             </div>
             <div id="graph-learning-feedback-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
               <p class="sub" style="margin:0 0 8px;color:var(--muted);">What went wrong? Select all that apply.</p>
-              <div style="display:grid;grid-template-columns:repeat(2,minmax(200px,1fr));gap:8px 16px;">
-                <label><input type="checkbox" data-feedback-tag="missed_object" /> Missed an object</label>
-                <label><input type="checkbox" data-feedback-tag="split_object" /> Split an object apart</label>
-                <label><input type="checkbox" data-feedback-tag="merged_objects" /> Merged different objects together</label>
-                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> Color boundary not detected</label>
-                <label><input type="checkbox" data-feedback-tag="noisy_fragmented" /> Too noisy / fragmented</label>
-                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> Shapes don’t match objects</label>
+              <div style="display:grid;grid-template-columns:repeat(2,minmax(200px,1fr));gap:6px 16px;">
+                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:2px;">Region count</strong>
+                <label><input type="checkbox" data-feedback-tag="too_many_regions" /> Too many regions</label>
+                <label><input type="checkbox" data-feedback-tag="too_few_regions" /> Too few regions</label>
+                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:4px;">Boundaries &amp; shapes</strong>
+                <label><input type="checkbox" data-feedback-tag="split_object" /> Object split into pieces</label>
+                <label><input type="checkbox" data-feedback-tag="merged_objects" /> Separate objects merged together</label>
+                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> Shapes don’t follow actual objects</label>
+                <label><input type="checkbox" data-feedback-tag="missed_object" /> Missed an important object</label>
+                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:4px;">Color &amp; surface</strong>
+                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> Color difference not used as a boundary</label>
+                <label><input type="checkbox" data-feedback-tag="surface_fragmented" /> Uniform surface broken into pieces</label>
               </div>
               <div class="actions" style="margin-top:10px;gap:10px;align-items:center;">
                 <label>Quality (1-5):
