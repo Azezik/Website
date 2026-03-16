@@ -20,8 +20,9 @@
     parentContourBonus: 0.25, minEnclosingArea: 0.01
   });
   const FEEDBACK_TAGS = Object.freeze([
-    'missed_object','split_object','merged_objects',
-    'color_boundary_missed','noisy_fragmented','shape_mismatch'
+    'too_many_regions','too_few_regions',
+    'split_object','merged_objects','shape_mismatch','missed_object',
+    'color_boundary_missed','surface_fragmented'
   ]);
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const copyParams = (params) => ({ ...DEFAULT_PARAMS, ...(params || {}) });
@@ -664,16 +665,23 @@
   function adaptParametersFromFeedback(params, feedback){
     const p = copyParams(params), tags = new Set(Array.isArray(feedback?.tags) ? feedback.tags : []);
 
-    // ── "Missed an object" → detect smaller objects, tighten sensitivity ──
-    if(tags.has('missed_object')){
-      p.minRegionArea = Math.max(0.0002, p.minRegionArea - 0.0003);
+    // ── Region count ──
+    if(tags.has('too_many_regions')){
+      p.mergeThreshold += 3;
+      p.minRegionArea += 0.0005;
+      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.06);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.03);
+    }
+    if(tags.has('too_few_regions')){
+      p.mergeThreshold -= 2;
+      p.minRegionArea = Math.max(0.0001, p.minRegionArea - 0.0003);
       p.edgeSensitivity += 2;
-      p.gridSize = Math.max(4, p.gridSize - 1);
-      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.2);
-      p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.15);
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
     }
 
-    // ── "Split an object apart" → merge more aggressively ──
+    // ── Boundaries & shapes ──
     if(tags.has('split_object')){
       p.mergeThreshold += 3;
       p.edgeSensitivity += 2;
@@ -682,8 +690,6 @@
       p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
       p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.06);
     }
-
-    // ── "Merged different objects together" → separate more ──
     if(tags.has('merged_objects')){
       p.mergeThreshold -= 2;
       p.edgeSensitivity -= 3;
@@ -691,30 +697,33 @@
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
       p.surfaceUniformityBias = Math.max(0, p.surfaceUniformityBias - 0.06);
     }
+    if(tags.has('shape_mismatch')){
+      p.rectangularBiasPenalty += 0.08;
+      p.gridSize = Math.max(4, p.gridSize - 1);
+      p.closureRadius = Math.min(8, p.closureRadius + 1);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.06);
+    }
+    if(tags.has('missed_object')){
+      p.minRegionArea = Math.max(0.0001, p.minRegionArea - 0.0003);
+      p.edgeSensitivity += 2;
+      p.gridSize = Math.max(4, p.gridSize - 1);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.2);
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
+    }
 
-    // ── "Color boundary not detected" → strengthen color influence ──
+    // ── Color & surface ──
     if(tags.has('color_boundary_missed')){
       p.colorWeight = Math.min(0.8, p.colorWeight + 0.08);
       p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.3);
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 3);
       p.colorDistGamma = Math.max(0.8, p.colorDistGamma - 0.2);
     }
-
-    // ── "Too noisy / fragmented" → relax, merge uniform surfaces ──
-    if(tags.has('noisy_fragmented')){
+    if(tags.has('surface_fragmented')){
       p.mergeThreshold += 3;
-      p.minRegionArea += 0.0005;
-      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
+      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2.5);
       p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.1);
       p.colorDistGamma = Math.min(3.5, p.colorDistGamma + 0.15);
-    }
-
-    // ── "Shapes don't match objects" → improve shape fidelity ──
-    if(tags.has('shape_mismatch')){
-      p.rectangularBiasPenalty += 0.08;
-      p.gridSize = Math.max(4, p.gridSize - 1);
-      p.closureRadius = Math.min(8, p.closureRadius + 1);
-      p.closureWeight = Math.min(0.6, p.closureWeight + 0.06);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.04);
     }
 
     const rating = Number(feedback?.rating || 0);
