@@ -20717,8 +20717,9 @@ function paintGraphLearningOverlay(ctx){
       const c = node.contour || [];
       if(c.length < 3) continue;
       const hue = hues[i % hues.length];
-      // Vary opacity by closure score: higher closure = more confident fill
-      const closureAlpha = 0.10 + (node.closureScore || 0) * 0.12;
+      // Vary opacity by closure score and surface uniformity:
+      // high closure = confident enclosure; high uniformity = coherent surface
+      const closureAlpha = 0.10 + (node.closureScore || 0) * 0.10 + (node.surfaceUniformity || 0) * 0.06;
       ctx.fillStyle = 'hsla(' + hue + ',60%,55%,' + closureAlpha.toFixed(2) + ')';
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
@@ -20781,7 +20782,8 @@ function paintGraphLearningOverlay(ctx){
       const n = nodes[i];
       const closureLabel = n.closureScore > 0.01 ? ' c' + (n.closureScore * 100).toFixed(0) : '';
       const colorLabel = n.colorConfidence > 0.01 ? ' C' + (n.colorConfidence * 100).toFixed(0) : '';
-      ctx.fillText(String(i + 1) + closureLabel + colorLabel, (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
+      const uniformLabel = n.surfaceUniformity > 0.01 ? ' u' + (n.surfaceUniformity * 100).toFixed(0) : '';
+      ctx.fillText(String(i + 1) + closureLabel + colorLabel + uniformLabel, (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
     }
   }
 }
@@ -20840,9 +20842,11 @@ function graphLearningRunGeneration(opts){
   if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
   updateGraphLearningPresetButtons();
   const artf = gl.graph?.artifacts || {};
+  const prm = gl.params || {};
   const colorTag = artf.colorBoundaryActive ? ', color:on' : ', color:off';
   const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
-  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + colorTag + closureTag + '.');
+  const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
+  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + colorTag + closureTag + calTag + '.');
   renderGraphLearningViewer();
 }
 
