@@ -12200,8 +12200,17 @@ async function openFile(file){
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
-    const tokens = await ensureTokensForPage(1);
-    await buildKeywordIndexForPage(1, tokens);
+    try {
+      const tokens = await ensureTokensForPage(1);
+      await buildKeywordIndexForPage(1, tokens);
+    } catch(err){
+      // Some images can fail OCR/tokenization (codec quirks, worker decode, etc.).
+      // Keep the loaded image available so view/normalization-only flows (e.g. WFG2 Graph Learning)
+      // can still proceed on the rendered bitmap.
+      console.warn('[openFile][image] tokenization failed; continuing with loaded image', err);
+      state.tokensByPage[1] = state.tokensByPage[1] || [];
+      state.keywordIndexByPage[1] = state.keywordIndexByPage[1] || [];
+    }
     // Keep the blob URL alive while the image remains mounted in <img>.
     // cleanupDoc()/next upload will revoke it via replacePendingBlobUrl().
     if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
@@ -12234,8 +12243,10 @@ async function openFile(file){
   } catch (err) {
     console.error('Failed to load PDF:', err);
     state.pdf = null;
+    clearDocumentSurfaces();
     if(els.pageControls) els.pageControls.style.display = 'none';
     alert('Failed to load PDF. Please try another file.');
+    throw err;
   }
 }
 function cleanupDoc(){
@@ -12263,7 +12274,27 @@ function cleanupDoc(){
   state.findTextTessSelectionPx = null; state.findTextTessSelectionCss = null;
   state.findTextPdfSelectionsPx = []; state.findTextPdfSelectionsCss = [];
   state.findTextTessSelectionsPx = []; state.findTextTessSelectionsCss = [];
+  state.pageNum = 1;
+  state.numPages = 0;
+  state.viewport = { w:0, h:0, scale:1 };
+  clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+}
+
+function clearDocumentSurfaces(){
+  if(els.pdfCanvas){
+    const pctx = els.pdfCanvas.getContext('2d');
+    if(pctx) pctx.clearRect(0, 0, els.pdfCanvas.width || 0, els.pdfCanvas.height || 0);
+    els.pdfCanvas.width = 0;
+    els.pdfCanvas.height = 0;
+    els.pdfCanvas.style.width = '0px';
+    els.pdfCanvas.style.height = '0px';
+  }
+  if(els.imgCanvas){
+    els.imgCanvas.removeAttribute('src');
+    els.imgCanvas.width = 0;
+    els.imgCanvas.height = 0;
+  }
 }
 
 function replacePendingBlobUrl(nextUrl){
@@ -20756,6 +20787,10 @@ async function graphLearningOpenFile(file){
   state.graphLearning.attemptNumber = 0;
   state.graphLearning.lastAttemptId = null;
   state.graphLearning.latestFeedback = null;
+  state.graphLearning.graph = null;
+  state.graphLearning.normalizedSurface = null;
+  clearGraphLearningViewer();
+  graphLearningStatus('Loading file…');
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
   try {
     await openFile(file);
@@ -20767,6 +20802,11 @@ async function graphLearningOpenFile(file){
   }
   const page = state.pageNum || 1;
   const img = getPageGrayImageData(page);
+  if(!img || !img.width || !img.height){
+    clearGraphLearningViewer();
+    graphLearningStatus('File loaded but no render surface was available.');
+    return;
+  }
   state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
   if(!state.graphLearning.normalizedSurface){
     clearGraphLearningViewer();
