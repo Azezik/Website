@@ -80,11 +80,18 @@ function normBoxIoU(a, b) {
  * from the reference document's region descriptors.
  *
  * The neighborhood captures which regions are near, overlapping, or
- * structurally related to the target — providing context for anchor scoring.
+ * structurally related to the target — providing context for anchor scoring
+ * and structural fingerprinting for BBOX relocation.
+ *
+ * The structural fingerprint encodes:
+ * - Relative positions of nearby regions (angle + distance from BBOX center)
+ * - Containment relationships (what contains the BBOX, what the BBOX overlaps)
+ * - Edge type distribution of neighbors
+ * - Shape characteristics of neighbors (aspect ratio, area)
  *
  * @param {object} target - { fieldKey, label, normBox: {x0n,y0n,wN,hN} }
  * @param {object} refDoc - Reference document summary (full)
- * @returns {object} Neighborhood descriptor
+ * @returns {object} Neighborhood descriptor with structural fingerprint
  */
 function computeTargetNeighborhood(target, refDoc) {
   var nb = target.normBox;
@@ -93,6 +100,8 @@ function computeTargetNeighborhood(target, refDoc) {
   var nhDescs = refDoc.neighborhoodDescriptors || {};
 
   var neighbors = [];
+  var containingRegions = [];
+
   for (var i = 0; i < regions.length; i++) {
     var r = regions[i];
     var rNb = regionToNormBox(r);
@@ -100,24 +109,53 @@ function computeTargetNeighborhood(target, refDoc) {
     var dist = pointDist(tgtCenter, rCenter);
     var overlap = normBoxIoU(nb, rNb);
 
+    // Check if this region contains the BBOX
+    var regionContainsBbox = rNb.x0n <= nb.x0n && rNb.y0n <= nb.y0n &&
+      (rNb.x0n + rNb.wN) >= (nb.x0n + nb.wN) && (rNb.y0n + rNb.hN) >= (nb.y0n + nb.hN);
+
     // Compute proximity score: nearby and overlapping regions rank higher
-    var proxScore = clamp(1 - dist / 0.5, 0, 1);     // within ~50% of page
+    var proxScore = clamp(1 - dist / 0.5, 0, 1);
     var overlapScore = overlap > 0 ? 0.5 + overlap * 0.5 : 0;
     var combinedProximity = Math.max(proxScore, overlapScore);
 
     if (combinedProximity > 0.05) {
+      // Structural vector: relative position from BBOX center to region
+      var dx = rCenter.x - tgtCenter.x;
+      var dy = rCenter.y - tgtCenter.y;
+      var angle = Math.atan2(dy, dx);
+
+      var nhDesc = nhDescs[r.regionId] || {};
+
       neighbors.push({
         regionId: r.regionId,
         centroid: rCenter,
         normalizedBbox: r.normalizedBbox,
         normalizedArea: r.normalizedArea,
+        aspectRatio: r.aspectRatio,
         surfaceType: r.surfaceType,
         textDensity: r.textDensity,
         confidence: r.confidence,
         distance: round(dist, 4),
         overlap: round(overlap, 4),
         proximity: round(combinedProximity, 4),
-        neighborhoodDescriptor: nhDescs[r.regionId] || {}
+        neighborhoodDescriptor: nhDesc,
+        // Structural fingerprint fields
+        relDx: round(dx, 4),
+        relDy: round(dy, 4),
+        angle: round(angle, 3),
+        containsBbox: regionContainsBbox,
+        containmentDepth: nhDesc.containmentDepth || 0,
+        edgeTypeDist: nhDesc.edgeTypeDist || {}
+      });
+    }
+
+    if (regionContainsBbox) {
+      containingRegions.push({
+        regionId: r.regionId,
+        normalizedArea: r.normalizedArea,
+        aspectRatio: r.aspectRatio,
+        surfaceType: r.surfaceType,
+        normalizedBbox: r.normalizedBbox
       });
     }
   }
@@ -125,13 +163,40 @@ function computeTargetNeighborhood(target, refDoc) {
   // Sort by proximity descending
   neighbors.sort(function (a, b) { return b.proximity - a.proximity; });
 
+  // Sort containing regions by area ascending (innermost container first)
+  containingRegions.sort(function (a, b) { return a.normalizedArea - b.normalizedArea; });
+
+  // Build structural fingerprint: top-N neighbors' relative positions (angle-sorted)
+  var topN = Math.min(neighbors.length, 8);
+  var structuralFingerprint = [];
+  for (var si = 0; si < topN; si++) {
+    var sn = neighbors[si];
+    structuralFingerprint.push({
+      relDx: sn.relDx,
+      relDy: sn.relDy,
+      angle: sn.angle,
+      distance: sn.distance,
+      normalizedArea: sn.normalizedArea,
+      aspectRatio: round(Math.min(sn.aspectRatio, 10), 2),
+      surfaceType: sn.surfaceType,
+      containsBbox: sn.containsBbox
+    });
+  }
+  // Sort fingerprint by angle for rotation-invariant comparison
+  structuralFingerprint.sort(function (a, b) { return a.angle - b.angle; });
+
   return {
     fieldKey: target.fieldKey,
     targetCenter: tgtCenter,
     targetNormBox: nb,
     neighborCount: neighbors.length,
     neighbors: neighbors,
-    // Summary metrics for the local area
+    // Containment context
+    containingRegions: containingRegions,
+    innermostContainer: containingRegions.length > 0 ? containingRegions[0] : null,
+    // Structural fingerprint for cross-document matching
+    structuralFingerprint: structuralFingerprint,
+    // Summary metrics
     avgDistance: neighbors.length > 0 ? round(mean(neighbors.map(function (n) { return n.distance; })), 4) : 0,
     avgTextDensity: neighbors.length > 0 ? round(mean(neighbors.map(function (n) { return n.textDensity; })), 4) : 0,
     overlappingRegionCount: neighbors.filter(function (n) { return n.overlap > 0; }).length
@@ -427,84 +492,133 @@ function transferBBox(target, refinedAnchors, correspondenceResult, targetDocId,
   var newW = transformedBox.wN;
   var newH = transformedBox.hN;
 
-  // ── Stage 5: Local structural refinement ───────────────────────────
-  // After transform, nudge toward nearby structurally-similar regions
-  // on the target document for fine alignment.
+  // ── Stage 5: Structural neighborhood refinement ────────────────────
+  // After affine transform, verify and refine the transferred position
+  // by comparing the structural neighborhood on the target to the
+  // reference neighborhood. This uses shape/topology matching, not text.
   var tgtRegions = targetDoc.regionDescriptors || [];
+  var tgtNhDescs = targetDoc.neighborhoodDescriptors || {};
   var txCenter = { x: newX + newW / 2, y: newY + newH / 2 };
 
   if (tgtRegions.length > 0) {
     var txNormBox = { x0n: newX, y0n: newY, wN: newW, hN: newH };
-    var bestNudge = null;
-    var bestNudgeScore = 0;
+    var refNeighborhood = opts.targetNeighborhood || null;
 
-    // Use the target neighborhood if available to identify expected
-    // structural features near the field
-    var expectedSurfaceTypes = null;
-    var expectedTextDensity = null;
-    if (opts.targetNeighborhood) {
-      var nh = opts.targetNeighborhood;
-      if (nh.neighbors && nh.neighbors.length > 0) {
-        expectedSurfaceTypes = {};
-        expectedTextDensity = 0;
-        var nhCount = Math.min(nh.neighbors.length, 5);
-        for (var nhi = 0; nhi < nhCount; nhi++) {
-          var nhRegion = nh.neighbors[nhi];
-          expectedSurfaceTypes[nhRegion.surfaceType] = true;
-          expectedTextDensity += nhRegion.textDensity;
-        }
-        expectedTextDensity /= nhCount;
-      }
-    }
-
+    // Build a structural context of the transferred position on the target
+    var nearbyTargetRegions = [];
+    var diagThreshold = Math.sqrt(newW * newW + newH * newH) * 1.0;
     for (var lri = 0; lri < tgtRegions.length; lri++) {
       var lr = tgtRegions[lri];
-      var lrCenter = lr.centroid;
-      var lrDist = pointDist(txCenter, lrCenter);
-
-      // Only consider regions very close to the transferred position
-      var diagThreshold = Math.sqrt(newW * newW + newH * newH) * 0.75;
+      var lrDist = pointDist(txCenter, lr.centroid);
       if (lrDist > diagThreshold) continue;
 
-      // Compute structural similarity: overlap + size match + neighborhood match
       var lrNormBox = regionToNormBox(lr);
-      var iou = normBoxIoU(txNormBox, lrNormBox);
-      var sizeSim = 1 - Math.abs(lr.normalizedBbox.w * lr.normalizedBbox.h - newW * newH) /
-        Math.max(lr.normalizedBbox.w * lr.normalizedBbox.h, newW * newH, 0.001);
-      sizeSim = clamp(sizeSim, 0, 1);
-
-      var proxSim = 1 - lrDist / diagThreshold;
-
-      // Neighborhood consistency bonus: if this region matches the expected
-      // structural type from the reference neighborhood, boost it
-      var nhBonus = 0;
-      if (expectedSurfaceTypes && expectedSurfaceTypes[lr.surfaceType]) {
-        nhBonus += 0.1;
-      }
-      if (expectedTextDensity !== null) {
-        var tdSim = 1 - Math.abs(lr.textDensity - expectedTextDensity);
-        nhBonus += tdSim * 0.1;
-      }
-
-      var nudgeScore = iou * 0.5 + sizeSim * 0.15 + proxSim * 0.15 + nhBonus;
-      if (nudgeScore > bestNudgeScore && nudgeScore > 0.15) {
-        bestNudgeScore = nudgeScore;
-        bestNudge = {
-          center: lrCenter,
-          normBox: lrNormBox,
-          score: nudgeScore
-        };
-      }
+      var lrNhDesc = tgtNhDescs[lr.regionId] || {};
+      nearbyTargetRegions.push({
+        region: lr,
+        normBox: lrNormBox,
+        distance: lrDist,
+        iou: normBoxIoU(txNormBox, lrNormBox),
+        nhDesc: lrNhDesc
+      });
     }
 
-    if (bestNudge) {
-      // Nudge: blend the transferred center toward the region center
-      // proportional to nudge score (max 30% adjustment)
-      var nudgeStrength = clamp(bestNudgeScore * 0.3, 0, 0.3);
-      var nudgedCX = txCenter.x + (bestNudge.center.x - txCenter.x) * nudgeStrength;
-      var nudgedCY = txCenter.y + (bestNudge.center.y - txCenter.y) * nudgeStrength;
-      newX = nudgedCX - newW / 2;
-      newY = nudgedCY - newH / 2;
+    if (refNeighborhood && refNeighborhood.structuralFingerprint && nearbyTargetRegions.length > 0) {
+      // Compare the structural fingerprint of the reference neighborhood
+      // against the local structure at the transferred position.
+      // Look for the best matching local context.
+
+      var bestNudge = null;
+      var bestNudgeScore = 0;
+
+      for (var nri = 0; nri < nearbyTargetRegions.length; nri++) {
+        var candidate = nearbyTargetRegions[nri];
+        var cr = candidate.region;
+
+        // Score 1: Geometric overlap and proximity
+        var geoScore = candidate.iou * 0.3 + (1 - candidate.distance / diagThreshold) * 0.2;
+
+        // Score 2: Shape similarity to innermost container or overlapping ref regions
+        var shapeSim = 0;
+        if (refNeighborhood.innermostContainer) {
+          var ic = refNeighborhood.innermostContainer;
+          var arSim = 1 - Math.abs(Math.min(cr.aspectRatio, 10) - Math.min(ic.aspectRatio, 10)) /
+            Math.max(Math.min(cr.aspectRatio, 10), Math.min(ic.aspectRatio, 10), 0.1);
+          var areaSim = 1 - Math.abs(cr.normalizedArea - ic.normalizedArea) /
+            Math.max(cr.normalizedArea, ic.normalizedArea, 0.001);
+          shapeSim = clamp(arSim * 0.5 + areaSim * 0.5, 0, 1);
+        }
+
+        // Score 3: Structural topology match (edge type distribution)
+        var topoSim = 0;
+        if (candidate.nhDesc.edgeTypeDist) {
+          // Compare the edge type distribution of this candidate's neighborhood
+          // to the reference neighbors' average distribution
+          var refFingerprint = refNeighborhood.structuralFingerprint;
+          var refContainCount = 0, refProxCount = 0, refAdjCount = 0;
+          for (var rfi = 0; rfi < refFingerprint.length; rfi++) {
+            if (refFingerprint[rfi].containsBbox) refContainCount++;
+          }
+          var cEdges = candidate.nhDesc.edgeTypeDist;
+          var cTotal = (cEdges.contains || 0) + (cEdges.spatial_proximity || 0) + (cEdges.spatial_adjacency || 0);
+          // Favor candidates with similar containment patterns
+          var depthSim = 1 - Math.abs((candidate.nhDesc.containmentDepth || 0) -
+            (refNeighborhood.innermostContainer ? 1 : 0)) / 3;
+          var adjSim = cTotal > 0 ? clamp((cEdges.spatial_adjacency || 0) / cTotal, 0, 1) : 0.5;
+          topoSim = clamp(depthSim * 0.6 + adjSim * 0.4, 0, 1);
+        }
+
+        // Score 4: Surface type consistency
+        var typeSim = 0;
+        if (refNeighborhood.neighbors && refNeighborhood.neighbors.length > 0) {
+          var topRefTypes = {};
+          var nCount = Math.min(refNeighborhood.neighbors.length, 5);
+          for (var rti = 0; rti < nCount; rti++) {
+            topRefTypes[refNeighborhood.neighbors[rti].surfaceType] = true;
+          }
+          if (topRefTypes[cr.surfaceType]) typeSim = 1;
+        }
+
+        var nudgeScore = geoScore * 0.35 + shapeSim * 0.25 + topoSim * 0.25 + typeSim * 0.15;
+
+        if (nudgeScore > bestNudgeScore && nudgeScore > 0.12) {
+          bestNudgeScore = nudgeScore;
+          bestNudge = {
+            center: cr.centroid,
+            normBox: candidate.normBox,
+            score: nudgeScore
+          };
+        }
+      }
+
+      if (bestNudge) {
+        // Nudge proportional to match quality (max 35% adjustment)
+        var nudgeStrength = clamp(bestNudgeScore * 0.35, 0, 0.35);
+        var nudgedCX = txCenter.x + (bestNudge.center.x - txCenter.x) * nudgeStrength;
+        var nudgedCY = txCenter.y + (bestNudge.center.y - txCenter.y) * nudgeStrength;
+        newX = nudgedCX - newW / 2;
+        newY = nudgedCY - newH / 2;
+      }
+    } else {
+      // Fallback: simple proximity-based nudge (when no structural fingerprint)
+      var bestSimple = null;
+      var bestSimpleScore = 0;
+      for (var si = 0; si < nearbyTargetRegions.length; si++) {
+        var sc = nearbyTargetRegions[si];
+        var simpleScore = sc.iou * 0.5 + (1 - sc.distance / diagThreshold) * 0.3;
+        var sizMatch = 1 - Math.abs(sc.region.normalizedArea - (newW * newH)) /
+          Math.max(sc.region.normalizedArea, newW * newH, 0.001);
+        simpleScore += clamp(sizMatch, 0, 1) * 0.2;
+        if (simpleScore > bestSimpleScore && simpleScore > 0.15) {
+          bestSimpleScore = simpleScore;
+          bestSimple = { center: sc.region.centroid };
+        }
+      }
+      if (bestSimple) {
+        var sNudge = clamp(bestSimpleScore * 0.25, 0, 0.25);
+        newX = txCenter.x + (bestSimple.center.x - txCenter.x) * sNudge - newW / 2;
+        newY = txCenter.y + (bestSimple.center.y - txCenter.y) * sNudge - newH / 2;
+      }
     }
   }
 
@@ -879,17 +993,21 @@ function formatExtractionReport(extractionResult) {
 var landmarkMatcher = require('./landmark-matcher');
 
 /**
- * Unified extraction pipeline: tries landmark-based extraction first,
- * falls back to region-based extraction if landmarks are insufficient.
+ * Unified extraction pipeline: structure-based extraction is primary,
+ * text landmarks provide supplementary refinement when available.
  *
- * This is the recommended top-level entry point.  It uses text landmarks
- * (stable printed labels) as the primary anchor source, which is vastly
- * more reliable than color-segmented regions across scan/screenshot
- * variations.  Region-based extraction remains available as a fallback
- * for documents with no usable text layer.
+ * This is the recommended top-level entry point. It uses structural
+ * correspondences (region shape, topology, spatial layout) as the
+ * primary anchor source. Text landmarks are used as supplementary
+ * signals to improve confidence, not as the primary matching strategy.
  *
- * @param {object}   refinementResult      - Phase 2B output (for fallback)
- * @param {object}   correspondenceResult  - Phase 2 output (for fallback)
+ * Design rationale: structural/visual matching works across PDFs, scans,
+ * screenshots, and photos where text may be absent, degraded, or
+ * differently rendered. Text landmarks help when available but the
+ * system must not depend on them.
+ *
+ * @param {object}   refinementResult      - Phase 2B output (structural)
+ * @param {object}   correspondenceResult  - Phase 2 output (structural)
  * @param {object}   refDoc                - Reference document summary
  * @param {object[]} batchDocuments        - All batch document summaries
  * @param {object}   batchTokens           - { [documentId]: { tokens, viewport } }
@@ -904,24 +1022,94 @@ function extractWithLandmarkFallback(
   opts = opts || {};
   var refDocId = refDoc.documentId;
 
-  // Try landmark-based extraction first
-  if (batchTokens && Object.keys(batchTokens).length >= 2 && extractionTargets && extractionTargets.length > 0) {
-    var landmarkResult = landmarkMatcher.extractWithLandmarks(
-      batchTokens, extractionTargets, refDocId, opts
-    );
-
-    if (landmarkResult.status === 'complete' && landmarkResult.landmarkCount >= 3) {
-      // Landmark extraction succeeded with sufficient landmarks
-      landmarkResult.extractionStrategy = 'text_landmarks';
-      return landmarkResult;
-    }
-  }
-
-  // Fall back to region-based extraction
+  // Primary: structure-based extraction using region correspondences
   var regionResult = extractFromBatch(
     refinementResult, correspondenceResult, refDoc, batchDocuments, batchTokens
   );
-  regionResult.extractionStrategy = 'region_based';
+  regionResult.extractionStrategy = 'structure_based';
+
+  // If structural extraction produced reasonable results, use them
+  // but attempt to supplement with landmark data for confidence boost
+  if (regionResult.status === 'complete' && regionResult.results && regionResult.results.length > 0) {
+    // Check structural confidence — if any fields have low confidence,
+    // try to supplement with landmark-based predictions
+    if (batchTokens && Object.keys(batchTokens).length >= 2 && extractionTargets && extractionTargets.length > 0) {
+      try {
+        var landmarkResult = landmarkMatcher.extractWithLandmarks(
+          batchTokens, extractionTargets, refDocId, opts
+        );
+
+        if (landmarkResult.status === 'complete' && landmarkResult.landmarkCount >= 3) {
+          // Merge: for each field with low structural confidence,
+          // blend with landmark prediction if landmark confidence is higher
+          for (var di = 0; di < regionResult.results.length; di++) {
+            var rDoc = regionResult.results[di];
+            if (rDoc.isReference) continue;
+
+            var lDoc = null;
+            for (var ldi = 0; ldi < landmarkResult.results.length; ldi++) {
+              if (landmarkResult.results[ldi].documentId === rDoc.documentId) {
+                lDoc = landmarkResult.results[ldi];
+                break;
+              }
+            }
+            if (!lDoc) continue;
+
+            for (var fi = 0; fi < rDoc.fields.length; fi++) {
+              var rField = rDoc.fields[fi];
+              if (rField.transferConfidence >= 0.7) continue; // structural is confident enough
+
+              // Find matching landmark field
+              var lField = null;
+              for (var lfi = 0; lfi < lDoc.fields.length; lfi++) {
+                if (lDoc.fields[lfi].fieldKey === rField.fieldKey) {
+                  lField = lDoc.fields[lfi];
+                  break;
+                }
+              }
+              if (!lField || lField.transferConfidence <= rField.transferConfidence) continue;
+
+              // Blend: weight toward whichever has higher confidence
+              var structWeight = rField.transferConfidence;
+              var landmarkWeight = lField.transferConfidence;
+              var totalWeight = structWeight + landmarkWeight;
+              if (totalWeight > 0) {
+                var sw = structWeight / totalWeight;
+                var lw = landmarkWeight / totalWeight;
+                rField.transferredNormBox = {
+                  x0n: round(rField.transferredNormBox.x0n * sw + lField.transferredNormBox.x0n * lw, 6),
+                  y0n: round(rField.transferredNormBox.y0n * sw + lField.transferredNormBox.y0n * lw, 6),
+                  wN: round(rField.transferredNormBox.wN * sw + lField.transferredNormBox.wN * lw, 6),
+                  hN: round(rField.transferredNormBox.hN * sw + lField.transferredNormBox.hN * lw, 6)
+                };
+                rField.transferConfidence = round(Math.max(rField.transferConfidence, lField.transferConfidence), 4);
+                rField.transferMethod = 'structure_landmark_blend';
+                rField.landmarkBoost = true;
+              }
+            }
+          }
+          regionResult.landmarkSupplementApplied = true;
+          regionResult.landmarkCount = landmarkResult.landmarkCount;
+        }
+      } catch (e) {
+        // Landmark supplementation is optional; don't fail the whole pipeline
+        regionResult.landmarkSupplementError = e.message || String(e);
+      }
+    }
+    return regionResult;
+  }
+
+  // Fallback: if structural extraction failed entirely, try pure landmarks
+  if (batchTokens && Object.keys(batchTokens).length >= 2 && extractionTargets && extractionTargets.length > 0) {
+    var fallbackResult = landmarkMatcher.extractWithLandmarks(
+      batchTokens, extractionTargets, refDocId, opts
+    );
+    if (fallbackResult.status === 'complete' && fallbackResult.landmarkCount >= 3) {
+      fallbackResult.extractionStrategy = 'text_landmarks_fallback';
+      return fallbackResult;
+    }
+  }
+
   return regionResult;
 }
 

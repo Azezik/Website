@@ -130,11 +130,16 @@ function selectReferenceDocument(documents) {
 /**
  * Compute a multi-dimensional similarity score between two regions.
  *
- * Dimensions considered:
- * - Position similarity (normalized bbox x,y)
- * - Size similarity (normalized area, aspect ratio)
- * - Neighborhood similarity (neighbor count, avg edge weight)
- * - Semantic similarity (text density, confidence, surface type)
+ * Structure-first design: the primary signals are geometric shape,
+ * spatial layout, containment depth, and neighborhood topology.
+ * Text/semantic signals are retained as supporting evidence only.
+ *
+ * Dimensions considered (ordered by weight):
+ * - Position similarity (normalized bbox centroids)
+ * - Shape similarity (aspect ratio, rectangularity, solidity)
+ * - Dimension similarity (normalized width + height)
+ * - Structural topology (neighbor count, edge type distribution, containment depth)
+ * - Semantic similarity (surface type, confidence — text density down-weighted)
  *
  * @param {object} regionA - Region descriptor from document A
  * @param {object} regionB - Region descriptor from document B
@@ -151,28 +156,33 @@ function computeRegionSimilarity(regionA, regionB, nhA, nhB) {
     Math.pow((regionA.centroid.x - regionB.centroid.x), 2) +
     Math.pow((regionA.centroid.y - regionB.centroid.y), 2)
   );
-  // Max possible distance in normalized space is sqrt(2) ≈ 1.414
   var positionSimilarity = clamp(1 - positionDist / 1.414, 0, 1);
 
-  // Size similarity: compare normalized areas and aspect ratios
-  var areaDiff = Math.abs(regionA.normalizedArea - regionB.normalizedArea);
-  var maxArea = Math.max(regionA.normalizedArea, regionB.normalizedArea, 0.001);
-  var areaSimilarity = clamp(1 - areaDiff / maxArea, 0, 1);
-
+  // Shape similarity: aspect ratio + rectangularity + solidity
   var arA = Math.min(regionA.aspectRatio, 10);
   var arB = Math.min(regionB.aspectRatio, 10);
   var arDiff = Math.abs(arA - arB);
   var maxAr = Math.max(arA, arB, 0.1);
   var aspectSimilarity = clamp(1 - arDiff / maxAr, 0, 1);
 
-  var sizeSimilarity = areaSimilarity * 0.6 + aspectSimilarity * 0.4;
+  var featA = regionA.features || {};
+  var featB = regionB.features || {};
+  var rectSim = 1 - Math.abs((featA.rectangularity || 1) - (featB.rectangularity || 1));
+  var solidSim = 1 - Math.abs((featA.solidity || 1) - (featB.solidity || 1));
+
+  var shapeSimilarity = clamp(aspectSimilarity * 0.5 + rectSim * 0.25 + solidSim * 0.25, 0, 1);
+
+  // Size similarity: compare normalized areas
+  var areaDiff = Math.abs(regionA.normalizedArea - regionB.normalizedArea);
+  var maxArea = Math.max(regionA.normalizedArea, regionB.normalizedArea, 0.001);
+  var sizeSimilarity = clamp(1 - areaDiff / maxArea, 0, 1);
 
   // Dimension similarity (width and height independently)
   var wDiff = Math.abs(regionA.normalizedBbox.w - regionB.normalizedBbox.w);
   var hDiff = Math.abs(regionA.normalizedBbox.h - regionB.normalizedBbox.h);
   var dimensionSimilarity = clamp(1 - (wDiff + hDiff), 0, 1);
 
-  // Neighborhood similarity
+  // Structural topology similarity (enhanced)
   var ncA = nhA.neighborCount || 0;
   var ncB = nhB.neighborCount || 0;
   var maxNc = Math.max(ncA, ncB, 1);
@@ -182,38 +192,68 @@ function computeRegionSimilarity(regionA, regionB, nhA, nhB) {
   var ewB = nhB.avgEdgeWeight || 0;
   var edgeWeightSim = 1 - Math.abs(ewA - ewB);
 
-  var neighborhoodSimilarity = clamp(neighborCountSim * 0.6 + edgeWeightSim * 0.4, 0, 1);
+  // Edge type distribution similarity
+  var edgeTypeSim = 1;
+  if (nhA.edgeTypeDist && nhB.edgeTypeDist) {
+    var distA = nhA.edgeTypeDist;
+    var distB = nhB.edgeTypeDist;
+    var totalA = (distA.contains || 0) + (distA.spatial_proximity || 0) + (distA.spatial_adjacency || 0);
+    var totalB = (distB.contains || 0) + (distB.spatial_proximity || 0) + (distB.spatial_adjacency || 0);
+    if (totalA > 0 && totalB > 0) {
+      var cSim = 1 - Math.abs((distA.contains || 0) / totalA - (distB.contains || 0) / totalB);
+      var pSim = 1 - Math.abs((distA.spatial_proximity || 0) / totalA - (distB.spatial_proximity || 0) / totalB);
+      var aSim = 1 - Math.abs((distA.spatial_adjacency || 0) / totalA - (distB.spatial_adjacency || 0) / totalB);
+      edgeTypeSim = (cSim + pSim + aSim) / 3;
+    }
+  }
 
-  // Semantic similarity: text density, confidence, surface type
-  var tdSim = 1 - Math.abs(regionA.textDensity - regionB.textDensity);
+  // Containment depth similarity
+  var depthA = nhA.containmentDepth || 0;
+  var depthB = nhB.containmentDepth || 0;
+  var depthSim = 1 - Math.abs(depthA - depthB) / Math.max(depthA, depthB, 1);
+
+  var topologySimilarity = clamp(
+    neighborCountSim * 0.25 +
+    edgeWeightSim * 0.15 +
+    edgeTypeSim * 0.35 +
+    depthSim * 0.25, 0, 1);
+
+  // Semantic similarity: surface type + confidence (text density down-weighted)
   var confSim = 1 - Math.abs(regionA.confidence - regionB.confidence);
   var typeSim = regionA.surfaceType === regionB.surfaceType ? 1 : 0.3;
+  var tdSim = 1 - Math.abs(regionA.textDensity - regionB.textDensity);
 
-  var semanticSimilarity = clamp(tdSim * 0.3 + confSim * 0.3 + typeSim * 0.4, 0, 1);
+  // Surface type and confidence are structural signals; text density is text-based
+  var semanticSimilarity = clamp(typeSim * 0.5 + confSim * 0.35 + tdSim * 0.15, 0, 1);
 
-  // Weighted combination
+  // Structure-first weighted combination
+  // Geometry/structure: position(25) + shape(15) + size(10) + dimension(10) + topology(25) = 85%
+  // Text/semantic: semantic(15) = 15%
   var weights = {
-    position: 0.35,
-    size: 0.15,
-    dimension: 0.15,
-    neighborhood: 0.15,
-    semantic: 0.20
+    position: 0.25,
+    shape: 0.15,
+    size: 0.10,
+    dimension: 0.10,
+    topology: 0.25,
+    semantic: 0.15
   };
 
   var combined =
     positionSimilarity * weights.position +
+    shapeSimilarity * weights.shape +
     sizeSimilarity * weights.size +
     dimensionSimilarity * weights.dimension +
-    neighborhoodSimilarity * weights.neighborhood +
+    topologySimilarity * weights.topology +
     semanticSimilarity * weights.semantic;
 
   return {
     similarity: round(combined, 4),
     dimensions: {
       position: round(positionSimilarity, 4),
+      shape: round(shapeSimilarity, 4),
       size: round(sizeSimilarity, 4),
       dimension: round(dimensionSimilarity, 4),
-      neighborhood: round(neighborhoodSimilarity, 4),
+      topology: round(topologySimilarity, 4),
       semantic: round(semanticSimilarity, 4)
     }
   };

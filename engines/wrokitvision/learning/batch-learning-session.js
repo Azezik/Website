@@ -126,16 +126,76 @@ function extractDocumentSummary(analysisResult, opts) {
     neighborhoodMap[e.targetId].push({ neighborId: e.sourceId, edgeType: e.edgeType, weight: e.weight });
   }
 
+  // Build a region lookup for structural topology encoding
+  const regionById = {};
+  for (const rd of regionDescriptors) { regionById[rd.regionId] = rd; }
+
   const neighborhoodDescriptors = {};
   for (const rd of regionDescriptors) {
     const neighbors = neighborhoodMap[rd.regionId] || [];
+    const containsEdges = neighbors.filter(function (n) { return n.edgeType === 'contains'; });
+    const proximityEdges = neighbors.filter(function (n) { return n.edgeType === 'spatial_proximity'; });
+    const adjacencyEdgesLocal = neighbors.filter(function (n) { return n.edgeType === 'spatial_adjacency'; });
+
+    // Structural topology: relative positions of neighbors (sorted by angle)
+    const neighborVectors = [];
+    for (let ni = 0; ni < neighbors.length; ni++) {
+      const nRegion = regionById[neighbors[ni].neighborId];
+      if (!nRegion) continue;
+      const dx = nRegion.centroid.x - rd.centroid.x;
+      const dy = nRegion.centroid.y - rd.centroid.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx);
+      neighborVectors.push({
+        neighborId: neighbors[ni].neighborId,
+        edgeType: neighbors[ni].edgeType,
+        weight: neighbors[ni].weight,
+        relDx: Math.round(dx * 10000) / 10000,
+        relDy: Math.round(dy * 10000) / 10000,
+        distance: Math.round(dist * 10000) / 10000,
+        angle: Math.round(angle * 1000) / 1000,
+        neighborAspectRatio: nRegion.aspectRatio > 10 ? 10 : Math.round(nRegion.aspectRatio * 100) / 100,
+        neighborNormArea: Math.round(nRegion.normalizedArea * 100000) / 100000,
+        neighborSurfaceType: nRegion.surfaceType
+      });
+    }
+    neighborVectors.sort(function (a, b) { return a.angle - b.angle; });
+
+    // Edge type distribution as a structural fingerprint
+    const edgeTypeDist = {
+      contains: containsEdges.length,
+      spatial_proximity: proximityEdges.length,
+      spatial_adjacency: adjacencyEdgesLocal.length
+    };
+
+    // Containment context: which regions contain this one, and which it contains
+    const containedBy = [];
+    const containsRegions = [];
+    for (let ci = 0; ci < containsEdges.length; ci++) {
+      const cNeighbor = regionById[containsEdges[ci].neighborId];
+      if (!cNeighbor) continue;
+      if (cNeighbor.normalizedArea > rd.normalizedArea) {
+        containedBy.push(containsEdges[ci].neighborId);
+      } else {
+        containsRegions.push(containsEdges[ci].neighborId);
+      }
+    }
+
     neighborhoodDescriptors[rd.regionId] = {
       neighborCount: neighbors.length,
       avgEdgeWeight: neighbors.length
         ? neighbors.reduce(function (s, n) { return s + n.weight; }, 0) / neighbors.length
         : 0,
-      containsCount: neighbors.filter(function (n) { return n.edgeType === 'contains'; }).length,
-      proximityCount: neighbors.filter(function (n) { return n.edgeType === 'spatial_proximity'; }).length
+      containsCount: containsEdges.length,
+      proximityCount: proximityEdges.length,
+      adjacencyCount: adjacencyEdgesLocal.length,
+      // Structural topology: relative positions and properties of neighbors
+      neighborVectors: neighborVectors,
+      edgeTypeDist: edgeTypeDist,
+      // Containment hierarchy
+      containedBy: containedBy,
+      containsRegions: containsRegions,
+      containmentDepth: containedBy.length
     };
   }
 
@@ -183,8 +243,10 @@ function extractDocumentSummary(analysisResult, opts) {
   });
 
   // Compute comparable feature vectors for each region
+  // Structural features are prioritized over text-based features
   const regionSignatures = regionDescriptors.map(function (rd) {
     const nh = neighborhoodDescriptors[rd.regionId] || {};
+    const feat = rd.features || {};
     return {
       regionId: rd.regionId,
       featureVector: [
@@ -197,7 +259,12 @@ function extractDocumentSummary(analysisResult, opts) {
         rd.confidence,
         rd.textDensity,
         (nh.neighborCount || 0) / 10,
-        (nh.avgEdgeWeight || 0)
+        (nh.avgEdgeWeight || 0),
+        // New structural features
+        (nh.adjacencyCount || 0) / 10,
+        (nh.containmentDepth || 0) / 5,
+        feat.rectangularity || 1,
+        feat.solidity || 1
       ],
       spatialBin: (Math.min(gridSize - 1, Math.floor(rd.centroid.y * gridSize))) * gridSize +
         Math.min(gridSize - 1, Math.floor(rd.centroid.x * gridSize))

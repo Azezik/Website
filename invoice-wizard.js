@@ -21931,13 +21931,15 @@ function _renderPhase2BRefinementResult(result){
     btn.disabled = true;
 
     try {
-      // Step 1: Run normal token-based extraction
-      var result = _learningAPI.extractFromBatch(
+      // Step 1: Run structure-first extraction with landmark supplementation
+      var extractionTargets = _phase2bState.extractionTargets.filter(function(t){ return t !== null; });
+      var result = _learningAPI.extractWithLandmarkFallback(
         _phase2bState.refinementResult,
         _phase2bState.correspondenceResult,
         refDoc,
         session.documents,
-        batchTokens
+        batchTokens,
+        extractionTargets
       );
 
       // Step 2: OCR fallback for fields with insufficient tokens
@@ -22047,7 +22049,14 @@ function _renderPhase2BExtractionResult(result){
   }
   html += '</div>';
 
-  // Summary
+  // Strategy and summary
+  var strategy = result.extractionStrategy || 'unknown';
+  var stratLabel = strategy === 'structure_based' ? 'Structure-Based (Primary)'
+    : strategy === 'text_landmarks_fallback' ? 'Text Landmarks (Fallback)'
+    : strategy.replace(/_/g, ' ');
+  html += '<p class="sub" style="color:var(--muted);margin:4px 0;"><strong>Strategy:</strong> ' + stratLabel;
+  if(result.landmarkSupplementApplied) html += ' + landmark supplement (' + (result.landmarkCount || 0) + ' landmarks)';
+  html += '</p>';
   html += '<p class="sub" style="color:var(--muted);margin:4px 0;">' + result.message + '</p>';
 
   content.innerHTML = html;
