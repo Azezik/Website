@@ -504,6 +504,20 @@ const els = {
   learningNewSessionBtn: document.getElementById('learning-new-session-btn'),
   learningSessionFileCount: document.getElementById('learning-session-file-count'),
   learningSessionStarted: document.getElementById('learning-session-started'),
+  graphLearningFileInput: document.getElementById('graph-learning-file-input'),
+  graphLearningRegenerateBtn: document.getElementById('graph-learning-regenerate-btn'),
+  graphLearningClearHistoryBtn: document.getElementById('graph-learning-clear-history-btn'),
+  graphLearningStatus: document.getElementById('graph-learning-status'),
+  graphLearningShowRegions: document.getElementById('graph-learning-show-regions'),
+  graphLearningShowContours: document.getElementById('graph-learning-show-contours'),
+  graphLearningShowAdjacency: document.getElementById('graph-learning-show-adjacency'),
+  graphLearningShowDebug: document.getElementById('graph-learning-show-debug'),
+  graphLearningGoodBtn: document.getElementById('graph-learning-good-btn'),
+  graphLearningBadBtn: document.getElementById('graph-learning-bad-btn'),
+  graphLearningFeedbackPanel: document.getElementById('graph-learning-feedback-panel'),
+  graphLearningRating: document.getElementById('graph-learning-rating'),
+  graphLearningApplyFeedbackBtn: document.getElementById('graph-learning-apply-feedback-btn'),
+  graphLearningAttempts: document.getElementById('graph-learning-attempts'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -1842,6 +1856,19 @@ let state = {
     previousSteps: null,
     previousStepIdx: 0,
     previousWizardComplete: false
+  },
+  graphLearning: {
+    active: false,
+    sessionId: null,
+    fileId: null,
+    fileName: '',
+    attemptNumber: 0,
+    params: null,
+    normalizedSurface: null,
+    graph: null,
+    lastAttemptId: null,
+    latestFeedback: null,
+    show: { regions: true, contours: true, adjacency: true, debug: false }
   },
 };
 
@@ -15983,6 +16010,9 @@ function drawOverlay(options = {}){
   if(state.learningActive){
     paintLearningAnnotations(overlayCtx, scaleX, scaleY);
   }
+  if(state.graphLearning?.active){
+    paintGraphLearningOverlay(overlayCtx, scaleX, scaleY);
+  }
 }
 
 function drawOverlayForVisibilityChange(){
@@ -20486,6 +20516,190 @@ if(els.learningNewSessionBtn){
 
 /* ====================== End Vision Learning Mode ==================== */
 
+/* ====================== Graph Learning (WFG2) ======================= */
+
+const _wfg2 = window.WrokitFeatureGraph2 || null;
+const _wfg2Store = _wfg2?.createAttemptStore ? _wfg2.createAttemptStore(localStorage) : null;
+
+function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
+
+function graphLearningSessionId(){
+  if(!state.graphLearning.sessionId) state.graphLearning.sessionId = 'wfg2sess-' + Date.now().toString(36);
+  return state.graphLearning.sessionId;
+}
+
+function renderGraphLearningAttemptHistory(){
+  if(!els.graphLearningAttempts || !_wfg2Store) return;
+  const rows = _wfg2Store.getAll().slice().reverse().slice(0, 50);
+  if(!rows.length){
+    els.graphLearningAttempts.innerHTML = '<p class="sub" style="color:var(--muted);">No attempts yet.</p>';
+    return;
+  }
+  els.graphLearningAttempts.innerHTML = rows.map(function(r){
+    const tags = (r.feedbackTags || []).join(', ');
+    const verdict = r.result === 'good' ? '<span style="color:#2a7;font-weight:700;">GOOD</span>' : '<span style="color:#c44;font-weight:700;">BAD</span>';
+    return '<div style="padding:6px 0;border-bottom:1px solid var(--border,#eee);">' +
+      verdict + ' <strong>#' + r.attemptNumber + '</strong> ' + (r.fileName || r.fileId || '') +
+      ' <span class="sub" style="color:var(--muted);">(' + new Date(r.timestamp).toLocaleTimeString() + ')</span>' +
+      '<div class="sub" style="color:var(--muted);">regions=' + (r.summary?.regionCount || 0) + ', edges=' + (r.summary?.edgeCount || 0) + (tags ? ', tags=' + tags : '') + '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function getGraphLearningLayerFlags(){
+  return {
+    regions: !!els.graphLearningShowRegions?.checked,
+    contours: !!els.graphLearningShowContours?.checked,
+    adjacency: !!els.graphLearningShowAdjacency?.checked,
+    debug: !!els.graphLearningShowDebug?.checked
+  };
+}
+
+function paintGraphLearningOverlay(ctx, scaleX, scaleY){
+  const gl = state.graphLearning;
+  if(!gl.active || !gl.graph?.nodes?.length) return;
+  const flags = getGraphLearningLayerFlags();
+  const nodes = gl.graph.nodes;
+  const idMap = new Map(nodes.map(n => [n.id, n]));
+
+  if(flags.regions){
+    for(const node of nodes){
+      const b = node.bbox || {};
+      ctx.fillStyle = 'rgba(121,134,203,0.18)';
+      ctx.strokeStyle = 'rgba(63,81,181,0.9)';
+      ctx.lineWidth = 1.2;
+      ctx.fillRect((b.x || 0)/scaleX, (b.y || 0)/scaleY, (b.w || 0)/scaleX, (b.h || 0)/scaleY);
+      ctx.strokeRect((b.x || 0)/scaleX, (b.y || 0)/scaleY, (b.w || 0)/scaleX, (b.h || 0)/scaleY);
+    }
+  }
+  if(flags.contours){
+    for(const node of nodes){
+      const c = node.contour || [];
+      if(c.length < 3) continue;
+      ctx.strokeStyle = 'rgba(0,150,136,0.95)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(c[0].x / scaleX, c[0].y / scaleY);
+      for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x / scaleX, c[i].y / scaleY);
+      ctx.closePath();
+      ctx.stroke();
+    }
+  }
+  if(flags.adjacency){
+    for(const e of gl.graph.edges || []){
+      const a = idMap.get(e.from), b = idMap.get(e.to);
+      if(!a || !b) continue;
+      ctx.strokeStyle = 'rgba(255,152,0,0.85)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo((a.center?.x || 0)/scaleX, (a.center?.y || 0)/scaleY);
+      ctx.lineTo((b.center?.x || 0)/scaleX, (b.center?.y || 0)/scaleY);
+      ctx.stroke();
+    }
+  }
+  if(flags.debug){
+    ctx.fillStyle = 'rgba(244,67,54,0.95)';
+    ctx.font = '10px IBM Plex Mono, monospace';
+    for(let i = 0; i < nodes.length; i++){
+      const n = nodes[i];
+      ctx.fillText(String(i+1), (n.center?.x || 0)/scaleX + 2, (n.center?.y || 0)/scaleY - 2);
+    }
+  }
+}
+
+function graphLearningCaptureAttempt(result, feedback){
+  if(!_wfg2Store || !state.graphLearning.graph) return;
+  const gl = state.graphLearning;
+  const attempt = {
+    attemptId: 'wfg2a-' + Date.now().toString(36),
+    sessionId: graphLearningSessionId(),
+    attemptNumber: gl.attemptNumber,
+    fileId: gl.fileId,
+    fileName: gl.fileName,
+    normalized: gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height, source: gl.normalizedSurface.source } : null,
+    generatedGraph: { engine: gl.graph.engine, version: gl.graph.version, nodes: gl.graph.nodes, edges: gl.graph.edges, artifacts: gl.graph.artifacts },
+    generationParameters: { ...(gl.params || {}) },
+    result,
+    feedbackTags: Array.isArray(feedback?.tags) ? feedback.tags : [],
+    rating: Number(feedback?.rating || 0) || null,
+    timestamp: new Date().toISOString(),
+    previousAttemptId: gl.lastAttemptId || null,
+    summary: { regionCount: gl.graph.nodes?.length || 0, edgeCount: gl.graph.edges?.length || 0 }
+  };
+  _wfg2Store.addAttempt(attempt);
+  gl.lastAttemptId = attempt.attemptId;
+  renderGraphLearningAttemptHistory();
+}
+
+function graphLearningRunGeneration(opts){
+  if(!_wfg2 || !state.graphLearning.normalizedSurface) return;
+  const gl = state.graphLearning;
+  if(opts?.feedback) gl.params = _wfg2.adaptParametersFromFeedback(gl.params || _wfg2.DEFAULT_PARAMS, opts.feedback);
+  if(!gl.params) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  gl.graph = _wfg2.generateFeatureGraph(gl.normalizedSurface, gl.params);
+  gl.attemptNumber = (gl.attemptNumber || 0) + 1;
+  if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = false;
+  if(els.graphLearningBadBtn) els.graphLearningBadBtn.disabled = false;
+  if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
+  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges.');
+  drawOverlay();
+}
+
+async function graphLearningOpenFile(file){
+  if(!file || !_wfg2) return;
+  state.graphLearning.active = true;
+  state.graphLearning.fileName = file.name || 'untitled';
+  state.graphLearning.fileId = 'wfg2file-' + Date.now().toString(36);
+  state.graphLearning.attemptNumber = 0;
+  state.graphLearning.lastAttemptId = null;
+  state.graphLearning.latestFeedback = null;
+  state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
+  await openFile(file);
+  const page = state.pageNum || 1;
+  const img = getPageGrayImageData(page);
+  state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  graphLearningRunGeneration();
+}
+
+if(els.graphLearningFileInput){
+  els.graphLearningFileInput.addEventListener('change', async function(e){
+    const file = e.target.files?.[0];
+    if(!file) return;
+    e.target.value = '';
+    await graphLearningOpenFile(file);
+  });
+}
+if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){ graphLearningRunGeneration(); }); }
+if(els.graphLearningGoodBtn){ els.graphLearningGoodBtn.addEventListener('click', function(){ graphLearningCaptureAttempt('good', null); graphLearningStatus('Marked Good.'); }); }
+if(els.graphLearningBadBtn){
+  els.graphLearningBadBtn.addEventListener('click', function(){
+    if(els.graphLearningFeedbackPanel) els.graphLearningFeedbackPanel.style.display = 'block';
+  });
+}
+if(els.graphLearningApplyFeedbackBtn){
+  els.graphLearningApplyFeedbackBtn.addEventListener('click', function(){
+    const tags = Array.from(document.querySelectorAll('#graph-learning-feedback-panel [data-feedback-tag]:checked')).map(function(el){ return el.getAttribute('data-feedback-tag'); });
+    const feedback = { tags: tags, rating: Number(els.graphLearningRating?.value || 0) || null };
+    graphLearningCaptureAttempt('bad', feedback);
+    graphLearningRunGeneration({ feedback: feedback });
+    if(els.graphLearningFeedbackPanel) els.graphLearningFeedbackPanel.style.display = 'none';
+    document.querySelectorAll('#graph-learning-feedback-panel [data-feedback-tag]:checked').forEach(function(el){ el.checked = false; });
+    if(els.graphLearningRating) els.graphLearningRating.value = '';
+  });
+}
+if(els.graphLearningClearHistoryBtn){
+  els.graphLearningClearHistoryBtn.addEventListener('click', function(){
+    if(!_wfg2Store) return;
+    if(confirm('Clear WFG2 graph-learning attempt history?')){ _wfg2Store.clear(); renderGraphLearningAttemptHistory(); }
+  });
+}
+[els.graphLearningShowRegions, els.graphLearningShowContours, els.graphLearningShowAdjacency, els.graphLearningShowDebug].forEach(function(el){
+  if(!el) return;
+  el.addEventListener('change', function(){ drawOverlay(); });
+});
+renderGraphLearningAttemptHistory();
+
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 
 /* ── Learning sub-tab switching ────────────────────────────────────── */
@@ -20500,9 +20714,12 @@ if(els.learningNewSessionBtn){
       buttons.forEach(function(b){ b.classList.toggle('active', b === btn); });
       var guidedTab = document.getElementById('learning-guided-tab');
       var batchTab = document.getElementById('learning-batch-tab');
+      var graphTab = document.getElementById('learning-graph-tab');
       if(guidedTab) guidedTab.style.display = targetId === 'learning-guided-tab' ? 'block' : 'none';
       if(batchTab) batchTab.style.display = targetId === 'learning-batch-tab' ? 'block' : 'none';
+      if(graphTab) graphTab.style.display = targetId === 'learning-graph-tab' ? 'block' : 'none';
       if(targetId === 'learning-batch-tab') refreshBatchSessionUI();
+      if(targetId === 'learning-graph-tab') renderGraphLearningAttemptHistory();
     });
   });
 })();
