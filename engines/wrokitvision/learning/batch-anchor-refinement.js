@@ -876,6 +876,55 @@ function formatExtractionReport(extractionResult) {
 
 /* ── Exports ─────────────────────────────────────────────────────────────── */
 
+var landmarkMatcher = require('./landmark-matcher');
+
+/**
+ * Unified extraction pipeline: tries landmark-based extraction first,
+ * falls back to region-based extraction if landmarks are insufficient.
+ *
+ * This is the recommended top-level entry point.  It uses text landmarks
+ * (stable printed labels) as the primary anchor source, which is vastly
+ * more reliable than color-segmented regions across scan/screenshot
+ * variations.  Region-based extraction remains available as a fallback
+ * for documents with no usable text layer.
+ *
+ * @param {object}   refinementResult      - Phase 2B output (for fallback)
+ * @param {object}   correspondenceResult  - Phase 2 output (for fallback)
+ * @param {object}   refDoc                - Reference document summary
+ * @param {object[]} batchDocuments        - All batch document summaries
+ * @param {object}   batchTokens           - { [documentId]: { tokens, viewport } }
+ * @param {object[]} extractionTargets     - [{ fieldKey, label, normBox }]
+ * @param {object}   [opts]
+ * @returns {object} ExtractionResult with method indicators
+ */
+function extractWithLandmarkFallback(
+  refinementResult, correspondenceResult, refDoc,
+  batchDocuments, batchTokens, extractionTargets, opts
+) {
+  opts = opts || {};
+  var refDocId = refDoc.documentId;
+
+  // Try landmark-based extraction first
+  if (batchTokens && Object.keys(batchTokens).length >= 2 && extractionTargets && extractionTargets.length > 0) {
+    var landmarkResult = landmarkMatcher.extractWithLandmarks(
+      batchTokens, extractionTargets, refDocId, opts
+    );
+
+    if (landmarkResult.status === 'complete' && landmarkResult.landmarkCount >= 3) {
+      // Landmark extraction succeeded with sufficient landmarks
+      landmarkResult.extractionStrategy = 'text_landmarks';
+      return landmarkResult;
+    }
+  }
+
+  // Fall back to region-based extraction
+  var regionResult = extractFromBatch(
+    refinementResult, correspondenceResult, refDoc, batchDocuments, batchTokens
+  );
+  regionResult.extractionStrategy = 'region_based';
+  return regionResult;
+}
+
 module.exports = {
   refineAnchors,
   computeTargetNeighborhood,
@@ -883,6 +932,7 @@ module.exports = {
   transferBBox,
   extractTextFromNormBox,
   extractFromBatch,
+  extractWithLandmarkFallback,
   formatRefinementReport,
   formatExtractionReport
 };

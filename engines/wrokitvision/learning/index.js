@@ -63,6 +63,8 @@ const BatchStructuralAnalyst = require('./batch-structural-analyst');
 const BatchCorrespondenceAnalyst = require('./batch-correspondence-analyst');
 const BatchAnchorRefinement = require('./batch-anchor-refinement');
 const BatchFieldIntelligence = require('./batch-field-intelligence');
+const TextLandmarkExtractor = require('./text-landmark-extractor');
+const LandmarkMatcher = require('./landmark-matcher');
 
 module.exports = {
   LearningStore,
@@ -74,5 +76,7 @@ module.exports = {
   BatchStructuralAnalyst,
   BatchCorrespondenceAnalyst,
   BatchAnchorRefinement,
-  BatchFieldIntelligence
+  BatchFieldIntelligence,
+  TextLandmarkExtractor,
+  LandmarkMatcher
 };
