@@ -10,6 +10,11 @@
     /* Color-aware boundary evidence */
     colorWeight: 0.45, luminanceWeight: 0.35, varianceWeight: 0.20,
     colorMergePenalty: 0.55,
+    /* Color distance calibration */
+    colorDistFloor: 6,       // ΔE below this is ignored (dead-zone for lighting noise)
+    colorDistCeiling: 45,    // ΔE at/above this produces maximum boundary signal
+    colorDistGamma: 1.8,     // >1 = suppress small distances, amplify large ones
+    surfaceUniformityBias: 0.35, // 0-1: how much intra-region color uniformity relaxes merge
     /* Continuity / closure */
     closureRadius: 3, closureWeight: 0.30,
     parentContourBonus: 0.25, minEnclosingArea: 0.01
@@ -17,7 +22,8 @@
   const FEEDBACK_TAGS = Object.freeze([
     'too_many_regions','too_few_regions','boundaries_inaccurate','merged_objects',
     'split_object','missed_object','too_grid_like','shape_mismatch','noisy_fragmented',
-    'color_boundary_missed','enclosing_shape_broken','internal_detail_dominates','other'
+    'color_boundary_missed','enclosing_shape_broken','internal_detail_dominates',
+    'surface_over_segmented','weak_color_boundary','other'
   ]);
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const copyParams = (params) => ({ ...DEFAULT_PARAMS, ...(params || {}) });
@@ -150,13 +156,31 @@
   }
 
   /* ─── Part 1: Color-aware boundary evidence ────────────────────── */
-  function computeColorBoundary(lab, w, h){
+
+  /* Magnitude-weighted color distance → boundary strength.
+     Uses a dead-zone (floor), ceiling, and gamma curve so that:
+     - ΔE < floor  → 0  (lighting noise, shadow variation)
+     - ΔE ≥ ceiling → 1  (strong object boundary)
+     - In between   → non-linear ramp that suppresses small distances
+                       and amplifies large ones (gamma > 1).            */
+  function colorDistToStrength(de, floor, ceiling, gamma){
+    if(de <= floor) return 0;
+    if(de >= ceiling) return 1;
+    const t = (de - floor) / (ceiling - floor); // 0-1 linear
+    return Math.pow(t, gamma);                   // gamma curve
+  }
+
+  function computeColorBoundary(lab, w, h, params){
     if(!lab) return null;
+    const p = params || {};
+    const floor   = p.colorDistFloor   ?? 6;
+    const ceiling = p.colorDistCeiling ?? 45;
+    const gamma   = p.colorDistGamma   ?? 1.8;
     const out = new Float32Array(w * h);
     const L = lab.L, a = lab.a, b = lab.b;
     for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
       const i = y * w + x;
-      // Compute max CIE76 ΔE across 4-connected neighbors
+      // Max CIE76 ΔE across 4-connected neighbors
       let maxDelta = 0;
       const nbrs = [i - 1, i + 1, i - w, i + w];
       for(const ni of nbrs){
@@ -164,25 +188,36 @@
         const de = Math.sqrt(dL * dL + da * da + db * db);
         if(de > maxDelta) maxDelta = de;
       }
-      // Normalize: ΔE of ~50 is a very strong color boundary; scale to 0-1
-      out[i] = Math.min(1, maxDelta / 50);
+      out[i] = colorDistToStrength(maxDelta, floor, ceiling, gamma);
     }
     return out;
   }
 
-  /* Per-cell color statistics in Lab space */
+  /* Per-cell color statistics in Lab space, including intra-cell color
+     variance (used for surface uniformity reasoning). */
   function computeCellLabStats(cells, lab, w){
     if(!lab) return;
     const L = lab.L, a = lab.a, b = lab.b;
     for(const cell of cells){
       let sumL = 0, sumA = 0, sumB = 0, cnt = 0;
+      let sumL2 = 0, sumA2 = 0, sumB2 = 0;
       for(let y = cell.y0; y < cell.y1; y++) for(let x = cell.x0; x < cell.x1; x++){
         const pi = y * w + x;
-        sumL += L[pi]; sumA += a[pi]; sumB += b[pi]; cnt++;
+        const vL = L[pi], vA = a[pi], vB = b[pi];
+        sumL += vL; sumA += vA; sumB += vB;
+        sumL2 += vL * vL; sumA2 += vA * vA; sumB2 += vB * vB;
+        cnt++;
       }
-      cell.meanL = sumL / Math.max(1, cnt);
-      cell.meanA = sumA / Math.max(1, cnt);
-      cell.meanB = sumB / Math.max(1, cnt);
+      const n = Math.max(1, cnt);
+      cell.meanL = sumL / n;
+      cell.meanA = sumA / n;
+      cell.meanB = sumB / n;
+      // Intra-cell color variance: low = uniform surface, high = textured/mixed
+      const varL = Math.max(0, sumL2 / n - cell.meanL * cell.meanL);
+      const varA = Math.max(0, sumA2 / n - cell.meanA * cell.meanA);
+      const varB = Math.max(0, sumB2 / n - cell.meanB * cell.meanB);
+      // Combined color standard deviation (Euclidean in Lab)
+      cell.colorStdDev = Math.sqrt(varL + varA + varB);
     }
   }
 
@@ -367,8 +402,8 @@
     const lab = normalizedSurface.lab || null;
     const grad = computeGradient(gray, w, h);
 
-    // Part 1: Color-aware boundary evidence
-    const colorBoundary = computeColorBoundary(lab, w, h);
+    // Part 1: Color-aware boundary evidence (magnitude-weighted)
+    const colorBoundary = computeColorBoundary(lab, w, h, p);
 
     // Part 2: Continuity / closure evidence
     const closureMap = buildClosureEvidence(grad, w, h, p);
@@ -427,13 +462,30 @@
           // Luminance tone check
           const toneDiff = Math.abs(c2.meanGray - seed.meanGray);
 
-          // Color difference in Lab (if available)
+          // Color difference in Lab (if available), magnitude-weighted
           let colorDist = 0;
+          let colorStrength = 0; // 0-1 after dead-zone/gamma
           if(lab && seed.meanL !== undefined){
             const dL = c2.meanL - seed.meanL;
             const da = c2.meanA - seed.meanA;
             const db = c2.meanB - seed.meanB;
             colorDist = Math.sqrt(dL * dL + da * da + db * db);
+            colorStrength = colorDistToStrength(
+              colorDist, p.colorDistFloor, p.colorDistCeiling, p.colorDistGamma
+            );
+          }
+
+          // Surface uniformity: if both cells are internally uniform
+          // (low intra-cell color variance), they likely belong to the
+          // same gradual surface (sky, wall) → relax color penalty.
+          const uBias = clamp(p.surfaceUniformityBias, 0, 1);
+          let uniformityRelax = 1.0;
+          if(uBias > 0 && cell.colorStdDev !== undefined && c2.colorStdDev !== undefined){
+            // Both cells uniform (stddev < 4) → relax up to (1 + uBias)
+            // Both cells textured → no relaxation
+            const avgStdDev = (cell.colorStdDev + c2.colorStdDev) * 0.5;
+            const uniformity = clamp(1 - avgStdDev / 12, 0, 1); // 1=very uniform, 0=textured
+            uniformityRelax = 1 + uniformity * uBias;
           }
 
           // Edge barrier from combined evidence (color + luminance + closure)
@@ -443,8 +495,10 @@
           // they are likely inside the same enclosing shape → relax merge
           const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
 
-          // Color penalty: even if luminance is similar, large color distance blocks merge
-          const colorPenalty = colorDist > 0 ? colorDist * p.colorMergePenalty : 0;
+          // Color penalty: magnitude-weighted (colorStrength is 0 for
+          // small ΔE, ramps non-linearly to 1 for strong color change).
+          // Surface uniformity relaxes the penalty for gradual surfaces.
+          const colorPenalty = colorStrength * p.colorMergePenalty * p.mergeThreshold / uniformityRelax;
           const effectiveToneDiff = toneDiff + colorPenalty;
 
           if(effectiveToneDiff <= p.mergeThreshold * closureRelax &&
@@ -472,7 +526,7 @@
       edges: buildAdjacency(filtered),
       artifacts: {
         contourLayer: filtered.map(r => ({ id: r.id, contour: r.contour })),
-        debugPrimitives: filtered.map(r => ({ id: r.id, bbox: r.bbox, compactness: r.compactness, closureScore: r.closureScore, colorConfidence: r.colorConfidence })),
+        debugPrimitives: filtered.map(r => ({ id: r.id, bbox: r.bbox, compactness: r.compactness, closureScore: r.closureScore, colorConfidence: r.colorConfidence, surfaceUniformity: r.surfaceUniformity })),
         colorBoundaryActive: !!colorBoundary,
         closureActive: true,
         enclosedRegionCount: enclosedRegions.length
@@ -525,6 +579,8 @@
     const points = [];
     let sumClosure = 0;
     let sumColorConf = 0;
+    let sumColorStdDev = 0;
+    let colorStdDevCount = 0;
     for(const idx of memberIdx){
       const c = cells[idx];
       minX = Math.min(minX, c.x0); minY = Math.min(minY, c.y0);
@@ -537,6 +593,11 @@
         const chroma = Math.sqrt(c.meanA * c.meanA + c.meanB * c.meanB);
         sumColorConf += Math.min(1, chroma / 40);
       }
+      // Track intra-region surface uniformity
+      if(c.colorStdDev !== undefined){
+        sumColorStdDev += c.colorStdDev;
+        colorStdDevCount++;
+      }
     }
     const area = memberIdx.length * grid * grid;
     const bboxArea = Math.max(1, (maxX - minX) * (maxY - minY));
@@ -547,6 +608,10 @@
 
     // Color confidence: how much color contributed to this region's definition
     const colorConfidence = clamp(sumColorConf / Math.max(1, memberIdx.length), 0, 1);
+
+    // Surface uniformity: 0-1, high = internally uniform surface (sky, wall)
+    const avgColorStdDev = colorStdDevCount > 0 ? sumColorStdDev / colorStdDevCount : 0;
+    const surfaceUniformity = clamp(1 - avgColorStdDev / 15, 0, 1);
 
     // Compactness: boosted by closure (enclosed regions are more compact/confident)
     const baseCompactness = (fillRatio * 0.7) + (memberIdx.length > 1 ? 0.15 : 0) + (closureScore * 0.15);
@@ -560,7 +625,8 @@
       contour: hull(points).map(p => ({ x: p[0], y: p[1] })),
       compactness: clamp(baseCompactness, 0, 1) - (1 - fillRatio) * params.rectangularBiasPenalty,
       closureScore,
-      colorConfidence
+      colorConfidence,
+      surfaceUniformity
     };
   }
 
@@ -589,19 +655,62 @@
 
   function adaptParametersFromFeedback(params, feedback){
     const p = copyParams(params), tags = new Set(Array.isArray(feedback?.tags) ? feedback.tags : []);
-    if(tags.has('too_many_regions')){ p.mergeThreshold += 3; p.minRegionArea += 0.0007; p.fragmentationTolerance += 0.02; }
-    if(tags.has('too_few_regions')){ p.mergeThreshold -= 2; p.minRegionArea -= 0.0008; }
-    if(tags.has('boundaries_inaccurate') || tags.has('merged_objects')){ p.edgeSensitivity -= 3; p.mergeThreshold -= 1; }
-    if(tags.has('split_object') || tags.has('noisy_fragmented')){ p.mergeThreshold += 2; p.edgeSensitivity += 1; }
+    // ── Standard region-count feedback ──
+    if(tags.has('too_many_regions')){
+      p.mergeThreshold += 3; p.minRegionArea += 0.0007; p.fragmentationTolerance += 0.02;
+      // Over-segmentation often means color floor is too low (noise triggers splits)
+      p.colorDistFloor = Math.min(20, p.colorDistFloor + 1.5);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.06);
+    }
+    if(tags.has('too_few_regions')){
+      p.mergeThreshold -= 2; p.minRegionArea -= 0.0008;
+      // Under-segmentation: tighten color tolerance
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
+      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.05);
+    }
+    if(tags.has('boundaries_inaccurate') || tags.has('merged_objects')){
+      p.edgeSensitivity -= 3; p.mergeThreshold -= 1;
+      // Merging distinct objects: strengthen color penalty, lower floor
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
+      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.06);
+      p.surfaceUniformityBias = Math.max(0, p.surfaceUniformityBias - 0.05);
+    }
+    if(tags.has('split_object') || tags.has('noisy_fragmented')){
+      p.mergeThreshold += 2; p.edgeSensitivity += 1;
+      // Fragmentation within a surface: raise floor, boost uniformity
+      p.colorDistFloor = Math.min(20, p.colorDistFloor + 2);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
+    }
     if(tags.has('missed_object')){ p.minRegionArea -= 0.001; p.edgeSensitivity += 1; }
     if(tags.has('too_grid_like') || tags.has('shape_mismatch')){ p.rectangularBiasPenalty += 0.08; p.gridSize = Math.max(6, p.gridSize - 1); }
 
-    // New: color boundary feedback
+    // ── Surface continuity feedback ──
+    if(tags.has('surface_over_segmented')){
+      // Uniform surface is fragmented: raise dead-zone floor, boost uniformity
+      p.colorDistFloor = Math.min(20, p.colorDistFloor + 2.5);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.1);
+      p.mergeThreshold += 2;
+      p.colorDistGamma = Math.min(3.5, p.colorDistGamma + 0.2);
+    }
+    if(tags.has('weak_color_boundary')){
+      // Color boundary is not strong enough: lower floor, increase penalty
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
+      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.08);
+      p.colorDistGamma = Math.max(0.8, p.colorDistGamma - 0.2);
+      p.colorWeight = Math.min(0.8, p.colorWeight + 0.05);
+    }
+
+    // ── Color boundary feedback ──
     if(tags.has('color_boundary_missed')){
       p.colorWeight = Math.min(0.8, p.colorWeight + 0.08);
       p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.1);
+      // Lower floor so more color differences become visible
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
+      // Sharpen gamma to amplify strong boundaries even more
+      p.colorDistGamma = Math.max(1.0, p.colorDistGamma - 0.15);
     }
-    // New: enclosing shape / continuity feedback
+
+    // ── Enclosing shape / continuity feedback ──
     if(tags.has('enclosing_shape_broken')){
       p.closureRadius = Math.min(8, p.closureRadius + 1);
       p.closureWeight = Math.min(0.6, p.closureWeight + 0.08);
@@ -611,6 +720,8 @@
       p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.1);
       p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
       p.mergeThreshold += 2;
+      // Interior detail is over-weighted: boost uniformity to keep container
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
     }
 
     const rating = Number(feedback?.rating || 0);
@@ -628,6 +739,10 @@
     p.luminanceWeight = clamp(p.luminanceWeight, 0.1, 0.8);
     p.varianceWeight = clamp(p.varianceWeight, 0, 0.5);
     p.colorMergePenalty = clamp(p.colorMergePenalty, 0, 1);
+    p.colorDistFloor = clamp(p.colorDistFloor, 0, 25);
+    p.colorDistCeiling = clamp(p.colorDistCeiling, 15, 80);
+    p.colorDistGamma = clamp(p.colorDistGamma, 0.5, 3.5);
+    p.surfaceUniformityBias = clamp(p.surfaceUniformityBias, 0, 0.8);
     p.closureRadius = clamp(Math.round(p.closureRadius), 1, 8);
     p.closureWeight = clamp(p.closureWeight, 0, 0.6);
     p.parentContourBonus = clamp(p.parentContourBonus, 0, 0.6);
