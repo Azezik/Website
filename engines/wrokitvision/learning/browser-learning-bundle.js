@@ -676,15 +676,61 @@
       neighborhoodMap[e.targetId].push({neighborId:e.sourceId,edgeType:e.edgeType,weight:e.weight});
     }
 
+    // Build region lookup for structural topology encoding
+    var regionById = {};
+    for(var rli=0;rli<regionDescriptors.length;rli++){ regionById[regionDescriptors[rli].regionId] = regionDescriptors[rli]; }
+
     var neighborhoodDescriptors = {};
     for(var ri=0;ri<regionDescriptors.length;ri++){
       var rd = regionDescriptors[ri];
       var neighbors = neighborhoodMap[rd.regionId]||[];
+      var containsEdges = neighbors.filter(function(n){return n.edgeType==='contains';});
+      var proximityEdges = neighbors.filter(function(n){return n.edgeType==='spatial_proximity';});
+      var adjacencyEdgesL = neighbors.filter(function(n){return n.edgeType==='spatial_adjacency';});
+
+      // Structural topology: relative positions of neighbors
+      var neighborVectors = [];
+      for(var nvi=0;nvi<neighbors.length;nvi++){
+        var nRegion = regionById[neighbors[nvi].neighborId];
+        if(!nRegion) continue;
+        var dx = nRegion.centroid.x - rd.centroid.x;
+        var dy = nRegion.centroid.y - rd.centroid.y;
+        var dist = Math.sqrt(dx*dx+dy*dy);
+        var angle = Math.atan2(dy,dx);
+        neighborVectors.push({
+          neighborId:neighbors[nvi].neighborId, edgeType:neighbors[nvi].edgeType, weight:neighbors[nvi].weight,
+          relDx:Math.round(dx*10000)/10000, relDy:Math.round(dy*10000)/10000,
+          distance:Math.round(dist*10000)/10000, angle:Math.round(angle*1000)/1000,
+          neighborAspectRatio:nRegion.aspectRatio>10?10:Math.round(nRegion.aspectRatio*100)/100,
+          neighborNormArea:Math.round(nRegion.normalizedArea*100000)/100000,
+          neighborSurfaceType:nRegion.surfaceType
+        });
+      }
+      neighborVectors.sort(function(a,b){return a.angle-b.angle;});
+
+      var edgeTypeDist = {contains:containsEdges.length, spatial_proximity:proximityEdges.length, spatial_adjacency:adjacencyEdgesL.length};
+
+      // Containment context
+      var containedBy = [];
+      var containsRegions = [];
+      for(var ci2=0;ci2<containsEdges.length;ci2++){
+        var cNeighbor = regionById[containsEdges[ci2].neighborId];
+        if(!cNeighbor) continue;
+        if(cNeighbor.normalizedArea > rd.normalizedArea) containedBy.push(containsEdges[ci2].neighborId);
+        else containsRegions.push(containsEdges[ci2].neighborId);
+      }
+
       neighborhoodDescriptors[rd.regionId] = {
         neighborCount: neighbors.length,
         avgEdgeWeight: neighbors.length ? neighbors.reduce(function(s,n){return s+n.weight;},0)/neighbors.length : 0,
-        containsCount: neighbors.filter(function(n){return n.edgeType==='contains';}).length,
-        proximityCount: neighbors.filter(function(n){return n.edgeType==='spatial_proximity';}).length
+        containsCount: containsEdges.length,
+        proximityCount: proximityEdges.length,
+        adjacencyCount: adjacencyEdgesL.length,
+        neighborVectors: neighborVectors,
+        edgeTypeDist: edgeTypeDist,
+        containedBy: containedBy,
+        containsRegions: containsRegions,
+        containmentDepth: containedBy.length
       };
     }
 
@@ -720,12 +766,15 @@
 
     var regionSignatures = regionDescriptors.map(function(rd2){
       var nh = neighborhoodDescriptors[rd2.regionId]||{};
+      var feat2 = rd2.features||{};
       return {
         regionId: rd2.regionId,
         featureVector: [
           rd2.normalizedBbox.x, rd2.normalizedBbox.y, rd2.normalizedBbox.w, rd2.normalizedBbox.h,
           rd2.normalizedArea, rd2.aspectRatio>10?10:rd2.aspectRatio,
-          rd2.confidence, rd2.textDensity, (nh.neighborCount||0)/10, nh.avgEdgeWeight||0
+          rd2.confidence, rd2.textDensity, (nh.neighborCount||0)/10, nh.avgEdgeWeight||0,
+          (nh.adjacencyCount||0)/10, (nh.containmentDepth||0)/5,
+          feat2.rectangularity||1, feat2.solidity||1
         ],
         spatialBin: Math.min(gridSize-1,Math.floor(rd2.centroid.y*gridSize))*gridSize + Math.min(gridSize-1,Math.floor(rd2.centroid.x*gridSize))
       };
@@ -1299,19 +1348,48 @@
 
   function computeRegionSimilarity(rA,rB,nhA,nhB){
     nhA=nhA||{};nhB=nhB||{};
+    // Position similarity
     var posDist=Math.sqrt(Math.pow(rA.centroid.x-rB.centroid.x,2)+Math.pow(rA.centroid.y-rB.centroid.y,2));
     var posSim=_clamp(1-posDist/1.414,0,1);
-    var areaDiff=Math.abs(rA.normalizedArea-rB.normalizedArea);var maxArea=Math.max(rA.normalizedArea,rB.normalizedArea,0.001);
-    var areaSim=_clamp(1-areaDiff/maxArea,0,1);
+    // Shape similarity: aspect ratio + rectangularity + solidity
     var arA=Math.min(rA.aspectRatio,10),arB=Math.min(rB.aspectRatio,10);
     var aspectSim=_clamp(1-Math.abs(arA-arB)/Math.max(arA,arB,0.1),0,1);
-    var sizeSim=areaSim*0.6+aspectSim*0.4;
+    var fA=rA.features||{},fB=rB.features||{};
+    var rectSim=1-Math.abs((fA.rectangularity||1)-(fB.rectangularity||1));
+    var solidSim=1-Math.abs((fA.solidity||1)-(fB.solidity||1));
+    var shapeSim=_clamp(aspectSim*0.5+rectSim*0.25+solidSim*0.25,0,1);
+    // Size similarity
+    var areaDiff=Math.abs(rA.normalizedArea-rB.normalizedArea);var maxArea=Math.max(rA.normalizedArea,rB.normalizedArea,0.001);
+    var sizeSim=_clamp(1-areaDiff/maxArea,0,1);
+    // Dimension similarity
     var dimSim=_clamp(1-(Math.abs(rA.normalizedBbox.w-rB.normalizedBbox.w)+Math.abs(rA.normalizedBbox.h-rB.normalizedBbox.h)),0,1);
+    // Structural topology similarity (enhanced)
     var ncA=nhA.neighborCount||0,ncB=nhB.neighborCount||0;
-    var nhSim=_clamp((1-Math.abs(ncA-ncB)/Math.max(ncA,ncB,1))*0.6+(1-Math.abs((nhA.avgEdgeWeight||0)-(nhB.avgEdgeWeight||0)))*0.4,0,1);
-    var semSim=_clamp((1-Math.abs(rA.textDensity-rB.textDensity))*0.3+(1-Math.abs(rA.confidence-rB.confidence))*0.3+(rA.surfaceType===rB.surfaceType?1:0.3)*0.4,0,1);
-    var combined=posSim*0.35+sizeSim*0.15+dimSim*0.15+nhSim*0.15+semSim*0.20;
-    return {similarity:_round(combined,4),dimensions:{position:_round(posSim,4),size:_round(sizeSim,4),dimension:_round(dimSim,4),neighborhood:_round(nhSim,4),semantic:_round(semSim,4)}};
+    var neighborCountSim=1-Math.abs(ncA-ncB)/Math.max(ncA,ncB,1);
+    var edgeWeightSim=1-Math.abs((nhA.avgEdgeWeight||0)-(nhB.avgEdgeWeight||0));
+    var edgeTypeSim=1;
+    if(nhA.edgeTypeDist&&nhB.edgeTypeDist){
+      var dA=nhA.edgeTypeDist,dB=nhB.edgeTypeDist;
+      var tA=(dA.contains||0)+(dA.spatial_proximity||0)+(dA.spatial_adjacency||0);
+      var tB=(dB.contains||0)+(dB.spatial_proximity||0)+(dB.spatial_adjacency||0);
+      if(tA>0&&tB>0){
+        var cS=1-Math.abs((dA.contains||0)/tA-(dB.contains||0)/tB);
+        var pS=1-Math.abs((dA.spatial_proximity||0)/tA-(dB.spatial_proximity||0)/tB);
+        var aS=1-Math.abs((dA.spatial_adjacency||0)/tA-(dB.spatial_adjacency||0)/tB);
+        edgeTypeSim=(cS+pS+aS)/3;
+      }
+    }
+    var depthA=nhA.containmentDepth||0,depthB=nhB.containmentDepth||0;
+    var depthSim=1-Math.abs(depthA-depthB)/Math.max(depthA,depthB,1);
+    var topoSim=_clamp(neighborCountSim*0.25+edgeWeightSim*0.15+edgeTypeSim*0.35+depthSim*0.25,0,1);
+    // Semantic similarity (text-based signals down-weighted)
+    var confSim=1-Math.abs(rA.confidence-rB.confidence);
+    var typeSim=rA.surfaceType===rB.surfaceType?1:0.3;
+    var tdSim=1-Math.abs(rA.textDensity-rB.textDensity);
+    var semSim=_clamp(typeSim*0.5+confSim*0.35+tdSim*0.15,0,1);
+    // Structure-first weighted combination
+    var combined=posSim*0.25+shapeSim*0.15+sizeSim*0.10+dimSim*0.10+topoSim*0.25+semSim*0.15;
+    return {similarity:_round(combined,4),dimensions:{position:_round(posSim,4),shape:_round(shapeSim,4),size:_round(sizeSim,4),dimension:_round(dimSim,4),topology:_round(topoSim,4),semantic:_round(semSim,4)}};
   }
 
   function matchDocumentRegions(refDoc,targetDoc,opts){
@@ -1469,17 +1547,37 @@
 
   function computeTargetNeighborhood(target,refDoc){
     var nb=target.normBox,tc=_normBoxCenter(nb),regions=refDoc.regionDescriptors||[],nhDescs=refDoc.neighborhoodDescriptors||{};
-    var neighbors=[];
+    var neighbors=[],containingRegions=[];
     for(var i=0;i<regions.length;i++){
       var r=regions[i],rNb={x0n:r.normalizedBbox.x,y0n:r.normalizedBbox.y,wN:r.normalizedBbox.w,hN:r.normalizedBbox.h};
       var dist=_pointDist(tc,r.centroid),overlap=_normBoxIoU(nb,rNb);
+      // Check containment
+      var regionContainsBbox=rNb.x0n<=nb.x0n&&rNb.y0n<=nb.y0n&&(rNb.x0n+rNb.wN)>=(nb.x0n+nb.wN)&&(rNb.y0n+rNb.hN)>=(nb.y0n+nb.hN);
       var prox=_clamp(1-dist/0.5,0,1),overlapS=overlap>0?0.5+overlap*0.5:0,combined=Math.max(prox,overlapS);
-      if(combined>0.05)neighbors.push({regionId:r.regionId,centroid:r.centroid,normalizedBbox:r.normalizedBbox,
-        normalizedArea:r.normalizedArea,surfaceType:r.surfaceType,textDensity:r.textDensity,confidence:r.confidence,
-        distance:_round(dist,4),overlap:_round(overlap,4),proximity:_round(combined,4),neighborhoodDescriptor:nhDescs[r.regionId]||{}});
+      if(combined>0.05){
+        var dx=r.centroid.x-tc.x,dy=r.centroid.y-tc.y,angle=Math.atan2(dy,dx);
+        var nhDesc=nhDescs[r.regionId]||{};
+        neighbors.push({regionId:r.regionId,centroid:r.centroid,normalizedBbox:r.normalizedBbox,
+          normalizedArea:r.normalizedArea,aspectRatio:r.aspectRatio,surfaceType:r.surfaceType,textDensity:r.textDensity,confidence:r.confidence,
+          distance:_round(dist,4),overlap:_round(overlap,4),proximity:_round(combined,4),neighborhoodDescriptor:nhDesc,
+          relDx:_round(dx,4),relDy:_round(dy,4),angle:_round(angle,3),containsBbox:regionContainsBbox,
+          containmentDepth:nhDesc.containmentDepth||0,edgeTypeDist:nhDesc.edgeTypeDist||{}});
+      }
+      if(regionContainsBbox)containingRegions.push({regionId:r.regionId,normalizedArea:r.normalizedArea,aspectRatio:r.aspectRatio,surfaceType:r.surfaceType,normalizedBbox:r.normalizedBbox});
     }
     neighbors.sort(function(a,b){return b.proximity-a.proximity;});
+    containingRegions.sort(function(a,b){return a.normalizedArea-b.normalizedArea;});
+    // Structural fingerprint: top-N neighbors sorted by angle
+    var topN=Math.min(neighbors.length,8),structuralFingerprint=[];
+    for(var si=0;si<topN;si++){
+      var sn=neighbors[si];
+      structuralFingerprint.push({relDx:sn.relDx,relDy:sn.relDy,angle:sn.angle,distance:sn.distance,
+        normalizedArea:sn.normalizedArea,aspectRatio:_round(Math.min(sn.aspectRatio||0,10),2),surfaceType:sn.surfaceType,containsBbox:sn.containsBbox});
+    }
+    structuralFingerprint.sort(function(a,b){return a.angle-b.angle;});
     return{fieldKey:target.fieldKey,targetCenter:tc,targetNormBox:nb,neighborCount:neighbors.length,neighbors:neighbors,
+      containingRegions:containingRegions,innermostContainer:containingRegions.length>0?containingRegions[0]:null,
+      structuralFingerprint:structuralFingerprint,
       avgDistance:neighbors.length>0?_round(_mean(neighbors.map(function(n){return n.distance;})),4):0,
       avgTextDensity:neighbors.length>0?_round(_mean(neighbors.map(function(n){return n.textDensity;})),4):0,
       overlappingRegionCount:neighbors.filter(function(n){return n.overlap>0;}).length};
@@ -1770,46 +1868,76 @@
     // Stage 4: Transform BBOX through the model
     var transformedBox=_transformNormBox(effectiveTransform,srcBox);
     var newX=transformedBox.x0n,newY=transformedBox.y0n,newW=transformedBox.wN,newH=transformedBox.hN;
-    // Stage 5: Local structural refinement
+    // Stage 5: Structural neighborhood refinement
     var tgtRegions=targetDoc.regionDescriptors||[];
+    var tgtNhDescs=targetDoc.neighborhoodDescriptors||{};
     var txCenter={x:newX+newW/2,y:newY+newH/2};
     if(tgtRegions.length>0){
       var txNormBox={x0n:newX,y0n:newY,wN:newW,hN:newH};
-      var bestNudge=null,bestNudgeScore=0;
-      var expectedSurfaceTypes=null,expectedTextDensity=null;
-      if(opts.targetNeighborhood){
-        var nh=opts.targetNeighborhood;
-        if(nh.neighbors&&nh.neighbors.length>0){
-          expectedSurfaceTypes={};expectedTextDensity=0;
-          var nhCount=Math.min(nh.neighbors.length,5);
-          for(var nhi=0;nhi<nhCount;nhi++){
-            expectedSurfaceTypes[nh.neighbors[nhi].surfaceType]=true;
-            expectedTextDensity+=nh.neighbors[nhi].textDensity;
-          }
-          expectedTextDensity/=nhCount;
-        }
-      }
-      var diagThreshold=Math.sqrt(newW*newW+newH*newH)*0.75;
+      var refNeighborhood=opts.targetNeighborhood||null;
+      // Build structural context at transferred position on target
+      var nearbyTargetRegions=[];
+      var diagThreshold=Math.sqrt(newW*newW+newH*newH)*1.0;
       for(var lri=0;lri<tgtRegions.length;lri++){
-        var lr=tgtRegions[lri],lrCenter=lr.centroid;
-        var lrDist=_pointDist(txCenter,lrCenter);
+        var lr=tgtRegions[lri];
+        var lrDist=_pointDist(txCenter,lr.centroid);
         if(lrDist>diagThreshold)continue;
         var lrNormBox={x0n:lr.normalizedBbox.x,y0n:lr.normalizedBbox.y,wN:lr.normalizedBbox.w,hN:lr.normalizedBbox.h};
-        var iou=_normBoxIoU(txNormBox,lrNormBox);
-        var sizeSim=1-Math.abs(lr.normalizedBbox.w*lr.normalizedBbox.h-newW*newH)/Math.max(lr.normalizedBbox.w*lr.normalizedBbox.h,newW*newH,0.001);
-        sizeSim=_clamp(sizeSim,0,1);
-        var proxSim=1-lrDist/diagThreshold;
-        var nhBonus=0;
-        if(expectedSurfaceTypes&&expectedSurfaceTypes[lr.surfaceType])nhBonus+=0.1;
-        if(expectedTextDensity!==null){var tdSim=1-Math.abs(lr.textDensity-expectedTextDensity);nhBonus+=tdSim*0.1;}
-        var nudgeScore=iou*0.5+sizeSim*0.15+proxSim*0.15+nhBonus;
-        if(nudgeScore>bestNudgeScore&&nudgeScore>0.15){bestNudgeScore=nudgeScore;bestNudge={center:lrCenter,normBox:lrNormBox,score:nudgeScore};}
+        nearbyTargetRegions.push({region:lr,normBox:lrNormBox,distance:lrDist,iou:_normBoxIoU(txNormBox,lrNormBox),nhDesc:tgtNhDescs[lr.regionId]||{}});
       }
-      if(bestNudge){
-        var nudgeStrength=_clamp(bestNudgeScore*0.3,0,0.3);
-        var nudgedCX=txCenter.x+(bestNudge.center.x-txCenter.x)*nudgeStrength;
-        var nudgedCY=txCenter.y+(bestNudge.center.y-txCenter.y)*nudgeStrength;
-        newX=nudgedCX-newW/2;newY=nudgedCY-newH/2;
+      if(refNeighborhood&&refNeighborhood.structuralFingerprint&&nearbyTargetRegions.length>0){
+        var bestNudge=null,bestNudgeScore=0;
+        for(var nri=0;nri<nearbyTargetRegions.length;nri++){
+          var candidate=nearbyTargetRegions[nri],cr=candidate.region;
+          // Geometric overlap and proximity
+          var geoScore=candidate.iou*0.3+(1-candidate.distance/diagThreshold)*0.2;
+          // Shape similarity to innermost container
+          var shapeSim2=0;
+          if(refNeighborhood.innermostContainer){
+            var ic=refNeighborhood.innermostContainer;
+            var arSim2=1-Math.abs(Math.min(cr.aspectRatio,10)-Math.min(ic.aspectRatio,10))/Math.max(Math.min(cr.aspectRatio,10),Math.min(ic.aspectRatio,10),0.1);
+            var areaSim2=1-Math.abs(cr.normalizedArea-ic.normalizedArea)/Math.max(cr.normalizedArea,ic.normalizedArea,0.001);
+            shapeSim2=_clamp(arSim2*0.5+areaSim2*0.5,0,1);
+          }
+          // Structural topology match
+          var topoSim2=0;
+          if(candidate.nhDesc.edgeTypeDist){
+            var depthSim2=1-Math.abs((candidate.nhDesc.containmentDepth||0)-(refNeighborhood.innermostContainer?1:0))/3;
+            var cEdges=candidate.nhDesc.edgeTypeDist;
+            var cTotal=(cEdges.contains||0)+(cEdges.spatial_proximity||0)+(cEdges.spatial_adjacency||0);
+            var adjSim2=cTotal>0?_clamp((cEdges.spatial_adjacency||0)/cTotal,0,1):0.5;
+            topoSim2=_clamp(depthSim2*0.6+adjSim2*0.4,0,1);
+          }
+          // Surface type consistency
+          var typeSim2=0;
+          if(refNeighborhood.neighbors&&refNeighborhood.neighbors.length>0){
+            var topRefTypes={};var nCount=Math.min(refNeighborhood.neighbors.length,5);
+            for(var rti=0;rti<nCount;rti++)topRefTypes[refNeighborhood.neighbors[rti].surfaceType]=true;
+            if(topRefTypes[cr.surfaceType])typeSim2=1;
+          }
+          var nudgeScore=geoScore*0.35+shapeSim2*0.25+topoSim2*0.25+typeSim2*0.15;
+          if(nudgeScore>bestNudgeScore&&nudgeScore>0.12){bestNudgeScore=nudgeScore;bestNudge={center:cr.centroid,normBox:candidate.normBox,score:nudgeScore};}
+        }
+        if(bestNudge){
+          var nudgeStrength=_clamp(bestNudgeScore*0.35,0,0.35);
+          newX=txCenter.x+(bestNudge.center.x-txCenter.x)*nudgeStrength-newW/2;
+          newY=txCenter.y+(bestNudge.center.y-txCenter.y)*nudgeStrength-newH/2;
+        }
+      } else {
+        // Fallback: simple proximity-based nudge
+        var bestSimple=null,bestSimpleScore=0;
+        for(var si2=0;si2<nearbyTargetRegions.length;si2++){
+          var sc=nearbyTargetRegions[si2];
+          var simpleScore=sc.iou*0.5+(1-sc.distance/diagThreshold)*0.3;
+          var sizMatch=1-Math.abs(sc.region.normalizedArea-(newW*newH))/Math.max(sc.region.normalizedArea,newW*newH,0.001);
+          simpleScore+=_clamp(sizMatch,0,1)*0.2;
+          if(simpleScore>bestSimpleScore&&simpleScore>0.15){bestSimpleScore=simpleScore;bestSimple={center:sc.region.centroid};}
+        }
+        if(bestSimple){
+          var sNudge=_clamp(bestSimpleScore*0.25,0,0.25);
+          newX=txCenter.x+(bestSimple.center.x-txCenter.x)*sNudge-newW/2;
+          newY=txCenter.y+(bestSimple.center.y-txCenter.y)*sNudge-newH/2;
+        }
       }
     }
     newX=_clamp(newX,0,1-newW);newY=_clamp(newY,0,1-newH);newW=_clamp(newW,0.001,1);newH=_clamp(newH,0.001,1);
@@ -2323,12 +2451,57 @@
 
   function extractWithLandmarkFallback(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens,extractionTargets,opts){
     opts=opts||{};var refDocId=refDoc.documentId;
-    if(batchTokens&&Object.keys(batchTokens).length>=2&&extractionTargets&&extractionTargets.length>0){
-      var lr=extractWithLandmarks(batchTokens,extractionTargets,refDocId,opts);
-      if(lr.status==='complete'&&lr.landmarkCount>=3){lr.extractionStrategy='text_landmarks';return lr;}
+    // Primary: structure-based extraction using region correspondences
+    var regionResult=extractFromBatch(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens);
+    regionResult.extractionStrategy='structure_based';
+    if(regionResult.status==='complete'&&regionResult.results&&regionResult.results.length>0){
+      // Supplement with landmarks for low-confidence fields
+      if(batchTokens&&Object.keys(batchTokens).length>=2&&extractionTargets&&extractionTargets.length>0){
+        try{
+          var landmarkResult=extractWithLandmarks(batchTokens,extractionTargets,refDocId,opts);
+          if(landmarkResult.status==='complete'&&landmarkResult.landmarkCount>=3){
+            for(var di=0;di<regionResult.results.length;di++){
+              var rDoc=regionResult.results[di];if(rDoc.isReference)continue;
+              var lDoc=null;
+              for(var ldi=0;ldi<landmarkResult.results.length;ldi++){
+                if(landmarkResult.results[ldi].documentId===rDoc.documentId){lDoc=landmarkResult.results[ldi];break;}
+              }
+              if(!lDoc)continue;
+              for(var fi=0;fi<rDoc.fields.length;fi++){
+                var rField=rDoc.fields[fi];if(rField.transferConfidence>=0.7)continue;
+                var lField=null;
+                for(var lfi=0;lfi<lDoc.fields.length;lfi++){
+                  if(lDoc.fields[lfi].fieldKey===rField.fieldKey){lField=lDoc.fields[lfi];break;}
+                }
+                if(!lField||lField.transferConfidence<=rField.transferConfidence)continue;
+                var sw=rField.transferConfidence,lw=lField.transferConfidence,tw=sw+lw;
+                if(tw>0){
+                  sw/=tw;lw/=tw;
+                  rField.transferredNormBox={
+                    x0n:_round(rField.transferredNormBox.x0n*sw+lField.transferredNormBox.x0n*lw,6),
+                    y0n:_round(rField.transferredNormBox.y0n*sw+lField.transferredNormBox.y0n*lw,6),
+                    wN:_round(rField.transferredNormBox.wN*sw+lField.transferredNormBox.wN*lw,6),
+                    hN:_round(rField.transferredNormBox.hN*sw+lField.transferredNormBox.hN*lw,6)
+                  };
+                  rField.transferConfidence=_round(Math.max(rField.transferConfidence,lField.transferConfidence),4);
+                  rField.transferMethod='structure_landmark_blend';rField.landmarkBoost=true;
+                }
+              }
+            }
+            regionResult.landmarkSupplementApplied=true;regionResult.landmarkCount=landmarkResult.landmarkCount;
+          }
+        }catch(e){regionResult.landmarkSupplementError=e.message||String(e);}
+      }
+      return regionResult;
     }
-    var rr=extractFromBatch(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens);
-    rr.extractionStrategy='region_based';return rr;
+    // Fallback: pure landmarks if structure failed
+    if(batchTokens&&Object.keys(batchTokens).length>=2&&extractionTargets&&extractionTargets.length>0){
+      var fallbackResult=extractWithLandmarks(batchTokens,extractionTargets,refDocId,opts);
+      if(fallbackResult.status==='complete'&&fallbackResult.landmarkCount>=3){
+        fallbackResult.extractionStrategy='text_landmarks_fallback';return fallbackResult;
+      }
+    }
+    return regionResult;
   }
 
   /* ── Public API ────────────────────────────────────────────────────────── */
