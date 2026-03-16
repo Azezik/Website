@@ -2159,6 +2159,178 @@
     return out;
   }
 
+  /* ── Text Landmark Extraction & Matching ──────────────────────────────── */
+
+  function _normalizeTokenText(text){if(!text)return'';return text.toLowerCase().trim().replace(/\s+/g,' ');}
+
+  function _normalizeTokenPos(token,viewport){
+    var vpW=viewport.width||viewport.w||1,vpH=viewport.height||viewport.h||1;
+    return{x:(token.x+token.w/2)/vpW,y:(token.y+token.h/2)/vpH,w:token.w/vpW,h:token.h/vpH};
+  }
+
+  function discoverLandmarks(batchTokens,opts){
+    opts=opts||{};var minDocFreq=opts.minDocumentFrequency||0.5;
+    var maxOccPerDoc=opts.maxOccurrencesPerDoc||2;var maxPosCV=opts.maxPositionCV||0.35;
+    var docIds=Object.keys(batchTokens).filter(function(id){return batchTokens[id]&&batchTokens[id].tokens&&batchTokens[id].tokens.length>0;});
+    var docCount=docIds.length;
+    if(docCount<2)return{landmarks:[],documentCount:docCount,status:'insufficient_documents',message:'Need at least 2 documents.',discoveredAt:new Date().toISOString()};
+    // Build cross-document token index
+    var tokenIdx={};
+    for(var di=0;di<docIds.length;di++){var dId=docIds[di];var docData=batchTokens[dId];if(!docData||!docData.tokens)continue;
+      var toks=docData.tokens;var vp=docData.viewport;
+      for(var ti=0;ti<toks.length;ti++){var tok=toks[ti];var txt=_normalizeTokenText(tok.text);
+        if(txt.length<2||/^\d+$/.test(txt))continue;
+        var np=_normalizeTokenPos(tok,vp);if(!tokenIdx[txt])tokenIdx[txt]={occ:{}};
+        if(!tokenIdx[txt].occ[dId])tokenIdx[txt].occ[dId]=[];
+        tokenIdx[txt].occ[dId].push({x:np.x,y:np.y,w:np.w,h:np.h,confidence:tok.confidence||0.5});
+      }
+    }
+    // Filter to stable tokens
+    var landmarks=[];var lmIdx=0;var txts=Object.keys(tokenIdx);
+    for(var i=0;i<txts.length;i++){var text=txts[i];var e=tokenIdx[text];var docs=Object.keys(e.occ);
+      if(docs.length/docCount<minDocFreq)continue;
+      var ambig=false;for(var d=0;d<docs.length;d++){if(e.occ[docs[d]].length>maxOccPerDoc){ambig=true;break;}}
+      if(ambig)continue;
+      var positions={};var xs=[],ys=[];
+      for(var d2=0;d2<docs.length;d2++){var dId2=docs[d2];var occ=e.occ[dId2];var p=occ[0];
+        positions[dId2]={x:_round(p.x,6),y:_round(p.y,6),w:_round(p.w,6),h:_round(p.h,6),
+          x0n:_round(p.x-p.w/2,6),y0n:_round(p.y-p.h/2,6),wN:_round(p.w,6),hN:_round(p.h,6),confidence:_round(p.confidence,4)};
+        xs.push(p.x);ys.push(p.y);
+      }
+      var mx=_mean(xs),my=_mean(ys);var sdx=_stddev(xs),sdy=_stddev(ys);
+      var cvX=mx>0.01?sdx/mx:sdx;var cvY=my>0.01?sdy/my:sdy;
+      if(Math.max(cvX,cvY)>maxPosCV)continue;
+      var posStab=_clamp(1-Math.max(cvX,cvY)/maxPosCV,0,1);
+      var conf=_clamp((docs.length/docCount)*0.5+posStab*0.5,0,1);
+      landmarks.push({landmarkId:'lm-'+lmIdx++,text:text,tokenCount:1,frequency:_round(docs.length/docCount,4),
+        positionStability:_round(posStab,4),confidence:_round(conf,4),documentPositions:positions,
+        meanPosition:{x:_round(mx,6),y:_round(my,6)}});
+    }
+    landmarks.sort(function(a,b){return b.confidence-a.confidence;});
+    return{landmarks:landmarks,documentCount:docCount,stableTokenCount:landmarks.length,
+      status:landmarks.length>0?'discovered':'no_landmarks',
+      message:landmarks.length>0?'Discovered '+landmarks.length+' text landmark(s) across '+docCount+' documents.':'No stable text landmarks found.',
+      discoveredAt:new Date().toISOString()};
+  }
+
+  function buildFieldContext(target,landmarks,refDocId,opts){
+    opts=opts||{};var maxDist=opts.maxDistance||0.4;var maxLm=opts.maxLandmarks||10;
+    var nb=target.normBox;var cx=nb.x0n+nb.wN/2,cy=nb.y0n+nb.hN/2;var ctxLms=[];
+    for(var li=0;li<landmarks.length;li++){var lm=landmarks[li];var lp=lm.documentPositions[refDocId];if(!lp)continue;
+      var rx=cx-lp.x,ry=cy-lp.y;var dist=Math.sqrt(rx*rx+ry*ry);if(dist>maxDist)continue;
+      ctxLms.push({landmarkId:lm.landmarkId,text:lm.text,relX:_round(rx,6),relY:_round(ry,6),
+        distance:_round(dist,6),landmarkConfidence:lm.confidence,landmarkPosition:{x:lp.x,y:lp.y}});
+    }
+    ctxLms.sort(function(a,b){return a.distance-b.distance;});
+    if(ctxLms.length>maxLm)ctxLms=ctxLms.slice(0,maxLm);
+    return{fieldKey:target.fieldKey,label:target.label,normBox:nb,bboxCenter:{x:cx,y:cy},
+      contextLandmarks:ctxLms,contextLandmarkCount:ctxLms.length};
+  }
+
+  function matchLandmarksOnTarget(landmarks,refDocId,targetDocId,targetTokens,targetViewport,opts){
+    opts=opts||{};var maxED=opts.maxEditDistance||0.3;
+    if(!targetTokens||!targetTokens.length||!landmarks||!landmarks.length)
+      return{matches:[],matchCount:0,unmatchedCount:landmarks?landmarks.length:0};
+    var vpW=targetViewport.width||targetViewport.w||1,vpH=targetViewport.height||targetViewport.h||1;
+    var tgtIdx={};
+    for(var ti=0;ti<targetTokens.length;ti++){var tk=targetTokens[ti];var nt=_normalizeTokenText(tk.text);
+      if(nt.length<2)continue;if(!tgtIdx[nt])tgtIdx[nt]=[];
+      tgtIdx[nt].push({token:tk,normPos:{x:(tk.x+tk.w/2)/vpW,y:(tk.y+tk.h/2)/vpH,w:tk.w/vpW,h:tk.h/vpH}});
+    }
+    var matches=[],unmatched=0;
+    for(var li=0;li<landmarks.length;li++){var lm=landmarks[li];
+      var rp=lm.documentPositions[refDocId];if(!rp)continue;
+      var tp=lm.documentPositions[targetDocId];
+      if(tp){matches.push({landmarkId:lm.landmarkId,text:lm.text,refPosition:{x:rp.x,y:rp.y},
+        tgtPosition:{x:tp.x,y:tp.y},matchType:'batch_known',matchScore:1.0,landmarkConfidence:lm.confidence});continue;}
+      // Exact match
+      if(tgtIdx[lm.text]){var cs=tgtIdx[lm.text];var best=cs[0];
+        if(cs.length>1){var bd=Infinity;for(var ci=0;ci<cs.length;ci++){var d=_pointDist(cs[ci].normPos,rp);if(d<bd){bd=d;best=cs[ci];}}}
+        matches.push({landmarkId:lm.landmarkId,text:lm.text,refPosition:{x:rp.x,y:rp.y},
+          tgtPosition:{x:best.normPos.x,y:best.normPos.y},matchType:'exact',matchScore:1.0,landmarkConfidence:lm.confidence});
+      }else{unmatched++;}
+    }
+    return{matches:matches,matchCount:matches.length,unmatchedCount:unmatched,
+      matchRate:landmarks.length>0?_round(matches.length/landmarks.length,4):0};
+  }
+
+  function transferBBoxWithLandmarks(fieldContext,landmarkMatches,opts){
+    opts=opts||{};var localBW=opts.localBlendWeight||0.7;
+    var srcBox=fieldContext.normBox;var srcCX=fieldContext.bboxCenter.x,srcCY=fieldContext.bboxCenter.y;
+    if(!landmarkMatches||!landmarkMatches.length)
+      return{transferredNormBox:{x0n:srcBox.x0n,y0n:srcBox.y0n,wN:srcBox.wN,hN:srcBox.hN},confidence:0,method:'identity_fallback',anchorsUsed:0};
+    // Relative-vector predictions
+    var ctx=fieldContext.contextLandmarks||[];var preds=[];
+    for(var ci=0;ci<ctx.length;ci++){var c=ctx[ci];var m=null;
+      for(var mi=0;mi<landmarkMatches.length;mi++){if(landmarkMatches[mi].landmarkId===c.landmarkId){m=landmarkMatches[mi];break;}}
+      if(!m)continue;var w=(1/(c.distance+0.05))*m.matchScore*m.landmarkConfidence;
+      preds.push({x:m.tgtPosition.x+c.relX,y:m.tgtPosition.y+c.relY,weight:w});
+    }
+    // Global transform
+    var pairs=[];for(var ti=0;ti<landmarkMatches.length;ti++){var lm=landmarkMatches[ti];
+      pairs.push({src:lm.refPosition,dst:lm.tgtPosition,weight:lm.matchScore*lm.landmarkConfidence,anchorId:lm.landmarkId});}
+    var gT=null,gCoh=0;
+    if(pairs.length>=1){var rr=_estimateRobustTransform(pairs,5,3);if(rr.transform){gT=rr.transform;gCoh=rr.coherence?rr.coherence.coherenceScore:0.5;}}
+    var fX,fY,fW=srcBox.wN,fH=srcBox.hN,method;
+    if(preds.length>=1&&gT){var tw=0,wx=0,wy=0;
+      for(var pi=0;pi<preds.length;pi++){tw+=preds[pi].weight;wx+=preds[pi].x*preds[pi].weight;wy+=preds[pi].y*preds[pi].weight;}
+      var lpx=tw>0?wx/tw:srcCX,lpy=tw>0?wy/tw:srcCY;
+      var gp=_transformPoint(gT,{x:srcCX,y:srcCY});var gb=_transformNormBox(gT,srcBox);
+      var lc=_clamp(preds.length/3,0.3,1);var lw=localBW*lc;var gw=1-lw;
+      fX=lpx*lw+gp.x*gw;fY=lpy*lw+gp.y*gw;fW=gb.wN;fH=gb.hN;method='landmark_blended';
+    }else if(preds.length>=1){var tw2=0,wx2=0,wy2=0;
+      for(var pi2=0;pi2<preds.length;pi2++){tw2+=preds[pi2].weight;wx2+=preds[pi2].x*preds[pi2].weight;wy2+=preds[pi2].y*preds[pi2].weight;}
+      fX=tw2>0?wx2/tw2:srcCX;fY=tw2>0?wy2/tw2:srcCY;method='landmark_relative';
+    }else if(gT){var gb2=_transformNormBox(gT,srcBox);fX=gb2.x0n+gb2.wN/2;fY=gb2.y0n+gb2.hN/2;fW=gb2.wN;fH=gb2.hN;method='landmark_global';
+    }else{fX=srcCX;fY=srcCY;method='identity_fallback';}
+    var rX=_clamp(fX-fW/2,0,Math.max(0,1-fW)),rY=_clamp(fY-fH/2,0,Math.max(0,1-fH));
+    fW=_clamp(fW,0.001,1);fH=_clamp(fH,0.001,1);
+    var conf=_clamp(_clamp(landmarkMatches.length/5,0.2,1)*0.3+_clamp(preds.length/3,0,1)*0.4+gCoh*0.3,0,1);
+    return{transferredNormBox:{x0n:_round(rX,6),y0n:_round(rY,6),wN:_round(fW,6),hN:_round(fH,6)},
+      confidence:_round(conf,4),method:method,anchorsUsed:landmarkMatches.length,nearbyLandmarksUsed:preds.length};
+  }
+
+  function extractWithLandmarks(batchTokens,extractionTargets,refDocId,opts){
+    opts=opts||{};
+    if(!batchTokens||!extractionTargets||!extractionTargets.length)
+      return{status:'no_data',message:'No batch tokens or extraction targets provided.',results:[],landmarks:[]};
+    var lr=opts.landmarks||discoverLandmarks(batchTokens,{minDocumentFrequency:opts.minDocumentFrequency||0.5,maxPositionCV:opts.maxPositionCV||0.35});
+    var landmarks=lr.landmarks||[];
+    if(!landmarks.length)return{status:'no_landmarks',message:'No text landmarks discovered.',results:[],landmarks:[],landmarkReport:lr};
+    var fCtxs={};for(var ti=0;ti<extractionTargets.length;ti++){var t=extractionTargets[ti];
+      fCtxs[t.fieldKey]=buildFieldContext(t,landmarks,refDocId,{maxDistance:0.4,maxLandmarks:10});}
+    var docIds=Object.keys(batchTokens);var results=[];
+    for(var di=0;di<docIds.length;di++){var dId=docIds[di];var dd=batchTokens[dId];if(!dd||!dd.tokens)continue;
+      var isRef=dId===refDocId;var dr={documentId:dId,documentName:dd.documentName||dId,isReference:isRef,fields:[]};
+      var mr=null;if(!isRef)mr=matchLandmarksOnTarget(landmarks,refDocId,dId,dd.tokens,dd.viewport,{maxEditDistance:opts.maxEditDistance||0.3});
+      for(var fi=0;fi<extractionTargets.length;fi++){var field=extractionTargets[fi];var tr;
+        if(isRef){tr={transferredNormBox:field.normBox,confidence:1,method:'reference_identity',anchorsUsed:0,nearbyLandmarksUsed:0};
+        }else{tr=transferBBoxWithLandmarks(fCtxs[field.fieldKey],mr?mr.matches:[],{nearbyRadius:0.25,localBlendWeight:0.7});}
+        var ext={text:'',tokenCount:0,confidence:0};
+        if(dd.tokens&&dd.viewport)ext=extractTextFromNormBox(tr.transferredNormBox,dd.tokens,dd.viewport);
+        dr.fields.push({fieldKey:field.fieldKey,label:field.label,sourceNormBox:field.normBox,
+          transferredNormBox:tr.transferredNormBox,transferConfidence:tr.confidence,transferMethod:tr.method,
+          anchorsUsed:tr.anchorsUsed,nearbyLandmarksUsed:tr.nearbyLandmarksUsed||0,
+          extractedText:ext.text,tokenCount:ext.tokenCount,textConfidence:ext.confidence,textSource:ext.textSource||'no_tokens'});
+      }
+      if(mr)dr.landmarkMatchDiagnostics={matchCount:mr.matchCount,unmatchedCount:mr.unmatchedCount,matchRate:mr.matchRate};
+      results.push(dr);
+    }
+    return{status:'complete',message:'Extracted '+extractionTargets.length+' field(s) from '+results.length+' document(s) using '+landmarks.length+' landmark(s).',
+      extractionTargets:extractionTargets,documentCount:results.length,landmarkCount:landmarks.length,results:results,landmarks:landmarks,
+      fieldContexts:fCtxs,extractedAt:new Date().toISOString()};
+  }
+
+  function extractWithLandmarkFallback(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens,extractionTargets,opts){
+    opts=opts||{};var refDocId=refDoc.documentId;
+    if(batchTokens&&Object.keys(batchTokens).length>=2&&extractionTargets&&extractionTargets.length>0){
+      var lr=extractWithLandmarks(batchTokens,extractionTargets,refDocId,opts);
+      if(lr.status==='complete'&&lr.landmarkCount>=3){lr.extractionStrategy='text_landmarks';return lr;}
+    }
+    var rr=extractFromBatch(refinementResult,correspondenceResult,refDoc,batchDocuments,batchTokens);
+    rr.extractionStrategy='region_based';return rr;
+  }
+
   /* ── Public API ────────────────────────────────────────────────────────── */
 
   root.WrokitVisionLearning = {
@@ -2197,8 +2369,15 @@
     transferBBox: transferBBox,
     extractTextFromNormBox: extractTextFromNormBox,
     extractFromBatch: extractFromBatch,
+    extractWithLandmarkFallback: extractWithLandmarkFallback,
     formatRefinementReport: formatRefinementReport,
     formatExtractionReport: formatExtractionReport,
+    // Text Landmark Pipeline
+    discoverLandmarks: discoverLandmarks,
+    buildFieldContext: buildFieldContext,
+    matchLandmarksOnTarget: matchLandmarksOnTarget,
+    transferBBoxWithLandmarks: transferBBoxWithLandmarks,
+    extractWithLandmarks: extractWithLandmarks,
     // Field Intelligence (Phase 3A)
     learnFieldGeometry: learnFieldGeometry,
     optimizeFieldGeometry: optimizeFieldGeometry,
