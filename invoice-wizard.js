@@ -20801,6 +20801,29 @@ function graphLearningRunGeneration(opts){
   renderGraphLearningViewer();
 }
 
+function graphLearningCaptureGray(page){
+  // For images, capture at full natural resolution so the entire image is
+  // included.  ensureGrayCanvas/getPageGrayImageData use the scaled display
+  // width which clips large images.  PDFs are fine via the normal path.
+  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  if(!src) return null;
+  const isImg = state.isImage && src.tagName === 'IMG';
+  if(!isImg) return getPageGrayImageData(page);
+  const w = src.naturalWidth || src.width;
+  const h = src.naturalHeight || src.height;
+  if(w <= 0 || h <= 0) return null;
+  const tmp = document.createElement('canvas');
+  tmp.width = w; tmp.height = h;
+  const ctx = tmp.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0);
+  const raw = ctx.getImageData(0, 0, w, h);
+  const gray = new Uint8Array(w * h);
+  for(let i = 0, j = 0; i < raw.data.length; i += 4, j++){
+    gray[j] = Math.round(0.299 * raw.data[i] + 0.587 * raw.data[i + 1] + 0.114 * raw.data[i + 2]);
+  }
+  return { gray, width: w, height: h };
+}
+
 async function graphLearningOpenFile(file){
   if(!file || !_wfg2) return;
   state.graphLearning.active = true;
@@ -20823,7 +20846,7 @@ async function graphLearningOpenFile(file){
     return;
   }
   const page = state.pageNum || 1;
-  const img = getPageGrayImageData(page);
+  const img = graphLearningCaptureGray(page);
   if(!img || !img.width || !img.height){
     clearGraphLearningViewer();
     graphLearningStatus('File loaded but no render surface was available.');
