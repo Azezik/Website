@@ -876,7 +876,8 @@
         <div id="learning-graph-tab" style="display:none;">
           <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
             Evaluate WFG2 (WrokitFeatureGraph2), a visual-first structural graph engine that avoids OCR/text proposals.
-            Upload one file, inspect the graph overlays, mark Good/Bad, and regenerate with feedback.
+            Now with color-aware boundary evidence (Lab color space) and continuity/closure contour reasoning.
+            Upload one file, inspect shape-following overlays, mark Good/Bad, and regenerate with feedback.
           </p>
 
           <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
@@ -894,16 +895,19 @@
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
               <strong>Layers</strong>
-              <label><input type="checkbox" id="graph-learning-show-regions" checked /> Regions</label>
+              <label><input type="checkbox" id="graph-learning-show-shape-fill" checked /> Shape Fill</label>
+              <label><input type="checkbox" id="graph-learning-show-regions" /> Regions (bbox)</label>
               <label><input type="checkbox" id="graph-learning-show-contours" checked /> Contours / Hulls</label>
               <label><input type="checkbox" id="graph-learning-show-adjacency" checked /> Adjacency</label>
+              <label><input type="checkbox" id="graph-learning-show-color-evidence" /> Color Evidence</label>
+              <label><input type="checkbox" id="graph-learning-show-closure-evidence" /> Closure Evidence</label>
               <label><input type="checkbox" id="graph-learning-show-debug" /> Debug primitives</label>
               <span class="sub" id="graph-learning-status" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
             </div>
           </div>
 
           <div id="graph-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
-            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Normalized Surface (base) + WFG2 Overlay (top)</div>
+            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Normalized Surface (color-preserved base) + Shape-following Overlay (top)</div>
             <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
               <canvas id="graph-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
               <canvas id="graph-learning-overlay-canvas" style="position:absolute;left:0;top:0;pointer-events:none;"></canvas>
@@ -929,6 +933,9 @@
                 <label><input type="checkbox" data-feedback-tag="too_grid_like" /> too grid-like / too document-like</label>
                 <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> regions don’t follow actual shapes</label>
                 <label><input type="checkbox" data-feedback-tag="noisy_fragmented" /> noisy or fragmented</label>
+                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> color boundary missed (similar brightness, different color)</label>
+                <label><input type="checkbox" data-feedback-tag="enclosing_shape_broken" /> enclosing shape broken apart</label>
+                <label><input type="checkbox" data-feedback-tag="internal_detail_dominates" /> internal text/detail dominates over container</label>
                 <label><input type="checkbox" data-feedback-tag="other" /> other</label>
               </div>
               <div class="actions" style="margin-top:8px;gap:10px;align-items:center;">
