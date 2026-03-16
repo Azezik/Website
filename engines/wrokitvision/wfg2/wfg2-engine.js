@@ -169,5 +169,56 @@
     };
   }
 
-  return { DEFAULT_PARAMS, FEEDBACK_TAGS, copyParams, normalizeVisualInput, generateFeatureGraph, adaptParametersFromFeedback, createAttemptStore };
+  function createPresetStore(storage, key){
+    const storageKey = key || 'wfg2.graphLearningPreset.v1';
+    const read = () => {
+      try {
+        const raw = storage?.getItem(storageKey);
+        if(!raw) return null;
+        const parsed = JSON.parse(raw);
+        if(!parsed || typeof parsed !== 'object') return null;
+        if(!parsed.params || typeof parsed.params !== 'object') return null;
+        return {
+          ...parsed,
+          params: copyParams(parsed.params)
+        };
+      } catch(err){
+        return null;
+      }
+    };
+    const write = (row) => {
+      try {
+        storage?.setItem(storageKey, JSON.stringify(row));
+      } catch(err){
+        /* ignore */
+      }
+    };
+    return {
+      get(){ return read(); },
+      save(preset){
+        const now = new Date().toISOString();
+        const payload = {
+          presetId: preset?.presetId || 'wfg2-baseline',
+          name: preset?.name || 'WFG2 Baseline',
+          params: copyParams(preset?.params || DEFAULT_PARAMS),
+          sourceAttemptId: preset?.sourceAttemptId || null,
+          sourceResult: preset?.sourceResult || null,
+          sourceFileName: preset?.sourceFileName || null,
+          savedAt: now,
+          createdAt: preset?.createdAt || now
+        };
+        write(payload);
+        return payload;
+      },
+      clear(){
+        try {
+          storage?.removeItem(storageKey);
+        } catch(err){
+          /* ignore */
+        }
+      }
+    };
+  }
+
+  return { DEFAULT_PARAMS, FEEDBACK_TAGS, copyParams, normalizeVisualInput, generateFeatureGraph, adaptParametersFromFeedback, createAttemptStore, createPresetStore };
 });
