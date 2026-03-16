@@ -4,7 +4,11 @@
   }
   root.WrokitFeatureGraph2 = factory();
 })(typeof window !== 'undefined' ? window : globalThis, function(){
+  // Schema version: bump when DEFAULT_PARAMS change to invalidate stale presets
+  const PARAMS_SCHEMA_VERSION = 2;
+
   const DEFAULT_PARAMS = Object.freeze({
+    _schemaVersion: PARAMS_SCHEMA_VERSION,
     gridSize: 8, edgeSensitivity: 28, mergeThreshold: 18,
     minRegionArea: 0.0008, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
     /* Color-primary boundary evidence: color is the anchor signal.
@@ -829,6 +833,12 @@
         const parsed = JSON.parse(raw);
         if(!parsed || typeof parsed !== 'object') return null;
         if(!parsed.params || typeof parsed.params !== 'object') return null;
+        // Invalidate presets saved with an older schema version — their
+        // weight tuning no longer matches the current engine architecture.
+        if((parsed.params._schemaVersion || 0) < PARAMS_SCHEMA_VERSION){
+          try { storage?.removeItem(storageKey); } catch(e){}
+          return null;
+        }
         return {
           ...parsed,
           params: copyParams(parsed.params)
