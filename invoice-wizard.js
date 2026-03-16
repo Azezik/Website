@@ -518,6 +518,9 @@ const els = {
   graphLearningRating: document.getElementById('graph-learning-rating'),
   graphLearningApplyFeedbackBtn: document.getElementById('graph-learning-apply-feedback-btn'),
   graphLearningAttempts: document.getElementById('graph-learning-attempts'),
+  graphLearningViewer: document.getElementById('graph-learning-viewer'),
+  graphLearningBaseCanvas: document.getElementById('graph-learning-base-canvas'),
+  graphLearningOverlayCanvas: document.getElementById('graph-learning-overlay-canvas'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -20555,11 +20558,44 @@ function getGraphLearningLayerFlags(){
   };
 }
 
-function paintGraphLearningOverlay(ctx, scaleX, scaleY){
+function syncGraphLearningCanvases(){
   const gl = state.graphLearning;
-  if(!gl.active || !gl.graph?.nodes?.length) return;
+  const surf = gl.normalizedSurface;
+  const base = els.graphLearningBaseCanvas;
+  const overlay = els.graphLearningOverlayCanvas;
+  if(!surf || !base || !overlay) return null;
+  if(base.width !== surf.width || base.height !== surf.height){
+    base.width = surf.width;
+    base.height = surf.height;
+  }
+  if(overlay.width !== surf.width || overlay.height !== surf.height){
+    overlay.width = surf.width;
+    overlay.height = surf.height;
+  }
+  return { base, overlay, width: surf.width, height: surf.height };
+}
+
+function renderGraphLearningBaseSurface(){
+  const synced = syncGraphLearningCanvases();
+  if(!synced) return;
+  const gl = state.graphLearning;
+  const surf = gl.normalizedSurface;
+  const ctx = synced.base.getContext('2d', { willReadFrequently: true });
+  const out = new Uint8ClampedArray(surf.width * surf.height * 4);
+  for(let i = 0, j = 0; i < surf.gray.length; i++, j += 4){
+    const v = surf.gray[i] || 0;
+    out[j] = v;
+    out[j + 1] = v;
+    out[j + 2] = v;
+    out[j + 3] = 255;
+  }
+  ctx.putImageData(new ImageData(out, surf.width, surf.height), 0, 0);
+}
+
+function paintGraphLearningOverlay(ctx){
+  const gl = state.graphLearning;
   const flags = getGraphLearningLayerFlags();
-  const nodes = gl.graph.nodes;
+  const nodes = gl.graph?.nodes || [];
   const idMap = new Map(nodes.map(n => [n.id, n]));
 
   if(flags.regions){
@@ -20568,8 +20604,8 @@ function paintGraphLearningOverlay(ctx, scaleX, scaleY){
       ctx.fillStyle = 'rgba(121,134,203,0.18)';
       ctx.strokeStyle = 'rgba(63,81,181,0.9)';
       ctx.lineWidth = 1.2;
-      ctx.fillRect((b.x || 0)/scaleX, (b.y || 0)/scaleY, (b.w || 0)/scaleX, (b.h || 0)/scaleY);
-      ctx.strokeRect((b.x || 0)/scaleX, (b.y || 0)/scaleY, (b.w || 0)/scaleX, (b.h || 0)/scaleY);
+      ctx.fillRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
+      ctx.strokeRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
     }
   }
   if(flags.contours){
@@ -20579,21 +20615,21 @@ function paintGraphLearningOverlay(ctx, scaleX, scaleY){
       ctx.strokeStyle = 'rgba(0,150,136,0.95)';
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.moveTo(c[0].x / scaleX, c[0].y / scaleY);
-      for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x / scaleX, c[i].y / scaleY);
+      ctx.moveTo(c[0].x, c[0].y);
+      for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x, c[i].y);
       ctx.closePath();
       ctx.stroke();
     }
   }
   if(flags.adjacency){
-    for(const e of gl.graph.edges || []){
+    for(const e of gl.graph?.edges || []){
       const a = idMap.get(e.from), b = idMap.get(e.to);
       if(!a || !b) continue;
       ctx.strokeStyle = 'rgba(255,152,0,0.85)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo((a.center?.x || 0)/scaleX, (a.center?.y || 0)/scaleY);
-      ctx.lineTo((b.center?.x || 0)/scaleX, (b.center?.y || 0)/scaleY);
+      ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
+      ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
       ctx.stroke();
     }
   }
@@ -20602,9 +20638,25 @@ function paintGraphLearningOverlay(ctx, scaleX, scaleY){
     ctx.font = '10px IBM Plex Mono, monospace';
     for(let i = 0; i < nodes.length; i++){
       const n = nodes[i];
-      ctx.fillText(String(i+1), (n.center?.x || 0)/scaleX + 2, (n.center?.y || 0)/scaleY - 2);
+      ctx.fillText(String(i + 1), (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
     }
   }
+}
+
+function renderGraphLearningViewer(){
+  const synced = syncGraphLearningCanvases();
+  if(!synced) return;
+  renderGraphLearningBaseSurface();
+  const octx = synced.overlay.getContext('2d');
+  octx.clearRect(0, 0, synced.width, synced.height);
+  paintGraphLearningOverlay(octx);
+}
+
+function clearGraphLearningViewer(){
+  const base = els.graphLearningBaseCanvas;
+  const overlay = els.graphLearningOverlayCanvas;
+  if(base){ const bctx = base.getContext('2d'); bctx.clearRect(0, 0, base.width || 1, base.height || 1); }
+  if(overlay){ const octx = overlay.getContext('2d'); octx.clearRect(0, 0, overlay.width || 1, overlay.height || 1); }
 }
 
 function graphLearningCaptureAttempt(result, feedback){
@@ -20642,7 +20694,7 @@ function graphLearningRunGeneration(opts){
   if(els.graphLearningBadBtn) els.graphLearningBadBtn.disabled = false;
   if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
   graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges.');
-  drawOverlay();
+  renderGraphLearningViewer();
 }
 
 async function graphLearningOpenFile(file){
@@ -20658,7 +20710,13 @@ async function graphLearningOpenFile(file){
   const page = state.pageNum || 1;
   const img = getPageGrayImageData(page);
   state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  if(!state.graphLearning.normalizedSurface){
+    clearGraphLearningViewer();
+    graphLearningStatus('Normalization failed for this file.');
+    return;
+  }
   state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  renderGraphLearningBaseSurface();
   graphLearningRunGeneration();
 }
 
@@ -20696,7 +20754,7 @@ if(els.graphLearningClearHistoryBtn){
 }
 [els.graphLearningShowRegions, els.graphLearningShowContours, els.graphLearningShowAdjacency, els.graphLearningShowDebug].forEach(function(el){
   if(!el) return;
-  el.addEventListener('change', function(){ drawOverlay(); });
+  el.addEventListener('change', function(){ renderGraphLearningViewer(); });
 });
 renderGraphLearningAttemptHistory();
 
@@ -20719,7 +20777,10 @@ renderGraphLearningAttemptHistory();
       if(batchTab) batchTab.style.display = targetId === 'learning-batch-tab' ? 'block' : 'none';
       if(graphTab) graphTab.style.display = targetId === 'learning-graph-tab' ? 'block' : 'none';
       if(targetId === 'learning-batch-tab') refreshBatchSessionUI();
-      if(targetId === 'learning-graph-tab') renderGraphLearningAttemptHistory();
+      if(targetId === 'learning-graph-tab'){
+        renderGraphLearningAttemptHistory();
+        renderGraphLearningViewer();
+      }
     });
   });
 })();
