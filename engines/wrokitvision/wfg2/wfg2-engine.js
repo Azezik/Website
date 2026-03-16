@@ -7,16 +7,17 @@
   const DEFAULT_PARAMS = Object.freeze({
     gridSize: 8, edgeSensitivity: 28, mergeThreshold: 18,
     minRegionArea: 0.0008, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
-    /* Color-aware boundary evidence */
-    colorWeight: 0.55, luminanceWeight: 0.30, varianceWeight: 0.15,
+    /* Color-primary boundary evidence: color is the anchor signal.
+       Luminance and variance are secondary — damped where color is present. */
+    colorWeight: 0.65, luminanceWeight: 0.20, varianceWeight: 0.10,
     colorMergePenalty: 1.8,
     /* Color distance calibration */
     colorDistFloor: 14,      // ΔE below this is ignored (shadows, lighting gradients)
     colorDistCeiling: 50,    // ΔE at/above this produces maximum boundary signal
     colorDistGamma: 2.2,     // >1 = suppress small distances, amplify large ones
     surfaceUniformityBias: 0.55, // 0-1: how much intra-region color uniformity relaxes merge
-    /* Continuity / closure */
-    closureRadius: 3, closureWeight: 0.30,
+    /* Continuity / closure (now color-informed when color data is available) */
+    closureRadius: 3, closureWeight: 0.20,
     parentContourBonus: 0.25, minEnclosingArea: 0.01
   });
   const FEEDBACK_TAGS = Object.freeze([
@@ -273,16 +274,34 @@
     return erode(dilate(edgeMap, w, h, radius), w, h, radius);
   }
 
-  /* Build a closure-evidence map from the gradient.  High values indicate
-     pixels that lie on or near a continuous closed contour. */
-  function buildClosureEvidence(grad, w, h, params){
+  /* Build a closure-evidence map.  When color boundaries are available they
+     are used as the primary edge source (much cleaner than luminance gradient
+     on synthetic / colored-shape scenes).  The luminance gradient is used as
+     a fallback only where color evidence is absent or weak. */
+  function buildClosureEvidence(grad, w, h, params, colorBoundary){
     const p = copyParams(params);
     const radius = clamp(Math.round(p.closureRadius), 1, 8);
-    // Threshold gradient into a binary edge map (Otsu-like: use top-30% edges)
-    const sorted = Array.from(grad).sort((a, b) => b - a);
-    const cutoff = Math.max(8, sorted[Math.floor(sorted.length * 0.30)] || 15);
+
+    // Build a fused edge map: prefer color boundary, fall back to luminance
     const binary = new Uint8Array(w * h);
-    for(let i = 0; i < grad.length; i++) binary[i] = grad[i] >= cutoff ? 1 : 0;
+    if(colorBoundary){
+      // Color boundary is Float32 0-1.  Threshold at 0.15 (moderate boundary).
+      // Where color evidence is weak (< 0.10), allow luminance gradient to fill in.
+      const sorted = Array.from(grad).sort((a, b) => b - a);
+      const lumCutoff = Math.max(8, sorted[Math.floor(sorted.length * 0.30)] || 15);
+      for(let i = 0; i < binary.length; i++){
+        if(colorBoundary[i] >= 0.15){
+          binary[i] = 1;
+        } else if(colorBoundary[i] < 0.10 && grad[i] >= lumCutoff){
+          binary[i] = 1; // luminance fallback in color-silent areas
+        }
+      }
+    } else {
+      // No color data — original luminance-only path
+      const sorted = Array.from(grad).sort((a, b) => b - a);
+      const cutoff = Math.max(8, sorted[Math.floor(sorted.length * 0.30)] || 15);
+      for(let i = 0; i < grad.length; i++) binary[i] = grad[i] >= cutoff ? 1 : 0;
+    }
     const closed = morphClose(binary, w, h, radius);
     return closed; // Uint8Array, 0 or 1
   }
@@ -356,7 +375,11 @@
     return conf;
   }
 
-  /* ─── Combined boundary evidence (color + luminance + closure) ── */
+  /* ─── Combined boundary evidence (color-primary architecture) ───
+     Color evidence is the primary structural signal.  Luminance gradient and
+     local variance are secondary — they only contribute significantly where
+     color evidence is absent or weak.  This prevents noisy luminance/variance
+     edges from corrupting the boundary map on scenes where color is clean. */
   function buildCombinedBoundaryEvidence(gray, lab, grad, colorBoundary, closureMap, w, h, params){
     const p = copyParams(params);
     const evidence = new Uint8Array(w * h);
@@ -364,11 +387,13 @@
     const wLum = clamp(p.luminanceWeight, 0, 1);
     const wVar = clamp(p.varianceWeight, 0, 1);
     const wClosure = clamp(p.closureWeight, 0, 1);
+    const hasColor = !!colorBoundary;
 
     for(let i = 0; i < evidence.length; i++){
       const lumEdge = grad[i] / 255;
-      const colEdge = colorBoundary ? colorBoundary[i] : 0;
+      const colEdge = hasColor ? colorBoundary[i] : 0;
       const closureBit = closureMap ? closureMap[i] : 0;
+
       // Compute local variance inline (3x3 window)
       const x = i % w, y = (i / w) | 0;
       let sum = 0, sumSq = 0, cnt = 0;
@@ -383,13 +408,20 @@
       const varV = Math.sqrt(Math.max(0, (sumSq / Math.max(1, cnt)) - (meanV * meanV))) / 64;
       const varNorm = Math.min(1, varV);
 
-      // Color signal uses its own squared scaling so strong color boundaries
-      // dominate over luminance noise.  colEdge is already 0 for small ΔE
-      // (dead-zone), so squaring only amplifies genuinely large boundaries.
+      // Color-primary: color evidence is the anchor signal.
       const colSq = colEdge * colEdge; // 0-1, strongly non-linear
-      const edgeSignal = lumEdge * wLum + colSq * wColor + varNorm * wVar;
+
+      // Secondary suppression: when color evidence is present at a pixel,
+      // luminance & variance contributions are heavily damped so they cannot
+      // inject false edges.  They only contribute fully where color is silent.
+      const colorPresence = hasColor ? clamp(colEdge * 4, 0, 1) : 0; // 0-1 soft gate
+      const secondaryDamp = 1 - colorPresence * 0.8; // 1.0 when no color → 0.2 when strong color
+      const lumContrib  = lumEdge  * wLum * secondaryDamp;
+      const varContrib  = varNorm  * wVar * secondaryDamp;
+
+      const edgeSignal = colSq * wColor + lumContrib + varContrib;
       // Closure boosts edge evidence where morphological closing bridged gaps
-      const closureBoost = closureBit ? wClosure : 0;
+      const closureBoost = closureBit ? wClosure * secondaryDamp : 0;
       evidence[i] = clamp(Math.round(Math.min(1, edgeSignal + closureBoost) * 255), 0, 255);
     }
     return evidence;
@@ -407,8 +439,8 @@
     // Part 1: Color-aware boundary evidence (magnitude-weighted)
     const colorBoundary = computeColorBoundary(lab, w, h, p);
 
-    // Part 2: Continuity / closure evidence
-    const closureMap = buildClosureEvidence(grad, w, h, p);
+    // Part 2: Continuity / closure evidence (color-informed when available)
+    const closureMap = buildClosureEvidence(grad, w, h, p, colorBoundary);
     const enclosedRegions = findEnclosedRegions(closureMap, w, h, p.minEnclosingArea);
     const closureConf = buildClosureConfidence(closureMap, enclosedRegions, grad, w, h);
 
@@ -423,19 +455,22 @@
     const cells = new Array(cols * rows);
     for(let cy = 0; cy < rows; cy++) for(let cx = 0; cx < cols; cx++){
       const idx = cy * cols + cx;
-      let sumGray = 0, sumGrad = 0, sumEvid = 0, sumClosure = 0, count = 0;
+      let sumGray = 0, sumGrad = 0, sumEvid = 0, sumClosure = 0, sumColorBnd = 0, count = 0;
       const x0 = cx * grid, y0 = cy * grid, x1 = Math.min(w, x0 + grid), y1 = Math.min(h, y0 + grid);
       for(let y = y0; y < y1; y++) for(let x = x0; x < x1; x++){
         const pi = y * w + x;
         sumGray += gray[pi]; sumGrad += grad[pi]; sumEvid += combinedEvidence[pi];
-        sumClosure += closureConf[pi]; count++;
+        sumClosure += closureConf[pi];
+        sumColorBnd += colorBoundary ? colorBoundary[pi] : 0;
+        count++;
       }
       cells[idx] = {
         idx, cx, cy, x0, y0, x1, y1,
         meanGray: sumGray / Math.max(1, count),
         meanGrad: sumGrad / Math.max(1, count),
         meanEvidence: sumEvid / Math.max(1, count),
-        meanClosure: sumClosure / Math.max(1, count)
+        meanClosure: sumClosure / Math.max(1, count),
+        meanColorBoundary: sumColorBnd / Math.max(1, count)
       };
     }
 
@@ -493,8 +528,16 @@
             uniformityRelax = 1 + uniformity * uBias;
           }
 
-          // Edge barrier from combined evidence (color + luminance + closure)
-          const edgeBarrier = (c2.meanEvidence + cell.meanEvidence) * 0.5;
+          // Split barrier: color boundary is the primary gate, combined evidence
+          // is secondary.  This prevents noisy luminance/variance in the combined
+          // evidence from blocking merges that color says should happen.
+          const colorBarrier = (c2.meanColorBoundary + cell.meanColorBoundary) * 0.5;
+          const combinedBarrier = (c2.meanEvidence + cell.meanEvidence) * 0.5;
+          // When color evidence is present, it is authoritative.
+          // Combined evidence only adds a mild secondary veto.
+          const effectiveBarrier = colorBoundary
+            ? (colorBarrier * 255) * 0.7 + combinedBarrier * 0.3
+            : combinedBarrier;
 
           // Closure-aware merge relaxation
           const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
@@ -507,7 +550,7 @@
           const effectiveToneDiff = toneDiff + colorPenalty;
 
           if(effectiveToneDiff <= p.mergeThreshold * closureRelax &&
-             edgeBarrier <= p.edgeSensitivity * closureRelax){
+             effectiveBarrier <= p.edgeSensitivity * closureRelax){
             visited[ni] = 1;
             queue.push(c2);
           }
@@ -516,9 +559,18 @@
       rawRegions.push(makeRegionFromCells(memberIdx, cells, grid, w, h, p, closureConf, enclosedRegions));
     }
 
-    // Filter by minimum area
+    // Filter by minimum area — but protect small regions that have strong
+    // color confidence, since those likely represent legitimate small objects
+    // that the color layer correctly identified.
     const minPixels = Math.max(25, Math.round(w * h * p.minRegionArea));
-    let filtered = rawRegions.filter(r => r.area >= minPixels);
+    let filtered = rawRegions.filter(r => {
+      if(r.area >= minPixels) return true;
+      // Small region rescue: keep if color confidence is high (the color layer
+      // is confident this is a real object, not noise).  Require at least 40%
+      // of the normal min area to prevent truly tiny noise fragments.
+      if(r.colorConfidence > 0.35 && r.area >= minPixels * 0.4) return true;
+      return false;
+    });
 
     // Part 2 integration: merge small interior regions into their enclosing parent
     // if the parent has strong closure confidence (preserves containers with text)
@@ -668,10 +720,15 @@
     // ── Region count ──
     if(tags.has('too_many_regions')){
       p.mergeThreshold += 3;
-      p.minRegionArea += 0.0005;
-      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
+      // Gentler minRegionArea increase — the small-object rescue in the
+      // filter stage (based on colorConfidence) now handles legitimate small
+      // objects, so we can be slightly more aggressive here without losing them.
+      p.minRegionArea += 0.0003;
+      p.colorDistFloor = Math.min(25, p.colorDistFloor + 1);
       p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.06);
-      p.closureWeight = Math.min(0.6, p.closureWeight + 0.03);
+      // Reduce luminance weight to suppress noisy non-color edges
+      p.luminanceWeight = Math.max(0.1, p.luminanceWeight - 0.03);
+      p.varianceWeight = Math.max(0, p.varianceWeight - 0.02);
     }
     if(tags.has('too_few_regions')){
       p.mergeThreshold -= 2;
