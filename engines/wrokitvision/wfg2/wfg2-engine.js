@@ -8,13 +8,13 @@
     gridSize: 10, edgeSensitivity: 28, mergeThreshold: 18,
     minRegionArea: 0.003, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
     /* Color-aware boundary evidence */
-    colorWeight: 0.45, luminanceWeight: 0.35, varianceWeight: 0.20,
-    colorMergePenalty: 0.55,
+    colorWeight: 0.55, luminanceWeight: 0.30, varianceWeight: 0.15,
+    colorMergePenalty: 1.8,
     /* Color distance calibration */
-    colorDistFloor: 6,       // ΔE below this is ignored (dead-zone for lighting noise)
-    colorDistCeiling: 45,    // ΔE at/above this produces maximum boundary signal
-    colorDistGamma: 1.8,     // >1 = suppress small distances, amplify large ones
-    surfaceUniformityBias: 0.35, // 0-1: how much intra-region color uniformity relaxes merge
+    colorDistFloor: 14,      // ΔE below this is ignored (shadows, lighting gradients)
+    colorDistCeiling: 50,    // ΔE at/above this produces maximum boundary signal
+    colorDistGamma: 2.2,     // >1 = suppress small distances, amplify large ones
+    surfaceUniformityBias: 0.55, // 0-1: how much intra-region color uniformity relaxes merge
     /* Continuity / closure */
     closureRadius: 3, closureWeight: 0.30,
     parentContourBonus: 0.25, minEnclosingArea: 0.01
@@ -384,11 +384,14 @@
       const varV = Math.sqrt(Math.max(0, (sumSq / Math.max(1, cnt)) - (meanV * meanV))) / 64;
       const varNorm = Math.min(1, varV);
 
-      // Combine: stronger of luminance edge or color edge drives the boundary
-      const edgeSignal = Math.max(lumEdge * wLum, colEdge * wColor) + varNorm * wVar;
+      // Color signal uses its own squared scaling so strong color boundaries
+      // dominate over luminance noise.  colEdge is already 0 for small ΔE
+      // (dead-zone), so squaring only amplifies genuinely large boundaries.
+      const colSq = colEdge * colEdge; // 0-1, strongly non-linear
+      const edgeSignal = lumEdge * wLum + colSq * wColor + varNorm * wVar;
       // Closure boosts edge evidence where morphological closing bridged gaps
       const closureBoost = closureBit ? wClosure : 0;
-      evidence[i] = clamp(Math.round((edgeSignal + closureBoost) * 255), 0, 255);
+      evidence[i] = clamp(Math.round(Math.min(1, edgeSignal + closureBoost) * 255), 0, 255);
     }
     return evidence;
   }
@@ -495,10 +498,14 @@
           // they are likely inside the same enclosing shape → relax merge
           const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
 
-          // Color penalty: magnitude-weighted (colorStrength is 0 for
-          // small ΔE, ramps non-linearly to 1 for strong color change).
+          // Color penalty: magnitude-weighted and squared so that strong
+          // color boundaries (red vs white) completely dominate over
+          // luminance similarity, while small ΔE adds almost nothing.
+          // At colorStrength=1, penalty = colorMergePenalty * mergeThreshold
+          // which exceeds the threshold and blocks the merge outright.
           // Surface uniformity relaxes the penalty for gradual surfaces.
-          const colorPenalty = colorStrength * p.colorMergePenalty * p.mergeThreshold / uniformityRelax;
+          const colorStr2 = colorStrength * colorStrength; // square again for emphasis
+          const colorPenalty = colorStr2 * p.colorMergePenalty * p.mergeThreshold / uniformityRelax;
           const effectiveToneDiff = toneDiff + colorPenalty;
 
           if(effectiveToneDiff <= p.mergeThreshold * closureRelax &&
@@ -666,13 +673,13 @@
       p.mergeThreshold -= 2; p.minRegionArea -= 0.0008;
       // Under-segmentation: tighten color tolerance
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
-      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.05);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.15);
     }
     if(tags.has('boundaries_inaccurate') || tags.has('merged_objects')){
       p.edgeSensitivity -= 3; p.mergeThreshold -= 1;
       // Merging distinct objects: strengthen color penalty, lower floor
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
-      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.06);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.2);
       p.surfaceUniformityBias = Math.max(0, p.surfaceUniformityBias - 0.05);
     }
     if(tags.has('split_object') || tags.has('noisy_fragmented')){
@@ -695,7 +702,7 @@
     if(tags.has('weak_color_boundary')){
       // Color boundary is not strong enough: lower floor, increase penalty
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
-      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.08);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.25);
       p.colorDistGamma = Math.max(0.8, p.colorDistGamma - 0.2);
       p.colorWeight = Math.min(0.8, p.colorWeight + 0.05);
     }
@@ -703,7 +710,7 @@
     // ── Color boundary feedback ──
     if(tags.has('color_boundary_missed')){
       p.colorWeight = Math.min(0.8, p.colorWeight + 0.08);
-      p.colorMergePenalty = Math.min(1, p.colorMergePenalty + 0.1);
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.3);
       // Lower floor so more color differences become visible
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
       // Sharpen gamma to amplify strong boundaries even more
@@ -738,7 +745,7 @@
     p.colorWeight = clamp(p.colorWeight, 0, 0.8);
     p.luminanceWeight = clamp(p.luminanceWeight, 0.1, 0.8);
     p.varianceWeight = clamp(p.varianceWeight, 0, 0.5);
-    p.colorMergePenalty = clamp(p.colorMergePenalty, 0, 1);
+    p.colorMergePenalty = clamp(p.colorMergePenalty, 0, 4);
     p.colorDistFloor = clamp(p.colorDistFloor, 0, 25);
     p.colorDistCeiling = clamp(p.colorDistCeiling, 15, 80);
     p.colorDistGamma = clamp(p.colorDistGamma, 0.5, 3.5);
