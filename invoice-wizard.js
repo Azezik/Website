@@ -12194,21 +12194,16 @@ async function openFile(file){
   if (isImage) {
     els.imgCanvas.style.display = 'block';
     els.pdfCanvas.style.display = 'none';
-    // Revoke any previously held blob URL before creating a new one
-    if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
     const url = URL.createObjectURL(file);
-    state._pendingBlobUrl = url;
+    replacePendingBlobUrl(url);
     await renderImage(url);
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
     const tokens = await ensureTokensForPage(1);
     await buildKeywordIndexForPage(1, tokens);
-    // OCR is done — safe to revoke the blob URL now
-    if(state._pendingBlobUrl === url){
-      URL.revokeObjectURL(url);
-      state._pendingBlobUrl = null;
-    }
+    // Keep the blob URL alive while the image remains mounted in <img>.
+    // cleanupDoc()/next upload will revoke it via replacePendingBlobUrl().
     if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
     else await calibrateIfNeeded();
     drawOverlay();
@@ -12271,6 +12266,13 @@ function cleanupDoc(){
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
 
+function replacePendingBlobUrl(nextUrl){
+  if(state._pendingBlobUrl && state._pendingBlobUrl !== nextUrl){
+    try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){}
+  }
+  state._pendingBlobUrl = nextUrl || null;
+}
+
 function loadRunImageFromBuffer(arrayBuffer){
   return new Promise((resolve, reject) => {
     const blob = new Blob([arrayBuffer]);
@@ -12330,19 +12332,14 @@ async function prepareRunDocument(file){
       state.viewport = { w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageViewports[0] = { width: imgMeta.width, height: imgMeta.height, w: imgMeta.width, h: imgMeta.height, scale: imgMeta.scale };
       state.pageOffsets[0] = 0;
-      if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} }
       const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
-      state._pendingBlobUrl = blobUrl;
+      replacePendingBlobUrl(blobUrl);
       await renderImage(blobUrl);
       state.pageNum = 1; state.numPages = 1;
       if(els.pageControls) els.pageControls.style.display = 'none';
       const tokens = await ensureTokensForPage(1, null, state.pageViewports[0], els.imgCanvas);
       await buildKeywordIndexForPage(1, tokens, state.pageViewports[0]);
-      // OCR is done — safe to revoke the blob URL now
-      if(state._pendingBlobUrl === blobUrl){
-        URL.revokeObjectURL(blobUrl);
-        state._pendingBlobUrl = null;
-      }
+      // Keep URL alive while imgCanvas is active; cleanupDoc handles revocation.
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
       return { type:'image' };
@@ -20760,7 +20757,14 @@ async function graphLearningOpenFile(file){
   state.graphLearning.lastAttemptId = null;
   state.graphLearning.latestFeedback = null;
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
-  await openFile(file);
+  try {
+    await openFile(file);
+  } catch(err){
+    console.error('[WFG2][GraphLearning] openFile failed', err);
+    clearGraphLearningViewer();
+    graphLearningStatus('Could not load this file for Graph Learning.');
+    return;
+  }
   const page = state.pageNum || 1;
   const img = getPageGrayImageData(page);
   state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
