@@ -506,6 +506,8 @@ const els = {
   learningSessionStarted: document.getElementById('learning-session-started'),
   graphLearningFileInput: document.getElementById('graph-learning-file-input'),
   graphLearningRegenerateBtn: document.getElementById('graph-learning-regenerate-btn'),
+  graphLearningSavePresetBtn: document.getElementById('graph-learning-save-preset-btn'),
+  graphLearningLoadPresetBtn: document.getElementById('graph-learning-load-preset-btn'),
   graphLearningClearHistoryBtn: document.getElementById('graph-learning-clear-history-btn'),
   graphLearningStatus: document.getElementById('graph-learning-status'),
   graphLearningShowRegions: document.getElementById('graph-learning-show-regions'),
@@ -518,6 +520,7 @@ const els = {
   graphLearningRating: document.getElementById('graph-learning-rating'),
   graphLearningApplyFeedbackBtn: document.getElementById('graph-learning-apply-feedback-btn'),
   graphLearningAttempts: document.getElementById('graph-learning-attempts'),
+  graphLearningPresetStatus: document.getElementById('graph-learning-preset-status'),
   graphLearningViewer: document.getElementById('graph-learning-viewer'),
   graphLearningBaseCanvas: document.getElementById('graph-learning-base-canvas'),
   graphLearningOverlayCanvas: document.getElementById('graph-learning-overlay-canvas'),
@@ -1871,6 +1874,7 @@ let state = {
     graph: null,
     lastAttemptId: null,
     latestFeedback: null,
+    activePreset: null,
     show: { regions: true, contours: true, adjacency: true, debug: false }
   },
 };
@@ -20523,12 +20527,59 @@ if(els.learningNewSessionBtn){
 
 const _wfg2 = window.WrokitFeatureGraph2 || null;
 const _wfg2Store = _wfg2?.createAttemptStore ? _wfg2.createAttemptStore(localStorage) : null;
+const _wfg2PresetStore = _wfg2?.createPresetStore ? _wfg2.createPresetStore(localStorage) : null;
 
 function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
 
 function graphLearningSessionId(){
   if(!state.graphLearning.sessionId) state.graphLearning.sessionId = 'wfg2sess-' + Date.now().toString(36);
   return state.graphLearning.sessionId;
+}
+
+function renderGraphLearningPresetStatus(){
+  if(!els.graphLearningPresetStatus) return;
+  const preset = _wfg2PresetStore?.get ? _wfg2PresetStore.get() : null;
+  if(!preset){
+    els.graphLearningPresetStatus.textContent = 'Preset: none saved';
+    state.graphLearning.activePreset = null;
+    return;
+  }
+  const stamp = preset.savedAt ? new Date(preset.savedAt).toLocaleString() : 'unknown time';
+  els.graphLearningPresetStatus.textContent = 'Preset: ' + (preset.name || 'WFG2 Baseline') + ' (saved ' + stamp + ')';
+  state.graphLearning.activePreset = preset;
+}
+
+function updateGraphLearningPresetButtons(){
+  if(els.graphLearningSavePresetBtn) els.graphLearningSavePresetBtn.disabled = !state.graphLearning?.params;
+  if(els.graphLearningLoadPresetBtn) els.graphLearningLoadPresetBtn.disabled = !_wfg2PresetStore?.get || !_wfg2PresetStore.get();
+}
+
+function graphLearningSaveCurrentPreset(opts){
+  if(!_wfg2PresetStore || !_wfg2 || !state.graphLearning?.params) return null;
+  const gl = state.graphLearning;
+  const previous = _wfg2PresetStore.get();
+  const saved = _wfg2PresetStore.save({
+    presetId: previous?.presetId || 'wfg2-baseline',
+    name: previous?.name || 'WFG2 Baseline',
+    createdAt: previous?.createdAt || null,
+    params: _wfg2.copyParams(gl.params),
+    sourceAttemptId: gl.lastAttemptId || null,
+    sourceResult: opts?.sourceResult || null,
+    sourceFileName: gl.fileName || null
+  });
+  renderGraphLearningPresetStatus();
+  updateGraphLearningPresetButtons();
+  return saved;
+}
+
+function graphLearningLoadPresetIntoSession(){
+  if(!_wfg2PresetStore || !_wfg2) return null;
+  const preset = _wfg2PresetStore.get();
+  if(!preset?.params) return null;
+  state.graphLearning.params = _wfg2.copyParams(preset.params);
+  state.graphLearning.activePreset = preset;
+  updateGraphLearningPresetButtons();
+  return preset;
 }
 
 function renderGraphLearningAttemptHistory(){
@@ -20681,6 +20732,8 @@ function graphLearningCaptureAttempt(result, feedback){
   _wfg2Store.addAttempt(attempt);
   gl.lastAttemptId = attempt.attemptId;
   renderGraphLearningAttemptHistory();
+  renderGraphLearningPresetStatus();
+  updateGraphLearningPresetButtons();
 }
 
 function graphLearningRunGeneration(opts){
@@ -20693,6 +20746,7 @@ function graphLearningRunGeneration(opts){
   if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = false;
   if(els.graphLearningBadBtn) els.graphLearningBadBtn.disabled = false;
   if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
+  updateGraphLearningPresetButtons();
   graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges.');
   renderGraphLearningViewer();
 }
@@ -20715,9 +20769,13 @@ async function graphLearningOpenFile(file){
     graphLearningStatus('Normalization failed for this file.');
     return;
   }
-  state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  const loadedPreset = graphLearningLoadPresetIntoSession();
+  if(!loadedPreset) state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
   renderGraphLearningBaseSurface();
   graphLearningRunGeneration();
+  if(loadedPreset){
+    graphLearningStatus('Loaded preset "' + (loadedPreset.name || 'WFG2 Baseline') + '" and generated attempt ' + state.graphLearning.attemptNumber + '.');
+  }
 }
 
 if(els.graphLearningFileInput){
@@ -20729,7 +20787,33 @@ if(els.graphLearningFileInput){
   });
 }
 if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){ graphLearningRunGeneration(); }); }
-if(els.graphLearningGoodBtn){ els.graphLearningGoodBtn.addEventListener('click', function(){ graphLearningCaptureAttempt('good', null); graphLearningStatus('Marked Good.'); }); }
+if(els.graphLearningSavePresetBtn){
+  els.graphLearningSavePresetBtn.addEventListener('click', function(){
+    const saved = graphLearningSaveCurrentPreset({ sourceResult: 'manual-save' });
+    if(saved) graphLearningStatus('Saved preset "' + (saved.name || 'WFG2 Baseline') + '".');
+  });
+}
+if(els.graphLearningLoadPresetBtn){
+  els.graphLearningLoadPresetBtn.addEventListener('click', function(){
+    const preset = graphLearningLoadPresetIntoSession();
+    if(!preset){
+      graphLearningStatus('No preset saved yet.');
+      return;
+    }
+    if(state.graphLearning.normalizedSurface){
+      graphLearningRunGeneration();
+      graphLearningStatus('Loaded preset "' + (preset.name || 'WFG2 Baseline') + '" and regenerated.');
+    } else {
+      graphLearningStatus('Loaded preset "' + (preset.name || 'WFG2 Baseline') + '". Upload a file to use it.');
+    }
+  });
+}
+if(els.graphLearningGoodBtn){
+  els.graphLearningGoodBtn.addEventListener('click', function(){
+    graphLearningCaptureAttempt('good', null);
+    graphLearningStatus('Marked Good.');
+  });
+}
 if(els.graphLearningBadBtn){
   els.graphLearningBadBtn.addEventListener('click', function(){
     if(els.graphLearningFeedbackPanel) els.graphLearningFeedbackPanel.style.display = 'block';
@@ -20757,6 +20841,8 @@ if(els.graphLearningClearHistoryBtn){
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
 });
 renderGraphLearningAttemptHistory();
+renderGraphLearningPresetStatus();
+updateGraphLearningPresetButtons();
 
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 

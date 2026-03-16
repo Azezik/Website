@@ -879,13 +879,16 @@
             Upload one file, inspect the graph overlays, mark Good/Bad, and regenerate with feedback.
           </p>
 
-          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
             <label class="btn primary">
               Upload File
               <input id="graph-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
             </label>
             <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled>Regenerate</button>
+            <button id="graph-learning-save-preset-btn" class="btn" type="button" disabled>Save Tuned Preset</button>
+            <button id="graph-learning-load-preset-btn" class="btn ghost" type="button">Load Preset</button>
             <button id="graph-learning-clear-history-btn" class="btn ghost" type="button">Clear Attempt History</button>
+            <span id="graph-learning-preset-status" class="sub" style="color:var(--muted);"></span>
           </div>
 
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
