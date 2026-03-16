@@ -20661,6 +20661,18 @@ function syncGraphLearningCanvases(){
     overlay.width = surf.width;
     overlay.height = surf.height;
   }
+  // Fit-to-view: scale CSS display size so the full surface is visible
+  // without scrolling, while keeping the drawing buffer at full resolution.
+  const container = base.parentElement;
+  const maxW = (container && container.clientWidth > 0) ? container.clientWidth : surf.width;
+  const maxH = Math.round(window.innerHeight * 0.65);
+  const fitScale = Math.min(maxW / surf.width, maxH / surf.height, 1);
+  const cssW = Math.round(surf.width * fitScale) + 'px';
+  const cssH = Math.round(surf.height * fitScale) + 'px';
+  base.style.width = cssW;
+  base.style.height = cssH;
+  overlay.style.width = cssW;
+  overlay.style.height = cssH;
   return { base, overlay, width: surf.width, height: surf.height };
 }
 
@@ -20744,8 +20756,8 @@ function renderGraphLearningViewer(){
 function clearGraphLearningViewer(){
   const base = els.graphLearningBaseCanvas;
   const overlay = els.graphLearningOverlayCanvas;
-  if(base){ const bctx = base.getContext('2d'); bctx.clearRect(0, 0, base.width || 1, base.height || 1); }
-  if(overlay){ const octx = overlay.getContext('2d'); octx.clearRect(0, 0, overlay.width || 1, overlay.height || 1); }
+  if(base){ const bctx = base.getContext('2d'); bctx.clearRect(0, 0, base.width || 1, base.height || 1); base.style.width = ''; base.style.height = ''; }
+  if(overlay){ const octx = overlay.getContext('2d'); octx.clearRect(0, 0, overlay.width || 1, overlay.height || 1); overlay.style.width = ''; overlay.style.height = ''; }
 }
 
 function graphLearningCaptureAttempt(result, feedback){
