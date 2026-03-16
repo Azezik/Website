@@ -16013,6 +16013,9 @@ function drawOverlay(options = {}){
   if(state.learningActive){
     paintLearningAnnotations(overlayCtx, scaleX, scaleY);
   }
+  if(state.graphLearning?.active){
+    paintGraphLearningOverlay(overlayCtx, scaleX, scaleY);
+  }
 }
 
 function drawOverlayForVisibilityChange(){
