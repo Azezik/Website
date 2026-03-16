@@ -20708,6 +20708,43 @@ function paintGraphLearningOverlay(ctx){
   const flags = getGraphLearningLayerFlags();
   const nodes = gl.graph?.nodes || [];
   const idMap = new Map(nodes.map(n => [n.id, n]));
+  const artf = gl.graph?.artifacts || {};
+  const nSize = gl.graph?.normalizedSize || {};
+
+  // ── Color Evidence heatmap: shows where color boundaries were detected ──
+  if(flags.colorEvidence && artf.colorBoundaryMap && nSize.width > 0 && nSize.height > 0){
+    const cMap = artf.colorBoundaryMap;
+    const mw = nSize.width, mh = nSize.height;
+    const imgData = ctx.createImageData(mw, mh);
+    const d = imgData.data;
+    for(let i = 0, j = 0; i < cMap.length; i++, j += 4){
+      const v = cMap[i]; // 0-1 (already dead-zone/gamma filtered)
+      if(v > 0.01){
+        d[j]     = 255;                             // R
+        d[j + 1] = Math.round(255 * (1 - v));       // G: 255→0 as v→1
+        d[j + 2] = 0;                               // B
+        d[j + 3] = Math.round(40 + v * 160);        // A: semi to opaque
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  // ── Closure Evidence: shows where morphological closure bridged edge gaps ──
+  if(flags.closureEvidence && artf.closureMap && nSize.width > 0 && nSize.height > 0){
+    const clMap = artf.closureMap;
+    const mw = nSize.width, mh = nSize.height;
+    const imgData = ctx.createImageData(mw, mh);
+    const d = imgData.data;
+    for(let i = 0, j = 0; i < clMap.length; i++, j += 4){
+      if(clMap[i]){
+        d[j]     = 0;    // R
+        d[j + 1] = 180;  // G
+        d[j + 2] = 255;  // B
+        d[j + 3] = 110;  // A
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
 
   // Shape-following fill: light fill inside contour polygons (primary view)
   if(flags.shapeFill){

@@ -923,24 +923,16 @@
               </div>
             </div>
             <div id="graph-learning-feedback-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
-              <div style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:6px 12px;">
-                <label><input type="checkbox" data-feedback-tag="too_many_regions" /> too many regions</label>
-                <label><input type="checkbox" data-feedback-tag="too_few_regions" /> too few regions</label>
-                <label><input type="checkbox" data-feedback-tag="boundaries_inaccurate" /> boundaries inaccurate</label>
-                <label><input type="checkbox" data-feedback-tag="merged_objects" /> merged separate objects together</label>
-                <label><input type="checkbox" data-feedback-tag="split_object" /> split one object into too many parts</label>
-                <label><input type="checkbox" data-feedback-tag="missed_object" /> missed important object</label>
-                <label><input type="checkbox" data-feedback-tag="too_grid_like" /> too grid-like / too document-like</label>
-                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> regions don’t follow actual shapes</label>
-                <label><input type="checkbox" data-feedback-tag="noisy_fragmented" /> noisy or fragmented</label>
-                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> color boundary missed (similar brightness, different color)</label>
-                <label><input type="checkbox" data-feedback-tag="enclosing_shape_broken" /> enclosing shape broken apart</label>
-                <label><input type="checkbox" data-feedback-tag="internal_detail_dominates" /> internal text/detail dominates over container</label>
-                <label><input type="checkbox" data-feedback-tag="surface_over_segmented" /> uniform surface fragmented (sky, wall split into pieces)</label>
-                <label><input type="checkbox" data-feedback-tag="weak_color_boundary" /> weak color boundary not strong enough to separate objects</label>
-                <label><input type="checkbox" data-feedback-tag="other" /> other</label>
+              <p class="sub" style="margin:0 0 8px;color:var(--muted);">What went wrong? Select all that apply.</p>
+              <div style="display:grid;grid-template-columns:repeat(2,minmax(200px,1fr));gap:8px 16px;">
+                <label><input type="checkbox" data-feedback-tag="missed_object" /> Missed an object</label>
+                <label><input type="checkbox" data-feedback-tag="split_object" /> Split an object apart</label>
+                <label><input type="checkbox" data-feedback-tag="merged_objects" /> Merged different objects together</label>
+                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> Color boundary not detected</label>
+                <label><input type="checkbox" data-feedback-tag="noisy_fragmented" /> Too noisy / fragmented</label>
+                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> Shapes don’t match objects</label>
               </div>
-              <div class="actions" style="margin-top:8px;gap:10px;align-items:center;">
+              <div class="actions" style="margin-top:10px;gap:10px;align-items:center;">
                 <label>Quality (1-5):
                   <input id="graph-learning-rating" type="number" min="1" max="5" step="1" style="width:64px;margin-left:6px;" />
                 </label>

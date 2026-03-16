@@ -5,8 +5,8 @@
   root.WrokitFeatureGraph2 = factory();
 })(typeof window !== 'undefined' ? window : globalThis, function(){
   const DEFAULT_PARAMS = Object.freeze({
-    gridSize: 10, edgeSensitivity: 28, mergeThreshold: 18,
-    minRegionArea: 0.003, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
+    gridSize: 8, edgeSensitivity: 28, mergeThreshold: 18,
+    minRegionArea: 0.0008, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
     /* Color-aware boundary evidence */
     colorWeight: 0.55, luminanceWeight: 0.30, varianceWeight: 0.15,
     colorMergePenalty: 1.8,
@@ -20,10 +20,8 @@
     parentContourBonus: 0.25, minEnclosingArea: 0.01
   });
   const FEEDBACK_TAGS = Object.freeze([
-    'too_many_regions','too_few_regions','boundaries_inaccurate','merged_objects',
-    'split_object','missed_object','too_grid_like','shape_mismatch','noisy_fragmented',
-    'color_boundary_missed','enclosing_shape_broken','internal_detail_dominates',
-    'surface_over_segmented','weak_color_boundary','other'
+    'missed_object','split_object','merged_objects',
+    'color_boundary_missed','noisy_fragmented','shape_mismatch'
   ]);
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const copyParams = (params) => ({ ...DEFAULT_PARAMS, ...(params || {}) });
@@ -462,19 +460,24 @@
           if(visited[ni]) continue;
           const c2 = cells[ni];
 
-          // Luminance tone check
-          const toneDiff = Math.abs(c2.meanGray - seed.meanGray);
+          // Compare candidate to BOTH the seed and the current frontier cell.
+          // This prevents color-drift where each step is small but the region
+          // gradually absorbs pixels far from the seed's color.
+          const toneDiffSeed = Math.abs(c2.meanGray - seed.meanGray);
+          const toneDiffLocal = Math.abs(c2.meanGray - cell.meanGray);
+          const toneDiff = Math.max(toneDiffSeed, toneDiffLocal);
 
-          // Color difference in Lab (if available), magnitude-weighted
-          let colorDist = 0;
+          // Color difference in Lab — check against both seed and frontier
           let colorStrength = 0; // 0-1 after dead-zone/gamma
           if(lab && seed.meanL !== undefined){
-            const dL = c2.meanL - seed.meanL;
-            const da = c2.meanA - seed.meanA;
-            const db = c2.meanB - seed.meanB;
-            colorDist = Math.sqrt(dL * dL + da * da + db * db);
+            const dLs = c2.meanL - seed.meanL, das = c2.meanA - seed.meanA, dbs = c2.meanB - seed.meanB;
+            const deSeed = Math.sqrt(dLs * dLs + das * das + dbs * dbs);
+            const dLl = c2.meanL - cell.meanL, dal = c2.meanA - cell.meanA, dbl = c2.meanB - cell.meanB;
+            const deLocal = Math.sqrt(dLl * dLl + dal * dal + dbl * dbl);
+            // Use the larger of the two distances — prevents drift
+            const deMax = Math.max(deSeed, deLocal);
             colorStrength = colorDistToStrength(
-              colorDist, p.colorDistFloor, p.colorDistCeiling, p.colorDistGamma
+              deMax, p.colorDistFloor, p.colorDistCeiling, p.colorDistGamma
             );
           }
 
@@ -484,27 +487,21 @@
           const uBias = clamp(p.surfaceUniformityBias, 0, 1);
           let uniformityRelax = 1.0;
           if(uBias > 0 && cell.colorStdDev !== undefined && c2.colorStdDev !== undefined){
-            // Both cells uniform (stddev < 4) → relax up to (1 + uBias)
-            // Both cells textured → no relaxation
             const avgStdDev = (cell.colorStdDev + c2.colorStdDev) * 0.5;
-            const uniformity = clamp(1 - avgStdDev / 12, 0, 1); // 1=very uniform, 0=textured
+            const uniformity = clamp(1 - avgStdDev / 12, 0, 1);
             uniformityRelax = 1 + uniformity * uBias;
           }
 
           // Edge barrier from combined evidence (color + luminance + closure)
           const edgeBarrier = (c2.meanEvidence + cell.meanEvidence) * 0.5;
 
-          // Closure-aware: if both cells have high closure confidence,
-          // they are likely inside the same enclosing shape → relax merge
+          // Closure-aware merge relaxation
           const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
 
-          // Color penalty: magnitude-weighted and squared so that strong
-          // color boundaries (red vs white) completely dominate over
-          // luminance similarity, while small ΔE adds almost nothing.
-          // At colorStrength=1, penalty = colorMergePenalty * mergeThreshold
-          // which exceeds the threshold and blocks the merge outright.
-          // Surface uniformity relaxes the penalty for gradual surfaces.
-          const colorStr2 = colorStrength * colorStrength; // square again for emphasis
+          // Color penalty: magnitude-weighted and squared.
+          // At colorStrength=1 (strong color boundary), penalty far exceeds
+          // mergeThreshold, making the boundary decisive.
+          const colorStr2 = colorStrength * colorStrength;
           const colorPenalty = colorStr2 * p.colorMergePenalty * p.mergeThreshold / uniformityRelax;
           const effectiveToneDiff = toneDiff + colorPenalty;
 
@@ -536,7 +533,11 @@
         debugPrimitives: filtered.map(r => ({ id: r.id, bbox: r.bbox, compactness: r.compactness, closureScore: r.closureScore, colorConfidence: r.colorConfidence, surfaceUniformity: r.surfaceUniformity })),
         colorBoundaryActive: !!colorBoundary,
         closureActive: true,
-        enclosedRegionCount: enclosedRegions.length
+        enclosedRegionCount: enclosedRegions.length,
+        // Evidence maps for visualization overlays
+        colorBoundaryMap: colorBoundary,  // Float32Array 0-1, or null
+        closureMap: closureMap,           // Uint8Array 0|1, or null
+        combinedEvidenceMap: combinedEvidence // Uint8Array 0-255
       }
     };
     return graph;
@@ -662,73 +663,58 @@
 
   function adaptParametersFromFeedback(params, feedback){
     const p = copyParams(params), tags = new Set(Array.isArray(feedback?.tags) ? feedback.tags : []);
-    // ── Standard region-count feedback ──
-    if(tags.has('too_many_regions')){
-      p.mergeThreshold += 3; p.minRegionArea += 0.0007; p.fragmentationTolerance += 0.02;
-      // Over-segmentation often means color floor is too low (noise triggers splits)
-      p.colorDistFloor = Math.min(20, p.colorDistFloor + 1.5);
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.06);
-    }
-    if(tags.has('too_few_regions')){
-      p.mergeThreshold -= 2; p.minRegionArea -= 0.0008;
-      // Under-segmentation: tighten color tolerance
-      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
-      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.15);
-    }
-    if(tags.has('boundaries_inaccurate') || tags.has('merged_objects')){
-      p.edgeSensitivity -= 3; p.mergeThreshold -= 1;
-      // Merging distinct objects: strengthen color penalty, lower floor
-      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
+
+    // ── "Missed an object" → detect smaller objects, tighten sensitivity ──
+    if(tags.has('missed_object')){
+      p.minRegionArea = Math.max(0.0002, p.minRegionArea - 0.0003);
+      p.edgeSensitivity += 2;
+      p.gridSize = Math.max(4, p.gridSize - 1);
       p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.2);
-      p.surfaceUniformityBias = Math.max(0, p.surfaceUniformityBias - 0.05);
-    }
-    if(tags.has('split_object') || tags.has('noisy_fragmented')){
-      p.mergeThreshold += 2; p.edgeSensitivity += 1;
-      // Fragmentation within a surface: raise floor, boost uniformity
-      p.colorDistFloor = Math.min(20, p.colorDistFloor + 2);
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
-    }
-    if(tags.has('missed_object')){ p.minRegionArea -= 0.001; p.edgeSensitivity += 1; }
-    if(tags.has('too_grid_like') || tags.has('shape_mismatch')){ p.rectangularBiasPenalty += 0.08; p.gridSize = Math.max(6, p.gridSize - 1); }
-
-    // ── Surface continuity feedback ──
-    if(tags.has('surface_over_segmented')){
-      // Uniform surface is fragmented: raise dead-zone floor, boost uniformity
-      p.colorDistFloor = Math.min(20, p.colorDistFloor + 2.5);
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.1);
-      p.mergeThreshold += 2;
-      p.colorDistGamma = Math.min(3.5, p.colorDistGamma + 0.2);
-    }
-    if(tags.has('weak_color_boundary')){
-      // Color boundary is not strong enough: lower floor, increase penalty
       p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
-      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.25);
-      p.colorDistGamma = Math.max(0.8, p.colorDistGamma - 0.2);
-      p.colorWeight = Math.min(0.8, p.colorWeight + 0.05);
     }
 
-    // ── Color boundary feedback ──
+    // ── "Split an object apart" → merge more aggressively ──
+    if(tags.has('split_object')){
+      p.mergeThreshold += 3;
+      p.edgeSensitivity += 2;
+      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
+      p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.06);
+    }
+
+    // ── "Merged different objects together" → separate more ──
+    if(tags.has('merged_objects')){
+      p.mergeThreshold -= 2;
+      p.edgeSensitivity -= 3;
+      p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.3);
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 1);
+      p.surfaceUniformityBias = Math.max(0, p.surfaceUniformityBias - 0.06);
+    }
+
+    // ── "Color boundary not detected" → strengthen color influence ──
     if(tags.has('color_boundary_missed')){
       p.colorWeight = Math.min(0.8, p.colorWeight + 0.08);
       p.colorMergePenalty = Math.min(4, p.colorMergePenalty + 0.3);
-      // Lower floor so more color differences become visible
-      p.colorDistFloor = Math.max(1, p.colorDistFloor - 2);
-      // Sharpen gamma to amplify strong boundaries even more
-      p.colorDistGamma = Math.max(1.0, p.colorDistGamma - 0.15);
+      p.colorDistFloor = Math.max(1, p.colorDistFloor - 3);
+      p.colorDistGamma = Math.max(0.8, p.colorDistGamma - 0.2);
     }
 
-    // ── Enclosing shape / continuity feedback ──
-    if(tags.has('enclosing_shape_broken')){
-      p.closureRadius = Math.min(8, p.closureRadius + 1);
-      p.closureWeight = Math.min(0.6, p.closureWeight + 0.08);
-      p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.08);
+    // ── "Too noisy / fragmented" → relax, merge uniform surfaces ──
+    if(tags.has('noisy_fragmented')){
+      p.mergeThreshold += 3;
+      p.minRegionArea += 0.0005;
+      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
+      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.1);
+      p.colorDistGamma = Math.min(3.5, p.colorDistGamma + 0.15);
     }
-    if(tags.has('internal_detail_dominates')){
-      p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.1);
-      p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
-      p.mergeThreshold += 2;
-      // Interior detail is over-weighted: boost uniformity to keep container
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
+
+    // ── "Shapes don't match objects" → improve shape fidelity ──
+    if(tags.has('shape_mismatch')){
+      p.rectangularBiasPenalty += 0.08;
+      p.gridSize = Math.max(4, p.gridSize - 1);
+      p.closureRadius = Math.min(8, p.closureRadius + 1);
+      p.closureWeight = Math.min(0.6, p.closureWeight + 0.06);
     }
 
     const rating = Number(feedback?.rating || 0);
@@ -739,7 +725,7 @@
     p.gridSize = clamp(Math.round(p.gridSize), 4, 24);
     p.edgeSensitivity = clamp(Math.round(p.edgeSensitivity), 8, 120);
     p.mergeThreshold = clamp(Math.round(p.mergeThreshold), 4, 60);
-    p.minRegionArea = clamp(p.minRegionArea, 0.0004, 0.08);
+    p.minRegionArea = clamp(p.minRegionArea, 0.0001, 0.08);
     p.fragmentationTolerance = clamp(p.fragmentationTolerance, 0.05, 0.8);
     p.rectangularBiasPenalty = clamp(p.rectangularBiasPenalty, 0, 1);
     p.colorWeight = clamp(p.colorWeight, 0, 0.8);
