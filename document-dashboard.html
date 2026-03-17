@@ -456,6 +456,7 @@
           <button class="tablink active" data-learning-target="learning-guided-tab">Guided Learning</button>
           <button class="tablink" data-learning-target="learning-batch-tab">Batch Structural</button>
           <button class="tablink" data-learning-target="learning-graph-tab">Graph Learning</button>
+          <button class="tablink" data-learning-target="learning-object-tab">Object Learning</button>
         </nav>
 
         <!-- ═══ Guided Learning sub-tab (existing) ═══ -->
@@ -1067,6 +1068,54 @@
             <div id="graph-learning-attempts" style="margin-top:8px;max-height:220px;overflow:auto;"></div>
           </details>
         </div><!-- /learning-graph-tab -->
+
+        <!-- ═══ Object Learning (WFG2 Constraints) sub-tab ═══ -->
+        <div id="learning-object-tab" style="display:none;">
+          <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
+            Object Learning validates whether WFG2 keeps specific user-marked objects coherent. Draw boxes around objects,
+            then analyze split/merge/leak behavior under the current accepted tuning.
+          </p>
+
+          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+            <label class="btn primary">
+              Upload File
+              <input id="object-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
+            </label>
+            <button id="object-learning-undo-btn" class="btn" type="button" disabled>Undo Box</button>
+            <button id="object-learning-clear-btn" class="btn ghost" type="button" disabled>Clear All Boxes</button>
+            <button id="object-learning-analyze-btn" class="btn primary" type="button" disabled>Analyze Objects</button>
+            <span id="object-learning-status" class="sub" style="color:var(--muted);">No file loaded.</span>
+          </div>
+
+          <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <strong style="white-space:nowrap;">Overlay</strong>
+              <label><input type="checkbox" id="object-learning-show-compiled" checked /> Compiled Graph</label>
+              <label><input type="checkbox" id="object-learning-show-regions" checked /> Region Boxes</label>
+              <label><input type="checkbox" id="object-learning-show-analysis" checked /> Analysis Hints</label>
+              <span style="color:var(--border);">|</span>
+              <span id="object-learning-baseline-status" class="sub" style="color:var(--muted);">Uses current accepted tuning baseline when available.</span>
+            </div>
+          </div>
+
+          <div id="object-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
+            <div class="sub" style="margin-bottom:8px;color:var(--muted);">Draw object boxes directly on the overlay canvas.</div>
+            <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
+              <canvas id="object-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
+              <canvas id="object-learning-overlay-canvas" style="position:absolute;left:0;top:0;cursor:crosshair;"></canvas>
+            </div>
+          </div>
+
+          <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+            <h4 style="margin:0 0 8px;">Aggregate Summary</h4>
+            <div id="object-learning-summary" class="sub" style="color:var(--muted);">No analysis yet.</div>
+          </div>
+
+          <details class="panel minimal" open>
+            <summary>Per-Box Analysis</summary>
+            <div id="object-learning-results" style="margin-top:8px;"></div>
+          </details>
+        </div><!-- /learning-object-tab -->
 
       </section>
 

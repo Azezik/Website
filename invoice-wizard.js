@@ -530,6 +530,19 @@ const els = {
   graphLearningViewer: document.getElementById('graph-learning-viewer'),
   graphLearningBaseCanvas: document.getElementById('graph-learning-base-canvas'),
   graphLearningOverlayCanvas: document.getElementById('graph-learning-overlay-canvas'),
+  objectLearningFileInput: document.getElementById('object-learning-file-input'),
+  objectLearningUndoBtn: document.getElementById('object-learning-undo-btn'),
+  objectLearningClearBtn: document.getElementById('object-learning-clear-btn'),
+  objectLearningAnalyzeBtn: document.getElementById('object-learning-analyze-btn'),
+  objectLearningStatus: document.getElementById('object-learning-status'),
+  objectLearningShowCompiled: document.getElementById('object-learning-show-compiled'),
+  objectLearningShowRegions: document.getElementById('object-learning-show-regions'),
+  objectLearningShowAnalysis: document.getElementById('object-learning-show-analysis'),
+  objectLearningBaselineStatus: document.getElementById('object-learning-baseline-status'),
+  objectLearningSummary: document.getElementById('object-learning-summary'),
+  objectLearningResults: document.getElementById('object-learning-results'),
+  objectLearningBaseCanvas: document.getElementById('object-learning-base-canvas'),
+  objectLearningOverlayCanvas: document.getElementById('object-learning-overlay-canvas'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -1882,6 +1895,19 @@ let state = {
     latestFeedback: null,
     activePreset: null,
     show: { regions: true, contours: true, adjacency: true, debug: false }
+  },
+  objectLearning: {
+    active: false,
+    fileId: null,
+    fileName: '',
+    normalizedSurface: null,
+    graph: null,
+    boxes: [],
+    analyses: [],
+    aggregate: null,
+    drawing: null,
+    objective: null,
+    constraints: []
   },
 };
 
@@ -21751,6 +21777,7 @@ function wfg2UpdateStateIndicator(){
 
   if(acceptBtn) acceptBtn.disabled = !state.graphLearning.params;
   if(resetToBaselineBtn) resetToBaselineBtn.style.display = baseline ? '' : 'none';
+  updateObjectLearningBaselineStatus();
 }
 
 // Accept Current Tuning button
@@ -21768,11 +21795,13 @@ function wfg2UpdateStateIndicator(){
       ? (passed + '/' + benchResults.length + ' benchmarks passed')
       : 'no benchmarks run';
 
+    var previousBaseline = wfg2LoadAcceptedBaseline();
     var baselineData = {
       params: _wfg2.copyParams(gl.params),
       sliderValues: gl.params._sliderValues ? Object.assign({}, gl.params._sliderValues) : null,
       benchmarkSummary: benchSummary,
       benchmarkPassFail: benchResults.map(function(r){ return { id: r.id, label: r.label, pass: r.pass }; }),
+      objectLearningSummary: previousBaseline?.objectLearningSummary || null,
       acceptedAt: new Date().toISOString(),
       sourceFileName: gl.fileName || null,
       sourceAttemptNumber: gl.attemptNumber || 0
@@ -21946,6 +21975,440 @@ function wfg2RefreshDebugInspector(){
 // Initialize state indicator
 wfg2UpdateStateIndicator();
 
+
+/* ====================== Object Learning (WFG2 Constraints) ========== */
+
+function objectLearningStatus(msg){ if(els.objectLearningStatus) els.objectLearningStatus.textContent = msg || ''; }
+
+function wfg2GetEffectiveParams(){
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(baseline?.params && _wfg2) return _wfg2.copyParams(baseline.params);
+  if(state.graphLearning?.params && _wfg2) return _wfg2.copyParams(state.graphLearning.params);
+  return _wfg2 ? _wfg2.copyParams(_wfg2.DEFAULT_PARAMS) : null;
+}
+
+function wfg2UpdateObjectLearningSummary(summary){
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(!baseline) return;
+  baseline.objectLearningSummary = summary || null;
+  baseline.objectLearningUpdatedAt = new Date().toISOString();
+  wfg2SaveAcceptedBaseline(baseline);
+  updateObjectLearningBaselineStatus();
+  wfg2UpdateStateIndicator();
+}
+
+function updateObjectLearningBaselineStatus(){
+  if(!els.objectLearningBaselineStatus) return;
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(!baseline){
+    els.objectLearningBaselineStatus.textContent = 'No accepted baseline yet. Object analysis is using temporary/default tuning.';
+    return;
+  }
+  var stamp = baseline.acceptedAt ? new Date(baseline.acceptedAt).toLocaleString() : 'unknown';
+  var ol = baseline.objectLearningSummary;
+  if(ol && Number.isFinite(ol.objectCohesionScore)){
+    els.objectLearningBaselineStatus.textContent = 'Accepted baseline (' + stamp + ') • last cohesion ' + ol.objectCohesionScore.toFixed(1) + '% over ' + (ol.boxCount || 0) + ' object(s).';
+  } else {
+    els.objectLearningBaselineStatus.textContent = 'Accepted baseline (' + stamp + ') loaded. Run Object Learning analysis to record object summary.';
+  }
+}
+
+function syncObjectLearningCanvases(){
+  var ol = state.objectLearning;
+  var surf = ol.normalizedSurface;
+  var base = els.objectLearningBaseCanvas;
+  var overlay = els.objectLearningOverlayCanvas;
+  if(!surf || !base || !overlay) return null;
+  if(base.width !== surf.width || base.height !== surf.height){ base.width = surf.width; base.height = surf.height; }
+  if(overlay.width !== surf.width || overlay.height !== surf.height){ overlay.width = surf.width; overlay.height = surf.height; }
+  var container = base.parentElement;
+  var maxW = (container && container.clientWidth > 0) ? container.clientWidth : surf.width;
+  var maxH = Math.round(window.innerHeight * 0.65);
+  var fitScale = Math.min(maxW / surf.width, maxH / surf.height, 1);
+  var cssW = Math.round(surf.width * fitScale) + 'px';
+  var cssH = Math.round(surf.height * fitScale) + 'px';
+  base.style.width = cssW; base.style.height = cssH;
+  overlay.style.width = cssW; overlay.style.height = cssH;
+  return { base: base, overlay: overlay, width: surf.width, height: surf.height };
+}
+
+function renderObjectLearningBaseSurface(){
+  var synced = syncObjectLearningCanvases();
+  if(!synced) return;
+  var surf = state.objectLearning.normalizedSurface;
+  var ctx = synced.base.getContext('2d', { willReadFrequently: true });
+  var out = new Uint8ClampedArray(surf.width * surf.height * 4);
+  var hasColor = surf.rgb && surf.rgb.r;
+  for(var i = 0, j = 0; i < surf.gray.length; i++, j += 4){
+    if(hasColor){ out[j] = surf.rgb.r[i] || 0; out[j + 1] = surf.rgb.g[i] || 0; out[j + 2] = surf.rgb.b[i] || 0; }
+    else { var v = surf.gray[i] || 0; out[j] = v; out[j + 1] = v; out[j + 2] = v; }
+    out[j + 3] = 255;
+  }
+  ctx.putImageData(new ImageData(out, surf.width, surf.height), 0, 0);
+}
+
+function pointInBox(pt, box){ return !!pt && pt.x >= box.x && pt.y >= box.y && pt.x <= box.x + box.w && pt.y <= box.y + box.h; }
+function intersectArea(a, b){
+  var x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+  var x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+  var w = x2 - x1, h = y2 - y1;
+  return (w > 0 && h > 0) ? (w * h) : 0;
+}
+
+function objectLearningAnalyzeBox(box, graph){
+  var nodes = graph?.nodes || [];
+  var edges = graph?.edges || [];
+  var boxArea = Math.max(1, box.w * box.h);
+  var hits = [];
+  for(var i = 0; i < nodes.length; i++){
+    var node = nodes[i];
+    var nb = node.bbox || { x: 0, y: 0, w: 0, h: 0 };
+    var ov = intersectArea(box, nb);
+    if(ov <= 0 && !pointInBox(node.center, box)) continue;
+    var nodeArea = Math.max(1, (nb.w || 1) * (nb.h || 1));
+    var outsideRatio = Math.max(0, nodeArea - ov) / nodeArea;
+    hits.push({ node: node, overlapArea: ov, overlapRatio: ov / boxArea, outsideRatio: outsideRatio });
+  }
+  hits.sort(function(a, b){ return b.overlapArea - a.overlapArea; });
+  var dominant = hits[0] || null;
+  var dominantCoverage = dominant ? (dominant.overlapArea / boxArea) : 0;
+  var fragmentation = hits.length <= 1 ? 0 : Math.min(1, (hits.length - 1) / 4);
+  var leakage = 0;
+  for(var h = 0; h < hits.length; h++) leakage += hits[h].outsideRatio;
+  leakage = hits.length ? Math.min(1, leakage / hits.length) : 1;
+  var coverageTotal = 0;
+  for(var t = 0; t < hits.length; t++) coverageTotal += hits[t].overlapRatio;
+  var boundaryAlignment = Math.max(0, Math.min(1, (dominantCoverage * 0.75) + ((1 - leakage) * 0.25) - Math.max(0, coverageTotal - 1) * 0.1));
+
+  var splitBoundaries = [];
+  var leakEdges = [];
+  var hitIds = new Set(hits.map(function(hh){ return hh.node.id; }));
+  for(var e = 0; e < edges.length; e++){
+    var edge = edges[e];
+    var inFrom = hitIds.has(edge.from);
+    var inTo = hitIds.has(edge.to);
+    if(inFrom && inTo) splitBoundaries.push(edge);
+    else if(inFrom || inTo) leakEdges.push(edge);
+  }
+
+  var classification = 'coherent';
+  if(!hits.length || dominantCoverage < 0.35) classification = 'unstable';
+  else if(hits.length >= 3 || fragmentation > 0.5) classification = 'split';
+  else if(leakage > 0.45 && dominantCoverage > 0.55) classification = 'merged';
+  else if(leakage > 0.22 || leakEdges.length > splitBoundaries.length + 1) classification = 'leaking';
+
+  return {
+    boxId: box.id,
+    classification: classification,
+    metrics: {
+      intersectingRegions: hits.length,
+      dominantRegionCoveragePct: dominantCoverage * 100,
+      fragmentationScore: fragmentation,
+      leakageScore: leakage,
+      boundaryAlignmentScore: boundaryAlignment
+    },
+    overlay: {
+      hitNodes: hits.map(function(hh){ return hh.node.id; }),
+      splitBoundaries: splitBoundaries,
+      leakEdges: leakEdges,
+      dominantNodeId: dominant?.node?.id || null
+    },
+    constraints: {
+      shouldNotSplit: true,
+      shouldNotMergeExternally: true,
+      shouldRemainStable: true
+    },
+    objectiveContribution: Math.max(0, Math.min(1, (dominantCoverage * 0.45) + ((1 - fragmentation) * 0.2) + ((1 - leakage) * 0.25) + (boundaryAlignment * 0.1)))
+  };
+}
+
+function objectLearningBuildAggregate(analyses){
+  if(!analyses.length) return null;
+  var cohesive = 0, fragment = 0, leak = 0, passed = 0;
+  analyses.forEach(function(a){
+    cohesive += a.objectiveContribution;
+    fragment += a.metrics.fragmentationScore;
+    leak += a.metrics.leakageScore;
+    if(a.classification === 'coherent') passed++;
+  });
+  var score = (cohesive / analyses.length) * 100;
+  return {
+    boxCount: analyses.length,
+    objectCohesionScore: score,
+    fragmentationAverage: fragment / analyses.length,
+    leakageAverage: leak / analyses.length,
+    passedCount: passed,
+    failedCount: analyses.length - passed,
+    autoTuneObjective: cohesive / analyses.length,
+    constraints: analyses.map(function(a){ return { boxId: a.boxId, classification: a.classification, objectiveContribution: a.objectiveContribution, constraints: a.constraints }; })
+  };
+}
+
+function renderObjectLearningResults(){
+  if(els.objectLearningResults){
+    var analyses = state.objectLearning.analyses || [];
+    if(!analyses.length){
+      els.objectLearningResults.innerHTML = '<p class="sub" style="color:var(--muted);">Draw boxes and click Analyze Objects.</p>';
+    } else {
+      els.objectLearningResults.innerHTML = analyses.map(function(a, idx){
+        var m = a.metrics;
+        return '<div style="border-bottom:1px solid var(--border,#eee);padding:8px 0;">' +
+          '<strong>Box #' + (idx + 1) + '</strong> — <span style="text-transform:capitalize;">' + a.classification + '</span>' +
+          '<div class="sub" style="margin-top:4px;color:var(--muted);">' +
+          'regions=' + m.intersectingRegions +
+          ', dominant=' + m.dominantRegionCoveragePct.toFixed(1) + '%' +
+          ', fragmentation=' + m.fragmentationScore.toFixed(2) +
+          ', leakage=' + m.leakageScore.toFixed(2) +
+          ', boundary=' + m.boundaryAlignmentScore.toFixed(2) +
+          '</div>' +
+          '</div>';
+      }).join('');
+    }
+  }
+  var agg = state.objectLearning.aggregate;
+  if(els.objectLearningSummary){
+    if(!agg) els.objectLearningSummary.textContent = 'No analysis yet.';
+    else els.objectLearningSummary.textContent = 'Object cohesion ' + agg.objectCohesionScore.toFixed(1) + '% • fragmentation avg ' + agg.fragmentationAverage.toFixed(2) + ' • leakage avg ' + agg.leakageAverage.toFixed(2) + ' • passed ' + agg.passedCount + '/' + agg.boxCount + '.';
+  }
+}
+
+function objectLearningDrawOverlay(ctx){
+  var ol = state.objectLearning;
+  var graph = ol.graph;
+  var showCompiled = !!els.objectLearningShowCompiled?.checked;
+  var showRegions = !!els.objectLearningShowRegions?.checked;
+  var showAnalysis = !!els.objectLearningShowAnalysis?.checked;
+  var nodes = graph?.nodes || [];
+  if(showCompiled){
+    for(var i = 0; i < nodes.length; i++){
+      var c = nodes[i].contour || [];
+      if(c.length < 3) continue;
+      ctx.fillStyle = 'rgba(33,150,243,0.08)';
+      ctx.strokeStyle = 'rgba(0,150,136,0.7)';
+      ctx.beginPath(); ctx.moveTo(c[0].x, c[0].y);
+      for(var j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+  }
+  if(showRegions){
+    nodes.forEach(function(n){ var b = n.bbox || {}; ctx.strokeStyle = 'rgba(63,81,181,0.5)'; ctx.strokeRect(b.x||0,b.y||0,b.w||0,b.h||0); });
+  }
+
+  ol.boxes.forEach(function(box, idx){
+    var analysis = (ol.analyses || []).find(function(a){ return a.boxId === box.id; });
+    var color = analysis
+      ? (analysis.classification === 'coherent' ? '#2a7' : analysis.classification === 'split' ? '#c44' : analysis.classification === 'merged' ? '#a24' : analysis.classification === 'leaking' ? '#d9822b' : '#666')
+      : '#4a90e2';
+    ctx.fillStyle = color + '22';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.fillRect(box.x, box.y, box.w, box.h);
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+    ctx.font = '11px IBM Plex Mono, monospace';
+    ctx.fillStyle = color;
+    ctx.fillText('#' + (idx + 1) + (analysis ? (' ' + analysis.classification) : ''), box.x + 4, Math.max(12, box.y - 4));
+
+    if(showAnalysis && analysis){
+      var nodeMap = new Map(nodes.map(function(n){ return [n.id, n]; }));
+      ctx.strokeStyle = 'rgba(255,82,82,0.85)';
+      analysis.overlay.splitBoundaries.forEach(function(edge){
+        var a = nodeMap.get(edge.from), b = nodeMap.get(edge.to);
+        if(!a || !b) return;
+        ctx.beginPath(); ctx.moveTo(a.center?.x || 0, a.center?.y || 0); ctx.lineTo(b.center?.x || 0, b.center?.y || 0); ctx.stroke();
+      });
+      ctx.strokeStyle = 'rgba(255,193,7,0.85)';
+      analysis.overlay.leakEdges.forEach(function(edge){
+        var a = nodeMap.get(edge.from), b = nodeMap.get(edge.to);
+        if(!a || !b) return;
+        ctx.beginPath(); ctx.moveTo(a.center?.x || 0, a.center?.y || 0); ctx.lineTo(b.center?.x || 0, b.center?.y || 0); ctx.stroke();
+      });
+    }
+  });
+
+  if(ol.drawing){
+    var d = ol.drawing;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#009688';
+    ctx.strokeRect(d.x, d.y, d.w, d.h);
+    ctx.setLineDash([]);
+  }
+}
+
+function renderObjectLearningViewer(){
+  var synced = syncObjectLearningCanvases();
+  if(!synced) return;
+  renderObjectLearningBaseSurface();
+  var octx = synced.overlay.getContext('2d');
+  octx.clearRect(0, 0, synced.width, synced.height);
+  objectLearningDrawOverlay(octx);
+}
+
+function clearObjectLearningViewer(){
+  var base = els.objectLearningBaseCanvas;
+  var overlay = els.objectLearningOverlayCanvas;
+  if(base){ var bctx = base.getContext('2d'); bctx.clearRect(0,0,base.width||1,base.height||1); }
+  if(overlay){ var octx = overlay.getContext('2d'); octx.clearRect(0,0,overlay.width||1,overlay.height||1); }
+}
+
+function objectLearningUpdateButtons(){
+  var hasBoxes = (state.objectLearning.boxes || []).length > 0;
+  if(els.objectLearningUndoBtn) els.objectLearningUndoBtn.disabled = !hasBoxes;
+  if(els.objectLearningClearBtn) els.objectLearningClearBtn.disabled = !hasBoxes;
+  if(els.objectLearningAnalyzeBtn) els.objectLearningAnalyzeBtn.disabled = !hasBoxes || !state.objectLearning.graph;
+}
+
+function objectLearningAnalyze(){
+  var ol = state.objectLearning;
+  if(!ol.graph || !ol.boxes.length){ objectLearningStatus('Upload file and draw at least one object box.'); return; }
+  ol.analyses = ol.boxes.map(function(b){ return objectLearningAnalyzeBox(b, ol.graph); });
+  ol.aggregate = objectLearningBuildAggregate(ol.analyses);
+  ol.constraints = ol.aggregate?.constraints || [];
+  ol.objective = ol.aggregate?.autoTuneObjective || 0;
+  renderObjectLearningResults();
+  renderObjectLearningViewer();
+  if(ol.aggregate){
+    objectLearningStatus('Analyzed ' + ol.aggregate.boxCount + ' object(s): cohesion ' + ol.aggregate.objectCohesionScore.toFixed(1) + '%.');
+    wfg2UpdateObjectLearningSummary({
+      boxCount: ol.aggregate.boxCount,
+      objectCohesionScore: ol.aggregate.objectCohesionScore,
+      fragmentationAverage: ol.aggregate.fragmentationAverage,
+      leakageAverage: ol.aggregate.leakageAverage,
+      passedCount: ol.aggregate.passedCount,
+      failedCount: ol.aggregate.failedCount,
+      objective: ol.aggregate.autoTuneObjective,
+      analyzedAt: new Date().toISOString()
+    });
+  }
+}
+
+function objectLearningCanvasToSurfacePoint(evt){
+  var canvas = els.objectLearningOverlayCanvas;
+  if(!canvas) return null;
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width / Math.max(1, rect.width);
+  var sy = canvas.height / Math.max(1, rect.height);
+  return { x: (evt.clientX - rect.left) * sx, y: (evt.clientY - rect.top) * sy };
+}
+
+function objectLearningBindDrawing(){
+  var canvas = els.objectLearningOverlayCanvas;
+  if(!canvas || canvas._objBound) return;
+  var isDown = false;
+  canvas.addEventListener('pointerdown', function(evt){
+    if(!state.objectLearning.graph) return;
+    var p = objectLearningCanvasToSurfacePoint(evt); if(!p) return;
+    isDown = true;
+    state.objectLearning.drawing = { startX: p.x, startY: p.y, x: p.x, y: p.y, w: 1, h: 1 };
+    renderObjectLearningViewer();
+  });
+  canvas.addEventListener('pointermove', function(evt){
+    if(!isDown || !state.objectLearning.drawing) return;
+    var p = objectLearningCanvasToSurfacePoint(evt); if(!p) return;
+    var d = state.objectLearning.drawing;
+    d.x = Math.min(d.startX, p.x); d.y = Math.min(d.startY, p.y);
+    d.w = Math.abs(p.x - d.startX); d.h = Math.abs(p.y - d.startY);
+    renderObjectLearningViewer();
+  });
+  function finishDraw(){
+    if(!isDown) return;
+    isDown = false;
+    var d = state.objectLearning.drawing;
+    state.objectLearning.drawing = null;
+    if(d && d.w >= 8 && d.h >= 8){
+      state.objectLearning.boxes.push({ id: 'objbox-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6), x: d.x, y: d.y, w: d.w, h: d.h });
+      state.objectLearning.analyses = [];
+      state.objectLearning.aggregate = null;
+      objectLearningStatus('Box added. Click Analyze Objects to evaluate constraints.');
+    }
+    objectLearningUpdateButtons();
+    renderObjectLearningResults();
+    renderObjectLearningViewer();
+  }
+  canvas.addEventListener('pointerup', finishDraw);
+  canvas.addEventListener('pointerleave', function(){ if(isDown) finishDraw(); });
+  canvas._objBound = true;
+}
+
+function objectLearningRunGeneration(){
+  var ol = state.objectLearning;
+  if(!_wfg2 || !ol.normalizedSurface) return;
+  var params = wfg2GetEffectiveParams();
+  ol.graph = _wfg2.generateRegionGraph(ol.normalizedSurface, params || _wfg2.DEFAULT_PARAMS);
+  objectLearningUpdateButtons();
+  renderObjectLearningViewer();
+}
+
+async function objectLearningOpenFile(file){
+  if(!file || !_wfg2) return;
+  state.objectLearning.active = true;
+  state.objectLearning.fileName = file.name || 'untitled';
+  state.objectLearning.fileId = 'wfg2obj-' + Date.now().toString(36);
+  state.objectLearning.boxes = [];
+  state.objectLearning.analyses = [];
+  state.objectLearning.aggregate = null;
+  state.objectLearning.objective = null;
+  state.objectLearning.constraints = [];
+  clearObjectLearningViewer();
+  renderObjectLearningResults();
+  objectLearningStatus('Loading file…');
+  state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
+  try { await openFile(file); }
+  catch(err){
+    console.error('[WFG2][ObjectLearning] openFile failed', err);
+    objectLearningStatus('Could not load this file for Object Learning.');
+    return;
+  }
+  var page = state.pageNum || 1;
+  var img = graphLearningCaptureGray(page);
+  if(!img || !img.width || !img.height){ objectLearningStatus('File loaded but no render surface was available.'); return; }
+  state.objectLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  if(!state.objectLearning.normalizedSurface){ objectLearningStatus('Normalization failed for this file.'); return; }
+  renderObjectLearningBaseSurface();
+  objectLearningRunGeneration();
+  objectLearningBindDrawing();
+  updateObjectLearningBaselineStatus();
+  objectLearningStatus('File loaded. Draw one or more object boxes, then click Analyze Objects.');
+}
+
+if(els.objectLearningFileInput){
+  els.objectLearningFileInput.addEventListener('change', async function(e){
+    var file = e.target.files?.[0];
+    if(!file) return;
+    e.target.value = '';
+    await objectLearningOpenFile(file);
+  });
+}
+if(els.objectLearningUndoBtn){
+  els.objectLearningUndoBtn.addEventListener('click', function(){
+    if(!state.objectLearning.boxes.length) return;
+    state.objectLearning.boxes.pop();
+    state.objectLearning.analyses = [];
+    state.objectLearning.aggregate = null;
+    objectLearningUpdateButtons();
+    renderObjectLearningResults();
+    renderObjectLearningViewer();
+  });
+}
+if(els.objectLearningClearBtn){
+  els.objectLearningClearBtn.addEventListener('click', function(){
+    state.objectLearning.boxes = [];
+    state.objectLearning.analyses = [];
+    state.objectLearning.aggregate = null;
+    objectLearningUpdateButtons();
+    renderObjectLearningResults();
+    renderObjectLearningViewer();
+    objectLearningStatus('All object boxes cleared.');
+  });
+}
+if(els.objectLearningAnalyzeBtn){ els.objectLearningAnalyzeBtn.addEventListener('click', objectLearningAnalyze); }
+[els.objectLearningShowCompiled, els.objectLearningShowRegions, els.objectLearningShowAnalysis].forEach(function(el){
+  if(!el) return;
+  el.addEventListener('change', function(){ renderObjectLearningViewer(); });
+});
+updateObjectLearningBaselineStatus();
+objectLearningUpdateButtons();
+renderObjectLearningResults();
+
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 
 /* ── Learning sub-tab switching ────────────────────────────────────── */
@@ -21961,13 +22424,19 @@ wfg2UpdateStateIndicator();
       var guidedTab = document.getElementById('learning-guided-tab');
       var batchTab = document.getElementById('learning-batch-tab');
       var graphTab = document.getElementById('learning-graph-tab');
+      var objectTab = document.getElementById('learning-object-tab');
       if(guidedTab) guidedTab.style.display = targetId === 'learning-guided-tab' ? 'block' : 'none';
       if(batchTab) batchTab.style.display = targetId === 'learning-batch-tab' ? 'block' : 'none';
       if(graphTab) graphTab.style.display = targetId === 'learning-graph-tab' ? 'block' : 'none';
+      if(objectTab) objectTab.style.display = targetId === 'learning-object-tab' ? 'block' : 'none';
       if(targetId === 'learning-batch-tab') refreshBatchSessionUI();
       if(targetId === 'learning-graph-tab'){
         renderGraphLearningAttemptHistory();
         renderGraphLearningViewer();
+      }
+      if(targetId === 'learning-object-tab'){
+        renderObjectLearningViewer();
+        renderObjectLearningResults();
       }
     });
   });
