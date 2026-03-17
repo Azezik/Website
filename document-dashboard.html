@@ -893,17 +893,32 @@
             <span id="graph-learning-preset-status" class="sub" style="color:var(--muted);"></span>
           </div>
 
+          <!-- ═══ Pipeline Mode Selector ═══ -->
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+              <strong style="white-space:nowrap;">Pipeline Mode</strong>
+              <select id="graph-learning-pipeline-mode" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
+                <option value="partition" selected>Partition-Only (Color-First)</option>
+                <option value="structural">Structural-Only (Legacy)</option>
+                <option value="hybrid">Hybrid (Partition + Structural Refinement)</option>
+                <option value="combined">Combined View</option>
+              </select>
+              <span class="sub" id="graph-learning-pipeline-info" style="color:var(--muted);font-size:11px;">Non-overlapping color-first partition is the primary segmentation.</span>
+            </div>
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
               <strong style="white-space:nowrap;">Output</strong>
               <label><input type="checkbox" id="graph-learning-show-compiled" checked /> Compiled Graph</label>
               <label><input type="checkbox" id="graph-learning-show-regions" /> Bounding Boxes</label>
               <label><input type="checkbox" id="graph-learning-show-adjacency" /> Adjacency</label>
+              <label><input type="checkbox" id="graph-learning-show-partition" checked /> Partition Overlay</label>
+              <label><input type="checkbox" id="graph-learning-show-shared-boundaries" /> Shared Boundaries</label>
               <span style="color:var(--border);">|</span>
               <strong style="white-space:nowrap;">Evidence</strong>
               <label><input type="checkbox" id="graph-learning-show-color-evidence" /> Color</label>
               <label><input type="checkbox" id="graph-learning-show-closure-evidence" /> Closure</label>
               <label><input type="checkbox" id="graph-learning-show-debug" /> Debug</label>
+              <label><input type="checkbox" id="graph-learning-show-region-order" /> Region Order</label>
+              <label><input type="checkbox" id="graph-learning-show-confidence" /> Confidence</label>
               <span class="sub" id="graph-learning-status" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
             </div>
           </div>
@@ -1005,6 +1020,45 @@
                 </label>
                 <input id="wfg2-slider-geoSimplify" type="range" min="0" max="100" value="50" style="width:100%;" />
                 <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = preserve raw edges. High = smooth boundaries.</p>
+              </div>
+            </div>
+          </details>
+
+          <!-- ═══ Section 4: Partition Controls ═══ -->
+          <details class="panel minimal" style="margin-bottom:12px;" open>
+            <summary>Section 4 — Color-First Partition</summary>
+            <div style="padding:8px 0;">
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Partition Color Tolerance</strong>
+                  <span id="wfg2-slider-partitionTolerance-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-partitionTolerance" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = strict color matching (more regions). High = permissive (fewer, larger regions).</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Boundary Continuation Strength</strong>
+                  <span id="wfg2-slider-partitionContinuation-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-partitionContinuation" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = strict boundaries. High = repair noisy boundary gaps aggressively.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Local Refinement Range</strong>
+                  <span id="wfg2-slider-partitionRefinement-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-partitionRefinement" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = narrow tolerance search. High = wide local refinement at boundaries.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Region Scoring Weights</strong>
+                  <span id="wfg2-slider-partitionScoring-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-partitionScoring" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = favor small high-contrast regions. High = favor large uniform regions.</p>
               </div>
             </div>
           </details>

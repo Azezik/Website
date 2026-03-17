@@ -20677,7 +20677,11 @@ function getGraphLearningLayerFlags(){
     adjacency: !!els.graphLearningShowAdjacency?.checked,
     debug: !!els.graphLearningShowDebug?.checked,
     colorEvidence: !!(document.getElementById('graph-learning-show-color-evidence') || {}).checked,
-    closureEvidence: !!(document.getElementById('graph-learning-show-closure-evidence') || {}).checked
+    closureEvidence: !!(document.getElementById('graph-learning-show-closure-evidence') || {}).checked,
+    partition: !!(document.getElementById('graph-learning-show-partition') || {}).checked,
+    sharedBoundaries: !!(document.getElementById('graph-learning-show-shared-boundaries') || {}).checked,
+    regionOrder: !!(document.getElementById('graph-learning-show-region-order') || {}).checked,
+    confidence: !!(document.getElementById('graph-learning-show-confidence') || {}).checked
   };
 }
 
@@ -20848,6 +20852,72 @@ function paintGraphLearningOverlay(ctx){
     }
   }
 
+  // ── Partition overlay: per-pixel region coloring ──
+  if(flags.partition && artf.partitionLabelMap && nSize.width > 0 && nSize.height > 0){
+    const lblMap = artf.partitionLabelMap;
+    const mw = nSize.width, mh = nSize.height;
+    const imgData = ctx.createImageData(mw, mh);
+    const d = imgData.data;
+    const pHues = [210, 30, 150, 330, 60, 270, 180, 0, 120, 300, 45, 195, 285, 75, 345];
+    for(var pi = 0, pj = 0; pi < lblMap.length; pi++, pj += 4){
+      var lbl = lblMap[pi];
+      if(lbl < 0) continue;
+      var hue = pHues[lbl % pHues.length];
+      // HSL to RGB inline (simplified)
+      var hp = hue / 60;
+      var c1 = 0.45, x1 = c1 * (1 - Math.abs(hp % 2 - 1));
+      var rp = 0, gp = 0, bp = 0;
+      if(hp < 1){ rp = c1; gp = x1; }
+      else if(hp < 2){ rp = x1; gp = c1; }
+      else if(hp < 3){ gp = c1; bp = x1; }
+      else if(hp < 4){ gp = x1; bp = c1; }
+      else if(hp < 5){ rp = x1; bp = c1; }
+      else { rp = c1; bp = x1; }
+      d[pj] = Math.round((rp + 0.45) * 255);
+      d[pj + 1] = Math.round((gp + 0.45) * 255);
+      d[pj + 2] = Math.round((bp + 0.45) * 255);
+      d[pj + 3] = 55; // low alpha for overlay
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  // ── Shared boundaries overlay ──
+  if(flags.sharedBoundaries && artf.partitionSharedBoundaries && nSize.width > 0 && nSize.height > 0){
+    var sbMap = artf.partitionSharedBoundaries;
+    var sbW = nSize.width, sbH = nSize.height;
+    var sbImg = ctx.createImageData(sbW, sbH);
+    var sbD = sbImg.data;
+    for(var sbi = 0, sbj = 0; sbi < sbMap.length; sbi++, sbj += 4){
+      if(sbMap[sbi]){
+        sbD[sbj] = 255; sbD[sbj + 1] = 255; sbD[sbj + 2] = 0; sbD[sbj + 3] = 180;
+      }
+    }
+    ctx.putImageData(sbImg, 0, 0);
+  }
+
+  // ── Region order overlay ──
+  if(flags.regionOrder){
+    ctx.font = 'bold 11px IBM Plex Mono, monospace';
+    ctx.fillStyle = 'rgba(0,100,200,0.95)';
+    for(var roi = 0; roi < nodes.length; roi++){
+      var rn = nodes[roi];
+      var order = rn.commitOrder !== undefined ? rn.commitOrder : roi;
+      ctx.fillText('#' + order, (rn.center?.x || 0) - 8, (rn.center?.y || 0) + 14);
+    }
+  }
+
+  // ── Confidence overlay ──
+  if(flags.confidence){
+    ctx.font = '10px IBM Plex Mono, monospace';
+    for(var ci = 0; ci < nodes.length; ci++){
+      var cn = nodes[ci];
+      var conf = cn.confidence !== undefined ? cn.confidence : (cn.closureScore || 0);
+      var confPct = (conf * 100).toFixed(0);
+      ctx.fillStyle = conf > 0.6 ? 'rgba(46,125,50,0.9)' : conf > 0.3 ? 'rgba(245,127,23,0.9)' : 'rgba(211,47,47,0.9)';
+      ctx.fillText(confPct + '%', (cn.center?.x || 0) + 2, (cn.center?.y || 0) - 12);
+    }
+  }
+
   if(flags.debug){
     ctx.fillStyle = 'rgba(244,67,54,0.95)';
     ctx.font = '10px IBM Plex Mono, monospace';
@@ -20887,7 +20957,7 @@ function graphLearningCaptureAttempt(result, feedback){
     fileId: gl.fileId,
     fileName: gl.fileName,
     normalized: gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height, source: gl.normalizedSurface.source } : null,
-    generatedGraph: { engine: gl.graph.engine, version: gl.graph.version, nodes: gl.graph.nodes, edges: gl.graph.edges, artifacts: gl.graph.artifacts },
+    generatedGraph: { engine: gl.graph.engine, version: gl.graph.version, pipelineMode: gl.graph.pipelineMode, nodes: gl.graph.nodes, edges: gl.graph.edges, artifacts: gl.graph.artifacts, partition: gl.graph.partition ? { regionCount: gl.graph.partition.regionCount } : null },
     generationParameters: { ...(gl.params || {}) },
     result,
     feedbackTags: Array.isArray(feedback?.tags) ? feedback.tags : [],
@@ -20916,10 +20986,12 @@ function graphLearningRunGeneration(opts){
   updateGraphLearningPresetButtons();
   const artf = gl.graph?.artifacts || {};
   const prm = gl.params || {};
+  const modeTag = ', mode:' + (gl.graph?.pipelineMode || 'partition');
+  const partTag = gl.graph?.partition ? ', partition:' + (gl.graph.partition.regionCount || 0) + ' regions' : '';
   const colorTag = artf.colorBoundaryActive ? ', color:on' : ', color:off';
   const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
-  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + colorTag + closureTag + calTag + '.');
+  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + '.');
   renderGraphLearningViewer();
 }
 
@@ -21049,11 +21121,36 @@ if(els.graphLearningClearHistoryBtn){
 [els.graphLearningShowRegions, els.graphLearningShowAdjacency, els.graphLearningShowDebug,
  document.getElementById('graph-learning-show-compiled'),
  document.getElementById('graph-learning-show-color-evidence'),
- document.getElementById('graph-learning-show-closure-evidence')
+ document.getElementById('graph-learning-show-closure-evidence'),
+ document.getElementById('graph-learning-show-partition'),
+ document.getElementById('graph-learning-show-shared-boundaries'),
+ document.getElementById('graph-learning-show-region-order'),
+ document.getElementById('graph-learning-show-confidence')
 ].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
 });
+
+// Pipeline mode selector
+(function(){
+  var modeSelect = document.getElementById('graph-learning-pipeline-mode');
+  var modeInfo = document.getElementById('graph-learning-pipeline-info');
+  var modeDescriptions = {
+    partition: 'Non-overlapping color-first partition is the primary segmentation.',
+    structural: 'Legacy grid-based structural region growing (overlapping regions possible).',
+    hybrid: 'Partition first, then structural refinement enriches partition regions.',
+    combined: 'Both partition and structural run; partition is authoritative.'
+  };
+  if(modeSelect){
+    modeSelect.addEventListener('change', function(){
+      var mode = modeSelect.value;
+      if(modeInfo) modeInfo.textContent = modeDescriptions[mode] || '';
+      if(state.graphLearning.params) state.graphLearning.params.pipelineMode = mode;
+      if(state.graphLearning.normalizedSurface) graphLearningRunGeneration({ _skipSliderSync: true });
+    });
+  }
+})();
+
 renderGraphLearningAttemptHistory();
 renderGraphLearningPresetStatus();
 updateGraphLearningPresetButtons();
@@ -21166,6 +21263,49 @@ const WFG2_SLIDER_DEFS = {
     fromParams: function(p){
       return (typeof p.geoSimplifyLevel === 'number') ? p.geoSimplifyLevel : 0;
     }
+  },
+  /* ═══ Partition sliders ═══ */
+  partitionTolerance: {
+    label: 'Partition Color Tolerance',
+    toParams: function(t, p){
+      p.partitionColorTolerance = Math.round(3 + t * 57);  // 3..60
+    },
+    fromParams: function(p){
+      return ((p.partitionColorTolerance || 15) - 3) / 57;
+    }
+  },
+  partitionContinuation: {
+    label: 'Boundary Continuation Strength',
+    toParams: function(t, p){
+      p.partitionBoundaryContinuation = t;  // 0..1
+    },
+    fromParams: function(p){
+      return (p.partitionBoundaryContinuation ?? 0.6);
+    }
+  },
+  partitionRefinement: {
+    label: 'Local Refinement Range',
+    toParams: function(t, p){
+      p.partitionLocalRefinementRange = Math.round(1 + t * 31);  // 1..32
+    },
+    fromParams: function(p){
+      return ((p.partitionLocalRefinementRange || 8) - 1) / 31;
+    }
+  },
+  partitionScoring: {
+    label: 'Region Scoring Weights',
+    toParams: function(t, p){
+      // Low t = favor small high-contrast (more boundary/contour weight)
+      // High t = favor large uniform (more variance/closure weight)
+      p.partitionScoreVarianceW = 0.10 + t * 0.40;   // 0.10..0.50
+      p.partitionScoreBoundaryW = 0.40 - t * 0.25;   // 0.40..0.15
+      p.partitionScoreContourW = 0.25 - t * 0.10;    // 0.25..0.15
+      p.partitionScoreClosureW = 0.10 + t * 0.15;    // 0.10..0.25
+      p.partitionScoreLeakW = 0.15 - t * 0.05;       // 0.15..0.10
+    },
+    fromParams: function(p){
+      return ((p.partitionScoreVarianceW || 0.25) - 0.10) / 0.40;
+    }
   }
 };
 
@@ -21209,6 +21349,14 @@ function wfg2ReadSlidersToParams(){
   p.closureWeight = Math.max(0, Math.min(0.6, p.closureWeight));
   p.parentContourBonus = Math.max(0, Math.min(0.6, p.parentContourBonus));
   p.minEnclosingArea = Math.max(0.002, Math.min(0.1, p.minEnclosingArea));
+  // Partition params clamping
+  p.partitionColorTolerance = Math.max(3, Math.min(60, Math.round(p.partitionColorTolerance || 15)));
+  p.partitionMinRegionPixels = Math.max(4, Math.min(2000, Math.round(p.partitionMinRegionPixels || 64)));
+  p.partitionBoundaryContinuation = Math.max(0, Math.min(1, p.partitionBoundaryContinuation ?? 0.6));
+  p.partitionLocalRefinementRange = Math.max(1, Math.min(32, Math.round(p.partitionLocalRefinementRange || 8)));
+  // Read pipeline mode from UI
+  var modeEl = document.getElementById('graph-learning-pipeline-mode');
+  if(modeEl) p.pipelineMode = modeEl.value || 'partition';
   return p;
 }
 
@@ -21230,6 +21378,9 @@ function wfg2SyncSlidersFromParams(params){
     if(el) el.value = val;
     if(valEl) valEl.textContent = (val / 100).toFixed(2);
   }
+  // Sync pipeline mode selector
+  var modeSelect = document.getElementById('graph-learning-pipeline-mode');
+  if(modeSelect && params.pipelineMode) modeSelect.value = params.pipelineMode;
 }
 
 function wfg2UpdateSliderDisplay(id){
@@ -21451,6 +21602,52 @@ const WFG2_BENCHMARKS = [
     critical: false,
     causeCategory: 'general color distance issue',
     comparisonPairId: 'red_vs_blue_pair_red'
+  },
+  /* ═══ Partition-specific benchmarks ═══ */
+  { id: 'partition_non_overlap', label: 'P1: Partition Non-Overlap',
+    description: 'Validates that partition produces non-overlapping regions: every pixel assigned to exactly one region.',
+    mustPassDefault: true,
+    validate: function(graph){
+      var partition = graph?.partition;
+      if(!partition || !partition.labelMap) return { pass: false, reason: 'No partition data — pipeline mode may not be partition.' };
+      var lblMap = partition.labelMap;
+      var unassigned = 0;
+      for(var i = 0; i < lblMap.length; i++) if(lblMap[i] < 0) unassigned++;
+      if(unassigned > 0) return { pass: false, reason: unassigned + ' pixels unassigned — partition incomplete.' };
+      return { pass: true, reason: 'All pixels assigned. Non-overlapping partition verified.' };
+    },
+    critical: true,
+    causeCategory: 'partition algorithm failure — pixels left unassigned'
+  },
+  { id: 'partition_shared_boundaries', label: 'P2: Shared Boundaries',
+    description: 'Validates that partition produces shared boundaries between adjacent regions.',
+    validate: function(graph){
+      var partition = graph?.partition;
+      if(!partition || !partition.sharedBoundaries) return { pass: false, reason: 'No shared boundary data.' };
+      var sb = partition.sharedBoundaries;
+      var boundaryCount = 0;
+      for(var i = 0; i < sb.length; i++) if(sb[i]) boundaryCount++;
+      if(boundaryCount === 0) return { pass: false, reason: 'No shared boundaries detected — only one region?' };
+      return { pass: true, reason: boundaryCount + ' boundary pixels. Shared boundaries present.' };
+    },
+    critical: false,
+    causeCategory: 'partition produced only one region or no boundaries'
+  },
+  { id: 'partition_graph_from_partition', label: 'P3: Graph Built From Partition',
+    description: 'Validates that the feature graph nodes and edges are derived from the partition, not from independent proposals.',
+    validate: function(graph){
+      if(!graph?.partition) return { pass: false, reason: 'No partition data.' };
+      var nodes = graph.nodes || [];
+      var partitionNodes = nodes.filter(function(n){ return n.type === 'partition_region'; });
+      if(partitionNodes.length === 0 && nodes.length > 0) return { pass: false, reason: 'Graph nodes are not partition_region type — graph not built from partition.' };
+      if(partitionNodes.length === 0) return { pass: false, reason: 'No regions detected.' };
+      var edges = graph.edges || [];
+      var sharedBoundaryEdges = edges.filter(function(e){ return e.kind === 'shared_boundary'; });
+      if(edges.length > 0 && sharedBoundaryEdges.length === 0) return { pass: false, reason: 'Edges exist but none are shared_boundary — graph not derived from partition.' };
+      return { pass: true, reason: partitionNodes.length + ' partition regions, ' + sharedBoundaryEdges.length + ' shared-boundary edges. Graph derived from partition.' };
+    },
+    critical: true,
+    causeCategory: 'graph construction not using partition as source'
   }
 ];
 
