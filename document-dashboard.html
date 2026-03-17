@@ -875,9 +875,9 @@
         <!-- ═══ Graph Learning (WFG2) sub-tab ═══ -->
         <div id="learning-graph-tab" style="display:none;">
           <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
-            Evaluate WFG2 (WrokitFeatureGraph2), a visual-first structural graph engine that avoids OCR/text proposals.
-            Now with color-aware boundary evidence (Lab color space) and continuity/closure contour reasoning.
-            Upload one file, inspect shape-following overlays, mark Good/Bad, and regenerate with feedback.
+            WFG2 (WrokitFeatureGraph2) segmentation parameter controls. Sliders map directly to the engine's
+            perceptual color distance, region merge rules, boundary snap, closure reinforcement, and other pipeline parameters.
+            Upload a file to preview, adjust sliders, and regenerate. Use the benchmark panel to validate core segmentation.
           </p>
 
           <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
@@ -915,38 +915,120 @@
             </div>
           </div>
 
-          <div class="panel minimal" style="margin-bottom:12px;">
-            <div class="actions" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-              <strong>Result Review</strong>
-              <div class="actions" style="gap:8px;">
-                <button id="graph-learning-good-btn" class="btn" type="button" disabled>Good</button>
-                <button id="graph-learning-bad-btn" class="btn" type="button" disabled>Bad</button>
-              </div>
-            </div>
-            <div id="graph-learning-feedback-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
-              <p class="sub" style="margin:0 0 8px;color:var(--muted);">What went wrong? Select all that apply.</p>
-              <div style="display:grid;grid-template-columns:repeat(2,minmax(200px,1fr));gap:6px 16px;">
-                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:2px;">Region count</strong>
-                <label><input type="checkbox" data-feedback-tag="too_many_regions" /> Too many regions</label>
-                <label><input type="checkbox" data-feedback-tag="too_few_regions" /> Too few regions</label>
-                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:4px;">Boundaries &amp; shapes</strong>
-                <label><input type="checkbox" data-feedback-tag="split_object" /> Object split into pieces</label>
-                <label><input type="checkbox" data-feedback-tag="merged_objects" /> Separate objects merged together</label>
-                <label><input type="checkbox" data-feedback-tag="shape_mismatch" /> Shapes don’t follow actual objects</label>
-                <label><input type="checkbox" data-feedback-tag="missed_object" /> Missed an important object</label>
-                <strong class="sub" style="grid-column:1/-1;color:var(--muted);margin-top:4px;">Color &amp; surface</strong>
-                <label><input type="checkbox" data-feedback-tag="color_boundary_missed" /> Color difference not used as a boundary</label>
-                <label><input type="checkbox" data-feedback-tag="surface_fragmented" /> Uniform surface broken into pieces</label>
-              </div>
-              <div class="actions" style="margin-top:10px;gap:10px;align-items:center;">
-                <label>Quality (1-5):
-                  <input id="graph-learning-rating" type="number" min="1" max="5" step="1" style="width:64px;margin-left:6px;" />
+          <!-- ═══ Section 1: Core Edge Sensitivity ═══ -->
+          <details class="panel minimal" style="margin-bottom:12px;" open>
+            <summary>Section 1 — Core Edge Sensitivity</summary>
+            <div style="padding:8px 0;">
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Color Boundary Sensitivity</strong>
+                  <span id="wfg2-slider-colorSensitivity-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
                 </label>
-                <button id="graph-learning-apply-feedback-btn" class="btn primary" type="button">Apply Feedback + Regenerate</button>
+                <input id="wfg2-slider-colorSensitivity" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = only strong color differences create edges. High = moderate differences produce edges.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Brightness-Only Edge Suppression</strong>
+                  <span id="wfg2-slider-luminanceSuppression-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-luminanceSuppression" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = shadows/brightness gradients may generate edges. High = brightness-only gradients heavily suppressed.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Boundary Snap Tightness</strong>
+                  <span id="wfg2-slider-boundarySnap-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-boundarySnap" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = loose boundaries. High = edges snap tightly to color transitions.</p>
               </div>
             </div>
+          </details>
+
+          <!-- ═══ Section 2: Region Formation ═══ -->
+          <details class="panel minimal" style="margin-bottom:12px;" open>
+            <summary>Section 2 — Region Formation</summary>
+            <div style="padding:8px 0;">
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Same-Surface Merge Strength</strong>
+                  <span id="wfg2-slider-mergeStrength-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-mergeStrength" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = gradients may split regions. High = internal shading merges into one region.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Small Region Preservation</strong>
+                  <span id="wfg2-slider-smallRegion-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-smallRegion" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = small regions easily merge. High = small high-contrast objects remain distinct.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Minimum Region Significance</strong>
+                  <span id="wfg2-slider-minSignificance-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-minSignificance" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = many small noisy regions survive. High = only significant regions remain.</p>
+              </div>
+            </div>
+          </details>
+
+          <!-- ═══ Section 3: Structural Reinforcement ═══ -->
+          <details class="panel minimal" style="margin-bottom:12px;" open>
+            <summary>Section 3 — Structural Reinforcement</summary>
+            <div style="padding:8px 0;">
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Shape Continuity Reinforcement</strong>
+                  <span id="wfg2-slider-shapeContinuity-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-shapeContinuity" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = color evidence dominates. High = continuous edges get extra weight.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Closure Bias</strong>
+                  <span id="wfg2-slider-closureBias-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-closureBias" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = open boundaries allowed. High = closed shapes strongly preferred.</p>
+              </div>
+              <div class="wfg2-slider-row" style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Geometric Simplification</strong>
+                  <span id="wfg2-slider-geoSimplify-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;">0.50</span>
+                </label>
+                <input id="wfg2-slider-geoSimplify" type="range" min="0" max="100" value="50" style="width:100%;" />
+                <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:11px;">Low = preserve raw edges. High = smooth boundaries.</p>
+              </div>
+            </div>
+          </details>
+
+          <!-- ═══ Apply / Reset controls ═══ -->
+          <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+            <button id="graph-learning-apply-sliders-btn" class="btn primary" type="button" disabled>Apply Parameters + Regenerate</button>
+            <button id="graph-learning-reset-defaults-btn" class="btn ghost" type="button">Reset to Defaults</button>
           </div>
 
+          <!-- ═══ Benchmark Validation Panel ═══ -->
+          <details id="graph-learning-benchmark-panel" class="panel minimal" style="margin-bottom:12px;">
+            <summary>Benchmark Validation</summary>
+            <p class="sub" style="margin:4px 0 8px;color:var(--muted);">
+              Canonical test images to validate segmentation behavior. Click "Run Benchmarks" to generate and evaluate all tests.
+            </p>
+            <div class="actions" style="gap:8px;margin-bottom:12px;">
+              <button id="graph-learning-run-benchmarks-btn" class="btn" type="button">Run Benchmarks</button>
+              <span id="graph-learning-benchmark-status" class="sub" style="color:var(--muted);"></span>
+            </div>
+            <div id="graph-learning-benchmark-alert" style="display:none;padding:10px 14px;margin-bottom:12px;border-radius:6px;border:2px solid #c44;background:#fff0f0;color:#a00;font-weight:600;"></div>
+            <div id="graph-learning-benchmark-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;"></div>
+          </details>
+
+          <!-- ═══ Attempt History ═══ -->
           <details class="panel minimal" open>
             <summary>Attempt History</summary>
             <div id="graph-learning-attempts" style="margin-top:8px;max-height:220px;overflow:auto;"></div>
