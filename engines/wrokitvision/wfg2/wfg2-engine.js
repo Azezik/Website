@@ -480,14 +480,9 @@
        - Every pixel belongs to exactly one region
        - Boundaries are shared between adjacent regions
        - No overlapping region proposals
-     Uses a greedy, masked extraction pipeline:
-       1. Initial contiguous color flood segmentation
-       2. Score all candidate regions
-       3. Lock highest-confidence region
-       4. Locally refine tolerance at boundaries
-       5. Mask committed pixels from further competition
-       6. Refine neighbor boundaries against committed region
-       7. Repeat until full partition achieved                        */
+     Architecture: direct greedy commit — iterate unassigned seeds,
+     flood at each, commit immediately. No Phase-1/Phase-2 split.
+     Single shared visited array reused via generation counter.        */
 
   function computePartition(surface, params){
     const p = copyParams(params);
@@ -496,502 +491,312 @@
     const lab = surface.lab;
     const gray = surface.gray;
     const hasColor = !!lab;
+    const chromaW = hasColor ? clamp(p.chromaWeight, 0, 1) : 0;
 
-    // Per-pixel label map: -1 = unassigned
     const labelMap = new Int32Array(n).fill(-1);
-    // Region data store
     const regions = [];
     let nextRegionId = 0;
 
-    // Compute color boundary map for scoring
-    const colorBoundary = hasColor ? computeColorBoundary(lab, w, h, p) : null;
-
-    // Compute gradient for boundary contrast scoring
-    const grad = computeGradient(gray, w, h);
-
     const baseTolerance = p.partitionColorTolerance;
     const minPixels = Math.max(4, p.partitionMinRegionPixels);
-    const refinementRange = Math.max(1, p.partitionLocalRefinementRange);
     const continuationStrength = clamp(p.partitionBoundaryContinuation, 0, 1);
 
-    // ── A. Initial pass: flood-fill contiguous color regions ──
-    // Produces candidate regions with medium tolerance
-    function floodFillColor(startIdx, tolerance, mask){
-      if(mask[startIdx]) return null;
-      const queue = [startIdx];
+    // Shared visited array with generation counter (avoids re-allocation)
+    const visited = new Int32Array(n); // 0 = never visited
+    let visitGen = 0;
+
+    // Region mean color storage
+    const regionMeans = {};
+
+    // ── Flood-fill: uses shared visited array ──
+    function floodFill(startIdx, tolerance){
+      if(labelMap[startIdx] !== -1) return null;
+      visitGen++;
+      const vg = visitGen;
+
       const pixels = [];
-      const visited = new Uint8Array(n);
-      visited[startIdx] = 1;
+      let seedL, seedA, seedB;
+      const seedGray = gray[startIdx];
+      if(hasColor){ seedL = lab.L[startIdx]; seedA = lab.a[startIdx]; seedB = lab.b[startIdx]; }
 
-      // Seed color (Lab or gray)
-      let seedL, seedA, seedB, seedGray;
-      if(hasColor){
-        seedL = lab.L[startIdx]; seedA = lab.a[startIdx]; seedB = lab.b[startIdx];
-      }
-      seedGray = gray[startIdx];
+      let sumL = 0, sumA = 0, sumB = 0;
+      let sumL2 = 0, sumA2 = 0, sumB2 = 0;
+      let x0 = w, y0 = h, x1 = 0, y1 = 0;
+      let cnt = 0;
 
-      // Running mean for color drift prevention
-      let sumL = 0, sumA = 0, sumB = 0, cnt = 0;
+      const queue = [startIdx];
+      let qHead = 0;
+      visited[startIdx] = vg;
 
-      while(queue.length > 0){
-        const idx = queue.pop();
-        if(mask[idx]) continue;
+      while(qHead < queue.length){
+        const idx = queue[qHead++];
+        if(labelMap[idx] !== -1) continue; // taken by another region since enqueued
         pixels.push(idx);
-
-        if(hasColor){
-          sumL += lab.L[idx]; sumA += lab.a[idx]; sumB += lab.b[idx];
-        }
         cnt++;
 
-        const x = idx % w, y = (idx / w) | 0;
-        // 4-connected neighbors
-        const nbrs = [];
-        if(x > 0) nbrs.push(idx - 1);
-        if(x < w - 1) nbrs.push(idx + 1);
-        if(y > 0) nbrs.push(idx - w);
-        if(y < h - 1) nbrs.push(idx + w);
+        const px = idx % w, py = (idx / w) | 0;
+        if(px < x0) x0 = px; if(py < y0) y0 = py;
+        if(px > x1) x1 = px; if(py > y1) y1 = py;
 
-        // Current region mean (prevents drift)
+        if(hasColor){
+          const vL = lab.L[idx], vA = lab.a[idx], vB = lab.b[idx];
+          sumL += vL; sumA += vA; sumB += vB;
+          sumL2 += vL * vL; sumA2 += vA * vA; sumB2 += vB * vB;
+        }
+
+        // Running mean for drift check
         const meanL = sumL / cnt, meanA = sumA / cnt, meanB = sumB / cnt;
 
-        for(const ni of nbrs){
-          if(visited[ni] || mask[ni]) continue;
-
+        // Inline 4-connected neighbor check
+        const nIndices = [
+          px > 0 ? idx - 1 : -1,
+          px < w - 1 ? idx + 1 : -1,
+          py > 0 ? idx - w : -1,
+          py < h - 1 ? idx + w : -1
+        ];
+        for(let k = 0; k < 4; k++){
+          const ni = nIndices[k];
+          if(ni < 0 || visited[ni] === vg || labelMap[ni] !== -1) continue;
           let dist;
           if(hasColor){
-            const chromaW = clamp(p.chromaWeight, 0, 1);
-            // Distance to both seed and running mean (prevents color drift)
             const dSeed = chromaDominantDeltaE(lab.L[ni], lab.a[ni], lab.b[ni], seedL, seedA, seedB, chromaW);
             const dMean = chromaDominantDeltaE(lab.L[ni], lab.a[ni], lab.b[ni], meanL, meanA, meanB, chromaW);
-            dist = Math.max(dSeed, dMean);
+            dist = dSeed > dMean ? dSeed : dMean;
           } else {
-            dist = Math.abs(gray[ni] - seedGray);
+            dist = gray[ni] > seedGray ? gray[ni] - seedGray : seedGray - gray[ni];
           }
-
           if(dist <= tolerance){
-            visited[ni] = 1;
+            visited[ni] = vg;
             queue.push(ni);
           }
         }
       }
 
-      if(pixels.length < minPixels) return null;
-      return pixels;
-    }
-
-    // ── B. Region scoring ──
-    function scoreRegion(pixels){
-      const numPx = pixels.length;
-      if(numPx < minPixels) return -1;
-
-      const wVar = p.partitionScoreVarianceW;
-      const wBnd = p.partitionScoreBoundaryW;
-      const wCont = p.partitionScoreContourW;
-      const wClos = p.partitionScoreClosureW;
-      const wLeak = p.partitionScoreLeakW;
-
-      // Internal color variance (lower is better)
-      let sumL = 0, sumA = 0, sumB = 0, sumL2 = 0, sumA2 = 0, sumB2 = 0;
-      if(hasColor){
-        for(const idx of pixels){
-          const vL = lab.L[idx], vA = lab.a[idx], vB = lab.b[idx];
-          sumL += vL; sumA += vA; sumB += vB;
-          sumL2 += vL * vL; sumA2 += vA * vA; sumB2 += vB * vB;
-        }
-        const mn = numPx;
-        const varL = Math.max(0, sumL2 / mn - (sumL / mn) * (sumL / mn));
-        const varA = Math.max(0, sumA2 / mn - (sumA / mn) * (sumA / mn));
-        const varB = Math.max(0, sumB2 / mn - (sumB / mn) * (sumB / mn));
-        var internalVariance = Math.sqrt(varL + varA + varB);
-      } else {
-        let sumG = 0, sumG2 = 0;
-        for(const idx of pixels){ const v = gray[idx]; sumG += v; sumG2 += v * v; }
-        internalVariance = Math.sqrt(Math.max(0, sumG2 / numPx - (sumG / numPx) * (sumG / numPx)));
-      }
-      // Normalize: 0 variance = 1.0 score, high variance = 0 score
-      const varianceScore = clamp(1 - internalVariance / 40, 0, 1);
-
-      // Boundary contrast: average color boundary strength at region border pixels
-      let boundarySum = 0, boundaryCount = 0;
-      const pixSet = new Set(pixels);
-      for(const idx of pixels){
-        const x = idx % w, y = (idx / w) | 0;
-        const nbrs = [];
-        if(x > 0) nbrs.push(idx - 1);
-        if(x < w - 1) nbrs.push(idx + 1);
-        if(y > 0) nbrs.push(idx - w);
-        if(y < h - 1) nbrs.push(idx + w);
-        let isBorder = false;
-        for(const ni of nbrs){
-          if(!pixSet.has(ni)){ isBorder = true; break; }
-        }
-        if(isBorder){
-          boundarySum += colorBoundary ? colorBoundary[idx] : (grad[idx] / 255);
-          boundaryCount++;
-        }
-      }
-      const boundaryScore = boundaryCount > 0 ? clamp(boundarySum / boundaryCount, 0, 1) : 0;
-
-      // Contour continuity: fraction of border pixels with strong boundary evidence
-      let contiguousBoundary = 0;
-      if(boundaryCount > 0){
-        let strongCount = 0;
-        for(const idx of pixels){
-          const x = idx % w, y = (idx / w) | 0;
-          const nbrs = [];
-          if(x > 0) nbrs.push(idx - 1);
-          if(x < w - 1) nbrs.push(idx + 1);
-          if(y > 0) nbrs.push(idx - w);
-          if(y < h - 1) nbrs.push(idx + w);
-          let isBorder = false;
-          for(const ni of nbrs){ if(!pixSet.has(ni)){ isBorder = true; break; } }
-          if(isBorder){
-            const ev = colorBoundary ? colorBoundary[idx] : (grad[idx] / 255);
-            if(ev > 0.2) strongCount++;
-          }
-        }
-        contiguousBoundary = strongCount / boundaryCount;
-      }
-      const contourScore = clamp(contiguousBoundary, 0, 1);
-
-      // Closure quality: compactness (area vs perimeter^2)
-      const perimeter = boundaryCount;
-      const compactness = perimeter > 0 ? (4 * Math.PI * numPx) / (perimeter * perimeter) : 0;
-      const closureScore = clamp(compactness, 0, 1);
-
-      // Leakage risk: if region touches image border excessively
-      let borderTouch = 0;
-      for(const idx of pixels){
-        const x = idx % w, y = (idx / w) | 0;
-        if(x === 0 || x === w - 1 || y === 0 || y === h - 1) borderTouch++;
-      }
-      const leakScore = clamp(1 - (borderTouch / Math.max(1, perimeter)) * 2, 0, 1);
-
-      // Weighted composite score + area bonus (larger regions preferred)
-      const areaBonus = clamp(Math.log2(numPx) / 16, 0, 0.3);
-      const score = varianceScore * wVar + boundaryScore * wBnd + contourScore * wCont + closureScore * wClos + leakScore * wLeak + areaBonus;
-
-      return score;
-    }
-
-    // ── D. Local tolerance refinement ──
-    function refineTolerance(seedIdx, mask){
-      let bestTol = baseTolerance;
-      let bestScore = -1;
-      let bestPixels = null;
-
-      // Search tolerance in a range around the base
-      const steps = [baseTolerance * 0.6, baseTolerance * 0.8, baseTolerance, baseTolerance * 1.2, baseTolerance * 1.5];
-      for(const tol of steps){
-        const pixels = floodFillColor(seedIdx, tol, mask);
-        if(!pixels) continue;
-        const score = scoreRegion(pixels);
-        if(score > bestScore){
-          bestScore = score;
-          bestTol = tol;
-          bestPixels = pixels;
-        }
-      }
-      return { tolerance: bestTol, score: bestScore, pixels: bestPixels };
-    }
-
-    // ── E-F. Boundary continuation / repair ──
-    // After committing a region, repair short corrupted boundary spans
-    // by checking if boundary pixels have clean neighbors on both sides
-    function repairBoundaries(regionPixels, regionId){
-      if(continuationStrength <= 0) return;
-      const pixSet = new Set(regionPixels);
-      const repairRadius = Math.max(1, Math.round(refinementRange * continuationStrength));
-
-      // Find boundary pixels of the committed region
-      for(const idx of regionPixels){
-        const x = idx % w, y = (idx / w) | 0;
-        // Check 4-connected neighbors that are unassigned
-        const nbrs = [];
-        if(x > 0) nbrs.push(idx - 1);
-        if(x < w - 1) nbrs.push(idx + 1);
-        if(y > 0) nbrs.push(idx - w);
-        if(y < h - 1) nbrs.push(idx + w);
-
-        for(const ni of nbrs){
-          if(labelMap[ni] !== -1) continue; // already assigned
-          // Check if this unassigned pixel is a short noise gap
-          // (clean region on both sides of a small gap)
-          if(hasColor){
-            const chromaW = clamp(p.chromaWeight, 0, 1);
-            // Mean color of region
-            const rMeanL = regionMeans[regionId].L;
-            const rMeanA = regionMeans[regionId].A;
-            const rMeanB = regionMeans[regionId].B;
-            const dist = chromaDominantDeltaE(lab.L[ni], lab.a[ni], lab.b[ni], rMeanL, rMeanA, rMeanB, chromaW);
-            // If the gap pixel is very close in color, absorb it
-            if(dist <= baseTolerance * (0.5 + continuationStrength * 0.8)){
-              // Check that it's a short gap: at least 2 committed neighbors
-              let committedNeighbors = 0;
-              const nx = ni % w, ny = (ni / w) | 0;
-              if(nx > 0 && labelMap[ni - 1] === regionId) committedNeighbors++;
-              if(nx < w - 1 && labelMap[ni + 1] === regionId) committedNeighbors++;
-              if(ny > 0 && labelMap[ni - w] === regionId) committedNeighbors++;
-              if(ny < h - 1 && labelMap[ni + w] === regionId) committedNeighbors++;
-              if(committedNeighbors >= 2){
-                labelMap[ni] = regionId;
-                regionPixels.push(ni);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Region mean color storage for boundary repair
-    const regionMeans = {};
-
-    // ── MAIN PARTITION LOOP ──
-    // Mask of committed pixels (1 = committed)
-    const committed = new Uint8Array(n);
-
-    // Phase 1: Generate all initial flood candidates
-    const candidates = [];
-    // Sample seed points on a grid for efficiency
-    const seedStep = Math.max(2, Math.round(Math.sqrt(n / 2000)));
-    for(let sy = 0; sy < h; sy += seedStep){
-      for(let sx = 0; sx < w; sx += seedStep){
-        const si = sy * w + sx;
-        if(committed[si]) continue;
-        const pixels = floodFillColor(si, baseTolerance, committed);
-        if(pixels){
-          const score = scoreRegion(pixels);
-          if(score > 0) candidates.push({ seedIdx: si, pixels, score });
-        }
-      }
-    }
-
-    // Sort by score descending (greedy: best first)
-    candidates.sort((a, b) => b.score - a.score);
-
-    // Phase 2: Greedy commit loop
-    for(const cand of candidates){
-      // Re-check: if seed is already committed, skip
-      if(committed[cand.seedIdx]) continue;
-
-      // D. Local tolerance refinement on the seed
-      const refined = refineTolerance(cand.seedIdx, committed);
-      if(!refined.pixels || refined.score <= 0) continue;
-
-      // E. Mask commitment: lock region, remove pixels from competition
-      const regionId = nextRegionId++;
-      const regionPixels = refined.pixels;
-
-      // Compute and store region mean color
-      if(hasColor){
-        let sL = 0, sA = 0, sB = 0;
-        for(const idx of regionPixels){
-          sL += lab.L[idx]; sA += lab.a[idx]; sB += lab.b[idx];
-        }
-        const cnt = regionPixels.length;
-        regionMeans[regionId] = { L: sL / cnt, A: sA / cnt, B: sB / cnt };
-      }
-
-      for(const idx of regionPixels){
-        if(committed[idx]) continue; // pixel may have been taken by a prior candidate
-        labelMap[idx] = regionId;
-        committed[idx] = 1;
-      }
-
-      // F. Boundary repair
-      repairBoundaries(regionPixels, regionId);
-
-      // Count actual pixels assigned to this region (some may have been pre-committed)
-      let actualCount = 0;
-      for(let i = 0; i < n; i++) if(labelMap[i] === regionId) actualCount++;
-
-      if(actualCount < minPixels){
-        // Too small after commitment conflicts — unmark
-        for(let i = 0; i < n; i++) if(labelMap[i] === regionId) labelMap[i] = -1;
-        continue;
-      }
-
-      // Build region bbox and contour
-      let x0 = w, y0 = h, x1 = 0, y1 = 0;
-      for(let i = 0; i < n; i++){
-        if(labelMap[i] !== regionId) continue;
-        const x = i % w, y = (i / w) | 0;
-        if(x < x0) x0 = x; if(y < y0) y0 = y;
-        if(x > x1) x1 = x; if(y > y1) y1 = y;
-      }
-
-      regions.push({
-        id: regionId,
-        score: refined.score,
-        tolerance: refined.tolerance,
-        pixelCount: actualCount,
+      if(cnt < minPixels) return null;
+      return {
+        pixels, count: cnt,
         bbox: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 },
-        meanColor: regionMeans[regionId] || null
-      });
+        sumL, sumA, sumB, sumL2, sumA2, sumB2
+      };
     }
 
-    // Phase 3: Assign remaining unassigned pixels to nearest committed neighbor
-    let changed = true;
-    let passCount = 0;
-    while(changed && passCount < 50){
-      changed = false;
-      passCount++;
+    // ── Score: fast, from pre-computed flood metadata ──
+    function scoreFlood(fr){
+      const numPx = fr.count;
+      let varianceScore = 0.5;
+      if(hasColor){
+        const varL = Math.max(0, fr.sumL2 / numPx - (fr.sumL / numPx) * (fr.sumL / numPx));
+        const varA = Math.max(0, fr.sumA2 / numPx - (fr.sumA / numPx) * (fr.sumA / numPx));
+        const varB = Math.max(0, fr.sumB2 / numPx - (fr.sumB / numPx) * (fr.sumB / numPx));
+        varianceScore = clamp(1 - Math.sqrt(varL + varA + varB) / 40, 0, 1);
+      }
+      const fillRatio = numPx / Math.max(1, fr.bbox.w * fr.bbox.h);
+      const areaBonus = clamp(Math.log2(numPx) / 16, 0, 0.3);
+      return varianceScore * 0.5 + fillRatio * 0.3 + areaBonus;
+    }
+
+    // ── Boundary repair ──
+    function repairBoundaries(pixels, regionId, rMean){
+      if(continuationStrength <= 0 || !hasColor || !rMean) return;
+      const maxDist = baseTolerance * (0.5 + continuationStrength * 0.8);
+      const limit = Math.min(pixels.length, 15000);
+      for(let ri = 0; ri < limit; ri++){
+        const idx = pixels[ri];
+        const px = idx % w, py = (idx / w) | 0;
+        const nbr = [
+          px > 0 ? idx - 1 : -1,
+          px < w - 1 ? idx + 1 : -1,
+          py > 0 ? idx - w : -1,
+          py < h - 1 ? idx + w : -1
+        ];
+        for(let k = 0; k < 4; k++){
+          const ni = nbr[k];
+          if(ni < 0 || labelMap[ni] !== -1) continue;
+          const dist = chromaDominantDeltaE(lab.L[ni], lab.a[ni], lab.b[ni], rMean.L, rMean.A, rMean.B, chromaW);
+          if(dist > maxDist) continue;
+          let adj = 0;
+          const nx = ni % w, ny = (ni / w) | 0;
+          if(nx > 0 && labelMap[ni - 1] === regionId) adj++;
+          if(nx < w - 1 && labelMap[ni + 1] === regionId) adj++;
+          if(ny > 0 && labelMap[ni - w] === regionId) adj++;
+          if(ny < h - 1 && labelMap[ni + w] === regionId) adj++;
+          if(adj >= 2) labelMap[ni] = regionId;
+        }
+      }
+    }
+
+    // ── DIRECT GREEDY PARTITION ──
+    // Scan seeds on a grid. For each unassigned seed: flood, score, commit.
+    const seedStep = Math.max(3, Math.round(Math.sqrt(n / 800)));
+    const MAX_REGIONS = 500;
+
+    for(let sy = 0; sy < h && regions.length < MAX_REGIONS; sy += seedStep){
+      for(let sx = 0; sx < w && regions.length < MAX_REGIONS; sx += seedStep){
+        const si = sy * w + sx;
+        if(labelMap[si] !== -1) continue;
+
+        // Try 2 tolerance levels: base and slightly higher
+        let bestFr = null, bestScore = -1, bestTol = baseTolerance;
+        for(let ti = 0; ti < 2; ti++){
+          const tol = ti === 0 ? baseTolerance : baseTolerance * 1.3;
+          const fr = floodFill(si, tol);
+          if(!fr) continue;
+          const sc = scoreFlood(fr);
+          if(sc > bestScore){ bestScore = sc; bestFr = fr; bestTol = tol; }
+        }
+        if(!bestFr) continue;
+
+        const regionId = nextRegionId++;
+        const fr = bestFr;
+
+        // Compute & store region mean
+        if(hasColor && fr.count > 0){
+          regionMeans[regionId] = {
+            L: fr.sumL / fr.count, A: fr.sumA / fr.count, B: fr.sumB / fr.count
+          };
+        }
+
+        // Commit
+        let actualCount = 0;
+        for(let pi = 0; pi < fr.pixels.length; pi++){
+          const idx = fr.pixels[pi];
+          if(labelMap[idx] === -1){
+            labelMap[idx] = regionId;
+            actualCount++;
+          }
+        }
+
+        if(actualCount < minPixels){
+          for(let pi = 0; pi < fr.pixels.length; pi++){
+            if(labelMap[fr.pixels[pi]] === regionId) labelMap[fr.pixels[pi]] = -1;
+          }
+          continue;
+        }
+
+        repairBoundaries(fr.pixels, regionId, regionMeans[regionId]);
+
+        let surfaceUniformity = 0.5;
+        if(hasColor && fr.count > 0){
+          const mn = fr.count;
+          const varAll = Math.max(0, fr.sumL2 / mn - (fr.sumL / mn) * (fr.sumL / mn))
+            + Math.max(0, fr.sumA2 / mn - (fr.sumA / mn) * (fr.sumA / mn))
+            + Math.max(0, fr.sumB2 / mn - (fr.sumB / mn) * (fr.sumB / mn));
+          surfaceUniformity = clamp(1 - Math.sqrt(varAll) / 20, 0, 1);
+        }
+
+        regions.push({
+          id: regionId, score: bestScore, tolerance: bestTol,
+          pixelCount: actualCount, bbox: fr.bbox,
+          meanColor: regionMeans[regionId] || null,
+          surfaceUniformity
+        });
+      }
+    }
+
+    // Assign remaining unassigned pixels via iterative neighbor dilation
+    let changed = true, passCount = 0;
+    while(changed && passCount < 20){
+      changed = false; passCount++;
       for(let i = 0; i < n; i++){
         if(labelMap[i] !== -1) continue;
-        const x = i % w, y = (i / w) | 0;
-        // Find nearest committed neighbor
-        let bestLabel = -1, bestDist = Infinity;
-        const nbrs = [];
-        if(x > 0) nbrs.push(i - 1);
-        if(x < w - 1) nbrs.push(i + 1);
-        if(y > 0) nbrs.push(i - w);
-        if(y < h - 1) nbrs.push(i + w);
-        for(const ni of nbrs){
-          if(labelMap[ni] === -1) continue;
-          let dist;
+        const px = i % w, py = (i / w) | 0;
+        let bestLabel = -1, bestDist = 1e9;
+        const nb = [
+          px > 0 ? i - 1 : -1,
+          px < w - 1 ? i + 1 : -1,
+          py > 0 ? i - w : -1,
+          py < h - 1 ? i + w : -1
+        ];
+        for(let k = 0; k < 4; k++){
+          const ni = nb[k];
+          if(ni < 0 || labelMap[ni] === -1) continue;
+          let dist = 0;
           if(hasColor){
             const rm = regionMeans[labelMap[ni]];
-            if(rm){
-              const chromaW = clamp(p.chromaWeight, 0, 1);
-              dist = chromaDominantDeltaE(lab.L[i], lab.a[i], lab.b[i], rm.L, rm.A, rm.B, chromaW);
-            } else {
-              dist = 0;
-            }
+            if(rm) dist = chromaDominantDeltaE(lab.L[i], lab.a[i], lab.b[i], rm.L, rm.A, rm.B, chromaW);
           } else {
-            dist = Math.abs(gray[i] - gray[ni]);
+            dist = gray[i] > gray[ni] ? gray[i] - gray[ni] : gray[ni] - gray[i];
           }
           if(dist < bestDist){ bestDist = dist; bestLabel = labelMap[ni]; }
         }
-        if(bestLabel !== -1){
-          labelMap[i] = bestLabel;
-          changed = true;
-        }
+        if(bestLabel !== -1){ labelMap[i] = bestLabel; changed = true; }
       }
     }
+    // Force-assign stragglers
+    const fallbackId = regions.length > 0 ? regions[0].id : 0;
+    for(let i = 0; i < n; i++) if(labelMap[i] === -1) labelMap[i] = fallbackId;
 
-    // If any pixels still unassigned (isolated), assign to region 0 or create background
-    for(let i = 0; i < n; i++){
-      if(labelMap[i] === -1){
-        labelMap[i] = regions.length > 0 ? regions[0].id : 0;
-      }
-    }
-
-    // Build shared boundary map
+    // Shared boundaries & adjacency (single O(n) pass)
     const sharedBoundaries = new Uint8Array(n);
-    for(let y = 0; y < h; y++){
-      for(let x = 0; x < w; x++){
-        const i = y * w + x;
-        const myLabel = labelMap[i];
-        if(x < w - 1 && labelMap[i + 1] !== myLabel) sharedBoundaries[i] = 1;
-        if(y < h - 1 && labelMap[i + w] !== myLabel) sharedBoundaries[i] = 1;
-      }
-    }
-
-    // Build adjacency from shared boundaries
     const adjSet = new Set();
     for(let y = 0; y < h; y++){
       for(let x = 0; x < w; x++){
         const i = y * w + x;
-        const myLabel = labelMap[i];
-        if(x < w - 1 && labelMap[i + 1] !== myLabel){
-          const pair = Math.min(myLabel, labelMap[i + 1]) + ':' + Math.max(myLabel, labelMap[i + 1]);
-          adjSet.add(pair);
+        const ml = labelMap[i];
+        if(x < w - 1){
+          const nl = labelMap[i + 1];
+          if(nl !== ml){ sharedBoundaries[i] = 1; adjSet.add(ml < nl ? ml + ':' + nl : nl + ':' + ml); }
         }
-        if(y < h - 1 && labelMap[i + w] !== myLabel){
-          const pair = Math.min(myLabel, labelMap[i + w]) + ':' + Math.max(myLabel, labelMap[i + w]);
-          adjSet.add(pair);
+        if(y < h - 1){
+          const nl = labelMap[i + w];
+          if(nl !== ml){ sharedBoundaries[i] = 1; adjSet.add(ml < nl ? ml + ':' + nl : nl + ':' + ml); }
         }
       }
     }
     const adjacency = [];
     for(const pair of adjSet){
-      const parts = pair.split(':');
-      adjacency.push({ from: Number(parts[0]), to: Number(parts[1]) });
+      const sep = pair.indexOf(':');
+      adjacency.push({ from: Number(pair.substring(0, sep)), to: Number(pair.substring(sep + 1)) });
     }
 
-    // Build final region nodes with full metadata
+    // Build nodes (bbox already tracked from flood result)
     const partitionNodes = [];
-    for(const reg of regions){
-      // Compute contour (convex hull of border pixels)
+    for(let ri = 0; ri < regions.length; ri++){
+      const reg = regions[ri];
+      const bx0 = reg.bbox.x, by0 = reg.bbox.y;
+      const bx1 = bx0 + reg.bbox.w, by1 = by0 + reg.bbox.h;
       const borderPoints = [];
-      for(let i = 0; i < n; i++){
-        if(labelMap[i] !== reg.id) continue;
-        const x = i % w, y = (i / w) | 0;
-        if(sharedBoundaries[i]){
-          borderPoints.push([x, y]);
+      const bSampleStep = Math.max(1, ((reg.bbox.w * reg.bbox.h) / 400) | 0);
+      let bIdx = 0;
+      for(let by = by0; by < by1 && by < h; by++){
+        for(let bx = bx0; bx < bx1 && bx < w; bx++){
+          const bi = by * w + bx;
+          if(labelMap[bi] === reg.id && sharedBoundaries[bi]){
+            if(bIdx % bSampleStep === 0) borderPoints.push([bx, by]);
+            bIdx++;
+          }
         }
       }
-      // If no border points (fully interior), use bbox corners
       if(borderPoints.length < 3){
-        borderPoints.push([reg.bbox.x, reg.bbox.y]);
-        borderPoints.push([reg.bbox.x + reg.bbox.w, reg.bbox.y]);
-        borderPoints.push([reg.bbox.x + reg.bbox.w, reg.bbox.y + reg.bbox.h]);
-        borderPoints.push([reg.bbox.x, reg.bbox.y + reg.bbox.h]);
+        borderPoints.push([bx0, by0], [bx1 - 1, by0], [bx1 - 1, by1 - 1], [bx0, by1 - 1]);
       }
-      const contourPts = hull(borderPoints).map(p => ({ x: p[0], y: p[1] }));
-
-      // Surface uniformity from region mean color
-      let surfaceUniformity = 0.5;
-      if(hasColor && reg.meanColor){
-        let sumStd = 0;
-        let stdCnt = 0;
-        for(let i = 0; i < n; i++){
-          if(labelMap[i] !== reg.id) continue;
-          const dL = lab.L[i] - reg.meanColor.L;
-          const dA = lab.a[i] - reg.meanColor.A;
-          const dB = lab.b[i] - reg.meanColor.B;
-          sumStd += Math.sqrt(dL * dL + dA * dA + dB * dB);
-          stdCnt++;
-        }
-        const avgDev = stdCnt > 0 ? sumStd / stdCnt : 0;
-        surfaceUniformity = clamp(1 - avgDev / 20, 0, 1);
-      }
-
-      // Color confidence: chroma magnitude of region mean
+      const contourPts = hull(borderPoints).map(function(pt){ return { x: pt[0], y: pt[1] }; });
       let colorConfidence = 0;
       if(reg.meanColor){
-        const chroma = Math.sqrt(reg.meanColor.A * reg.meanColor.A + reg.meanColor.B * reg.meanColor.B);
-        colorConfidence = clamp(chroma / 40, 0, 1);
+        colorConfidence = clamp(Math.sqrt(reg.meanColor.A * reg.meanColor.A + reg.meanColor.B * reg.meanColor.B) / 40, 0, 1);
       }
-
       partitionNodes.push({
-        id: 'wfg2-p-' + reg.id,
-        type: 'partition_region',
-        partitionId: reg.id,
+        id: 'wfg2-p-' + reg.id, type: 'partition_region', partitionId: reg.id,
         bbox: reg.bbox,
-        center: { x: reg.bbox.x + reg.bbox.w * 0.5, y: reg.bbox.y + reg.bbox.h * 0.5 },
-        area: reg.pixelCount,
-        contour: contourPts,
-        confidence: clamp(reg.score, 0, 1),
-        tolerance: reg.tolerance,
-        commitOrder: regions.indexOf(reg),
-        surfaceUniformity,
-        colorConfidence,
-        closureScore: 0, // computed from contour compactness
-        compactness: contourPts.length > 0 ? clamp((4 * Math.PI * reg.pixelCount) / (contourPts.length * contourPts.length * 4), 0, 1) : 0
+        center: { x: bx0 + reg.bbox.w * 0.5, y: by0 + reg.bbox.h * 0.5 },
+        area: reg.pixelCount, contour: contourPts,
+        confidence: clamp(reg.score, 0, 1), tolerance: reg.tolerance,
+        commitOrder: ri, surfaceUniformity: reg.surfaceUniformity,
+        colorConfidence: colorConfidence, closureScore: 0,
+        compactness: contourPts.length > 2 ? clamp((4 * Math.PI * reg.pixelCount) / (contourPts.length * contourPts.length * 4), 0, 1) : 0
       });
     }
 
-    // Build adjacency edges with partition IDs mapped to node IDs
     const idLookup = {};
-    for(const node of partitionNodes) idLookup[node.partitionId] = node.id;
+    for(let ni = 0; ni < partitionNodes.length; ni++) idLookup[partitionNodes[ni].partitionId] = partitionNodes[ni].id;
     const partitionEdges = [];
-    for(const adj of adjacency){
-      const fromId = idLookup[adj.from];
-      const toId = idLookup[adj.to];
-      if(fromId && toId){
-        partitionEdges.push({ from: fromId, to: toId, kind: 'shared_boundary', distance: 0 });
-      }
+    for(let ai = 0; ai < adjacency.length; ai++){
+      const fromId = idLookup[adjacency[ai].from];
+      const toId = idLookup[adjacency[ai].to];
+      if(fromId && toId) partitionEdges.push({ from: fromId, to: toId, kind: 'shared_boundary', distance: 0 });
     }
 
-    return {
-      labelMap,
-      sharedBoundaries,
-      nodes: partitionNodes,
-      edges: partitionEdges,
-      adjacency,
-      regionCount: regions.length
-    };
+    return { labelMap, sharedBoundaries, nodes: partitionNodes, edges: partitionEdges, adjacency, regionCount: regions.length };
   }
 
   /* ─── Legacy structural region growing (grid-based) ─────────── */
