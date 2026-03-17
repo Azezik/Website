@@ -1012,6 +1012,28 @@
           <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
             <button id="graph-learning-apply-sliders-btn" class="btn primary" type="button" disabled>Apply Parameters + Regenerate</button>
             <button id="graph-learning-reset-defaults-btn" class="btn ghost" type="button">Reset to Defaults</button>
+            <button id="graph-learning-reset-to-baseline-btn" class="btn ghost" type="button" style="display:none;">Reset to Accepted Baseline</button>
+          </div>
+
+          <!-- ═══ Settings State Indicator ═══ -->
+          <div id="graph-learning-state-indicator" class="panel minimal" style="margin-bottom:12px;padding:8px 12px;display:none;">
+            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <strong style="white-space:nowrap;font-size:12px;">Active Settings:</strong>
+              <span id="graph-learning-state-label" class="sub" style="font-size:12px;color:var(--muted);">Defaults</span>
+              <span style="color:var(--border);">|</span>
+              <span id="graph-learning-state-saved-indicator" class="sub" style="font-size:11px;color:var(--muted);">Not saved</span>
+            </div>
+          </div>
+
+          <!-- ═══ Accept / Continuity Controls ═══ -->
+          <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;border:1px dashed var(--border,#ccc);">
+            <div class="actions" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">
+              <button id="graph-learning-accept-tuning-btn" class="btn primary" type="button" disabled>Accept Current Tuning</button>
+              <span id="graph-learning-baseline-status" class="sub" style="font-size:11px;color:var(--muted);">No accepted baseline.</span>
+            </div>
+            <p class="sub" style="margin:0;color:var(--muted);font-size:11px;">
+              Saves the current slider values and benchmark state as the accepted learned baseline. Future sessions will start from this baseline instead of defaults.
+            </p>
           </div>
 
           <!-- ═══ Benchmark Validation Panel ═══ -->
@@ -1019,6 +1041,7 @@
             <summary>Benchmark Validation</summary>
             <p class="sub" style="margin:4px 0 8px;color:var(--muted);">
               Canonical test images to validate segmentation behavior. Click "Run Benchmarks" to generate and evaluate all tests.
+              After adjusting sliders and confirming benchmarks pass, click "Accept Current Tuning" to save as your learned baseline.
             </p>
             <div class="actions" style="gap:8px;margin-bottom:12px;">
               <button id="graph-learning-run-benchmarks-btn" class="btn" type="button">Run Benchmarks</button>
@@ -1026,6 +1049,16 @@
             </div>
             <div id="graph-learning-benchmark-alert" style="display:none;padding:10px 14px;margin-bottom:12px;border-radius:6px;border:2px solid #c44;background:#fff0f0;color:#a00;font-weight:600;"></div>
             <div id="graph-learning-benchmark-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;"></div>
+          </details>
+
+          <!-- ═══ State Debug Inspector ═══ -->
+          <details id="graph-learning-debug-panel" class="panel minimal" style="margin-bottom:12px;">
+            <summary>Parameter State Inspector</summary>
+            <p class="sub" style="margin:4px 0 8px;color:var(--muted);font-size:11px;">
+              Shows the full parameter pipeline state for debugging. Expand to diagnose slider/apply/persist mismatches.
+            </p>
+            <div id="graph-learning-debug-output" style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;background:var(--bg,#f5f5f5);padding:8px;border-radius:4px;max-height:300px;overflow:auto;"></div>
+            <button id="graph-learning-debug-refresh-btn" class="btn ghost" type="button" style="margin-top:6px;font-size:11px;">Refresh State</button>
           </details>
 
           <!-- ═══ Attempt History ═══ -->
