@@ -20681,7 +20681,8 @@ function getGraphLearningLayerFlags(){
     partition: !!(document.getElementById('graph-learning-show-partition') || {}).checked,
     sharedBoundaries: !!(document.getElementById('graph-learning-show-shared-boundaries') || {}).checked,
     regionOrder: !!(document.getElementById('graph-learning-show-region-order') || {}).checked,
-    confidence: !!(document.getElementById('graph-learning-show-confidence') || {}).checked
+    confidence: !!(document.getElementById('graph-learning-show-confidence') || {}).checked,
+    colorPartition: !!(document.getElementById('graph-learning-show-color-partition') || {}).checked
   };
 }
 
@@ -20929,6 +20930,103 @@ function paintGraphLearningOverlay(ctx){
       ctx.fillText(String(i + 1) + closureLabel + colorLabel + uniformLabel, (n.center?.x || 0) + 2, (n.center?.y || 0) - 2);
     }
   }
+
+  // ═══ Color Partition: Master Segmentation View ═══
+  // Dedicated layer that makes each detected region immediately identifiable.
+  // High-contrast fills, thick boundaries, centered labels with background.
+  if(flags.colorPartition && artf.partitionLabelMap && nSize.width > 0 && nSize.height > 0){
+    var cpLblMap = artf.partitionLabelMap;
+    var cpSbMap = artf.partitionSharedBoundaries;
+    var cpW = nSize.width, cpH = nSize.height;
+
+    // 20 maximally-separated high-saturation colors (hand-picked for distinctness)
+    var cpPalette = [
+      [230,  25,  75], [ 60, 180,  75], [255, 225,  25], [  0, 130, 200],
+      [245, 130,  48], [145,  30, 180], [ 70, 240, 240], [240,  50, 230],
+      [210, 245,  60], [250, 190, 212], [  0, 128, 128], [220, 190, 255],
+      [170, 110,  40], [255, 250, 200], [128,   0,   0], [170, 255, 195],
+      [128, 128,   0], [255, 215, 180], [  0,   0, 128], [128, 128, 128]
+    ];
+
+    // Pass 1: Per-pixel region fill (high alpha for solid distinct colors)
+    var cpImg = ctx.createImageData(cpW, cpH);
+    var cpD = cpImg.data;
+    for(var cpi = 0, cpj = 0; cpi < cpLblMap.length; cpi++, cpj += 4){
+      var cpLbl = cpLblMap[cpi];
+      if(cpLbl < 0) continue;
+      var cpCol = cpPalette[cpLbl % cpPalette.length];
+      cpD[cpj]     = cpCol[0];
+      cpD[cpj + 1] = cpCol[1];
+      cpD[cpj + 2] = cpCol[2];
+      cpD[cpj + 3] = 160; // strong fill — regions are immediately distinguishable
+    }
+
+    // Pass 2: Thick boundaries (3px via dilation) — dark high-contrast lines
+    if(cpSbMap){
+      // Build boundary set with 1-pixel dilation for thickness
+      var cpBoundary = new Uint8Array(cpLblMap.length);
+      for(var byi = 0; byi < cpH; byi++){
+        for(var bxi = 0; bxi < cpW; bxi++){
+          var bIdx = byi * cpW + bxi;
+          if(cpSbMap[bIdx]){
+            // Mark this pixel and neighbors within 1px radius
+            for(var dy = -1; dy <= 1; dy++){
+              for(var dx = -1; dx <= 1; dx++){
+                var nx = bxi + dx, ny = byi + dy;
+                if(nx >= 0 && nx < cpW && ny >= 0 && ny < cpH){
+                  cpBoundary[ny * cpW + nx] = 1;
+                }
+              }
+            }
+          }
+        }
+      }
+      for(var bi = 0, bj = 0; bi < cpBoundary.length; bi++, bj += 4){
+        if(cpBoundary[bi]){
+          cpD[bj] = 20; cpD[bj + 1] = 20; cpD[bj + 2] = 30; cpD[bj + 3] = 220;
+        }
+      }
+    }
+
+    ctx.putImageData(cpImg, 0, 0);
+
+    // Pass 3: Region labels — centered in each region with background pill
+    ctx.save();
+    var cpFontSize = Math.max(11, Math.min(16, Math.round(Math.min(cpW, cpH) / 40)));
+    ctx.font = 'bold ' + cpFontSize + 'px IBM Plex Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for(var li = 0; li < nodes.length; li++){
+      var ln = nodes[li];
+      var lx = ln.center?.x || 0;
+      var ly = ln.center?.y || 0;
+      var labelText = String(li + 1);
+      var tm = ctx.measureText(labelText);
+      var pillW = tm.width + 10;
+      var pillH = cpFontSize + 6;
+      // Background pill (dark with slight transparency)
+      ctx.fillStyle = 'rgba(10, 10, 20, 0.82)';
+      ctx.beginPath();
+      var pillR = 4;
+      var px0 = lx - pillW / 2, py0 = ly - pillH / 2;
+      var px1 = lx + pillW / 2, py1 = ly + pillH / 2;
+      ctx.moveTo(px0 + pillR, py0);
+      ctx.lineTo(px1 - pillR, py0);
+      ctx.quadraticCurveTo(px1, py0, px1, py0 + pillR);
+      ctx.lineTo(px1, py1 - pillR);
+      ctx.quadraticCurveTo(px1, py1, px1 - pillR, py1);
+      ctx.lineTo(px0 + pillR, py1);
+      ctx.quadraticCurveTo(px0, py1, px0, py1 - pillR);
+      ctx.lineTo(px0, py0 + pillR);
+      ctx.quadraticCurveTo(px0, py0, px0 + pillR, py0);
+      ctx.closePath();
+      ctx.fill();
+      // White text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(labelText, lx, ly + 1);
+    }
+    ctx.restore();
+  }
 }
 
 function renderGraphLearningViewer(){
@@ -21125,7 +21223,8 @@ if(els.graphLearningClearHistoryBtn){
  document.getElementById('graph-learning-show-partition'),
  document.getElementById('graph-learning-show-shared-boundaries'),
  document.getElementById('graph-learning-show-region-order'),
- document.getElementById('graph-learning-show-confidence')
+ document.getElementById('graph-learning-show-confidence'),
+ document.getElementById('graph-learning-show-color-partition')
 ].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
