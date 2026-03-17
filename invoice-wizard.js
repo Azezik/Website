@@ -21134,12 +21134,11 @@ const WFG2_SLIDER_DEFS = {
   geoSimplify: {
     label: 'Geometric Simplification',
     toParams: function(t, p){
-      // Maps to grid coarseness as a simplification proxy
-      // At high t, use coarser grid which smooths boundaries
-      p.gridSize = Math.max(p.gridSize || 8, Math.round(4 + t * 20)); // 4..24
+      // Use a dedicated param so geoSimplify doesn't fight with boundarySnap over gridSize
+      p.geoSimplifyLevel = t; // 0..1 stored directly
     },
     fromParams: function(p){
-      return ((p.gridSize || 8) - 4) / 20;
+      return (typeof p.geoSimplifyLevel === 'number') ? p.geoSimplifyLevel : 0;
     }
   }
 };
@@ -21148,12 +21147,21 @@ const WFG2_SLIDER_IDS = Object.keys(WFG2_SLIDER_DEFS);
 
 function wfg2ReadSlidersToParams(){
   if(!_wfg2) return null;
-  const p = _wfg2.copyParams(state.graphLearning?.params || _wfg2.DEFAULT_PARAMS);
+  const p = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  // Store raw slider values for reliable round-tripping (no reverse-engineering needed)
+  p._sliderValues = {};
   for(const id of WFG2_SLIDER_IDS){
     const el = document.getElementById('wfg2-slider-' + id);
     if(!el) continue;
-    const t = Number(el.value) / 100;
+    const raw = Number(el.value);
+    p._sliderValues[id] = raw;
+    const t = raw / 100;
     WFG2_SLIDER_DEFS[id].toParams(t, p);
+  }
+  // Apply geoSimplify effect on gridSize AFTER boundarySnap has set it
+  if(typeof p.geoSimplifyLevel === 'number' && p.geoSimplifyLevel > 0){
+    // Increase gridSize proportionally to simplification level
+    p.gridSize = Math.max(p.gridSize, Math.round(4 + p.geoSimplifyLevel * 20));
   }
   // Clamp all params to valid ranges
   p.gridSize = Math.max(4, Math.min(24, Math.round(p.gridSize)));
@@ -21180,12 +21188,20 @@ function wfg2ReadSlidersToParams(){
 
 function wfg2SyncSlidersFromParams(params){
   if(!params) return;
+  const stored = params._sliderValues || {};
   for(const id of WFG2_SLIDER_IDS){
-    const def = WFG2_SLIDER_DEFS[id];
-    const val = Math.round(def.fromParams(params) * 100);
+    // Prefer stored raw slider value (exact round-trip) over reverse-engineered value
+    var val;
+    if(typeof stored[id] === 'number'){
+      val = stored[id];
+    } else {
+      const def = WFG2_SLIDER_DEFS[id];
+      val = Math.round(def.fromParams(params) * 100);
+    }
+    val = Math.max(0, Math.min(100, Math.round(val)));
     const el = document.getElementById('wfg2-slider-' + id);
     const valEl = document.getElementById('wfg2-slider-' + id + '-val');
-    if(el) el.value = Math.max(0, Math.min(100, val));
+    if(el) el.value = val;
     if(valEl) valEl.textContent = (val / 100).toFixed(2);
   }
 }
@@ -21210,7 +21226,8 @@ if(els.graphLearningApplySlidersBtn){
     const p = wfg2ReadSlidersToParams();
     if(!p) return;
     state.graphLearning.params = p;
-    graphLearningRunGeneration();
+    // Skip slider sync — sliders are already at the user's chosen values
+    graphLearningRunGeneration({ _skipSliderSync: true });
     graphLearningCaptureAttempt('slider-tuned', { tags: ['slider_adjustment'], rating: null });
     graphLearningStatus('Applied slider parameters and regenerated.');
   });
@@ -21283,26 +21300,38 @@ function wfg2CreateBenchmarkImage(testId, size){
       fillRect(0, 0, w - 1, h - 1, 210, 210, 210);
       fillRect(40, 40, 159, 159, 0, 220, 220);
       break;
-    case 'shaded_yellow_circle':
-      // Yellow circle with mild shading
+    case 'shaded_red_circle':
+      // Red sphere/circle with mild gradient (tests red-channel handling)
       for(let y = 0; y < h; y++){
         for(let x = 0; x < w; x++){
           const dx = x - 100, dy = y - 100;
           const dist = Math.sqrt(dx * dx + dy * dy);
           if(dist <= 60){
-            const shade = 0.85 + 0.15 * (1 - dist / 60); // mild shading
-            setPixel(x, y, Math.round(255 * shade), Math.round(230 * shade), 30);
+            const shade = 0.85 + 0.15 * (1 - dist / 60);
+            setPixel(x, y, Math.round(210 * shade), Math.round(30 * shade), Math.round(30 * shade));
           }
         }
       }
       break;
-    case 'small_red_dot':
-      // Small red dot (radius 8)
-      fillCircle(100, 100, 8, 220, 20, 20);
+    case 'small_blue_dot':
+      // Small blue dot (radius 8) — tests small-object preservation without red-channel confound
+      fillCircle(100, 100, 8, 20, 40, 220);
       break;
     case 'faint_gray_patch':
       // Very subtle gray patch on white
       fillRect(60, 60, 139, 139, 235, 235, 235);
+      break;
+    case 'small_red_dot':
+      // Small red dot (radius 8) — dedicated red-channel test
+      fillCircle(100, 100, 8, 220, 20, 20);
+      break;
+    case 'red_vs_blue_pair_red':
+      // Red circle for red-vs-blue comparison (same size/position as blue)
+      fillCircle(100, 100, 30, 210, 25, 25);
+      break;
+    case 'red_vs_blue_pair_blue':
+      // Blue circle for red-vs-blue comparison (same size/position as red)
+      fillCircle(100, 100, 30, 25, 40, 210);
       break;
   }
 
@@ -21311,54 +21340,91 @@ function wfg2CreateBenchmarkImage(testId, size){
 
 const WFG2_BENCHMARKS = [
   { id: 'black_square_white', label: 'A: Black Square on White',
-    description: 'Black square on white background. Expected: 1 region with clean boundary.',
+    description: 'Black square on white background. Must-pass default case. Expected: 2+ regions with clean boundary.',
+    mustPassDefault: true,
     validate: function(graph){
-      // Must detect at least 2 regions (background + square) with clear separation
       const nodes = graph?.nodes || [];
       if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) detected — expected at least 2.' };
       if(nodes.length > 5) return { pass: false, reason: nodes.length + ' regions — too fragmented for a simple black square.' };
       return { pass: true, reason: nodes.length + ' regions detected. Clean segmentation.' };
     },
-    critical: true
+    critical: true,
+    causeCategory: 'internal pipeline failure / default parameter failure'
   },
   { id: 'cyan_on_gray', label: 'B: Cyan Object on Light Gray',
-    description: 'Saturated cyan shape on pale gray background. Expected: object clearly detected.',
+    description: 'Strong saturated object on pale background. Must-pass default case. Expected: object clearly detected.',
+    mustPassDefault: true,
     validate: function(graph){
       const nodes = graph?.nodes || [];
       if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — cyan object not detected.' };
       if(nodes.length > 6) return { pass: false, reason: nodes.length + ' regions — too fragmented.' };
       return { pass: true, reason: nodes.length + ' regions. Cyan object detected.' };
     },
-    critical: true
+    critical: true,
+    causeCategory: 'boundary sensitivity too low'
   },
-  { id: 'shaded_yellow_circle', label: 'C: Shaded Yellow Circle',
-    description: 'Yellow circle with mild shading. Expected: circle remains one region.',
+  { id: 'shaded_red_circle', label: 'C: Large Red Gradient Object',
+    description: 'Red sphere with mild gradient. Tests red-channel handling. Expected: circle remains one region (internal shading must not split it).',
     validate: function(graph){
       const nodes = graph?.nodes || [];
-      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — circle not separated from background.' };
-      if(nodes.length > 8) return { pass: false, reason: nodes.length + ' regions — circle shading caused fragmentation.' };
-      return { pass: true, reason: nodes.length + ' regions. Circle detected.' };
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — red circle not separated from background.' };
+      if(nodes.length > 8) return { pass: false, reason: nodes.length + ' regions — red gradient caused fragmentation (red-channel issue suspected).' };
+      return { pass: true, reason: nodes.length + ' regions. Red gradient circle detected cleanly.' };
     },
-    critical: false
+    critical: false,
+    causeCategory: 'same-surface merge too aggressive / red-channel mishandling'
   },
-  { id: 'small_red_dot', label: 'D: Small Red Object',
-    description: 'Small red dot on white. Expected: dot remains distinct region.',
+  { id: 'small_blue_dot', label: 'D: Small Blue Object',
+    description: 'Small blue dot on pale background. Tests small-object preservation without red-channel confound.',
     validate: function(graph){
       const nodes = graph?.nodes || [];
-      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — small object lost.' };
-      return { pass: true, reason: nodes.length + ' regions. Small object preserved.' };
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — small blue object lost.' };
+      return { pass: true, reason: nodes.length + ' regions. Small blue object preserved.' };
     },
-    critical: false
+    critical: false,
+    causeCategory: 'small region preservation too weak'
   },
   { id: 'faint_gray_patch', label: 'E: Faint Gray Patch',
     description: 'Very subtle gray patch on white. May be weakly detected or ignored.',
     validate: function(graph){
       const nodes = graph?.nodes || [];
-      // This is expected to be weak — not a failure if missed
       if(nodes.length >= 2) return { pass: true, reason: nodes.length + ' regions. Subtle patch detected (sensitive config).' };
       return { pass: true, reason: '1 region. Faint patch below threshold (expected at conservative settings).' };
     },
-    critical: false
+    critical: false,
+    causeCategory: 'boundary sensitivity too low'
+  },
+  { id: 'small_red_dot', label: 'F: Small Red Object (Red-Channel Test)',
+    description: 'Small red dot on white. Dedicated red-channel segmentation test — compares with D (blue).',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — small red object lost (red-channel issue?).' };
+      return { pass: true, reason: nodes.length + ' regions. Small red object preserved.' };
+    },
+    critical: false,
+    causeCategory: 'red-channel color distance / Lab conversion issue'
+  },
+  { id: 'red_vs_blue_pair_red', label: 'G1: Red Circle (Comparison)',
+    description: 'Medium red circle — paired with G2 (blue) for red-vs-blue comparison.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — red circle not detected.' };
+      return { pass: true, reason: nodes.length + ' regions. Red circle detected.', regionCount: nodes.length };
+    },
+    critical: false,
+    causeCategory: 'red-channel color distance issue',
+    comparisonPairId: 'red_vs_blue_pair_blue'
+  },
+  { id: 'red_vs_blue_pair_blue', label: 'G2: Blue Circle (Comparison)',
+    description: 'Medium blue circle — paired with G1 (red). If G1 fails but G2 passes, red is specifically mishandled.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — blue circle not detected.' };
+      return { pass: true, reason: nodes.length + ' regions. Blue circle detected.', regionCount: nodes.length };
+    },
+    critical: false,
+    causeCategory: 'general color distance issue',
+    comparisonPairId: 'red_vs_blue_pair_red'
   }
 ];
 
@@ -21375,7 +21441,8 @@ function wfg2RunBenchmarks(params){
     var validation = bench.validate(graph);
     results.push({
       id: bench.id, label: bench.label, description: bench.description,
-      critical: bench.critical,
+      critical: bench.critical, mustPassDefault: bench.mustPassDefault || false,
+      causeCategory: bench.causeCategory || null,
       graph: graph, surface: surface, imgData: imgData,
       pass: validation.pass, reason: validation.reason
     });
@@ -21385,20 +21452,85 @@ function wfg2RunBenchmarks(params){
 
 function wfg2DetectCoreSegmentationFailure(results){
   var criticalFails = results.filter(function(r){ return r.critical && !r.pass; });
+  var allFails = results.filter(function(r){ return !r.pass; });
   if(criticalFails.length > 0){
+    // Build diagnostic info per failed benchmark
+    var diagnostics = criticalFails.map(function(r){
+      var diag = {
+        id: r.id, label: r.label, reason: r.reason,
+        causeCategory: r.causeCategory || 'unknown',
+        mustPassDefault: r.mustPassDefault || false
+      };
+      return diag;
+    });
     return {
       failure: true,
+      isDefaultPipelineFailure: criticalFails.some(function(r){ return r.mustPassDefault; }),
+      criticalFails: diagnostics,
+      allFails: allFails.map(function(r){ return { id: r.id, label: r.label, reason: r.reason, causeCategory: r.causeCategory }; }),
       message: 'CORE SEGMENTATION FAILURE: ' + criticalFails.length + ' critical benchmark(s) failed (' +
         criticalFails.map(function(r){ return r.label; }).join(', ') +
-        '). This indicates a pipeline problem, not a tuning issue. The default parameters should handle these cases.'
+        '). This indicates a pipeline problem, not a tuning issue.'
     };
   }
-  return { failure: false, message: null };
+  // Check for red-channel specific issue (F fails but D passes)
+  var redSmallResult = results.find(function(r){ return r.id === 'small_red_dot'; });
+  var blueSmallResult = results.find(function(r){ return r.id === 'small_blue_dot'; });
+  var redCompare = results.find(function(r){ return r.id === 'red_vs_blue_pair_red'; });
+  var blueCompare = results.find(function(r){ return r.id === 'red_vs_blue_pair_blue'; });
+  var redChannelSuspect = false;
+  if(redSmallResult && blueSmallResult && !redSmallResult.pass && blueSmallResult.pass) redChannelSuspect = true;
+  if(redCompare && blueCompare && !redCompare.pass && blueCompare.pass) redChannelSuspect = true;
+
+  return {
+    failure: false, message: null,
+    redChannelSuspect: redChannelSuspect,
+    allFails: allFails.map(function(r){ return { id: r.id, label: r.label, reason: r.reason, causeCategory: r.causeCategory }; })
+  };
 }
 
-function wfg2RenderBenchmarkResults(results){
+function wfg2RenderBenchmarkResults(results, coreCheck){
   if(!els.graphLearningBenchmarkResults) return;
   var html = '';
+
+  // If there's a core segmentation failure, render recovery workflow first
+  if(coreCheck && coreCheck.failure){
+    html += '<div style="grid-column:1/-1;border:2px solid #c44;border-radius:8px;padding:14px;background:#fff0f0;margin-bottom:8px;">';
+    if(coreCheck.isDefaultPipelineFailure){
+      html += '<div style="font-weight:700;color:#a00;font-size:14px;margin-bottom:8px;">DEFAULT PIPELINE FAILURE</div>';
+      html += '<p style="margin:0 0 8px;font-size:12px;color:#800;">Must-pass default cases failed. This is a pipeline problem — these cases should always pass with default parameters.</p>';
+    } else {
+      html += '<div style="font-weight:700;color:#a00;font-size:14px;margin-bottom:8px;">CORE SEGMENTATION FAILURE</div>';
+    }
+    html += '<div style="font-size:12px;margin-bottom:8px;">';
+    for(var ci = 0; ci < coreCheck.criticalFails.length; ci++){
+      var cf = coreCheck.criticalFails[ci];
+      html += '<div style="padding:6px 0;border-bottom:1px solid #fcc;">';
+      html += '<strong>' + cf.label + '</strong> — ' + cf.reason + '<br/>';
+      html += '<span style="color:#a00;">Likely cause: ' + cf.causeCategory + '</span>';
+      if(cf.mustPassDefault) html += '<br/><span style="color:#800;font-weight:600;">This is a must-pass default case.</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+    html += '<div style="font-size:11px;color:#666;margin-bottom:8px;">Inspect the failed benchmark images below. Suggested actions:</div>';
+    html += '<ul style="font-size:11px;color:#666;margin:0 0 8px;padding-left:18px;">';
+    html += '<li>Check if default parameters are being applied correctly</li>';
+    html += '<li>Try "Reset to Defaults" and re-run benchmarks</li>';
+    html += '<li>If failure persists at defaults, this indicates an internal pipeline issue</li>';
+    html += '</ul>';
+    html += '<button id="wfg2-bench-reset-and-rerun" class="btn" type="button" style="font-size:12px;">Reset to Defaults + Re-Run Benchmarks</button>';
+    html += '</div>';
+  }
+
+  // Red-channel warning
+  if(coreCheck && coreCheck.redChannelSuspect){
+    html += '<div style="grid-column:1/-1;border:2px solid #e90;border-radius:8px;padding:12px;background:#fff8e0;margin-bottom:8px;">';
+    html += '<div style="font-weight:700;color:#b60;font-size:13px;margin-bottom:4px;">RED-CHANNEL ISSUE DETECTED</div>';
+    html += '<p style="margin:0;font-size:12px;color:#864;">Red objects failed segmentation while equivalent blue objects passed. ';
+    html += 'This suggests a red-specific issue in color distance, Lab conversion, or evidence weighting.</p>';
+    html += '</div>';
+  }
+
   for(var i = 0; i < results.length; i++){
     var r = results[i];
     var passColor = r.pass ? '#2a7' : '#c44';
@@ -21414,10 +21546,32 @@ function wfg2RenderBenchmarkResults(results){
     // Render the benchmark image + overlay on a small canvas
     html += '<canvas id="wfg2-bench-canvas-' + r.id + '" width="200" height="200" style="display:block;width:100%;max-width:200px;border:1px solid var(--border,#ddd);border-radius:4px;margin-bottom:6px;image-rendering:pixelated;"></canvas>';
 
-    html += '<p class="sub" style="margin:0;color:var(--muted);font-size:11px;">' + r.reason + '</p>';
+    html += '<p class="sub" style="margin:0 0 4px;color:var(--muted);font-size:11px;">' + r.reason + '</p>';
+    // Show cause category for failures
+    if(!r.pass && r.causeCategory){
+      html += '<p class="sub" style="margin:0;color:#a00;font-size:10px;">Likely cause: ' + r.causeCategory + '</p>';
+    }
     html += '</div>';
   }
   els.graphLearningBenchmarkResults.innerHTML = html;
+
+  // Wire up reset-and-rerun button if present
+  var resetRerunBtn = document.getElementById('wfg2-bench-reset-and-rerun');
+  if(resetRerunBtn){
+    resetRerunBtn.addEventListener('click', function(){
+      if(!_wfg2) return;
+      state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+      wfg2SyncSlidersFromParams(state.graphLearning.params);
+      if(state.graphLearning.normalizedSurface) graphLearningRunGeneration();
+      // Re-run benchmarks
+      var newResults = wfg2RunBenchmarks(state.graphLearning.params);
+      var newCoreCheck = wfg2DetectCoreSegmentationFailure(newResults);
+      wfg2RenderBenchmarkResults(newResults, newCoreCheck);
+      wfg2RenderBenchmarkAlert(newCoreCheck);
+      var passed = newResults.filter(function(r){ return r.pass; }).length;
+      if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = passed + '/' + newResults.length + ' passed (after reset).';
+    });
+  }
 
   // Paint benchmark canvases after DOM update
   requestAnimationFrame(function(){
@@ -21454,6 +21608,17 @@ function wfg2RenderBenchmarkResults(results){
   });
 }
 
+function wfg2RenderBenchmarkAlert(coreCheck){
+  if(!els.graphLearningBenchmarkAlert) return;
+  if(coreCheck.failure){
+    els.graphLearningBenchmarkAlert.style.display = 'block';
+    els.graphLearningBenchmarkAlert.textContent = coreCheck.message;
+  } else {
+    els.graphLearningBenchmarkAlert.style.display = 'none';
+    els.graphLearningBenchmarkAlert.textContent = '';
+  }
+}
+
 // Run benchmarks button
 if(els.graphLearningRunBenchmarksBtn){
   els.graphLearningRunBenchmarksBtn.addEventListener('click', function(){
@@ -21467,32 +21632,319 @@ if(els.graphLearningRunBenchmarksBtn){
     var passed = results.filter(function(r){ return r.pass; }).length;
     if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = passed + '/' + results.length + ' passed.';
 
-    wfg2RenderBenchmarkResults(results);
-
     // Check for core segmentation failure
     var coreCheck = wfg2DetectCoreSegmentationFailure(results);
-    if(els.graphLearningBenchmarkAlert){
-      if(coreCheck.failure){
-        els.graphLearningBenchmarkAlert.style.display = 'block';
-        els.graphLearningBenchmarkAlert.textContent = coreCheck.message;
-      } else {
-        els.graphLearningBenchmarkAlert.style.display = 'none';
-        els.graphLearningBenchmarkAlert.textContent = '';
-      }
-    }
+    // Store latest benchmark results for continuity workflow
+    state.graphLearning._lastBenchmarkResults = results;
+    state.graphLearning._lastBenchmarkCoreCheck = coreCheck;
+
+    wfg2RenderBenchmarkResults(results, coreCheck);
+    wfg2RenderBenchmarkAlert(coreCheck);
   });
 }
 
-// When a generation runs, sync sliders and enable the apply button
+// When a generation runs, sync sliders (unless caller suppresses it) and enable the apply button
 var _wfg2OrigRunGeneration = graphLearningRunGeneration;
 graphLearningRunGeneration = function(opts){
   _wfg2OrigRunGeneration(opts);
-  if(state.graphLearning?.params) wfg2SyncSlidersFromParams(state.graphLearning.params);
+  // Only sync sliders if this was NOT a slider-apply (caller sets _skipSliderSync)
+  if(!opts?._skipSliderSync && state.graphLearning?.params) wfg2SyncSlidersFromParams(state.graphLearning.params);
   if(els.graphLearningApplySlidersBtn) els.graphLearningApplySlidersBtn.disabled = !state.graphLearning?.normalizedSurface;
 };
 
 // Initialize sliders from defaults
 if(_wfg2) wfg2SyncSlidersFromParams(_wfg2.DEFAULT_PARAMS);
+
+/* ═══ WFG2 Continuity Model: Accepted Baseline ═══ */
+
+var WFG2_BASELINE_KEY = 'wfg2.acceptedBaseline.v1';
+
+function wfg2LoadAcceptedBaseline(){
+  try {
+    var raw = localStorage.getItem(WFG2_BASELINE_KEY);
+    if(!raw) return null;
+    var baseline = JSON.parse(raw);
+    if(!baseline || !baseline.params) return null;
+    return baseline;
+  } catch(e){ return null; }
+}
+
+function wfg2SaveAcceptedBaseline(data){
+  try {
+    localStorage.setItem(WFG2_BASELINE_KEY, JSON.stringify(data));
+  } catch(e){ console.error('[WFG2] Failed to save accepted baseline', e); }
+}
+
+function wfg2ClearAcceptedBaseline(){
+  try { localStorage.removeItem(WFG2_BASELINE_KEY); } catch(e){}
+}
+
+// Determine what settings source is active
+function wfg2GetActiveSettingsSource(){
+  var gl = state.graphLearning;
+  if(!gl.params) return 'defaults';
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(baseline && baseline.params && gl.params._sliderValues){
+    var bSliders = baseline.sliderValues || {};
+    var cSliders = gl.params._sliderValues || {};
+    var match = true;
+    for(var k in bSliders){
+      if(bSliders[k] !== cSliders[k]){ match = false; break; }
+    }
+    if(match) return 'accepted-baseline';
+  }
+  // Check if params match defaults
+  if(_wfg2){
+    var def = _wfg2.DEFAULT_PARAMS;
+    var isDefault = true;
+    var keys = ['gridSize','edgeSensitivity','mergeThreshold','minRegionArea','colorWeight','luminanceWeight','chromaWeight','colorDistFloor','colorDistCeiling','colorDistGamma'];
+    for(var i = 0; i < keys.length; i++){
+      if(Math.abs((gl.params[keys[i]] || 0) - (def[keys[i]] || 0)) > 0.001){ isDefault = false; break; }
+    }
+    if(isDefault && !gl.params._sliderValues) return 'defaults';
+  }
+  return 'temporary-session';
+}
+
+function wfg2UpdateStateIndicator(){
+  var stateIndicator = document.getElementById('graph-learning-state-indicator');
+  var stateLabel = document.getElementById('graph-learning-state-label');
+  var savedIndicator = document.getElementById('graph-learning-state-saved-indicator');
+  var baselineStatus = document.getElementById('graph-learning-baseline-status');
+  var acceptBtn = document.getElementById('graph-learning-accept-tuning-btn');
+  var resetToBaselineBtn = document.getElementById('graph-learning-reset-to-baseline-btn');
+
+  if(stateIndicator) stateIndicator.style.display = '';
+
+  var source = wfg2GetActiveSettingsSource();
+  var baseline = wfg2LoadAcceptedBaseline();
+
+  if(stateLabel){
+    if(source === 'accepted-baseline') stateLabel.textContent = 'Accepted Baseline';
+    else if(source === 'defaults') stateLabel.textContent = 'Engine Defaults';
+    else stateLabel.textContent = 'Temporary Session Tuning (unsaved)';
+    stateLabel.style.color = source === 'temporary-session' ? '#e90' : 'var(--muted)';
+  }
+
+  if(savedIndicator){
+    if(baseline){
+      var stamp = baseline.acceptedAt ? new Date(baseline.acceptedAt).toLocaleString() : 'unknown';
+      savedIndicator.textContent = 'Baseline saved: ' + stamp;
+      savedIndicator.style.color = '#2a7';
+    } else {
+      savedIndicator.textContent = 'No saved baseline';
+      savedIndicator.style.color = 'var(--muted)';
+    }
+  }
+
+  if(baselineStatus){
+    if(baseline){
+      var bStamp = baseline.acceptedAt ? new Date(baseline.acceptedAt).toLocaleString() : 'unknown';
+      var benchInfo = baseline.benchmarkSummary || 'no benchmark data';
+      baselineStatus.textContent = 'Accepted baseline: ' + bStamp + ' — ' + benchInfo;
+      baselineStatus.style.color = '#2a7';
+    } else {
+      baselineStatus.textContent = 'No accepted baseline. Adjust sliders and benchmarks, then accept.';
+      baselineStatus.style.color = 'var(--muted)';
+    }
+  }
+
+  if(acceptBtn) acceptBtn.disabled = !state.graphLearning.params;
+  if(resetToBaselineBtn) resetToBaselineBtn.style.display = baseline ? '' : 'none';
+}
+
+// Accept Current Tuning button
+(function(){
+  var acceptBtn = document.getElementById('graph-learning-accept-tuning-btn');
+  if(!acceptBtn) return;
+  acceptBtn.addEventListener('click', function(){
+    var gl = state.graphLearning;
+    if(!gl.params || !_wfg2) return;
+
+    // Build benchmark summary
+    var benchResults = gl._lastBenchmarkResults || [];
+    var passed = benchResults.filter(function(r){ return r.pass; }).length;
+    var benchSummary = benchResults.length > 0
+      ? (passed + '/' + benchResults.length + ' benchmarks passed')
+      : 'no benchmarks run';
+
+    var baselineData = {
+      params: _wfg2.copyParams(gl.params),
+      sliderValues: gl.params._sliderValues ? Object.assign({}, gl.params._sliderValues) : null,
+      benchmarkSummary: benchSummary,
+      benchmarkPassFail: benchResults.map(function(r){ return { id: r.id, label: r.label, pass: r.pass }; }),
+      acceptedAt: new Date().toISOString(),
+      sourceFileName: gl.fileName || null,
+      sourceAttemptNumber: gl.attemptNumber || 0
+    };
+    wfg2SaveAcceptedBaseline(baselineData);
+
+    // Also save as the preset for backward compat
+    graphLearningSaveCurrentPreset({ sourceResult: 'accepted-baseline' });
+
+    wfg2UpdateStateIndicator();
+    graphLearningStatus('Accepted current tuning as learned baseline. Future sessions will use this.');
+  });
+})();
+
+// Reset to Accepted Baseline button
+(function(){
+  var resetToBaselineBtn = document.getElementById('graph-learning-reset-to-baseline-btn');
+  if(!resetToBaselineBtn) return;
+  resetToBaselineBtn.addEventListener('click', function(){
+    var baseline = wfg2LoadAcceptedBaseline();
+    if(!baseline || !baseline.params || !_wfg2) return;
+    state.graphLearning.params = _wfg2.copyParams(baseline.params);
+    // Restore stored slider values if available
+    if(baseline.sliderValues) state.graphLearning.params._sliderValues = Object.assign({}, baseline.sliderValues);
+    wfg2SyncSlidersFromParams(state.graphLearning.params);
+    if(state.graphLearning.normalizedSurface) graphLearningRunGeneration({ _skipSliderSync: true });
+    wfg2UpdateStateIndicator();
+    graphLearningStatus('Restored accepted baseline settings.');
+  });
+})();
+
+// Load accepted baseline on file open (modify the existing load logic)
+var _wfg2OrigOpenFile2 = graphLearningOpenFile;
+graphLearningOpenFile = async function(file){
+  await _wfg2OrigOpenFile2(file);
+  // After file is opened, check if we should use accepted baseline
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(baseline && baseline.params && _wfg2){
+    // Accepted baseline takes priority over preset
+    state.graphLearning.params = _wfg2.copyParams(baseline.params);
+    if(baseline.sliderValues) state.graphLearning.params._sliderValues = Object.assign({}, baseline.sliderValues);
+    wfg2SyncSlidersFromParams(state.graphLearning.params);
+    if(state.graphLearning.normalizedSurface) graphLearningRunGeneration({ _skipSliderSync: true });
+    graphLearningStatus('Loaded accepted baseline and generated attempt ' + state.graphLearning.attemptNumber + '.');
+  }
+  wfg2UpdateStateIndicator();
+};
+
+// Update state indicator when sliders are applied or reset
+var _origApplyHandler = els.graphLearningApplySlidersBtn;
+var _origResetHandler = els.graphLearningResetDefaultsBtn;
+// Patch apply to update indicator after apply
+(function(){
+  var applyBtn = els.graphLearningApplySlidersBtn;
+  if(!applyBtn) return;
+  var origListeners = applyBtn._wfg2Patched;
+  if(!origListeners){
+    applyBtn.addEventListener('click', function(){ setTimeout(wfg2UpdateStateIndicator, 50); });
+    applyBtn._wfg2Patched = true;
+  }
+})();
+(function(){
+  var resetBtn = els.graphLearningResetDefaultsBtn;
+  if(!resetBtn) return;
+  resetBtn.addEventListener('click', function(){ setTimeout(wfg2UpdateStateIndicator, 50); });
+})();
+
+/* ═══ WFG2 Parameter State Debug Inspector ═══ */
+
+function wfg2RefreshDebugInspector(){
+  var output = document.getElementById('graph-learning-debug-output');
+  if(!output) return;
+  var gl = state.graphLearning;
+  var lines = [];
+
+  lines.push('=== Settings Source ===');
+  lines.push('Active: ' + wfg2GetActiveSettingsSource());
+  lines.push('');
+
+  lines.push('=== UI Slider Values (raw 0-100) ===');
+  for(var i = 0; i < WFG2_SLIDER_IDS.length; i++){
+    var id = WFG2_SLIDER_IDS[i];
+    var el = document.getElementById('wfg2-slider-' + id);
+    lines.push('  ' + id + ': ' + (el ? el.value : 'n/a'));
+  }
+  lines.push('');
+
+  lines.push('=== Stored Slider Values (in params._sliderValues) ===');
+  var stored = gl.params?._sliderValues || {};
+  for(var j = 0; j < WFG2_SLIDER_IDS.length; j++){
+    var sid = WFG2_SLIDER_IDS[j];
+    lines.push('  ' + sid + ': ' + (typeof stored[sid] === 'number' ? stored[sid] : 'n/a'));
+  }
+  lines.push('');
+
+  lines.push('=== Committed/Applied Engine Params ===');
+  if(gl.params){
+    var keys = ['gridSize','edgeSensitivity','mergeThreshold','minRegionArea','fragmentationTolerance',
+      'rectangularBiasPenalty','colorWeight','luminanceWeight','varianceWeight','colorMergePenalty',
+      'chromaWeight','colorDistFloor','colorDistCeiling','colorDistGamma','surfaceUniformityBias',
+      'closureRadius','closureWeight','parentContourBonus','minEnclosingArea','geoSimplifyLevel'];
+    for(var k = 0; k < keys.length; k++){
+      var key = keys[k];
+      var val = gl.params[key];
+      lines.push('  ' + key + ': ' + (val !== undefined ? (typeof val === 'number' ? val.toFixed(4) : val) : 'undefined'));
+    }
+  } else {
+    lines.push('  (no params set)');
+  }
+  lines.push('');
+
+  lines.push('=== Accepted Baseline (localStorage) ===');
+  var baseline = wfg2LoadAcceptedBaseline();
+  if(baseline){
+    lines.push('  Accepted: ' + (baseline.acceptedAt || 'unknown'));
+    lines.push('  Benchmark: ' + (baseline.benchmarkSummary || 'none'));
+    if(baseline.sliderValues){
+      for(var m in baseline.sliderValues){
+        lines.push('    slider.' + m + ': ' + baseline.sliderValues[m]);
+      }
+    }
+  } else {
+    lines.push('  (no baseline saved)');
+  }
+  lines.push('');
+
+  lines.push('=== Preset (localStorage) ===');
+  var preset = _wfg2PresetStore?.get ? _wfg2PresetStore.get() : null;
+  if(preset){
+    lines.push('  Name: ' + (preset.name || 'unnamed'));
+    lines.push('  Saved: ' + (preset.savedAt || 'unknown'));
+  } else {
+    lines.push('  (no preset)');
+  }
+  lines.push('');
+
+  lines.push('=== Defaults (engine) ===');
+  if(_wfg2){
+    var def = _wfg2.DEFAULT_PARAMS;
+    lines.push('  gridSize: ' + def.gridSize + '  edgeSensitivity: ' + def.edgeSensitivity);
+    lines.push('  mergeThreshold: ' + def.mergeThreshold + '  minRegionArea: ' + def.minRegionArea);
+    lines.push('  colorWeight: ' + def.colorWeight + '  colorDistFloor: ' + def.colorDistFloor);
+  }
+
+  // Highlight any drift between UI and committed
+  lines.push('');
+  lines.push('=== Drift Check (UI vs Committed) ===');
+  var driftFound = false;
+  for(var d = 0; d < WFG2_SLIDER_IDS.length; d++){
+    var did = WFG2_SLIDER_IDS[d];
+    var uiEl = document.getElementById('wfg2-slider-' + did);
+    var uiVal = uiEl ? Number(uiEl.value) : -1;
+    var committedVal = (typeof stored[did] === 'number') ? stored[did] : -1;
+    if(uiVal !== committedVal && committedVal >= 0){
+      lines.push('  DRIFT: ' + did + ' — UI=' + uiVal + ' committed=' + committedVal);
+      driftFound = true;
+    }
+  }
+  if(!driftFound) lines.push('  No drift detected.');
+
+  output.textContent = lines.join('\n');
+}
+
+(function(){
+  var debugRefreshBtn = document.getElementById('graph-learning-debug-refresh-btn');
+  if(debugRefreshBtn){
+    debugRefreshBtn.addEventListener('click', wfg2RefreshDebugInspector);
+  }
+})();
+
+// Initialize state indicator
+wfg2UpdateStateIndicator();
 
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 
