@@ -519,6 +519,12 @@ const els = {
   graphLearningFeedbackPanel: document.getElementById('graph-learning-feedback-panel'),
   graphLearningRating: document.getElementById('graph-learning-rating'),
   graphLearningApplyFeedbackBtn: document.getElementById('graph-learning-apply-feedback-btn'),
+  graphLearningApplySlidersBtn: document.getElementById('graph-learning-apply-sliders-btn'),
+  graphLearningResetDefaultsBtn: document.getElementById('graph-learning-reset-defaults-btn'),
+  graphLearningRunBenchmarksBtn: document.getElementById('graph-learning-run-benchmarks-btn'),
+  graphLearningBenchmarkStatus: document.getElementById('graph-learning-benchmark-status'),
+  graphLearningBenchmarkAlert: document.getElementById('graph-learning-benchmark-alert'),
+  graphLearningBenchmarkResults: document.getElementById('graph-learning-benchmark-results'),
   graphLearningAttempts: document.getElementById('graph-learning-attempts'),
   graphLearningPresetStatus: document.getElementById('graph-learning-preset-status'),
   graphLearningViewer: document.getElementById('graph-learning-viewer'),
@@ -21008,28 +21014,6 @@ if(els.graphLearningLoadPresetBtn){
     }
   });
 }
-if(els.graphLearningGoodBtn){
-  els.graphLearningGoodBtn.addEventListener('click', function(){
-    graphLearningCaptureAttempt('good', null);
-    graphLearningStatus('Marked Good.');
-  });
-}
-if(els.graphLearningBadBtn){
-  els.graphLearningBadBtn.addEventListener('click', function(){
-    if(els.graphLearningFeedbackPanel) els.graphLearningFeedbackPanel.style.display = 'block';
-  });
-}
-if(els.graphLearningApplyFeedbackBtn){
-  els.graphLearningApplyFeedbackBtn.addEventListener('click', function(){
-    const tags = Array.from(document.querySelectorAll('#graph-learning-feedback-panel [data-feedback-tag]:checked')).map(function(el){ return el.getAttribute('data-feedback-tag'); });
-    const feedback = { tags: tags, rating: Number(els.graphLearningRating?.value || 0) || null };
-    graphLearningCaptureAttempt('bad', feedback);
-    graphLearningRunGeneration({ feedback: feedback });
-    if(els.graphLearningFeedbackPanel) els.graphLearningFeedbackPanel.style.display = 'none';
-    document.querySelectorAll('#graph-learning-feedback-panel [data-feedback-tag]:checked').forEach(function(el){ el.checked = false; });
-    if(els.graphLearningRating) els.graphLearningRating.value = '';
-  });
-}
 if(els.graphLearningClearHistoryBtn){
   els.graphLearningClearHistoryBtn.addEventListener('click', function(){
     if(!_wfg2Store) return;
@@ -21047,6 +21031,468 @@ if(els.graphLearningClearHistoryBtn){
 renderGraphLearningAttemptHistory();
 renderGraphLearningPresetStatus();
 updateGraphLearningPresetButtons();
+
+/* ═══ WFG2 Slider-Based Parameter Controls ═══ */
+
+/**
+ * Slider definitions: each maps a UI slider (0-100) to one or more WFG2 engine params.
+ * The `toParams` function converts the 0-1 normalized slider value to engine param values.
+ * The `fromParams` function reads the engine params and returns a 0-1 value for the slider.
+ */
+const WFG2_SLIDER_DEFS = {
+  colorSensitivity: {
+    label: 'Color Boundary Sensitivity',
+    toParams: function(t, p){
+      // Low t = high colorDistFloor (less sensitive), low colorWeight
+      // High t = low colorDistFloor (more sensitive), high colorWeight, high colorMergePenalty
+      p.colorDistFloor = Math.round(25 - t * 25);           // 25..0
+      p.colorDistCeiling = Math.round(30 + (1 - t) * 50);   // 80..30
+      p.colorWeight = 0.40 + t * 0.55;                       // 0.40..0.95
+      p.colorMergePenalty = 1.0 + t * 4.0;                   // 1.0..5.0
+      p.colorDistGamma = 3.2 - t * 2.4;                      // 3.2..0.8
+    },
+    fromParams: function(p){
+      return 1 - (p.colorDistFloor || 0) / 25;
+    }
+  },
+  luminanceSuppression: {
+    label: 'Brightness-Only Edge Suppression',
+    toParams: function(t, p){
+      // Low t = luminance contributes more, High t = luminance suppressed
+      p.luminanceWeight = 0.30 - t * 0.30;                   // 0.30..0
+      p.varianceWeight = 0.20 - t * 0.20;                    // 0.20..0
+      p.chromaWeight = 0.50 + t * 0.50;                      // 0.50..1.0
+    },
+    fromParams: function(p){
+      return 1 - (p.luminanceWeight || 0) / 0.30;
+    }
+  },
+  boundarySnap: {
+    label: 'Boundary Snap Tightness',
+    toParams: function(t, p){
+      // Low t = coarse grid, high merge. High t = fine grid, lower edge sensitivity threshold
+      p.gridSize = Math.round(20 - t * 16);                  // 20..4
+      p.edgeSensitivity = Math.round(100 - t * 88);          // 100..12
+    },
+    fromParams: function(p){
+      return 1 - ((p.gridSize || 8) - 4) / 16;
+    }
+  },
+  mergeStrength: {
+    label: 'Same-Surface Merge Strength',
+    toParams: function(t, p){
+      // Low t = low merge. High t = aggressive merge + high uniformity bias
+      p.mergeThreshold = Math.round(4 + t * 56);             // 4..60
+      p.surfaceUniformityBias = t * 0.80;                    // 0..0.80
+      p.fragmentationTolerance = 0.05 + t * 0.75;            // 0.05..0.80
+    },
+    fromParams: function(p){
+      return ((p.mergeThreshold || 18) - 4) / 56;
+    }
+  },
+  smallRegion: {
+    label: 'Small Region Preservation',
+    toParams: function(t, p){
+      // Low t = large minRegionArea (small regions merge). High t = tiny minRegionArea (preserved)
+      p.minRegionArea = 0.08 - t * 0.0799;                   // 0.08..0.0001
+    },
+    fromParams: function(p){
+      return 1 - ((p.minRegionArea || 0.0008) - 0.0001) / 0.0799;
+    }
+  },
+  minSignificance: {
+    label: 'Minimum Region Significance',
+    toParams: function(t, p){
+      // Low t = tiny area threshold (noisy). High t = large threshold (only strong regions)
+      p.minRegionArea = Math.max(p.minRegionArea || 0, 0.0001 + t * 0.0799); // Override upwards only
+      p.rectangularBiasPenalty = t * 1.0;                     // 0..1
+    },
+    fromParams: function(p){
+      return (p.rectangularBiasPenalty || 0);
+    }
+  },
+  shapeContinuity: {
+    label: 'Shape Continuity Reinforcement',
+    toParams: function(t, p){
+      p.closureWeight = t * 0.60;                             // 0..0.60
+      p.parentContourBonus = t * 0.60;                        // 0..0.60
+    },
+    fromParams: function(p){
+      return (p.closureWeight || 0) / 0.60;
+    }
+  },
+  closureBias: {
+    label: 'Closure Bias',
+    toParams: function(t, p){
+      p.closureRadius = Math.round(1 + t * 7);               // 1..8
+      p.minEnclosingArea = 0.10 - t * 0.098;                 // 0.10..0.002
+    },
+    fromParams: function(p){
+      return ((p.closureRadius || 3) - 1) / 7;
+    }
+  },
+  geoSimplify: {
+    label: 'Geometric Simplification',
+    toParams: function(t, p){
+      // Maps to grid coarseness as a simplification proxy
+      // At high t, use coarser grid which smooths boundaries
+      p.gridSize = Math.max(p.gridSize || 8, Math.round(4 + t * 20)); // 4..24
+    },
+    fromParams: function(p){
+      return ((p.gridSize || 8) - 4) / 20;
+    }
+  }
+};
+
+const WFG2_SLIDER_IDS = Object.keys(WFG2_SLIDER_DEFS);
+
+function wfg2ReadSlidersToParams(){
+  if(!_wfg2) return null;
+  const p = _wfg2.copyParams(state.graphLearning?.params || _wfg2.DEFAULT_PARAMS);
+  for(const id of WFG2_SLIDER_IDS){
+    const el = document.getElementById('wfg2-slider-' + id);
+    if(!el) continue;
+    const t = Number(el.value) / 100;
+    WFG2_SLIDER_DEFS[id].toParams(t, p);
+  }
+  // Clamp all params to valid ranges
+  p.gridSize = Math.max(4, Math.min(24, Math.round(p.gridSize)));
+  p.edgeSensitivity = Math.max(8, Math.min(120, Math.round(p.edgeSensitivity)));
+  p.mergeThreshold = Math.max(4, Math.min(60, Math.round(p.mergeThreshold)));
+  p.minRegionArea = Math.max(0.0001, Math.min(0.08, p.minRegionArea));
+  p.fragmentationTolerance = Math.max(0.05, Math.min(0.8, p.fragmentationTolerance));
+  p.rectangularBiasPenalty = Math.max(0, Math.min(1, p.rectangularBiasPenalty));
+  p.colorWeight = Math.max(0.3, Math.min(0.95, p.colorWeight));
+  p.luminanceWeight = Math.max(0, Math.min(0.3, p.luminanceWeight));
+  p.varianceWeight = Math.max(0, Math.min(0.2, p.varianceWeight));
+  p.colorMergePenalty = Math.max(0.5, Math.min(5, p.colorMergePenalty));
+  p.chromaWeight = Math.max(0.5, Math.min(1.0, p.chromaWeight));
+  p.colorDistFloor = Math.max(0, Math.min(25, p.colorDistFloor));
+  p.colorDistCeiling = Math.max(15, Math.min(80, p.colorDistCeiling));
+  p.colorDistGamma = Math.max(0.5, Math.min(3.5, p.colorDistGamma));
+  p.surfaceUniformityBias = Math.max(0, Math.min(0.8, p.surfaceUniformityBias));
+  p.closureRadius = Math.max(1, Math.min(8, Math.round(p.closureRadius)));
+  p.closureWeight = Math.max(0, Math.min(0.6, p.closureWeight));
+  p.parentContourBonus = Math.max(0, Math.min(0.6, p.parentContourBonus));
+  p.minEnclosingArea = Math.max(0.002, Math.min(0.1, p.minEnclosingArea));
+  return p;
+}
+
+function wfg2SyncSlidersFromParams(params){
+  if(!params) return;
+  for(const id of WFG2_SLIDER_IDS){
+    const def = WFG2_SLIDER_DEFS[id];
+    const val = Math.round(def.fromParams(params) * 100);
+    const el = document.getElementById('wfg2-slider-' + id);
+    const valEl = document.getElementById('wfg2-slider-' + id + '-val');
+    if(el) el.value = Math.max(0, Math.min(100, val));
+    if(valEl) valEl.textContent = (val / 100).toFixed(2);
+  }
+}
+
+function wfg2UpdateSliderDisplay(id){
+  const el = document.getElementById('wfg2-slider-' + id);
+  const valEl = document.getElementById('wfg2-slider-' + id + '-val');
+  if(el && valEl) valEl.textContent = (Number(el.value) / 100).toFixed(2);
+}
+
+// Attach slider input events for real-time value display
+for(const id of WFG2_SLIDER_IDS){
+  const el = document.getElementById('wfg2-slider-' + id);
+  if(el){
+    el.addEventListener('input', function(){ wfg2UpdateSliderDisplay(id); });
+  }
+}
+
+// Apply sliders button
+if(els.graphLearningApplySlidersBtn){
+  els.graphLearningApplySlidersBtn.addEventListener('click', function(){
+    const p = wfg2ReadSlidersToParams();
+    if(!p) return;
+    state.graphLearning.params = p;
+    graphLearningRunGeneration();
+    graphLearningCaptureAttempt('slider-tuned', { tags: ['slider_adjustment'], rating: null });
+    graphLearningStatus('Applied slider parameters and regenerated.');
+  });
+}
+
+// Reset to defaults
+if(els.graphLearningResetDefaultsBtn){
+  els.graphLearningResetDefaultsBtn.addEventListener('click', function(){
+    if(!_wfg2) return;
+    state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+    wfg2SyncSlidersFromParams(state.graphLearning.params);
+    if(state.graphLearning.normalizedSurface){
+      graphLearningRunGeneration();
+      graphLearningStatus('Reset to default parameters and regenerated.');
+    } else {
+      graphLearningStatus('Reset to default parameters.');
+    }
+  });
+}
+
+// Enable apply button when a file is loaded
+var _origGraphLearningRunGeneration = graphLearningRunGeneration;
+
+// Sync sliders after initial generation or preset load
+(function(){
+  var origOpenFile = graphLearningOpenFile;
+  window._wfg2OrigOpenFile = origOpenFile;
+})();
+
+/* ═══ WFG2 Benchmark Validation System ═══ */
+
+/**
+ * Generate a synthetic test image as raw pixel data.
+ * Returns { gray, r, g, b, width, height }.
+ */
+function wfg2CreateBenchmarkImage(testId, size){
+  const w = size || 200, h = size || 200;
+  const n = w * h;
+  const r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n), gray = new Uint8Array(n);
+
+  function setPixel(x, y, rv, gv, bv){
+    if(x < 0 || x >= w || y < 0 || y >= h) return;
+    const i = y * w + x;
+    r[i] = rv; g[i] = gv; b[i] = bv;
+    gray[i] = Math.round(0.299 * rv + 0.587 * gv + 0.114 * bv);
+  }
+
+  function fillRect(x1, y1, x2, y2, rv, gv, bv){
+    for(let y = y1; y <= y2; y++) for(let x = x1; x <= x2; x++) setPixel(x, y, rv, gv, bv);
+  }
+
+  function fillCircle(cx, cy, rad, rv, gv, bv){
+    for(let y = cy - rad; y <= cy + rad; y++){
+      for(let x = cx - rad; x <= cx + rad; x++){
+        if((x - cx) * (x - cx) + (y - cy) * (y - cy) <= rad * rad) setPixel(x, y, rv, gv, bv);
+      }
+    }
+  }
+
+  // Fill background white by default
+  fillRect(0, 0, w - 1, h - 1, 255, 255, 255);
+
+  switch(testId){
+    case 'black_square_white':
+      // Black square centered on white background
+      fillRect(50, 50, 149, 149, 0, 0, 0);
+      break;
+    case 'cyan_on_gray':
+      // Light gray background, cyan rectangle
+      fillRect(0, 0, w - 1, h - 1, 210, 210, 210);
+      fillRect(40, 40, 159, 159, 0, 220, 220);
+      break;
+    case 'shaded_yellow_circle':
+      // Yellow circle with mild shading
+      for(let y = 0; y < h; y++){
+        for(let x = 0; x < w; x++){
+          const dx = x - 100, dy = y - 100;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if(dist <= 60){
+            const shade = 0.85 + 0.15 * (1 - dist / 60); // mild shading
+            setPixel(x, y, Math.round(255 * shade), Math.round(230 * shade), 30);
+          }
+        }
+      }
+      break;
+    case 'small_red_dot':
+      // Small red dot (radius 8)
+      fillCircle(100, 100, 8, 220, 20, 20);
+      break;
+    case 'faint_gray_patch':
+      // Very subtle gray patch on white
+      fillRect(60, 60, 139, 139, 235, 235, 235);
+      break;
+  }
+
+  return { gray, r, g, b, width: w, height: h };
+}
+
+const WFG2_BENCHMARKS = [
+  { id: 'black_square_white', label: 'A: Black Square on White',
+    description: 'Black square on white background. Expected: 1 region with clean boundary.',
+    validate: function(graph){
+      // Must detect at least 2 regions (background + square) with clear separation
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) detected — expected at least 2.' };
+      if(nodes.length > 5) return { pass: false, reason: nodes.length + ' regions — too fragmented for a simple black square.' };
+      return { pass: true, reason: nodes.length + ' regions detected. Clean segmentation.' };
+    },
+    critical: true
+  },
+  { id: 'cyan_on_gray', label: 'B: Cyan Object on Light Gray',
+    description: 'Saturated cyan shape on pale gray background. Expected: object clearly detected.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — cyan object not detected.' };
+      if(nodes.length > 6) return { pass: false, reason: nodes.length + ' regions — too fragmented.' };
+      return { pass: true, reason: nodes.length + ' regions. Cyan object detected.' };
+    },
+    critical: true
+  },
+  { id: 'shaded_yellow_circle', label: 'C: Shaded Yellow Circle',
+    description: 'Yellow circle with mild shading. Expected: circle remains one region.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — circle not separated from background.' };
+      if(nodes.length > 8) return { pass: false, reason: nodes.length + ' regions — circle shading caused fragmentation.' };
+      return { pass: true, reason: nodes.length + ' regions. Circle detected.' };
+    },
+    critical: false
+  },
+  { id: 'small_red_dot', label: 'D: Small Red Object',
+    description: 'Small red dot on white. Expected: dot remains distinct region.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      if(nodes.length < 2) return { pass: false, reason: 'Only ' + nodes.length + ' region(s) — small object lost.' };
+      return { pass: true, reason: nodes.length + ' regions. Small object preserved.' };
+    },
+    critical: false
+  },
+  { id: 'faint_gray_patch', label: 'E: Faint Gray Patch',
+    description: 'Very subtle gray patch on white. May be weakly detected or ignored.',
+    validate: function(graph){
+      const nodes = graph?.nodes || [];
+      // This is expected to be weak — not a failure if missed
+      if(nodes.length >= 2) return { pass: true, reason: nodes.length + ' regions. Subtle patch detected (sensitive config).' };
+      return { pass: true, reason: '1 region. Faint patch below threshold (expected at conservative settings).' };
+    },
+    critical: false
+  }
+];
+
+function wfg2RunBenchmarks(params){
+  if(!_wfg2) return [];
+  const p = params || state.graphLearning?.params || _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  var results = [];
+  for(var i = 0; i < WFG2_BENCHMARKS.length; i++){
+    var bench = WFG2_BENCHMARKS[i];
+    var imgData = wfg2CreateBenchmarkImage(bench.id, 200);
+    var surface = _wfg2.normalizeVisualInput(imgData, { maxSide: 200 });
+    var graph = null;
+    try { graph = _wfg2.generateFeatureGraph(surface, p); } catch(e){ /* engine error */ }
+    var validation = bench.validate(graph);
+    results.push({
+      id: bench.id, label: bench.label, description: bench.description,
+      critical: bench.critical,
+      graph: graph, surface: surface, imgData: imgData,
+      pass: validation.pass, reason: validation.reason
+    });
+  }
+  return results;
+}
+
+function wfg2DetectCoreSegmentationFailure(results){
+  var criticalFails = results.filter(function(r){ return r.critical && !r.pass; });
+  if(criticalFails.length > 0){
+    return {
+      failure: true,
+      message: 'CORE SEGMENTATION FAILURE: ' + criticalFails.length + ' critical benchmark(s) failed (' +
+        criticalFails.map(function(r){ return r.label; }).join(', ') +
+        '). This indicates a pipeline problem, not a tuning issue. The default parameters should handle these cases.'
+    };
+  }
+  return { failure: false, message: null };
+}
+
+function wfg2RenderBenchmarkResults(results){
+  if(!els.graphLearningBenchmarkResults) return;
+  var html = '';
+  for(var i = 0; i < results.length; i++){
+    var r = results[i];
+    var passColor = r.pass ? '#2a7' : '#c44';
+    var passLabel = r.pass ? 'PASS' : 'FAIL';
+    var borderColor = r.pass ? '#2a7' : (r.critical ? '#c44' : '#e90');
+
+    html += '<div style="border:2px solid ' + borderColor + ';border-radius:8px;padding:10px;background:var(--surface,#fafafa);">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
+    html += '<strong style="font-size:12px;">' + r.label + '</strong>';
+    html += '<span style="color:' + passColor + ';font-weight:700;font-size:12px;">' + passLabel + (r.critical ? ' (critical)' : '') + '</span>';
+    html += '</div>';
+
+    // Render the benchmark image + overlay on a small canvas
+    html += '<canvas id="wfg2-bench-canvas-' + r.id + '" width="200" height="200" style="display:block;width:100%;max-width:200px;border:1px solid var(--border,#ddd);border-radius:4px;margin-bottom:6px;image-rendering:pixelated;"></canvas>';
+
+    html += '<p class="sub" style="margin:0;color:var(--muted);font-size:11px;">' + r.reason + '</p>';
+    html += '</div>';
+  }
+  els.graphLearningBenchmarkResults.innerHTML = html;
+
+  // Paint benchmark canvases after DOM update
+  requestAnimationFrame(function(){
+    for(var i = 0; i < results.length; i++){
+      var r = results[i];
+      var canvas = document.getElementById('wfg2-bench-canvas-' + r.id);
+      if(!canvas || !r.imgData) continue;
+      var ctx = canvas.getContext('2d');
+      var w = r.imgData.width, h = r.imgData.height;
+      canvas.width = w; canvas.height = h;
+      var imgOut = new Uint8ClampedArray(w * h * 4);
+      for(var j = 0, k = 0; j < w * h; j++, k += 4){
+        imgOut[k] = r.imgData.r[j]; imgOut[k + 1] = r.imgData.g[j]; imgOut[k + 2] = r.imgData.b[j]; imgOut[k + 3] = 255;
+      }
+      ctx.putImageData(new ImageData(imgOut, w, h), 0, 0);
+
+      // Overlay the feature graph contours
+      var nodes = r.graph?.nodes || [];
+      var hues = [210, 150, 30, 330, 270, 60, 180, 0, 120, 300];
+      for(var ni = 0; ni < nodes.length; ni++){
+        var node = nodes[ni];
+        var c = node.contour || [];
+        if(c.length < 3) continue;
+        var hue = hues[ni % hues.length];
+        ctx.strokeStyle = 'hsla(' + hue + ',70%,50%,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(c[0].x, c[0].y);
+        for(var ci = 1; ci < c.length; ci++) ctx.lineTo(c[ci].x, c[ci].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+  });
+}
+
+// Run benchmarks button
+if(els.graphLearningRunBenchmarksBtn){
+  els.graphLearningRunBenchmarksBtn.addEventListener('click', function(){
+    if(!_wfg2){
+      if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = 'WFG2 engine not loaded.';
+      return;
+    }
+    if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = 'Running benchmarks...';
+    var params = state.graphLearning?.params || (_wfg2 ? _wfg2.copyParams(_wfg2.DEFAULT_PARAMS) : null);
+    var results = wfg2RunBenchmarks(params);
+    var passed = results.filter(function(r){ return r.pass; }).length;
+    if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = passed + '/' + results.length + ' passed.';
+
+    wfg2RenderBenchmarkResults(results);
+
+    // Check for core segmentation failure
+    var coreCheck = wfg2DetectCoreSegmentationFailure(results);
+    if(els.graphLearningBenchmarkAlert){
+      if(coreCheck.failure){
+        els.graphLearningBenchmarkAlert.style.display = 'block';
+        els.graphLearningBenchmarkAlert.textContent = coreCheck.message;
+      } else {
+        els.graphLearningBenchmarkAlert.style.display = 'none';
+        els.graphLearningBenchmarkAlert.textContent = '';
+      }
+    }
+  });
+}
+
+// When a generation runs, sync sliders and enable the apply button
+var _wfg2OrigRunGeneration = graphLearningRunGeneration;
+graphLearningRunGeneration = function(opts){
+  _wfg2OrigRunGeneration(opts);
+  if(state.graphLearning?.params) wfg2SyncSlidersFromParams(state.graphLearning.params);
+  if(els.graphLearningApplySlidersBtn) els.graphLearningApplySlidersBtn.disabled = !state.graphLearning?.normalizedSurface;
+};
+
+// Initialize sliders from defaults
+if(_wfg2) wfg2SyncSlidersFromParams(_wfg2.DEFAULT_PARAMS);
 
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 
