@@ -796,7 +796,7 @@
       if(fromId && toId) partitionEdges.push({ from: fromId, to: toId, kind: 'shared_boundary', distance: 0 });
     }
 
-    return { labelMap, sharedBoundaries, nodes: partitionNodes, edges: partitionEdges, adjacency, regionCount: regions.length };
+    return { labelMap, sharedBoundaries, nodes: partitionNodes, edges: partitionEdges, adjacency, regionCount: regions.length, regionMeans };
   }
 
   /* ─── Legacy structural region growing (grid-based) ─────────── */
@@ -1006,7 +1006,8 @@
         closureMap: closureMap,
         combinedEvidenceMap: combinedEvidence,
         partitionLabelMap: partitionResult ? partitionResult.labelMap : null,
-        partitionSharedBoundaries: partitionResult ? partitionResult.sharedBoundaries : null
+        partitionSharedBoundaries: partitionResult ? partitionResult.sharedBoundaries : null,
+        partitionRegionMeans: partitionResult ? partitionResult.regionMeans : null
       }
     };
     return graph;
