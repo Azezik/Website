@@ -5,21 +5,24 @@
   root.WrokitFeatureGraph2 = factory();
 })(typeof window !== 'undefined' ? window : globalThis, function(){
   // Schema version: bump when DEFAULT_PARAMS change to invalidate stale presets
-  const PARAMS_SCHEMA_VERSION = 2;
+  const PARAMS_SCHEMA_VERSION = 3;
 
   const DEFAULT_PARAMS = Object.freeze({
     _schemaVersion: PARAMS_SCHEMA_VERSION,
     gridSize: 8, edgeSensitivity: 28, mergeThreshold: 18,
     minRegionArea: 0.0008, fragmentationTolerance: 0.22, rectangularBiasPenalty: 0.35,
-    /* Color-primary boundary evidence: color is the anchor signal.
-       Luminance and variance are secondary — damped where color is present. */
-    colorWeight: 0.65, luminanceWeight: 0.20, varianceWeight: 0.10,
-    colorMergePenalty: 1.8,
+    /* Color-dominant boundary evidence: chromatic difference is the anchor signal.
+       Luminance and variance are tertiary — heavily suppressed where color is present. */
+    colorWeight: 0.80, luminanceWeight: 0.08, varianceWeight: 0.05,
+    colorMergePenalty: 2.5,
+    /* Chromatic vs luminance separation: controls how much hue/saturation
+       dominates over brightness in boundary and merge decisions. */
+    chromaWeight: 0.85,  // 0-1: fraction of boundary signal from chromatic (a*b*) vs luminance (L*)
     /* Color distance calibration */
-    colorDistFloor: 14,      // ΔE below this is ignored (shadows, lighting gradients)
+    colorDistFloor: 20,      // ΔE below this is ignored (shadows, lighting gradients)
     colorDistCeiling: 50,    // ΔE at/above this produces maximum boundary signal
     colorDistGamma: 2.2,     // >1 = suppress small distances, amplify large ones
-    surfaceUniformityBias: 0.55, // 0-1: how much intra-region color uniformity relaxes merge
+    surfaceUniformityBias: 0.70, // 0-1: how much intra-region color uniformity relaxes merge
     /* Continuity / closure (now color-informed when color data is available) */
     closureRadius: 3, closureWeight: 0.20,
     parentContourBonus: 0.25, minEnclosingArea: 0.01
@@ -174,22 +177,34 @@
     return Math.pow(t, gamma);                   // gamma curve
   }
 
+  /* Compute chromatic-dominant color distance between two Lab pixels.
+     Separates chromatic difference (Δa, Δb) from luminance difference (ΔL)
+     and weights chromatic change much higher.  This prevents shading/lighting
+     gradients (L-only changes) from producing false boundaries. */
+  function chromaDominantDeltaE(L1, a1, b1, L2, a2, b2, chromaW){
+    const da = a1 - a2, db = b1 - b2;
+    const dChroma = Math.sqrt(da * da + db * db);
+    const dL = Math.abs(L1 - L2);
+    // Chromatic distance is the dominant signal; luminance is attenuated
+    return dChroma * chromaW + dL * (1 - chromaW);
+  }
+
   function computeColorBoundary(lab, w, h, params){
     if(!lab) return null;
     const p = params || {};
-    const floor   = p.colorDistFloor   ?? 6;
-    const ceiling = p.colorDistCeiling ?? 45;
-    const gamma   = p.colorDistGamma   ?? 1.8;
+    const floor    = p.colorDistFloor   ?? 20;
+    const ceiling  = p.colorDistCeiling ?? 50;
+    const gamma    = p.colorDistGamma   ?? 2.2;
+    const chromaW  = clamp(p.chromaWeight ?? 0.85, 0, 1);
     const out = new Float32Array(w * h);
     const L = lab.L, a = lab.a, b = lab.b;
     for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
       const i = y * w + x;
-      // Max CIE76 ΔE across 4-connected neighbors
+      // Max chromatic-dominant ΔE across 4-connected neighbors
       let maxDelta = 0;
       const nbrs = [i - 1, i + 1, i - w, i + w];
       for(const ni of nbrs){
-        const dL = L[i] - L[ni], da = a[i] - a[ni], db = b[i] - b[ni];
-        const de = Math.sqrt(dL * dL + da * da + db * db);
+        const de = chromaDominantDeltaE(L[i], a[i], b[i], L[ni], a[ni], b[ni], chromaW);
         if(de > maxDelta) maxDelta = de;
       }
       out[i] = colorDistToStrength(maxDelta, floor, ceiling, gamma);
@@ -289,15 +304,18 @@
     // Build a fused edge map: prefer color boundary, fall back to luminance
     const binary = new Uint8Array(w * h);
     if(colorBoundary){
-      // Color boundary is Float32 0-1.  Threshold at 0.15 (moderate boundary).
-      // Where color evidence is weak (< 0.10), allow luminance gradient to fill in.
+      // Color boundary is Float32 0-1.  Use a higher threshold (0.25) so that
+      // only meaningful chromatic transitions produce closure edges.  Shading
+      // gradients (which produce low color boundary values) are excluded.
+      // Luminance fallback is restricted to areas with zero color evidence and
+      // requires a very strong gradient to prevent shading artifacts.
       const sorted = Array.from(grad).sort((a, b) => b - a);
-      const lumCutoff = Math.max(8, sorted[Math.floor(sorted.length * 0.30)] || 15);
+      const lumCutoff = Math.max(20, sorted[Math.floor(sorted.length * 0.15)] || 25);
       for(let i = 0; i < binary.length; i++){
-        if(colorBoundary[i] >= 0.15){
+        if(colorBoundary[i] >= 0.25){
           binary[i] = 1;
-        } else if(colorBoundary[i] < 0.10 && grad[i] >= lumCutoff){
-          binary[i] = 1; // luminance fallback in color-silent areas
+        } else if(colorBoundary[i] < 0.05 && grad[i] >= lumCutoff){
+          binary[i] = 1; // luminance fallback only in truly color-silent areas
         }
       }
     } else {
@@ -412,20 +430,24 @@
       const varV = Math.sqrt(Math.max(0, (sumSq / Math.max(1, cnt)) - (meanV * meanV))) / 64;
       const varNorm = Math.min(1, varV);
 
-      // Color-primary: color evidence is the anchor signal.
+      // Color-dominant: chromatic color evidence is the anchor signal.
       const colSq = colEdge * colEdge; // 0-1, strongly non-linear
 
-      // Secondary suppression: when color evidence is present at a pixel,
-      // luminance & variance contributions are heavily damped so they cannot
-      // inject false edges.  They only contribute fully where color is silent.
-      const colorPresence = hasColor ? clamp(colEdge * 4, 0, 1) : 0; // 0-1 soft gate
-      const secondaryDamp = 1 - colorPresence * 0.8; // 1.0 when no color → 0.2 when strong color
-      const lumContrib  = lumEdge  * wLum * secondaryDamp;
-      const varContrib  = varNorm  * wVar * secondaryDamp;
+      // Aggressive secondary suppression: when ANY color data is available,
+      // luminance & variance are near-zero contributors.  They only have
+      // meaningful influence when no color data exists at all.
+      // This prevents shading/lighting gradients from producing false edges.
+      const colorPresence = hasColor ? clamp(colEdge * 6, 0, 1) : 0; // 0-1 aggressive soft gate
+      const secondaryDamp = 1 - colorPresence * 0.95; // 1.0 when no color → 0.05 when strong color
+      // Even when color is absent at this pixel, if color data exists globally,
+      // still attenuate luminance to prevent shading artifacts inside objects.
+      const globalColorDamp = hasColor ? 0.3 : 1.0;
+      const lumContrib  = lumEdge  * wLum * secondaryDamp * globalColorDamp;
+      const varContrib  = varNorm  * wVar * secondaryDamp * globalColorDamp;
 
       const edgeSignal = colSq * wColor + lumContrib + varContrib;
       // Closure boosts edge evidence where morphological closing bridged gaps
-      const closureBoost = closureBit ? wClosure * secondaryDamp : 0;
+      const closureBoost = closureBit ? wClosure * secondaryDamp * globalColorDamp : 0;
       evidence[i] = clamp(Math.round(Math.min(1, edgeSignal + closureBoost) * 255), 0, 255);
     }
     return evidence;
@@ -500,30 +522,34 @@
           if(visited[ni]) continue;
           const c2 = cells[ni];
 
-          // Compare candidate to BOTH the seed and the current frontier cell.
-          // This prevents color-drift where each step is small but the region
-          // gradually absorbs pixels far from the seed's color.
-          const toneDiffSeed = Math.abs(c2.meanGray - seed.meanGray);
-          const toneDiffLocal = Math.abs(c2.meanGray - cell.meanGray);
-          const toneDiff = Math.max(toneDiffSeed, toneDiffLocal);
+          // ── COLOR-DOMINANT MERGE DECISION ──
+          // Primary gate: chromatic Lab distance (hue/saturation).
+          // Luminance (shading) changes are heavily attenuated in the merge
+          // decision so that internal gradients do not split uniform surfaces.
+          const chromaW = clamp(p.chromaWeight ?? 0.85, 0, 1);
 
-          // Color difference in Lab — check against both seed and frontier
-          let colorStrength = 0; // 0-1 after dead-zone/gamma
+          // Compute chromatic-dominant distance against BOTH seed and frontier
+          // to prevent color drift.
+          let colorDist = 0;
+          let colorStrength = 0;
           if(lab && seed.meanL !== undefined){
-            const dLs = c2.meanL - seed.meanL, das = c2.meanA - seed.meanA, dbs = c2.meanB - seed.meanB;
-            const deSeed = Math.sqrt(dLs * dLs + das * das + dbs * dbs);
-            const dLl = c2.meanL - cell.meanL, dal = c2.meanA - cell.meanA, dbl = c2.meanB - cell.meanB;
-            const deLocal = Math.sqrt(dLl * dLl + dal * dal + dbl * dbl);
-            // Use the larger of the two distances — prevents drift
-            const deMax = Math.max(deSeed, deLocal);
+            const deSeed = chromaDominantDeltaE(
+              c2.meanL, c2.meanA, c2.meanB,
+              seed.meanL, seed.meanA, seed.meanB, chromaW
+            );
+            const deLocal = chromaDominantDeltaE(
+              c2.meanL, c2.meanA, c2.meanB,
+              cell.meanL, cell.meanA, cell.meanB, chromaW
+            );
+            colorDist = Math.max(deSeed, deLocal);
             colorStrength = colorDistToStrength(
-              deMax, p.colorDistFloor, p.colorDistCeiling, p.colorDistGamma
+              colorDist, p.colorDistFloor, p.colorDistCeiling, p.colorDistGamma
             );
           }
 
           // Surface uniformity: if both cells are internally uniform
-          // (low intra-cell color variance), they likely belong to the
-          // same gradual surface (sky, wall) → relax color penalty.
+          // (low intra-cell color variance), they belong to the same
+          // gradual surface → strongly favor merge.
           const uBias = clamp(p.surfaceUniformityBias, 0, 1);
           let uniformityRelax = 1.0;
           if(uBias > 0 && cell.colorStdDev !== undefined && c2.colorStdDev !== undefined){
@@ -532,31 +558,40 @@
             uniformityRelax = 1 + uniformity * uBias;
           }
 
-          // Split barrier: color boundary is the primary gate, combined evidence
-          // is secondary.  This prevents noisy luminance/variance in the combined
-          // evidence from blocking merges that color says should happen.
-          const colorBarrier = (c2.meanColorBoundary + cell.meanColorBoundary) * 0.5;
-          const combinedBarrier = (c2.meanEvidence + cell.meanEvidence) * 0.5;
-          // When color evidence is present, it is authoritative.
-          // Combined evidence only adds a mild secondary veto.
-          const effectiveBarrier = colorBoundary
-            ? (colorBarrier * 255) * 0.7 + combinedBarrier * 0.3
-            : combinedBarrier;
-
           // Closure-aware merge relaxation
           const closureRelax = (cell.meanClosure > 0.4 && c2.meanClosure > 0.4) ? 1.3 : 1.0;
 
-          // Color penalty: magnitude-weighted and squared.
-          // At colorStrength=1 (strong color boundary), penalty far exceeds
-          // mergeThreshold, making the boundary decisive.
-          const colorStr2 = colorStrength * colorStrength;
-          const colorPenalty = colorStr2 * p.colorMergePenalty * p.mergeThreshold / uniformityRelax;
-          const effectiveToneDiff = toneDiff + colorPenalty;
-
-          if(effectiveToneDiff <= p.mergeThreshold * closureRelax &&
-             effectiveBarrier <= p.edgeSensitivity * closureRelax){
+          // ── PRIMARY GATE: chromatic color distance ──
+          // If color distance is below the floor (after uniformity relaxation),
+          // the cells are perceptually the same color → always merge.
+          // This is the single most important rule: small tonal/shading
+          // gradients within the same color surface MUST merge.
+          const effectiveFloor = p.colorDistFloor * uniformityRelax * closureRelax;
+          if(lab && seed.meanL !== undefined && colorDist <= effectiveFloor){
+            // Same perceptual color → unconditional merge
             visited[ni] = 1;
             queue.push(c2);
+          } else {
+            // Color distance is above floor — apply full merge logic.
+            // Color strength is the dominant rejection signal.
+            const colorBarrier = colorStrength * colorStrength * p.colorMergePenalty;
+
+            // Tone (luminance-only) difference is a minor secondary signal,
+            // heavily attenuated so shading alone cannot block a merge.
+            const toneDiff = Math.abs(c2.meanGray - seed.meanGray) * (1 - chromaW);
+
+            // Combined evidence barrier (secondary veto)
+            const evidBarrier = colorBoundary
+              ? (c2.meanColorBoundary + cell.meanColorBoundary) * 0.5 * 255
+              : (c2.meanEvidence + cell.meanEvidence) * 0.5;
+
+            const mergeScore = toneDiff + colorBarrier * p.mergeThreshold / uniformityRelax;
+
+            if(mergeScore <= p.mergeThreshold * closureRelax &&
+               evidBarrier <= p.edgeSensitivity * closureRelax){
+              visited[ni] = 1;
+              queue.push(c2);
+            }
           }
         }
       }
@@ -746,10 +781,13 @@
     if(tags.has('split_object')){
       p.mergeThreshold += 3;
       p.edgeSensitivity += 2;
-      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2);
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.08);
+      p.colorDistFloor = Math.min(35, p.colorDistFloor + 3);
+      p.surfaceUniformityBias = Math.min(0.9, p.surfaceUniformityBias + 0.08);
       p.closureWeight = Math.min(0.6, p.closureWeight + 0.05);
       p.parentContourBonus = Math.min(0.6, p.parentContourBonus + 0.06);
+      // Increase chroma dominance to suppress luminance-based splits
+      p.chromaWeight = Math.min(1.0, (p.chromaWeight || 0.85) + 0.03);
+      p.luminanceWeight = Math.max(0, p.luminanceWeight - 0.02);
     }
     if(tags.has('merged_objects')){
       p.mergeThreshold -= 2;
@@ -781,10 +819,12 @@
     }
     if(tags.has('surface_fragmented')){
       p.mergeThreshold += 3;
-      p.colorDistFloor = Math.min(25, p.colorDistFloor + 2.5);
-      p.surfaceUniformityBias = Math.min(0.8, p.surfaceUniformityBias + 0.1);
+      p.colorDistFloor = Math.min(35, p.colorDistFloor + 3);
+      p.surfaceUniformityBias = Math.min(0.9, p.surfaceUniformityBias + 0.1);
       p.colorDistGamma = Math.min(3.5, p.colorDistGamma + 0.15);
       p.closureWeight = Math.min(0.6, p.closureWeight + 0.04);
+      p.chromaWeight = Math.min(1.0, (p.chromaWeight || 0.85) + 0.03);
+      p.luminanceWeight = Math.max(0, p.luminanceWeight - 0.02);
     }
 
     const rating = Number(feedback?.rating || 0);
@@ -798,10 +838,11 @@
     p.minRegionArea = clamp(p.minRegionArea, 0.0001, 0.08);
     p.fragmentationTolerance = clamp(p.fragmentationTolerance, 0.05, 0.8);
     p.rectangularBiasPenalty = clamp(p.rectangularBiasPenalty, 0, 1);
-    p.colorWeight = clamp(p.colorWeight, 0, 0.8);
-    p.luminanceWeight = clamp(p.luminanceWeight, 0.1, 0.8);
-    p.varianceWeight = clamp(p.varianceWeight, 0, 0.5);
-    p.colorMergePenalty = clamp(p.colorMergePenalty, 0, 4);
+    p.colorWeight = clamp(p.colorWeight, 0.3, 0.95);
+    p.luminanceWeight = clamp(p.luminanceWeight, 0, 0.3);
+    p.varianceWeight = clamp(p.varianceWeight, 0, 0.2);
+    p.colorMergePenalty = clamp(p.colorMergePenalty, 0.5, 5);
+    p.chromaWeight = clamp(p.chromaWeight ?? 0.85, 0.5, 1.0);
     p.colorDistFloor = clamp(p.colorDistFloor, 0, 25);
     p.colorDistCeiling = clamp(p.colorDistCeiling, 15, 80);
     p.colorDistGamma = clamp(p.colorDistGamma, 0.5, 3.5);
