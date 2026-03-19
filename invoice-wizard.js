@@ -1933,7 +1933,13 @@ let state = {
     lastAttemptId: null,
     latestFeedback: null,
     activePreset: null,
-    show: { regions: true, contours: true, adjacency: true, debug: false }
+    show: { regions: true, contours: true, adjacency: true, debug: false },
+    // Regenerate/Good flow state
+    triedVariants: [],
+    currentVariantLabel: 'baseline',
+    currentStrategy: 'initial',
+    docFeatures: null,
+    baselineParams: null
   },
   objectLearning: {
     active: false,
@@ -20658,6 +20664,9 @@ if(els.learningNewSessionBtn){
 const _wfg2 = window.WrokitFeatureGraph2 || null;
 const _wfg2Store = _wfg2?.createAttemptStore ? _wfg2.createAttemptStore(localStorage) : null;
 const _wfg2PresetStore = _wfg2?.createPresetStore ? _wfg2.createPresetStore(localStorage) : null;
+const _glStore = window.GraphLearningStore || null;
+const _glTrainingStore = _glStore?.createGraphTrainingStore ? _glStore.createGraphTrainingStore(localStorage) : null;
+const _glFamilyStore = _glStore?.createGraphFamilyStore ? _glStore.createGraphFamilyStore(localStorage) : null;
 
 function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
 
@@ -21268,14 +21277,20 @@ function graphLearningCaptureGray(page){
 
 async function graphLearningOpenFile(file){
   if(!file || !_wfg2) return;
-  state.graphLearning.active = true;
-  state.graphLearning.fileName = file.name || 'untitled';
-  state.graphLearning.fileId = 'wfg2file-' + Date.now().toString(36);
-  state.graphLearning.attemptNumber = 0;
-  state.graphLearning.lastAttemptId = null;
-  state.graphLearning.latestFeedback = null;
-  state.graphLearning.graph = null;
-  state.graphLearning.normalizedSurface = null;
+  const gl = state.graphLearning;
+  gl.active = true;
+  gl.fileName = file.name || 'untitled';
+  gl.fileId = 'wfg2file-' + Date.now().toString(36);
+  gl.attemptNumber = 0;
+  gl.lastAttemptId = null;
+  gl.latestFeedback = null;
+  gl.graph = null;
+  gl.normalizedSurface = null;
+  gl.triedVariants = [];
+  gl.currentVariantLabel = 'baseline';
+  gl.currentStrategy = 'initial';
+  gl.docFeatures = null;
+  gl.baselineParams = null;
   clearGraphLearningViewer();
   graphLearningStatus('Loading file…');
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
@@ -21294,18 +21309,48 @@ async function graphLearningOpenFile(file){
     graphLearningStatus('File loaded but no render surface was available.');
     return;
   }
-  state.graphLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
-  if(!state.graphLearning.normalizedSurface){
+  gl.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  if(!gl.normalizedSurface){
     clearGraphLearningViewer();
     graphLearningStatus('Normalization failed for this file.');
     return;
   }
+
+  // Extract document features for training and family lookup
+  if(_glStore?.extractDocumentFeatures){
+    gl.docFeatures = _glStore.extractDocumentFeatures(gl.normalizedSurface);
+  }
+
+  // Determine starting params: learned family > preset > defaults
+  let startSource = 'defaults';
   const loadedPreset = graphLearningLoadPresetIntoSession();
-  if(!loadedPreset) state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  if(!loadedPreset) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  else startSource = 'preset';
+
+  // Try learned family match (overrides preset if confident)
+  if(_glFamilyStore && gl.docFeatures?.valid){
+    const match = _glFamilyStore.findBestFamily(gl.docFeatures);
+    if(match && match.similarity >= 0.60){
+      gl.params = _wfg2.copyParams(match.family.avgParams);
+      startSource = 'family-match (sim=' + match.similarity.toFixed(2) + ')';
+      var famLabel = document.getElementById('graph-learning-family-match');
+      if(famLabel) famLabel.textContent = 'Starting from learned family (similarity ' + (match.similarity * 100).toFixed(0) + '%)';
+    }
+  }
+
+  gl.baselineParams = _wfg2.copyParams(gl.params);
+  gl.triedVariants = ['baseline'];
+  gl.currentVariantLabel = 'baseline';
+  gl.currentStrategy = startSource;
+
   renderGraphLearningBaseSurface();
   graphLearningRunGeneration();
-  if(loadedPreset){
-    graphLearningStatus('Loaded preset "' + (loadedPreset.name || 'WFG2 Baseline') + '" and generated attempt ' + state.graphLearning.attemptNumber + '.');
+  graphLearningUpdateTrainingBar();
+  graphLearningUpdateRegenCount();
+  if(loadedPreset && startSource === 'preset'){
+    graphLearningStatus('Loaded preset "' + (loadedPreset.name || 'WFG2 Baseline') + '" and generated attempt ' + gl.attemptNumber + '.');
+  } else if(startSource.startsWith('family')){
+    graphLearningStatus('Auto-selected learned family params. Attempt ' + gl.attemptNumber + '.');
   }
 }
 
@@ -21317,7 +21362,34 @@ if(els.graphLearningFileInput){
     await graphLearningOpenFile(file);
   });
 }
-if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){ graphLearningRunGeneration(); }); }
+if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){
+  var gl = state.graphLearning;
+  if(!gl.normalizedSurface || !_wfg2) return;
+  // Use smart regeneration strategy
+  if(_glStore?.generateNextCandidate){
+    var candidate = _glStore.generateNextCandidate({
+      currentParams: gl.params || _wfg2.DEFAULT_PARAMS,
+      docFeatures: gl.docFeatures,
+      attemptNumber: gl.attemptNumber + 1,
+      triedVariants: gl.triedVariants || [],
+      copyParams: _wfg2.copyParams.bind(_wfg2),
+      familyStore: _glFamilyStore,
+      trainingStore: _glTrainingStore
+    });
+    gl.params = candidate.params;
+    gl.currentVariantLabel = candidate.variantLabel;
+    gl.currentStrategy = candidate.strategy;
+    gl.triedVariants.push(candidate.variantLabel);
+    graphLearningRunGeneration();
+    graphLearningCaptureAttempt('regenerated', { tags: ['regenerate_' + candidate.strategy], rating: null });
+    var stratEl = document.getElementById('graph-learning-strategy-label');
+    if(stratEl) stratEl.textContent = 'Strategy: ' + candidate.strategy + ' (' + candidate.variantLabel + ')';
+  } else {
+    // Fallback: just rerun with current params
+    graphLearningRunGeneration();
+  }
+  graphLearningUpdateRegenCount();
+}); }
 if(els.graphLearningSavePresetBtn){
   els.graphLearningSavePresetBtn.addEventListener('click', function(){
     const saved = graphLearningSaveCurrentPreset({ sourceResult: 'manual-save' });
@@ -21345,6 +21417,118 @@ if(els.graphLearningClearHistoryBtn){
     if(confirm('Clear WFG2 graph-learning attempt history?')){ _wfg2Store.clear(); renderGraphLearningAttemptHistory(); }
   });
 }
+
+// Clear training data button
+(function(){
+  var clearTrainBtn = document.getElementById('graph-learning-clear-training-btn');
+  if(clearTrainBtn){
+    clearTrainBtn.addEventListener('click', function(){
+      if(!confirm('Clear all accepted training examples and learned families?')) return;
+      if(_glTrainingStore) _glTrainingStore.clear();
+      if(_glFamilyStore) _glFamilyStore.clear();
+      graphLearningUpdateTrainingBar();
+      graphLearningStatus('Training data and learned families cleared.');
+    });
+  }
+})();
+
+/* ═══ Good Button Handler — Accept current graph as training example ═══ */
+
+if(els.graphLearningGoodBtn){
+  els.graphLearningGoodBtn.addEventListener('click', function(){
+    var gl = state.graphLearning;
+    if(!gl.graph || !gl.params || !_wfg2) return;
+
+    // Compute graph outcome stats
+    var _OLE = window.ObjectLearningEngine;
+    var surfSize = gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height } : { width: 1, height: 1 };
+    var graphStats = _OLE?.computeGraphStats ? _OLE.computeGraphStats(gl.graph, surfSize) : { region_count: gl.graph.nodes?.length || 0 };
+
+    // Build training example
+    var example = {
+      documentFeatures: gl.docFeatures || {},
+      generationMetadata: {
+        startingBaseline: gl.baselineParams ? 'custom' : 'defaults',
+        candidateVariantLabel: gl.currentVariantLabel || 'baseline',
+        strategy: gl.currentStrategy || 'initial',
+        regenerationCount: Math.max(0, gl.attemptNumber - 1),
+        triedVariants: (gl.triedVariants || []).slice()
+      },
+      acceptedParams: _wfg2.copyParams(gl.params),
+      graphOutcome: {
+        regionCount: graphStats.region_count || 0,
+        meaningfulRegionCount: graphStats.meaningful_region_count || 0,
+        dominantRegionCoverage: graphStats.dominant_region_coverage || 0,
+        avgRegionArea: graphStats.avg_region_area || 0,
+        medianRegionArea: graphStats.median_region_area || 0,
+        areaDistribution: graphStats.area_histogram || [],
+        edgeCount: graphStats.edge_count || 0,
+        avgEdgesPerNode: graphStats.avg_edges_per_node || 0,
+        containmentDepthMax: graphStats.containment_depth_max || 0,
+        avgConfidence: graphStats.avg_confidence || 0,
+        qualityScore: graphStats.quality_score || 0
+      },
+      fileName: gl.fileName,
+      fileId: gl.fileId,
+      pipelineMode: gl.graph.pipelineMode || 'partition'
+    };
+
+    // Save to training store
+    if(_glTrainingStore) _glTrainingStore.addExample(example);
+
+    // Update learned families
+    if(_glFamilyStore) _glFamilyStore.updateFromExample(example);
+
+    // Also save as preset for continuity
+    graphLearningSaveCurrentPreset({ sourceResult: 'accepted-good' });
+
+    // Also trigger the old accept-tuning flow for backwards compat
+    var acceptBtn = document.getElementById('graph-learning-accept-tuning-btn');
+    if(acceptBtn && !acceptBtn.disabled) acceptBtn.click();
+
+    // Capture as attempt
+    graphLearningCaptureAttempt('good', { tags: ['accepted', 'good_' + (gl.currentStrategy || 'unknown')], rating: 5 });
+
+    // Update UI
+    graphLearningUpdateTrainingBar();
+    var regenCount = Math.max(0, gl.attemptNumber - 1);
+    graphLearningStatus('Accepted! ' + (graphStats.region_count || 0) + ' regions saved as training example. (' + regenCount + ' regeneration' + (regenCount !== 1 ? 's' : '') + ' before acceptance)');
+
+    // Disable Good/Regenerate until next file
+    if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = true;
+    if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = true;
+  });
+}
+
+/* ═══ Training Progress Bar ═══ */
+
+function graphLearningUpdateTrainingBar(){
+  var bar = document.getElementById('graph-learning-training-bar');
+  var countEl = document.getElementById('graph-learning-training-count');
+  var famEl = document.getElementById('graph-learning-family-count');
+  if(!bar) return;
+  var exCount = _glTrainingStore ? _glTrainingStore.count() : 0;
+  var famCount = _glFamilyStore ? _glFamilyStore.getAll().length : 0;
+  if(exCount > 0 || famCount > 0){
+    bar.style.display = '';
+    if(countEl) countEl.textContent = exCount;
+    if(famEl) famEl.textContent = famCount;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+function graphLearningUpdateRegenCount(){
+  var el = document.getElementById('graph-learning-regen-count');
+  if(!el) return;
+  var gl = state.graphLearning;
+  var count = Math.max(0, gl.attemptNumber - 1);
+  el.textContent = count > 0 ? (count + ' regeneration' + (count !== 1 ? 's' : '')) : '';
+}
+
+// Initialize training bar on load
+graphLearningUpdateTrainingBar();
+
 [els.graphLearningShowRegions, els.graphLearningShowAdjacency, els.graphLearningShowDebug,
  document.getElementById('graph-learning-show-compiled'),
  document.getElementById('graph-learning-show-color-evidence'),
