@@ -1210,6 +1210,10 @@
               <div id="object-learning-descriptor-output" style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;background:var(--bg,#f5f5f5);padding:8px;border-radius:4px;max-height:300px;overflow:auto;margin-top:8px;">
                 No reference defined yet.
               </div>
+              <h5 style="margin:12px 0 4px;">Reference Graph Statistics</h5>
+              <div id="object-learning-ref-graph-stats" style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;background:var(--bg,#f5f5f5);padding:8px;border-radius:4px;max-height:200px;overflow:auto;">
+                No reference graph stats yet.
+              </div>
             </details>
 
             <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
@@ -1282,6 +1286,14 @@
               <details class="panel minimal">
                 <summary>Candidate Scores</summary>
                 <div id="object-learning-candidates-list" style="margin-top:8px;max-height:300px;overflow:auto;"></div>
+              </details>
+
+              <details class="panel minimal" style="margin-top:12px;" open>
+                <summary>Graph Normalization</summary>
+                <p class="sub" style="margin:4px 0 8px;color:var(--muted);font-size:11px;">
+                  Pre-match stage: WFG2 is run with multiple parameter variants and the graph most structurally similar to the reference is selected.
+                </p>
+                <div id="object-learning-normalization-info" style="margin-top:8px;"></div>
               </details>
             </div><!-- /batch-doc-panel -->
           </div><!-- /batch-panel -->

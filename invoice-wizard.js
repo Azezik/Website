@@ -1955,6 +1955,7 @@ let state = {
     referenceBbox: null,
     fieldConfig: null,
     scoringModel: null,
+    referenceGraphStats: null,
     // Batch processing state
     batchFiles: [],
     batchIndex: -1,
@@ -1964,7 +1965,9 @@ let state = {
     batchCurrentCandidates: [],
     batchAdjustedBbox: null,
     batchDrawing: null,
-    batchFeedbackGiven: false
+    batchFeedbackGiven: false,
+    // Graph normalization results (per-document)
+    batchNormalizationResult: null
   },
 };
 
@@ -23027,6 +23030,7 @@ function objectLearningLoadField(fieldId){
   ol.fieldConfig = config;
   ol.referenceDescriptor = config.reference_descriptor || null;
   ol.referenceBbox = config.reference_bbox || null;
+  ol.referenceGraphStats = config.reference_graph_stats || null;
   // Restore model weights
   if(ol.scoringModel && config.model_weights){
     ol.scoringModel.setWeights(config.model_weights);
@@ -23105,8 +23109,13 @@ if(els.objectLearningSetReferenceBtn){
     ol.referenceDescriptor = _olEngine.buildReferenceDescriptor(bbox, ol.graph, surfaceSize);
     ol.referenceBbox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
 
+    // Capture reference graph statistics for graph normalization
+    ol.referenceGraphStats = _olEngine.computeGraphStats(ol.graph, surfaceSize);
+
     // Create or update field config
     ol.fieldConfig = _olEngine.createFieldConfig(ol.currentFieldId, ol.referenceBbox, ol.referenceDescriptor);
+    // Store graph stats in the config for persistence
+    ol.fieldConfig.reference_graph_stats = ol.referenceGraphStats;
 
     // Save to store
     if(_olStore){
@@ -23121,13 +23130,23 @@ if(els.objectLearningSetReferenceBtn){
 }
 
 function objectLearningRenderDescriptor(){
-  if(!els.objectLearningDescriptorOutput) return;
-  var desc = state.objectLearning.referenceDescriptor;
-  if(!desc){
-    els.objectLearningDescriptorOutput.textContent = 'No reference defined yet.';
-    return;
+  if(els.objectLearningDescriptorOutput){
+    var desc = state.objectLearning.referenceDescriptor;
+    if(!desc){
+      els.objectLearningDescriptorOutput.textContent = 'No reference defined yet.';
+    } else {
+      els.objectLearningDescriptorOutput.textContent = JSON.stringify(desc, null, 2);
+    }
   }
-  els.objectLearningDescriptorOutput.textContent = JSON.stringify(desc, null, 2);
+  var statsEl = document.getElementById('object-learning-ref-graph-stats');
+  if(statsEl){
+    var stats = state.objectLearning.referenceGraphStats;
+    if(!stats){
+      statsEl.textContent = 'No reference graph stats yet.';
+    } else {
+      statsEl.textContent = JSON.stringify(stats, null, 2);
+    }
+  }
 }
 
 // Listen to box changes to update the set-reference button
@@ -23225,14 +23244,42 @@ async function objectLearningProcessNextBatchDoc(){
   ol.batchCurrentSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
   if(!ol.batchCurrentSurface) return;
 
-  // Run WFG2
   var params = wfg2GetEffectiveParams();
   var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
   if(params) params.pipelineMode = pipelineMode;
-  ol.batchCurrentGraph = _wfg2.generateFeatureGraph(ol.batchCurrentSurface, params || _wfg2.DEFAULT_PARAMS);
+  var surfaceSize = { width: ol.batchCurrentSurface.width, height: ol.batchCurrentSurface.height };
+
+  // ── Pre-match graph normalization stage ──
+  // If we have reference graph stats, run multiple WFG2 variants and select
+  // the graph most structurally similar to the reference.
+  ol.batchNormalizationResult = null;
+  if(ol.referenceGraphStats && _olEngine.selectBestGraph){
+    if(els.objectLearningBatchDocInfo){
+      els.objectLearningBatchDocInfo.textContent = 'Normalizing graph for: ' + (file.name || 'document') + ' (' + (ol.batchIndex + 1) + '/' + ol.batchFiles.length + ')';
+    }
+    var normResult = _olEngine.selectBestGraph(
+      ol.batchCurrentSurface,
+      ol.referenceGraphStats,
+      params || _wfg2.DEFAULT_PARAMS,
+      _wfg2.generateFeatureGraph,
+      _wfg2.copyParams,
+      { variantCount: 9, pipelineMode: pipelineMode }
+    );
+    ol.batchNormalizationResult = normResult;
+    ol.batchCurrentGraph = normResult.bestGraph;
+  } else {
+    // Fallback: single WFG2 run (no normalization)
+    ol.batchCurrentGraph = _wfg2.generateFeatureGraph(ol.batchCurrentSurface, params || _wfg2.DEFAULT_PARAMS);
+  }
+
+  if(els.objectLearningBatchDocInfo){
+    var normInfo = ol.batchNormalizationResult
+      ? ' | graph normalized (variant: ' + ol.batchNormalizationResult.bestLabel + ', similarity: ' + ol.batchNormalizationResult.bestSimilarity.toFixed(3) + ', tested: ' + ol.batchNormalizationResult.variantCount + ')'
+      : '';
+    els.objectLearningBatchDocInfo.textContent = 'Processing: ' + (file.name || 'document') + ' (' + (ol.batchIndex + 1) + '/' + ol.batchFiles.length + ')' + normInfo;
+  }
 
   // Generate candidates and score them
-  var surfaceSize = { width: ol.batchCurrentSurface.width, height: ol.batchCurrentSurface.height };
   var candidates = _olEngine.generateCandidates(ol.batchCurrentGraph, surfaceSize);
   var scored = _olEngine.scoreAndRankCandidates(candidates, ol.referenceDescriptor, ol.batchCurrentGraph, surfaceSize, ol.scoringModel);
   ol.batchCurrentCandidates = scored;
@@ -23242,6 +23289,7 @@ async function objectLearningProcessNextBatchDoc(){
   objectLearningRenderBatchViewer();
   objectLearningRenderPredictionInfo();
   objectLearningRenderCandidatesList();
+  objectLearningRenderNormalizationInfo();
   objectLearningBatchBindDrawing();
   objectLearningBatchUpdateFeedbackBtns();
 }
@@ -23395,6 +23443,85 @@ function objectLearningRenderCandidatesList(){
   }).join('');
   if(candidates.length > 20) html += '<div class="sub" style="color:var(--muted);padding:4px 0;">...and ' + (candidates.length - 20) + ' more</div>';
   els.objectLearningCandidatesList.innerHTML = html;
+}
+
+/* ── Graph Normalization Debug ──────────────────────────────────────── */
+
+function objectLearningRenderNormalizationInfo(){
+  var el = document.getElementById('object-learning-normalization-info');
+  if(!el) return;
+  var ol = state.objectLearning;
+  var nr = ol.batchNormalizationResult;
+  if(!nr){
+    el.innerHTML = '<span class="sub" style="color:var(--muted);">No graph normalization performed (no reference graph stats available).</span>';
+    return;
+  }
+
+  var refStats = ol.referenceGraphStats;
+  // Build the selected graph stats
+  var selectedStats = null;
+  if(nr.variants && nr.variants.length){
+    var best = nr.variants.find(function(v){ return v.label === nr.bestLabel; });
+    selectedStats = best?.stats || null;
+  }
+
+  var html = '<div style="margin-bottom:8px;">';
+  html += '<strong>Selected variant:</strong> <span style="color:#2196f3;font-weight:600;">' + nr.bestLabel + '</span>';
+  html += ' | <strong>Similarity:</strong> ' + nr.bestSimilarity.toFixed(4);
+  html += ' | <strong>Variants tested:</strong> ' + nr.variantCount;
+  html += '</div>';
+
+  // Reference vs Selected stats comparison
+  if(refStats && selectedStats){
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:11px;margin-bottom:8px;">';
+    html += '<div style="font-weight:600;">Metric</div><div style="font-weight:600;">Reference</div><div style="font-weight:600;">Selected</div>';
+    var pairs = [
+      ['Region count', refStats.region_count, selectedStats.region_count],
+      ['Meaningful regions', refStats.meaningful_region_count, selectedStats.meaningful_region_count],
+      ['Avg region area', (refStats.avg_region_area * 100).toFixed(2) + '%', (selectedStats.avg_region_area * 100).toFixed(2) + '%'],
+      ['Median region area', (refStats.median_region_area * 100).toFixed(2) + '%', (selectedStats.median_region_area * 100).toFixed(2) + '%'],
+      ['Dominant coverage', (refStats.dominant_region_coverage * 100).toFixed(1) + '%', (selectedStats.dominant_region_coverage * 100).toFixed(1) + '%'],
+      ['Area CV', refStats.area_cv.toFixed(2), selectedStats.area_cv.toFixed(2)],
+      ['Avg edges/node', refStats.avg_edges_per_node.toFixed(2), selectedStats.avg_edges_per_node.toFixed(2)],
+      ['Max depth', refStats.containment_depth_max, selectedStats.containment_depth_max],
+      ['Quality', refStats.quality_score.toFixed(2), selectedStats.quality_score.toFixed(2)]
+    ];
+    pairs.forEach(function(p){
+      html += '<div>' + p[0] + '</div><div>' + p[1] + '</div><div>' + p[2] + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Similarity component breakdown
+  if(nr.variants && nr.variants[0]?.components){
+    var best = nr.variants[0]; // already sorted by similarity
+    html += '<div style="margin-bottom:8px;"><strong>Similarity components (best):</strong></div>';
+    html += '<div style="display:grid;grid-template-columns:1fr auto auto;gap:4px;font-size:11px;">';
+    html += '<div style="font-weight:600;">Component</div><div style="font-weight:600;">Score</div><div style="font-weight:600;">Weight</div>';
+    Object.entries(best.components).forEach(function(entry){
+      var name = entry[0], comp = entry[1];
+      html += '<div>' + name.replace(/_/g, ' ') + '</div>';
+      html += '<div>' + comp.score.toFixed(3) + '</div>';
+      html += '<div>' + comp.weight.toFixed(2) + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Top variants table
+  html += '<div style="margin-top:8px;"><strong>Top variants:</strong></div>';
+  html += '<div style="font-size:11px;max-height:150px;overflow:auto;">';
+  var topN = Math.min(nr.variants.length, 8);
+  for(var i = 0; i < topN; i++){
+    var v = nr.variants[i];
+    var isBest = v.label === nr.bestLabel;
+    html += '<div style="padding:2px 0;' + (isBest ? 'font-weight:600;color:#2196f3;' : '') + '">';
+    html += (i + 1) + '. ' + v.label + ' — similarity: ' + v.similarity.toFixed(4) + ' | regions: ' + (v.region_count || '?');
+    if(isBest) html += ' (selected)';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
 }
 
 /* ── Batch feedback ────────────────────────────────────────────────────── */
