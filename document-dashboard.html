@@ -880,16 +880,26 @@
             or <strong>Good</strong> to accept. Accepted results train the system to auto-tune WFG2 for similar documents.
           </p>
 
-          <!-- ═══ Primary Action Bar: Upload + Regenerate + Good ═══ -->
-          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+          <!-- ═══ Primary Action Bar: Upload + Feedback Buttons ═══ -->
+          <div class="actions" style="gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:center;">
             <label class="btn primary">
               Upload File
               <input id="graph-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
             </label>
-            <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled style="min-width:120px;">Regenerate</button>
-            <button id="graph-learning-good-btn" class="btn primary" type="button" disabled style="min-width:100px;background:#2a7;border-color:#2a7;">Good</button>
-            <span id="graph-learning-regen-count" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;"></span>
-            <span id="graph-learning-strategy-label" class="sub" style="color:var(--muted);font-size:11px;"></span>
+            <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled style="min-width:110px;">Regenerate</button>
+            <button id="graph-learning-too-few-btn" class="btn" type="button" disabled style="min-width:130px;background:#d48806;border-color:#d48806;color:#fff;">Too Few Regions</button>
+            <button id="graph-learning-too-many-btn" class="btn" type="button" disabled style="min-width:140px;background:#c44;border-color:#c44;color:#fff;">Too Many Regions</button>
+            <button id="graph-learning-good-btn" class="btn primary" type="button" disabled style="min-width:80px;background:#2a7;border-color:#2a7;">Good</button>
+          </div>
+
+          <!-- ═══ Regeneration Info Bar ═══ -->
+          <div id="graph-learning-regen-info" class="panel minimal" style="margin-bottom:12px;padding:6px 12px;display:none;">
+            <div class="actions" style="gap:12px;flex-wrap:wrap;align-items:center;">
+              <span id="graph-learning-regen-count" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;"></span>
+              <span id="graph-learning-strategy-label" class="sub" style="color:var(--muted);font-size:11px;"></span>
+              <span id="graph-learning-param-changes" class="sub" style="color:var(--muted);font-size:11px;font-family:'IBM Plex Mono',monospace;"></span>
+              <span id="graph-learning-change-status" class="sub" style="font-size:11px;font-weight:600;"></span>
+            </div>
           </div>
 
           <!-- ═══ Training Progress Indicator ═══ -->

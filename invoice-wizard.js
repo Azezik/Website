@@ -515,6 +515,8 @@ const els = {
   graphLearningShowAdjacency: document.getElementById('graph-learning-show-adjacency'),
   graphLearningShowDebug: document.getElementById('graph-learning-show-debug'),
   graphLearningGoodBtn: document.getElementById('graph-learning-good-btn'),
+  graphLearningTooFewBtn: document.getElementById('graph-learning-too-few-btn'),
+  graphLearningTooManyBtn: document.getElementById('graph-learning-too-many-btn'),
   graphLearningBadBtn: document.getElementById('graph-learning-bad-btn'),
   graphLearningFeedbackPanel: document.getElementById('graph-learning-feedback-panel'),
   graphLearningRating: document.getElementById('graph-learning-rating'),
@@ -21215,10 +21217,21 @@ function graphLearningRunGeneration(opts){
   if(!gl.params) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
   gl.graph = _wfg2.generateFeatureGraph(gl.normalizedSurface, gl.params);
   gl.attemptNumber = (gl.attemptNumber || 0) + 1;
+  // Enable all feedback buttons
   if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = false;
   if(els.graphLearningBadBtn) els.graphLearningBadBtn.disabled = false;
   if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = false;
+  if(els.graphLearningTooFewBtn) els.graphLearningTooFewBtn.disabled = false;
+  if(els.graphLearningTooManyBtn) els.graphLearningTooManyBtn.disabled = false;
   updateGraphLearningPresetButtons();
+  // Compute and store graph fingerprint for change detection
+  var _OLE = window.ObjectLearningEngine;
+  var surfSize = gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height } : { width: 1, height: 1 };
+  var graphStats = _OLE?.computeGraphStats ? _OLE.computeGraphStats(gl.graph, surfSize) : null;
+  if(_glStore?.computeGraphFingerprint && graphStats){
+    gl._prevFingerprint = gl._currentFingerprint || null;
+    gl._currentFingerprint = _glStore.computeGraphFingerprint(graphStats);
+  }
   const artf = gl.graph?.artifacts || {};
   const prm = gl.params || {};
   const modeTag = ', mode:' + (gl.graph?.pipelineMode || 'partition');
@@ -21290,6 +21303,8 @@ async function graphLearningOpenFile(file){
   gl.currentVariantLabel = 'baseline';
   gl.currentStrategy = 'initial';
   gl.docFeatures = null;
+  gl._prevFingerprint = null;
+  gl._currentFingerprint = null;
   gl.baselineParams = null;
   clearGraphLearningViewer();
   graphLearningStatus('Loading file…');
@@ -21362,33 +21377,79 @@ if(els.graphLearningFileInput){
     await graphLearningOpenFile(file);
   });
 }
-if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){
+/**
+ * Shared regeneration handler with feedback type, change detection, and retry.
+ * @param {string} feedbackType - 'regenerate', 'too_few_regions', 'too_many_regions'
+ */
+function graphLearningDoRegenerate(feedbackType){
   var gl = state.graphLearning;
   if(!gl.normalizedSurface || !_wfg2) return;
-  // Use smart regeneration strategy
-  if(_glStore?.generateNextCandidate){
-    var candidate = _glStore.generateNextCandidate({
+  var ft = feedbackType || 'regenerate';
+  var prevParams = gl.params ? _wfg2.copyParams(gl.params) : null;
+  var MAX_RETRIES = 3;
+
+  if(!_glStore?.generateNextCandidate){
+    graphLearningRunGeneration();
+    graphLearningUpdateRegenInfo(null, null, null);
+    return;
+  }
+
+  var candidate = null;
+  var changeResult = null;
+
+  for(var retry = 0; retry < MAX_RETRIES; retry++){
+    candidate = _glStore.generateNextCandidate({
       currentParams: gl.params || _wfg2.DEFAULT_PARAMS,
       docFeatures: gl.docFeatures,
-      attemptNumber: gl.attemptNumber + 1,
+      attemptNumber: gl.attemptNumber + 1 + retry,
       triedVariants: gl.triedVariants || [],
       copyParams: _wfg2.copyParams.bind(_wfg2),
       familyStore: _glFamilyStore,
-      trainingStore: _glTrainingStore
+      trainingStore: _glTrainingStore,
+      feedback: ft
     });
     gl.params = candidate.params;
     gl.currentVariantLabel = candidate.variantLabel;
     gl.currentStrategy = candidate.strategy;
     gl.triedVariants.push(candidate.variantLabel);
     graphLearningRunGeneration();
-    graphLearningCaptureAttempt('regenerated', { tags: ['regenerate_' + candidate.strategy], rating: null });
-    var stratEl = document.getElementById('graph-learning-strategy-label');
-    if(stratEl) stratEl.textContent = 'Strategy: ' + candidate.strategy + ' (' + candidate.variantLabel + ')';
-  } else {
-    // Fallback: just rerun with current params
-    graphLearningRunGeneration();
+
+    // Check if graph actually changed
+    if(_glStore.measureGraphChange && gl._prevFingerprint && gl._currentFingerprint){
+      changeResult = _glStore.measureGraphChange(gl._prevFingerprint, gl._currentFingerprint);
+      if(changeResult.changed){
+        break; // Meaningful change achieved
+      }
+      // No change — retry with a different strategy
+      console.log('[WFG2][GraphLearning] Strategy "' + candidate.variantLabel + '" had no effect (magnitude=' + changeResult.magnitude + '), retrying…');
+    } else {
+      break; // No fingerprint comparison available, accept result
+    }
   }
+
+  // Log the attempt
+  var tags = [ft];
+  if(candidate) tags.push(candidate.strategy);
+  if(changeResult && !changeResult.changed) tags.push('no_visible_change');
+  graphLearningCaptureAttempt('regenerated', { tags: tags, rating: null });
+
+  // Update info bar
+  graphLearningUpdateRegenInfo(candidate, changeResult, prevParams);
   graphLearningUpdateRegenCount();
+}
+
+if(els.graphLearningRegenerateBtn){ els.graphLearningRegenerateBtn.addEventListener('click', function(){
+  graphLearningDoRegenerate('regenerate');
+}); }
+
+// Too Few Regions button
+if(els.graphLearningTooFewBtn){ els.graphLearningTooFewBtn.addEventListener('click', function(){
+  graphLearningDoRegenerate('too_few_regions');
+}); }
+
+// Too Many Regions button
+if(els.graphLearningTooManyBtn){ els.graphLearningTooManyBtn.addEventListener('click', function(){
+  graphLearningDoRegenerate('too_many_regions');
 }); }
 if(els.graphLearningSavePresetBtn){
   els.graphLearningSavePresetBtn.addEventListener('click', function(){
@@ -21494,9 +21555,11 @@ if(els.graphLearningGoodBtn){
     var regenCount = Math.max(0, gl.attemptNumber - 1);
     graphLearningStatus('Accepted! ' + (graphStats.region_count || 0) + ' regions saved as training example. (' + regenCount + ' regeneration' + (regenCount !== 1 ? 's' : '') + ' before acceptance)');
 
-    // Disable Good/Regenerate until next file
+    // Disable all feedback buttons until next file
     if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = true;
     if(els.graphLearningRegenerateBtn) els.graphLearningRegenerateBtn.disabled = true;
+    if(els.graphLearningTooFewBtn) els.graphLearningTooFewBtn.disabled = true;
+    if(els.graphLearningTooManyBtn) els.graphLearningTooManyBtn.disabled = true;
   });
 }
 
@@ -21524,6 +21587,54 @@ function graphLearningUpdateRegenCount(){
   var gl = state.graphLearning;
   var count = Math.max(0, gl.attemptNumber - 1);
   el.textContent = count > 0 ? (count + ' regeneration' + (count !== 1 ? 's' : '')) : '';
+}
+
+/**
+ * Update the regeneration info bar with strategy, param changes, and change status.
+ */
+function graphLearningUpdateRegenInfo(candidate, changeResult, prevParams){
+  var infoBar = document.getElementById('graph-learning-regen-info');
+  var stratEl = document.getElementById('graph-learning-strategy-label');
+  var paramEl = document.getElementById('graph-learning-param-changes');
+  var changeEl = document.getElementById('graph-learning-change-status');
+
+  if(infoBar) infoBar.style.display = '';
+
+  if(stratEl){
+    if(candidate){
+      stratEl.textContent = candidate.strategy + ' (' + candidate.variantLabel + ')';
+    } else {
+      stratEl.textContent = '';
+    }
+  }
+
+  if(paramEl){
+    if(candidate?.paramChanges?.length){
+      paramEl.textContent = candidate.paramChanges.join(', ');
+    } else {
+      paramEl.textContent = '';
+    }
+  }
+
+  if(changeEl){
+    if(changeResult){
+      if(changeResult.changed){
+        var gl = state.graphLearning;
+        var delta = changeResult.delta || {};
+        var parts = [];
+        if(delta.regionCount !== 0) parts.push('regions ' + (delta.regionCount > 0 ? '+' : '') + delta.regionCount);
+        if(delta.edgeCount !== 0) parts.push('edges ' + (delta.edgeCount > 0 ? '+' : '') + delta.edgeCount);
+        if(Math.abs(delta.dominantCoverage) > 0.005) parts.push('coverage ' + (delta.dominantCoverage > 0 ? '+' : '') + delta.dominantCoverage);
+        changeEl.textContent = 'Changed: ' + (parts.length ? parts.join(', ') : 'yes');
+        changeEl.style.color = '#2a7';
+      } else {
+        changeEl.textContent = 'No visible change (strategy had negligible effect)';
+        changeEl.style.color = '#c44';
+      }
+    } else {
+      changeEl.textContent = '';
+    }
+  }
 }
 
 // Initialize training bar on load
