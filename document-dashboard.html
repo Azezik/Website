@@ -1129,52 +1129,186 @@
           </details>
         </div><!-- /learning-graph-tab -->
 
-        <!-- ═══ Object Learning (WFG2 Constraints) sub-tab ═══ -->
+        <!-- ═══ Object Learning (ML System) sub-tab ═══ -->
         <div id="learning-object-tab" style="display:none;">
           <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
-            Object Learning validates whether WFG2 keeps specific user-marked objects coherent. Draw boxes around objects,
-            then analyze split/merge/leak behavior under the current accepted tuning.
+            Object Learning teaches the system how to locate fields using structural similarity.
+            Define a field, draw a reference BBOX, then process a batch of documents to train the model through feedback.
           </p>
 
-          <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
-            <label class="btn primary">
-              Upload File
-              <input id="object-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
-            </label>
-            <button id="object-learning-undo-btn" class="btn" type="button" disabled>Undo Box</button>
-            <button id="object-learning-clear-btn" class="btn ghost" type="button" disabled>Clear All Boxes</button>
-            <button id="object-learning-analyze-btn" class="btn primary" type="button" disabled>Analyze Objects</button>
-            <span id="object-learning-status" class="sub" style="color:var(--muted);">No file loaded.</span>
-          </div>
-
+          <!-- ═══ Mode Selector ═══ -->
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
-              <strong style="white-space:nowrap;">Overlay</strong>
-              <label><input type="checkbox" id="object-learning-show-compiled" checked /> Compiled Graph</label>
-              <label><input type="checkbox" id="object-learning-show-regions" checked /> Region Boxes</label>
-              <label><input type="checkbox" id="object-learning-show-analysis" checked /> Analysis Hints</label>
+              <strong style="white-space:nowrap;">Mode</strong>
+              <select id="object-learning-mode" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
+                <option value="reference" selected>Reference Definition</option>
+                <option value="batch">Batch Processing</option>
+                <option value="review">Review &amp; Export</option>
+              </select>
               <span style="color:var(--border);">|</span>
-              <span id="object-learning-baseline-status" class="sub" style="color:var(--muted);">Uses current accepted tuning baseline when available.</span>
+              <strong style="white-space:nowrap;">Field</strong>
+              <select id="object-learning-field-select" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);min-width:140px;">
+                <option value="">(new field)</option>
+              </select>
+              <input id="object-learning-field-name" type="text" placeholder="Field name" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);width:160px;" />
+              <button id="object-learning-create-field-btn" class="btn" type="button">Create / Select Field</button>
+              <span id="object-learning-field-status" class="sub" style="color:var(--muted);"></span>
             </div>
           </div>
 
-          <div id="object-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
-            <div class="sub" style="margin-bottom:8px;color:var(--muted);">Draw object boxes directly on the overlay canvas.</div>
-            <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
-              <canvas id="object-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
-              <canvas id="object-learning-overlay-canvas" style="position:absolute;left:0;top:0;cursor:crosshair;"></canvas>
+          <span id="object-learning-status" class="sub" style="display:block;margin-bottom:8px;color:var(--muted);">No file loaded.</span>
+
+          <!-- ═══ Reference Definition Panel ═══ -->
+          <div id="object-learning-reference-panel">
+            <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+              <label class="btn primary">
+                Upload Reference Image
+                <input id="object-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
+              </label>
+              <button id="object-learning-set-reference-btn" class="btn primary" type="button" disabled>Set Reference BBOX</button>
+              <button id="object-learning-undo-btn" class="btn" type="button" disabled>Undo Box</button>
+              <button id="object-learning-clear-btn" class="btn ghost" type="button" disabled>Clear All Boxes</button>
+              <button id="object-learning-analyze-btn" class="btn" type="button" disabled>Analyze Objects</button>
             </div>
-          </div>
 
-          <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
-            <h4 style="margin:0 0 8px;">Aggregate Summary</h4>
-            <div id="object-learning-summary" class="sub" style="color:var(--muted);">No analysis yet.</div>
-          </div>
+            <!-- Pipeline Mode + Visualization (mirrors Graph Learning) -->
+            <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+              <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+                <strong style="white-space:nowrap;">Pipeline Mode</strong>
+                <select id="object-learning-pipeline-mode" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
+                  <option value="partition" selected>Partition-Only (Color-First)</option>
+                  <option value="structural">Structural-Only (Legacy)</option>
+                  <option value="hybrid">Hybrid (Partition + Structural Refinement)</option>
+                  <option value="combined">Combined View</option>
+                </select>
+              </div>
+              <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+                <strong style="white-space:nowrap;">Output</strong>
+                <label><input type="checkbox" id="object-learning-show-compiled" checked /> Compiled Graph</label>
+                <label><input type="checkbox" id="object-learning-show-regions" checked /> Region Boxes</label>
+                <label><input type="checkbox" id="object-learning-show-region-ids" checked /> Region IDs</label>
+                <label><input type="checkbox" id="object-learning-show-adjacency" /> Adjacency</label>
+                <label><input type="checkbox" id="object-learning-show-partition" checked /> Partition Overlay</label>
+                <label><input type="checkbox" id="object-learning-show-hierarchy" /> Hierarchy</label>
+                <label><input type="checkbox" id="object-learning-show-analysis" checked /> Analysis Hints</label>
+                <span style="color:var(--border);">|</span>
+                <span id="object-learning-baseline-status" class="sub" style="color:var(--muted);">Uses current accepted tuning baseline when available.</span>
+              </div>
+            </div>
 
-          <details class="panel minimal" open>
-            <summary>Per-Box Analysis</summary>
-            <div id="object-learning-results" style="margin-top:8px;"></div>
-          </details>
+            <div id="object-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
+              <div class="sub" style="margin-bottom:8px;color:var(--muted);">Draw a BBOX for the field on the reference image. This defines the structural location.</div>
+              <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
+                <canvas id="object-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
+                <canvas id="object-learning-overlay-canvas" style="position:absolute;left:0;top:0;cursor:crosshair;"></canvas>
+              </div>
+            </div>
+
+            <!-- Reference Descriptor Display -->
+            <details id="object-learning-descriptor-panel" class="panel minimal" style="margin-bottom:12px;">
+              <summary>Reference Descriptor</summary>
+              <div id="object-learning-descriptor-output" style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;background:var(--bg,#f5f5f5);padding:8px;border-radius:4px;max-height:300px;overflow:auto;margin-top:8px;">
+                No reference defined yet.
+              </div>
+            </details>
+
+            <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+              <h4 style="margin:0 0 8px;">Aggregate Summary</h4>
+              <div id="object-learning-summary" class="sub" style="color:var(--muted);">No analysis yet.</div>
+            </div>
+
+            <details class="panel minimal" open>
+              <summary>Per-Box Analysis</summary>
+              <div id="object-learning-results" style="margin-top:8px;"></div>
+            </details>
+          </div><!-- /reference-panel -->
+
+          <!-- ═══ Batch Processing Panel ═══ -->
+          <div id="object-learning-batch-panel" style="display:none;">
+            <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+              <label class="btn primary">
+                Upload Batch Files
+                <input id="object-learning-batch-input" type="file" accept="image/png,image/jpeg,application/pdf" multiple style="display:none" />
+              </label>
+              <span id="object-learning-batch-status" class="sub" style="color:var(--muted);">No batch loaded.</span>
+            </div>
+
+            <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+              <h4 style="margin:0 0 8px;">Batch Queue</h4>
+              <div id="object-learning-batch-queue" class="sub" style="color:var(--muted);">No files queued.</div>
+              <div style="margin-top:8px;">
+                <span id="object-learning-batch-progress" class="sub" style="color:var(--muted);"></span>
+              </div>
+            </div>
+
+            <!-- Per-document processing area -->
+            <div id="object-learning-batch-doc-panel" style="display:none;">
+              <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
+                <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+                  <strong style="white-space:nowrap;">Output</strong>
+                  <label><input type="checkbox" id="object-learning-batch-show-compiled" checked /> Compiled Graph</label>
+                  <label><input type="checkbox" id="object-learning-batch-show-regions" checked /> Region Boxes</label>
+                  <label><input type="checkbox" id="object-learning-batch-show-region-ids" checked /> Region IDs</label>
+                  <label><input type="checkbox" id="object-learning-batch-show-prediction" checked /> Prediction</label>
+                </div>
+              </div>
+
+              <div id="object-learning-batch-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
+                <div class="sub" style="margin-bottom:8px;color:var(--muted);" id="object-learning-batch-doc-info">Processing document...</div>
+                <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
+                  <canvas id="object-learning-batch-base-canvas" style="display:block;border-radius:7px;"></canvas>
+                  <canvas id="object-learning-batch-overlay-canvas" style="position:absolute;left:0;top:0;cursor:crosshair;"></canvas>
+                </div>
+              </div>
+
+              <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+                <h4 style="margin:0 0 8px;">Prediction Result</h4>
+                <div id="object-learning-prediction-info" class="sub" style="color:var(--muted);">No prediction yet.</div>
+              </div>
+
+              <!-- Feedback buttons -->
+              <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;border:2px dashed var(--border,#ccc);">
+                <h4 style="margin:0 0 8px;">User Feedback</h4>
+                <p class="sub" style="margin:0 0 8px;color:var(--muted);">Confirm the prediction, adjust the BBOX, or reject it. Feedback trains the model.</p>
+                <div class="actions" style="gap:8px;flex-wrap:wrap;">
+                  <button id="object-learning-confirm-btn" class="btn primary" type="button" disabled>Confirm Prediction</button>
+                  <button id="object-learning-adjust-btn" class="btn" type="button" disabled>Adjust (Redraw BBOX)</button>
+                  <button id="object-learning-reject-btn" class="btn ghost" type="button" disabled>Reject</button>
+                  <span style="color:var(--border);">|</span>
+                  <button id="object-learning-next-btn" class="btn primary" type="button" disabled>Next Document</button>
+                </div>
+              </div>
+
+              <details class="panel minimal">
+                <summary>Candidate Scores</summary>
+                <div id="object-learning-candidates-list" style="margin-top:8px;max-height:300px;overflow:auto;"></div>
+              </details>
+            </div><!-- /batch-doc-panel -->
+          </div><!-- /batch-panel -->
+
+          <!-- ═══ Review & Export Panel ═══ -->
+          <div id="object-learning-review-panel" style="display:none;">
+            <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+              <h4 style="margin:0 0 8px;">Field Configuration Summary</h4>
+              <div id="object-learning-config-summary" class="sub" style="color:var(--muted);">No configuration available.</div>
+            </div>
+            <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+              <h4 style="margin:0 0 8px;">Training Data</h4>
+              <div id="object-learning-training-summary" class="sub" style="color:var(--muted);">No training data collected.</div>
+            </div>
+            <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;">
+              <h4 style="margin:0 0 8px;">Model Weights</h4>
+              <div id="object-learning-weights-output" style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;background:var(--bg,#f5f5f5);padding:8px;border-radius:4px;max-height:200px;overflow:auto;">
+                No model trained yet.
+              </div>
+            </div>
+            <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+              <button id="object-learning-save-config-btn" class="btn primary" type="button" disabled>Save Configuration</button>
+              <button id="object-learning-export-config-btn" class="btn" type="button" disabled>Export JSON</button>
+              <button id="object-learning-clear-config-btn" class="btn ghost" type="button">Clear Field Data</button>
+            </div>
+          </div><!-- /review-panel -->
+
         </div><!-- /learning-object-tab -->
 
       </section>
@@ -1391,6 +1525,7 @@
   <script src="engines/core/engine-registry.js"></script>
   <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
   <script src="engines/wrokitvision/wfg2/wfg2-engine.js?v=2.1"></script>
+  <script src="engines/wrokitvision/learning/object-learning-engine.js"></script>
   <!-- Data layer modules (loaded before invoice-wizard.js) -->
   <script src="js/data/telemetry.js"></script>
   <script src="js/data/write-queue.js"></script>

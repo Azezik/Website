@@ -65,6 +65,7 @@ const BatchAnchorRefinement = require('./batch-anchor-refinement');
 const BatchFieldIntelligence = require('./batch-field-intelligence');
 const TextLandmarkExtractor = require('./text-landmark-extractor');
 const LandmarkMatcher = require('./landmark-matcher');
+const ObjectLearningEngine = require('./object-learning-engine');
 
 module.exports = {
   LearningStore,
@@ -78,5 +79,6 @@ module.exports = {
   BatchAnchorRefinement,
   BatchFieldIntelligence,
   TextLandmarkExtractor,
-  LandmarkMatcher
+  LandmarkMatcher,
+  ObjectLearningEngine
 };
