@@ -537,12 +537,51 @@ const els = {
   objectLearningStatus: document.getElementById('object-learning-status'),
   objectLearningShowCompiled: document.getElementById('object-learning-show-compiled'),
   objectLearningShowRegions: document.getElementById('object-learning-show-regions'),
+  objectLearningShowRegionIds: document.getElementById('object-learning-show-region-ids'),
+  objectLearningShowAdjacency: document.getElementById('object-learning-show-adjacency'),
+  objectLearningShowPartition: document.getElementById('object-learning-show-partition'),
+  objectLearningShowHierarchy: document.getElementById('object-learning-show-hierarchy'),
   objectLearningShowAnalysis: document.getElementById('object-learning-show-analysis'),
   objectLearningBaselineStatus: document.getElementById('object-learning-baseline-status'),
   objectLearningSummary: document.getElementById('object-learning-summary'),
   objectLearningResults: document.getElementById('object-learning-results'),
   objectLearningBaseCanvas: document.getElementById('object-learning-base-canvas'),
   objectLearningOverlayCanvas: document.getElementById('object-learning-overlay-canvas'),
+  objectLearningPipelineMode: document.getElementById('object-learning-pipeline-mode'),
+  objectLearningModeSelect: document.getElementById('object-learning-mode'),
+  objectLearningFieldSelect: document.getElementById('object-learning-field-select'),
+  objectLearningFieldName: document.getElementById('object-learning-field-name'),
+  objectLearningCreateFieldBtn: document.getElementById('object-learning-create-field-btn'),
+  objectLearningFieldStatus: document.getElementById('object-learning-field-status'),
+  objectLearningSetReferenceBtn: document.getElementById('object-learning-set-reference-btn'),
+  objectLearningDescriptorOutput: document.getElementById('object-learning-descriptor-output'),
+  objectLearningReferencePanel: document.getElementById('object-learning-reference-panel'),
+  objectLearningBatchPanel: document.getElementById('object-learning-batch-panel'),
+  objectLearningReviewPanel: document.getElementById('object-learning-review-panel'),
+  objectLearningBatchInput: document.getElementById('object-learning-batch-input'),
+  objectLearningBatchStatus: document.getElementById('object-learning-batch-status'),
+  objectLearningBatchQueue: document.getElementById('object-learning-batch-queue'),
+  objectLearningBatchProgress: document.getElementById('object-learning-batch-progress'),
+  objectLearningBatchDocPanel: document.getElementById('object-learning-batch-doc-panel'),
+  objectLearningBatchDocInfo: document.getElementById('object-learning-batch-doc-info'),
+  objectLearningBatchBaseCanvas: document.getElementById('object-learning-batch-base-canvas'),
+  objectLearningBatchOverlayCanvas: document.getElementById('object-learning-batch-overlay-canvas'),
+  objectLearningBatchShowCompiled: document.getElementById('object-learning-batch-show-compiled'),
+  objectLearningBatchShowRegions: document.getElementById('object-learning-batch-show-regions'),
+  objectLearningBatchShowRegionIds: document.getElementById('object-learning-batch-show-region-ids'),
+  objectLearningBatchShowPrediction: document.getElementById('object-learning-batch-show-prediction'),
+  objectLearningPredictionInfo: document.getElementById('object-learning-prediction-info'),
+  objectLearningConfirmBtn: document.getElementById('object-learning-confirm-btn'),
+  objectLearningAdjustBtn: document.getElementById('object-learning-adjust-btn'),
+  objectLearningRejectBtn: document.getElementById('object-learning-reject-btn'),
+  objectLearningNextBtn: document.getElementById('object-learning-next-btn'),
+  objectLearningCandidatesList: document.getElementById('object-learning-candidates-list'),
+  objectLearningConfigSummary: document.getElementById('object-learning-config-summary'),
+  objectLearningTrainingSummary: document.getElementById('object-learning-training-summary'),
+  objectLearningWeightsOutput: document.getElementById('object-learning-weights-output'),
+  objectLearningSaveConfigBtn: document.getElementById('object-learning-save-config-btn'),
+  objectLearningExportConfigBtn: document.getElementById('object-learning-export-config-btn'),
+  objectLearningClearConfigBtn: document.getElementById('object-learning-clear-config-btn'),
   reports:         document.getElementById('reports'),
   wizardManagerList: document.getElementById('wizard-manager-list'),
   wizardManagerEmpty: document.getElementById('wizard-manager-empty'),
@@ -1907,7 +1946,25 @@ let state = {
     aggregate: null,
     drawing: null,
     objective: null,
-    constraints: []
+    constraints: [],
+    // ML System state
+    mode: 'reference',           // 'reference' | 'batch' | 'review'
+    currentFieldId: null,
+    currentFieldName: '',
+    referenceDescriptor: null,
+    referenceBbox: null,
+    fieldConfig: null,
+    scoringModel: null,
+    // Batch processing state
+    batchFiles: [],
+    batchIndex: -1,
+    batchCurrentGraph: null,
+    batchCurrentSurface: null,
+    batchCurrentPrediction: null,
+    batchCurrentCandidates: [],
+    batchAdjustedBbox: null,
+    batchDrawing: null,
+    batchFeedbackGiven: false
   },
 };
 
@@ -22344,7 +22401,10 @@ function wfg2RefreshDebugInspector(){
 wfg2UpdateStateIndicator();
 
 
-/* ====================== Object Learning (WFG2 Constraints) ========== */
+/* ====================== Object Learning (ML System) ================== */
+
+var _olEngine = window.ObjectLearningEngine || null;
+var _olStore = _olEngine ? _olEngine.createObjectLearningStore(localStorage) : null;
 
 function objectLearningStatus(msg){ if(els.objectLearningStatus) els.objectLearningStatus.textContent = msg || ''; }
 
@@ -22545,23 +22605,126 @@ function objectLearningDrawOverlay(ctx){
   var graph = ol.graph;
   var showCompiled = !!els.objectLearningShowCompiled?.checked;
   var showRegions = !!els.objectLearningShowRegions?.checked;
+  var showRegionIds = !!els.objectLearningShowRegionIds?.checked;
+  var showAdjacency = !!els.objectLearningShowAdjacency?.checked;
+  var showPartition = !!els.objectLearningShowPartition?.checked;
+  var showHierarchy = !!els.objectLearningShowHierarchy?.checked;
   var showAnalysis = !!els.objectLearningShowAnalysis?.checked;
   var nodes = graph?.nodes || [];
+  var edges = graph?.edges || [];
+
+  // Partition overlay (colored regions, matching Graph Learning)
+  if(showPartition && graph?.partition?.labelMap){
+    var labelMap = graph.partition.labelMap;
+    var regionCount = graph.partition.regionCount || 0;
+    var surf = ol.normalizedSurface;
+    if(surf && labelMap.length === surf.width * surf.height){
+      var w = surf.width, h = surf.height;
+      var imgData = ctx.getImageData(0, 0, w, h);
+      var d = imgData.data;
+      var palette = _objectLearningPartitionPalette(regionCount);
+      for(var pi = 0, pj = 0; pi < labelMap.length; pi++, pj += 4){
+        var label = labelMap[pi];
+        if(label >= 0 && label < palette.length){
+          var pc = palette[label];
+          d[pj] = (d[pj] * 0.6 + pc[0] * 0.4) | 0;
+          d[pj+1] = (d[pj+1] * 0.6 + pc[1] * 0.4) | 0;
+          d[pj+2] = (d[pj+2] * 0.6 + pc[2] * 0.4) | 0;
+        }
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+  }
+
+  // Compiled graph contours
   if(showCompiled){
     for(var i = 0; i < nodes.length; i++){
       var c = nodes[i].contour || [];
       if(c.length < 3) continue;
       ctx.fillStyle = 'rgba(33,150,243,0.08)';
       ctx.strokeStyle = 'rgba(0,150,136,0.7)';
+      ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(c[0].x, c[0].y);
       for(var j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
       ctx.closePath(); ctx.fill(); ctx.stroke();
     }
   }
+
+  // Region bounding boxes
   if(showRegions){
-    nodes.forEach(function(n){ var b = n.bbox || {}; ctx.strokeStyle = 'rgba(63,81,181,0.5)'; ctx.strokeRect(b.x||0,b.y||0,b.w||0,b.h||0); });
+    nodes.forEach(function(n){
+      var b = n.bbox || {};
+      ctx.strokeStyle = 'rgba(63,81,181,0.5)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(b.x||0, b.y||0, b.w||0, b.h||0);
+    });
   }
 
+  // Region IDs / labels
+  if(showRegionIds){
+    ctx.font = '10px IBM Plex Mono, monospace';
+    ctx.textBaseline = 'top';
+    nodes.forEach(function(n, idx){
+      var b = n.bbox || {};
+      var label = n.id || ('R' + idx);
+      // Shorten ID for display
+      var shortId = label.replace('wfg2-p-', 'R');
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect((b.x||0), (b.y||0), ctx.measureText(shortId).width + 4, 12);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(shortId, (b.x||0) + 2, (b.y||0) + 1);
+    });
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  // Adjacency edges
+  if(showAdjacency){
+    var nodeMap = new Map(nodes.map(function(n){ return [n.id, n]; }));
+    ctx.strokeStyle = 'rgba(255,152,0,0.4)';
+    ctx.lineWidth = 1;
+    edges.forEach(function(edge){
+      var a = nodeMap.get(edge.from), b = nodeMap.get(edge.to);
+      if(!a || !b) return;
+      ctx.beginPath();
+      ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
+      ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
+      ctx.stroke();
+    });
+  }
+
+  // Hierarchy (containment) lines
+  if(showHierarchy){
+    // Draw containment edges if present
+    var nodeMap2 = new Map(nodes.map(function(n){ return [n.id, n]; }));
+    edges.forEach(function(edge){
+      if(edge.kind !== 'contains' && edge.kind !== 'containment') return;
+      var a = nodeMap2.get(edge.from), b = nodeMap2.get(edge.to);
+      if(!a || !b) return;
+      ctx.strokeStyle = 'rgba(156,39,176,0.5)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
+      ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
+  }
+
+  // Reference BBOX highlight
+  if(ol.referenceBbox){
+    var rb = ol.referenceBbox;
+    ctx.strokeStyle = '#e91e63';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 4]);
+    ctx.strokeRect(rb.x, rb.y, rb.w, rb.h);
+    ctx.setLineDash([]);
+    ctx.font = 'bold 12px IBM Plex Mono, monospace';
+    ctx.fillStyle = '#e91e63';
+    ctx.fillText('REF: ' + (ol.currentFieldName || ol.currentFieldId || 'field'), rb.x + 4, Math.max(14, rb.y - 6));
+  }
+
+  // User-drawn boxes
   ol.boxes.forEach(function(box, idx){
     var analysis = (ol.analyses || []).find(function(a){ return a.boxId === box.id; });
     var color = analysis
@@ -22577,29 +22740,53 @@ function objectLearningDrawOverlay(ctx){
     ctx.fillText('#' + (idx + 1) + (analysis ? (' ' + analysis.classification) : ''), box.x + 4, Math.max(12, box.y - 4));
 
     if(showAnalysis && analysis){
-      var nodeMap = new Map(nodes.map(function(n){ return [n.id, n]; }));
+      var nMap = new Map(nodes.map(function(n){ return [n.id, n]; }));
       ctx.strokeStyle = 'rgba(255,82,82,0.85)';
+      ctx.lineWidth = 1;
       analysis.overlay.splitBoundaries.forEach(function(edge){
-        var a = nodeMap.get(edge.from), b = nodeMap.get(edge.to);
+        var a = nMap.get(edge.from), b = nMap.get(edge.to);
         if(!a || !b) return;
         ctx.beginPath(); ctx.moveTo(a.center?.x || 0, a.center?.y || 0); ctx.lineTo(b.center?.x || 0, b.center?.y || 0); ctx.stroke();
       });
       ctx.strokeStyle = 'rgba(255,193,7,0.85)';
       analysis.overlay.leakEdges.forEach(function(edge){
-        var a = nodeMap.get(edge.from), b = nodeMap.get(edge.to);
+        var a = nMap.get(edge.from), b = nMap.get(edge.to);
         if(!a || !b) return;
         ctx.beginPath(); ctx.moveTo(a.center?.x || 0, a.center?.y || 0); ctx.lineTo(b.center?.x || 0, b.center?.y || 0); ctx.stroke();
       });
     }
   });
 
+  // Drawing in progress
   if(ol.drawing){
-    var d = ol.drawing;
+    var dd = ol.drawing;
     ctx.setLineDash([6, 4]);
     ctx.strokeStyle = '#009688';
-    ctx.strokeRect(d.x, d.y, d.w, d.h);
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dd.x, dd.y, dd.w, dd.h);
     ctx.setLineDash([]);
   }
+}
+
+function _objectLearningPartitionPalette(count){
+  var palette = [];
+  for(var i = 0; i < Math.max(count, 1); i++){
+    var hue = (i * 137.508) % 360;
+    var r, g, b;
+    var h = hue / 60, f = h - Math.floor(h);
+    var s = 0.6, l = 0.7;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs(h % 2 - 1));
+    var m = l - c / 2;
+    if(h < 1){ r = c; g = x; b = 0; }
+    else if(h < 2){ r = x; g = c; b = 0; }
+    else if(h < 3){ r = 0; g = c; b = x; }
+    else if(h < 4){ r = 0; g = x; b = c; }
+    else if(h < 5){ r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    palette.push([(r + m) * 255 | 0, (g + m) * 255 | 0, (b + m) * 255 | 0]);
+  }
+  return palette;
 }
 
 function renderObjectLearningViewer(){
@@ -22701,7 +22888,10 @@ function objectLearningRunGeneration(){
   var ol = state.objectLearning;
   if(!_wfg2 || !ol.normalizedSurface) return;
   var params = wfg2GetEffectiveParams();
-  ol.graph = _wfg2.generateRegionGraph(ol.normalizedSurface, params || _wfg2.DEFAULT_PARAMS);
+  // Use the pipeline mode from Object Learning's own selector (parity with Graph Learning)
+  var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
+  if(params) params.pipelineMode = pipelineMode;
+  ol.graph = _wfg2.generateFeatureGraph(ol.normalizedSurface, params || _wfg2.DEFAULT_PARAMS);
   objectLearningUpdateButtons();
   renderObjectLearningViewer();
 }
@@ -22769,13 +22959,716 @@ if(els.objectLearningClearBtn){
   });
 }
 if(els.objectLearningAnalyzeBtn){ els.objectLearningAnalyzeBtn.addEventListener('click', objectLearningAnalyze); }
-[els.objectLearningShowCompiled, els.objectLearningShowRegions, els.objectLearningShowAnalysis].forEach(function(el){
+[els.objectLearningShowCompiled, els.objectLearningShowRegions, els.objectLearningShowRegionIds,
+ els.objectLearningShowAdjacency, els.objectLearningShowPartition, els.objectLearningShowHierarchy,
+ els.objectLearningShowAnalysis].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderObjectLearningViewer(); });
 });
+// Pipeline mode change re-runs generation
+if(els.objectLearningPipelineMode){
+  els.objectLearningPipelineMode.addEventListener('change', function(){
+    if(state.objectLearning.normalizedSurface) objectLearningRunGeneration();
+  });
+}
 updateObjectLearningBaselineStatus();
 objectLearningUpdateButtons();
 renderObjectLearningResults();
+
+/* ── Object Learning ML System ─────────────────────────────────────────── */
+
+// Initialize scoring model
+if(_olEngine && !state.objectLearning.scoringModel){
+  state.objectLearning.scoringModel = _olEngine.createScoringModel();
+}
+
+/* ── Mode switching ────────────────────────────────────────────────────── */
+
+function objectLearningSetMode(mode){
+  state.objectLearning.mode = mode;
+  if(els.objectLearningReferencePanel) els.objectLearningReferencePanel.style.display = mode === 'reference' ? '' : 'none';
+  if(els.objectLearningBatchPanel) els.objectLearningBatchPanel.style.display = mode === 'batch' ? '' : 'none';
+  if(els.objectLearningReviewPanel) els.objectLearningReviewPanel.style.display = mode === 'review' ? '' : 'none';
+  if(mode === 'review') objectLearningRenderReview();
+}
+
+if(els.objectLearningModeSelect){
+  els.objectLearningModeSelect.addEventListener('change', function(){
+    objectLearningSetMode(this.value);
+  });
+}
+
+/* ── Field management ──────────────────────────────────────────────────── */
+
+function objectLearningRefreshFieldSelect(){
+  if(!els.objectLearningFieldSelect || !_olStore) return;
+  var configs = _olStore.getAllFieldConfigs();
+  var select = els.objectLearningFieldSelect;
+  // Keep the (new field) option
+  while(select.options.length > 1) select.remove(1);
+  Object.keys(configs).forEach(function(fid){
+    var opt = document.createElement('option');
+    opt.value = fid;
+    opt.textContent = configs[fid].field_id + (configs[fid].training_count ? ' (' + configs[fid].training_count + ' examples)' : '');
+    select.appendChild(opt);
+  });
+}
+
+function objectLearningLoadField(fieldId){
+  if(!_olStore || !_olEngine) return;
+  var config = _olStore.getFieldConfig(fieldId);
+  if(!config){
+    if(els.objectLearningFieldStatus) els.objectLearningFieldStatus.textContent = 'Field not found.';
+    return;
+  }
+  var ol = state.objectLearning;
+  ol.currentFieldId = config.field_id;
+  ol.currentFieldName = config.field_id;
+  ol.fieldConfig = config;
+  ol.referenceDescriptor = config.reference_descriptor || null;
+  ol.referenceBbox = config.reference_bbox || null;
+  // Restore model weights
+  if(ol.scoringModel && config.model_weights){
+    ol.scoringModel.setWeights(config.model_weights);
+  }
+  if(ol.scoringModel && config.training_data){
+    ol.scoringModel.setTrainingData(config.training_data);
+  }
+  if(els.objectLearningFieldName) els.objectLearningFieldName.value = config.field_id;
+  if(els.objectLearningFieldStatus) els.objectLearningFieldStatus.textContent = 'Loaded field: ' + config.field_id + ' (' + (config.training_count || 0) + ' training examples)';
+  objectLearningUpdateSetReferenceBtn();
+  renderObjectLearningViewer();
+  objectLearningRenderDescriptor();
+}
+
+if(els.objectLearningFieldSelect){
+  els.objectLearningFieldSelect.addEventListener('change', function(){
+    var val = this.value;
+    if(val) objectLearningLoadField(val);
+    else {
+      // New field mode
+      state.objectLearning.currentFieldId = null;
+      state.objectLearning.currentFieldName = '';
+      state.objectLearning.fieldConfig = null;
+      state.objectLearning.referenceDescriptor = null;
+      state.objectLearning.referenceBbox = null;
+      if(els.objectLearningFieldName) els.objectLearningFieldName.value = '';
+      if(els.objectLearningFieldStatus) els.objectLearningFieldStatus.textContent = '';
+      objectLearningUpdateSetReferenceBtn();
+    }
+  });
+}
+
+if(els.objectLearningCreateFieldBtn){
+  els.objectLearningCreateFieldBtn.addEventListener('click', function(){
+    var name = (els.objectLearningFieldName?.value || '').trim();
+    if(!name){
+      if(els.objectLearningFieldStatus) els.objectLearningFieldStatus.textContent = 'Please enter a field name.';
+      return;
+    }
+    var fieldId = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    state.objectLearning.currentFieldId = fieldId;
+    state.objectLearning.currentFieldName = name;
+
+    // Check if field already exists
+    if(_olStore){
+      var existing = _olStore.getFieldConfig(fieldId);
+      if(existing){
+        objectLearningLoadField(fieldId);
+        return;
+      }
+    }
+
+    if(els.objectLearningFieldStatus) els.objectLearningFieldStatus.textContent = 'Field "' + name + '" ready. Upload a reference image and draw a BBOX.';
+    objectLearningUpdateSetReferenceBtn();
+    objectLearningRefreshFieldSelect();
+  });
+}
+
+/* ── Set Reference BBOX ────────────────────────────────────────────────── */
+
+function objectLearningUpdateSetReferenceBtn(){
+  if(!els.objectLearningSetReferenceBtn) return;
+  var ol = state.objectLearning;
+  els.objectLearningSetReferenceBtn.disabled = !(ol.currentFieldId && ol.boxes.length === 1 && ol.graph);
+}
+
+if(els.objectLearningSetReferenceBtn){
+  els.objectLearningSetReferenceBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    if(!ol.currentFieldId || !ol.boxes.length || !ol.graph || !_olEngine) return;
+
+    var bbox = ol.boxes[0]; // Use the first drawn box as the reference
+    var surfaceSize = { width: ol.normalizedSurface?.width || 1, height: ol.normalizedSurface?.height || 1 };
+
+    // Build reference descriptor
+    ol.referenceDescriptor = _olEngine.buildReferenceDescriptor(bbox, ol.graph, surfaceSize);
+    ol.referenceBbox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
+
+    // Create or update field config
+    ol.fieldConfig = _olEngine.createFieldConfig(ol.currentFieldId, ol.referenceBbox, ol.referenceDescriptor);
+
+    // Save to store
+    if(_olStore){
+      _olStore.saveFieldConfig(ol.currentFieldId, ol.fieldConfig);
+    }
+
+    objectLearningStatus('Reference set for field "' + ol.currentFieldId + '". Switch to Batch Processing to train.');
+    objectLearningRenderDescriptor();
+    renderObjectLearningViewer();
+    objectLearningRefreshFieldSelect();
+  });
+}
+
+function objectLearningRenderDescriptor(){
+  if(!els.objectLearningDescriptorOutput) return;
+  var desc = state.objectLearning.referenceDescriptor;
+  if(!desc){
+    els.objectLearningDescriptorOutput.textContent = 'No reference defined yet.';
+    return;
+  }
+  els.objectLearningDescriptorOutput.textContent = JSON.stringify(desc, null, 2);
+}
+
+// Listen to box changes to update the set-reference button
+var _origFinishDraw = null;
+// We hook into existing box updates by overriding objectLearningUpdateButtons
+var _origUpdateButtons = objectLearningUpdateButtons;
+objectLearningUpdateButtons = function(){
+  _origUpdateButtons();
+  objectLearningUpdateSetReferenceBtn();
+};
+
+/* ── Batch Processing ──────────────────────────────────────────────────── */
+
+if(els.objectLearningBatchInput){
+  els.objectLearningBatchInput.addEventListener('change', function(e){
+    var files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if(!files.length) return;
+    var ol = state.objectLearning;
+    if(!ol.currentFieldId || !ol.referenceDescriptor){
+      objectLearningStatus('Define a field and set a reference BBOX first.');
+      return;
+    }
+    ol.batchFiles = files;
+    ol.batchIndex = -1;
+    ol.batchFeedbackGiven = false;
+    objectLearningRenderBatchQueue();
+    if(els.objectLearningBatchStatus) els.objectLearningBatchStatus.textContent = files.length + ' files queued. Processing will start with the first file.';
+    // Start processing the first file
+    objectLearningProcessNextBatchDoc();
+  });
+}
+
+function objectLearningRenderBatchQueue(){
+  if(!els.objectLearningBatchQueue) return;
+  var ol = state.objectLearning;
+  if(!ol.batchFiles.length){
+    els.objectLearningBatchQueue.innerHTML = '<span class="sub" style="color:var(--muted);">No files queued.</span>';
+    return;
+  }
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
+  ol.batchFiles.forEach(function(f, idx){
+    var isCurrent = idx === ol.batchIndex;
+    var isDone = idx < ol.batchIndex;
+    var bg = isCurrent ? '#e3f2fd' : isDone ? '#e8f5e9' : '#f5f5f5';
+    var border = isCurrent ? '#2196f3' : isDone ? '#4caf50' : '#ddd';
+    html += '<span style="padding:2px 8px;border-radius:4px;font-size:11px;border:1px solid ' + border + ';background:' + bg + ';">';
+    html += (isDone ? '&#10003; ' : isCurrent ? '&#9654; ' : '') + (f.name || 'file ' + (idx + 1));
+    html += '</span>';
+  });
+  html += '</div>';
+  els.objectLearningBatchQueue.innerHTML = html;
+  if(els.objectLearningBatchProgress){
+    els.objectLearningBatchProgress.textContent = 'Progress: ' + Math.max(0, ol.batchIndex) + ' / ' + ol.batchFiles.length;
+  }
+}
+
+async function objectLearningProcessNextBatchDoc(){
+  var ol = state.objectLearning;
+  ol.batchIndex++;
+  if(ol.batchIndex >= ol.batchFiles.length){
+    // Batch complete
+    objectLearningBatchComplete();
+    return;
+  }
+
+  ol.batchFeedbackGiven = false;
+  ol.batchAdjustedBbox = null;
+  ol.batchDrawing = null;
+  ol.batchCurrentPrediction = null;
+  ol.batchCurrentCandidates = [];
+
+  var file = ol.batchFiles[ol.batchIndex];
+  objectLearningRenderBatchQueue();
+  if(els.objectLearningBatchDocPanel) els.objectLearningBatchDocPanel.style.display = '';
+  if(els.objectLearningBatchDocInfo) els.objectLearningBatchDocInfo.textContent = 'Processing: ' + (file.name || 'document') + ' (' + (ol.batchIndex + 1) + '/' + ol.batchFiles.length + ')';
+  objectLearningBatchUpdateFeedbackBtns();
+
+  // Load file through the same pipeline
+  if(!_wfg2) return;
+  state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
+  try { await openFile(file); } catch(err){
+    console.error('[ObjectLearning][Batch] openFile failed', err);
+    if(els.objectLearningBatchDocInfo) els.objectLearningBatchDocInfo.textContent = 'Failed to load: ' + (file.name || 'document');
+    return;
+  }
+
+  var page = state.pageNum || 1;
+  var img = graphLearningCaptureGray(page);
+  if(!img || !img.width || !img.height){
+    if(els.objectLearningBatchDocInfo) els.objectLearningBatchDocInfo.textContent = 'No render surface for: ' + (file.name || 'document');
+    return;
+  }
+
+  ol.batchCurrentSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  if(!ol.batchCurrentSurface) return;
+
+  // Run WFG2
+  var params = wfg2GetEffectiveParams();
+  var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
+  if(params) params.pipelineMode = pipelineMode;
+  ol.batchCurrentGraph = _wfg2.generateFeatureGraph(ol.batchCurrentSurface, params || _wfg2.DEFAULT_PARAMS);
+
+  // Generate candidates and score them
+  var surfaceSize = { width: ol.batchCurrentSurface.width, height: ol.batchCurrentSurface.height };
+  var candidates = _olEngine.generateCandidates(ol.batchCurrentGraph, surfaceSize);
+  var scored = _olEngine.scoreAndRankCandidates(candidates, ol.referenceDescriptor, ol.batchCurrentGraph, surfaceSize, ol.scoringModel);
+  ol.batchCurrentCandidates = scored;
+  ol.batchCurrentPrediction = scored[0] || null;
+
+  // Render
+  objectLearningRenderBatchViewer();
+  objectLearningRenderPredictionInfo();
+  objectLearningRenderCandidatesList();
+  objectLearningBatchBindDrawing();
+  objectLearningBatchUpdateFeedbackBtns();
+}
+
+function objectLearningRenderBatchViewer(){
+  var ol = state.objectLearning;
+  var surf = ol.batchCurrentSurface;
+  var base = els.objectLearningBatchBaseCanvas;
+  var overlay = els.objectLearningBatchOverlayCanvas;
+  if(!surf || !base || !overlay) return;
+
+  if(base.width !== surf.width || base.height !== surf.height){ base.width = surf.width; base.height = surf.height; }
+  if(overlay.width !== surf.width || overlay.height !== surf.height){ overlay.width = surf.width; overlay.height = surf.height; }
+
+  var container = base.parentElement;
+  var maxW = (container && container.clientWidth > 0) ? container.clientWidth : surf.width;
+  var maxH = Math.round(window.innerHeight * 0.65);
+  var fitScale = Math.min(maxW / surf.width, maxH / surf.height, 1);
+  var cssW = Math.round(surf.width * fitScale) + 'px';
+  var cssH = Math.round(surf.height * fitScale) + 'px';
+  base.style.width = cssW; base.style.height = cssH;
+  overlay.style.width = cssW; overlay.style.height = cssH;
+
+  // Draw base image
+  var ctx = base.getContext('2d', { willReadFrequently: true });
+  var out = new Uint8ClampedArray(surf.width * surf.height * 4);
+  var hasColor = surf.rgb && surf.rgb.r;
+  for(var i = 0, j = 0; i < surf.gray.length; i++, j += 4){
+    if(hasColor){ out[j] = surf.rgb.r[i] || 0; out[j+1] = surf.rgb.g[i] || 0; out[j+2] = surf.rgb.b[i] || 0; }
+    else { var v = surf.gray[i] || 0; out[j] = v; out[j+1] = v; out[j+2] = v; }
+    out[j+3] = 255;
+  }
+  ctx.putImageData(new ImageData(out, surf.width, surf.height), 0, 0);
+
+  // Draw overlay
+  var octx = overlay.getContext('2d');
+  octx.clearRect(0, 0, surf.width, surf.height);
+  objectLearningDrawBatchOverlay(octx);
+}
+
+function objectLearningDrawBatchOverlay(ctx){
+  var ol = state.objectLearning;
+  var graph = ol.batchCurrentGraph;
+  var nodes = graph?.nodes || [];
+  var showCompiled = !!els.objectLearningBatchShowCompiled?.checked;
+  var showRegions = !!els.objectLearningBatchShowRegions?.checked;
+  var showRegionIds = !!els.objectLearningBatchShowRegionIds?.checked;
+  var showPrediction = !!els.objectLearningBatchShowPrediction?.checked;
+
+  if(showCompiled){
+    for(var i = 0; i < nodes.length; i++){
+      var c = nodes[i].contour || [];
+      if(c.length < 3) continue;
+      ctx.fillStyle = 'rgba(33,150,243,0.08)';
+      ctx.strokeStyle = 'rgba(0,150,136,0.7)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(c[0].x, c[0].y);
+      for(var j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+  }
+
+  if(showRegions){
+    nodes.forEach(function(n){
+      var b = n.bbox || {};
+      ctx.strokeStyle = 'rgba(63,81,181,0.3)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(b.x||0, b.y||0, b.w||0, b.h||0);
+    });
+  }
+
+  if(showRegionIds){
+    ctx.font = '10px IBM Plex Mono, monospace';
+    ctx.textBaseline = 'top';
+    nodes.forEach(function(n){
+      var b = n.bbox || {};
+      var shortId = (n.id || '').replace('wfg2-p-', 'R');
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(b.x||0, b.y||0, ctx.measureText(shortId).width + 4, 12);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(shortId, (b.x||0) + 2, (b.y||0) + 1);
+    });
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  // Prediction BBOX
+  if(showPrediction && ol.batchCurrentPrediction){
+    var pred = ol.batchCurrentPrediction;
+    var pb = pred.bbox;
+    ctx.strokeStyle = '#4caf50';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(pb.x, pb.y, pb.w, pb.h);
+    ctx.fillStyle = 'rgba(76,175,80,0.15)';
+    ctx.fillRect(pb.x, pb.y, pb.w, pb.h);
+    ctx.font = 'bold 12px IBM Plex Mono, monospace';
+    ctx.fillStyle = '#4caf50';
+    ctx.fillText('PREDICTED (score: ' + pred.score.toFixed(3) + ')', pb.x + 4, Math.max(14, pb.y - 6));
+  }
+
+  // Adjusted BBOX (user correction)
+  if(ol.batchAdjustedBbox){
+    var ab = ol.batchAdjustedBbox;
+    ctx.strokeStyle = '#ff9800';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 3]);
+    ctx.strokeRect(ab.x, ab.y, ab.w, ab.h);
+    ctx.setLineDash([]);
+    ctx.font = 'bold 12px IBM Plex Mono, monospace';
+    ctx.fillStyle = '#ff9800';
+    ctx.fillText('ADJUSTED', ab.x + 4, Math.max(14, ab.y - 6));
+  }
+
+  // Drawing in progress (for adjust mode)
+  if(ol.batchDrawing){
+    var bd = ol.batchDrawing;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#ff9800';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bd.x, bd.y, bd.w, bd.h);
+    ctx.setLineDash([]);
+  }
+}
+
+function objectLearningRenderPredictionInfo(){
+  if(!els.objectLearningPredictionInfo) return;
+  var ol = state.objectLearning;
+  var pred = ol.batchCurrentPrediction;
+  if(!pred){
+    els.objectLearningPredictionInfo.textContent = 'No candidates found.';
+    return;
+  }
+  els.objectLearningPredictionInfo.textContent =
+    'Best match: ' + pred.candidate_id + ' (score: ' + pred.score.toFixed(4) + ')' +
+    ' | bbox: [' + Math.round(pred.bbox.x) + ',' + Math.round(pred.bbox.y) + ',' + Math.round(pred.bbox.w) + ',' + Math.round(pred.bbox.h) + ']' +
+    ' | candidates: ' + ol.batchCurrentCandidates.length;
+}
+
+function objectLearningRenderCandidatesList(){
+  if(!els.objectLearningCandidatesList) return;
+  var candidates = state.objectLearning.batchCurrentCandidates;
+  if(!candidates.length){
+    els.objectLearningCandidatesList.innerHTML = '<span class="sub" style="color:var(--muted);">No candidates.</span>';
+    return;
+  }
+  var html = candidates.slice(0, 20).map(function(c, idx){
+    return '<div style="border-bottom:1px solid var(--border,#eee);padding:4px 0;font-size:11px;">' +
+      '<strong>#' + (idx + 1) + '</strong> ' + c.candidate_id +
+      ' — score: ' + c.score.toFixed(4) +
+      ' | bbox: [' + Math.round(c.bbox.x) + ',' + Math.round(c.bbox.y) + ',' + Math.round(c.bbox.w) + ',' + Math.round(c.bbox.h) + ']' +
+      '</div>';
+  }).join('');
+  if(candidates.length > 20) html += '<div class="sub" style="color:var(--muted);padding:4px 0;">...and ' + (candidates.length - 20) + ' more</div>';
+  els.objectLearningCandidatesList.innerHTML = html;
+}
+
+/* ── Batch feedback ────────────────────────────────────────────────────── */
+
+function objectLearningBatchUpdateFeedbackBtns(){
+  var ol = state.objectLearning;
+  var hasDoc = ol.batchIndex >= 0 && ol.batchIndex < ol.batchFiles.length;
+  var hasPred = !!ol.batchCurrentPrediction;
+  var feedbackGiven = ol.batchFeedbackGiven;
+
+  if(els.objectLearningConfirmBtn) els.objectLearningConfirmBtn.disabled = !hasDoc || !hasPred || feedbackGiven;
+  if(els.objectLearningAdjustBtn) els.objectLearningAdjustBtn.disabled = !hasDoc || feedbackGiven;
+  if(els.objectLearningRejectBtn) els.objectLearningRejectBtn.disabled = !hasDoc || !hasPred || feedbackGiven;
+  if(els.objectLearningNextBtn) els.objectLearningNextBtn.disabled = !hasDoc || !feedbackGiven;
+}
+
+function objectLearningLogTrainingData(selectedBbox, isPositive){
+  var ol = state.objectLearning;
+  if(!_olEngine || !ol.referenceDescriptor || !ol.batchCurrentGraph) return;
+
+  var surfaceSize = { width: ol.batchCurrentSurface?.width || 1, height: ol.batchCurrentSurface?.height || 1 };
+
+  // Log all candidates: the selected one as positive, others as negative
+  ol.batchCurrentCandidates.forEach(function(cand){
+    var isSelected = false;
+    if(selectedBbox && isPositive){
+      // Check if this candidate is the one being confirmed/adjusted
+      isSelected = _olEngine.iou(cand.bbox, selectedBbox) > 0.5;
+    }
+    var label = isSelected ? 1 : 0;
+    if(ol.scoringModel){
+      ol.scoringModel.addTrainingExample(cand.feature_vector, label);
+    }
+    // Also store in field config
+    if(ol.fieldConfig){
+      _olEngine.addTrainingExample(ol.fieldConfig, {
+        field_id: ol.currentFieldId,
+        reference_id: ol.referenceDescriptor.primary_region_id,
+        candidate_id: cand.candidate_id,
+        feature_vector: cand.feature_vector,
+        label: label,
+        document_index: ol.batchIndex,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // If rejecting, log ALL as negative (no positive)
+  if(!isPositive){
+    // Already logged all as 0 above since isSelected would be false
+  }
+
+  // Update model weights after new data
+  if(ol.scoringModel) ol.scoringModel.updateWeights();
+
+  // Save updated config
+  if(_olStore && ol.fieldConfig){
+    ol.fieldConfig.model_weights = ol.scoringModel ? ol.scoringModel.getWeights() : null;
+    ol.fieldConfig.updated_at = new Date().toISOString();
+    _olStore.saveFieldConfig(ol.currentFieldId, ol.fieldConfig);
+  }
+}
+
+// Confirm prediction
+if(els.objectLearningConfirmBtn){
+  els.objectLearningConfirmBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    if(!ol.batchCurrentPrediction) return;
+    ol.batchFeedbackGiven = true;
+    objectLearningLogTrainingData(ol.batchCurrentPrediction.bbox, true);
+    objectLearningBatchUpdateFeedbackBtns();
+    objectLearningStatus('Confirmed. Click Next to continue.');
+  });
+}
+
+// Adjust (redraw BBOX)
+var _batchAdjustMode = false;
+if(els.objectLearningAdjustBtn){
+  els.objectLearningAdjustBtn.addEventListener('click', function(){
+    _batchAdjustMode = true;
+    objectLearningStatus('Draw the correct BBOX on the image. Release to confirm.');
+  });
+}
+
+function objectLearningBatchBindDrawing(){
+  var canvas = els.objectLearningBatchOverlayCanvas;
+  if(!canvas || canvas._batchObjBound) return;
+  var isDown = false;
+
+  canvas.addEventListener('pointerdown', function(evt){
+    if(!_batchAdjustMode) return;
+    var rect = canvas.getBoundingClientRect();
+    var sx = canvas.width / Math.max(1, rect.width);
+    var sy = canvas.height / Math.max(1, rect.height);
+    var p = { x: (evt.clientX - rect.left) * sx, y: (evt.clientY - rect.top) * sy };
+    isDown = true;
+    state.objectLearning.batchDrawing = { startX: p.x, startY: p.y, x: p.x, y: p.y, w: 1, h: 1 };
+    objectLearningRenderBatchViewer();
+  });
+
+  canvas.addEventListener('pointermove', function(evt){
+    if(!isDown || !state.objectLearning.batchDrawing) return;
+    var rect = canvas.getBoundingClientRect();
+    var sx = canvas.width / Math.max(1, rect.width);
+    var sy = canvas.height / Math.max(1, rect.height);
+    var p = { x: (evt.clientX - rect.left) * sx, y: (evt.clientY - rect.top) * sy };
+    var d = state.objectLearning.batchDrawing;
+    d.x = Math.min(d.startX, p.x); d.y = Math.min(d.startY, p.y);
+    d.w = Math.abs(p.x - d.startX); d.h = Math.abs(p.y - d.startY);
+    objectLearningRenderBatchViewer();
+  });
+
+  function finishBatchDraw(){
+    if(!isDown) return;
+    isDown = false;
+    _batchAdjustMode = false;
+    var d = state.objectLearning.batchDrawing;
+    state.objectLearning.batchDrawing = null;
+    if(d && d.w >= 8 && d.h >= 8){
+      state.objectLearning.batchAdjustedBbox = { x: d.x, y: d.y, w: d.w, h: d.h };
+      state.objectLearning.batchFeedbackGiven = true;
+      objectLearningLogTrainingData(state.objectLearning.batchAdjustedBbox, true);
+      objectLearningBatchUpdateFeedbackBtns();
+      objectLearningStatus('BBOX adjusted. Click Next to continue.');
+    }
+    objectLearningRenderBatchViewer();
+  }
+
+  canvas.addEventListener('pointerup', finishBatchDraw);
+  canvas.addEventListener('pointerleave', function(){ if(isDown) finishBatchDraw(); });
+  canvas._batchObjBound = true;
+}
+
+// Reject prediction
+if(els.objectLearningRejectBtn){
+  els.objectLearningRejectBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    ol.batchFeedbackGiven = true;
+    objectLearningLogTrainingData(null, false);
+    objectLearningBatchUpdateFeedbackBtns();
+    objectLearningStatus('Rejected. Click Next to continue.');
+  });
+}
+
+// Next document
+if(els.objectLearningNextBtn){
+  els.objectLearningNextBtn.addEventListener('click', function(){
+    objectLearningProcessNextBatchDoc();
+  });
+}
+
+// Batch overlay visualization toggles
+[els.objectLearningBatchShowCompiled, els.objectLearningBatchShowRegions,
+ els.objectLearningBatchShowRegionIds, els.objectLearningBatchShowPrediction].forEach(function(el){
+  if(!el) return;
+  el.addEventListener('change', function(){ objectLearningRenderBatchViewer(); });
+});
+
+function objectLearningBatchComplete(){
+  var ol = state.objectLearning;
+  objectLearningStatus('Batch complete! ' + ol.batchFiles.length + ' documents processed. Switch to Review & Export to save.');
+  objectLearningRenderBatchQueue();
+  if(els.objectLearningBatchDocPanel) els.objectLearningBatchDocPanel.style.display = 'none';
+  if(els.objectLearningBatchStatus) els.objectLearningBatchStatus.textContent = 'Batch processing complete. ' + ol.batchFiles.length + ' documents processed.';
+
+  // Save final state
+  if(_olStore && ol.fieldConfig && ol.currentFieldId){
+    ol.fieldConfig.model_weights = ol.scoringModel ? ol.scoringModel.getWeights() : null;
+    ol.fieldConfig.updated_at = new Date().toISOString();
+    _olStore.saveFieldConfig(ol.currentFieldId, ol.fieldConfig);
+  }
+}
+
+/* ── Review & Export ───────────────────────────────────────────────────── */
+
+function objectLearningRenderReview(){
+  var ol = state.objectLearning;
+
+  // Config summary
+  if(els.objectLearningConfigSummary){
+    if(!ol.currentFieldId || !ol.fieldConfig){
+      els.objectLearningConfigSummary.textContent = 'No field configuration available. Define a field and set a reference first.';
+    } else {
+      var fc = ol.fieldConfig;
+      els.objectLearningConfigSummary.textContent =
+        'Field: ' + fc.field_id +
+        ' | Reference: ' + (fc.reference_descriptor?.primary_region_id || 'none') +
+        ' | Training examples: ' + (fc.training_count || 0) +
+        ' | Created: ' + (fc.created_at || 'unknown') +
+        ' | Updated: ' + (fc.updated_at || 'unknown');
+    }
+  }
+
+  // Training summary
+  if(els.objectLearningTrainingSummary){
+    if(!ol.scoringModel || ol.scoringModel.trainingCount() === 0){
+      els.objectLearningTrainingSummary.textContent = 'No training data collected yet.';
+    } else {
+      var data = ol.scoringModel.getTrainingData();
+      var pos = data.filter(function(d){ return d.label === 1; }).length;
+      var neg = data.filter(function(d){ return d.label === 0; }).length;
+      els.objectLearningTrainingSummary.textContent =
+        'Total examples: ' + data.length + ' | Positive: ' + pos + ' | Negative: ' + neg;
+    }
+  }
+
+  // Model weights
+  if(els.objectLearningWeightsOutput){
+    if(!ol.scoringModel){
+      els.objectLearningWeightsOutput.textContent = 'No model trained yet.';
+    } else {
+      els.objectLearningWeightsOutput.textContent = JSON.stringify(ol.scoringModel.getWeights(), null, 2);
+    }
+  }
+
+  // Button states
+  var hasConfig = !!(ol.currentFieldId && ol.fieldConfig);
+  if(els.objectLearningSaveConfigBtn) els.objectLearningSaveConfigBtn.disabled = !hasConfig;
+  if(els.objectLearningExportConfigBtn) els.objectLearningExportConfigBtn.disabled = !hasConfig;
+}
+
+// Save configuration
+if(els.objectLearningSaveConfigBtn){
+  els.objectLearningSaveConfigBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    if(!_olStore || !ol.currentFieldId || !ol.fieldConfig) return;
+    ol.fieldConfig.model_weights = ol.scoringModel ? ol.scoringModel.getWeights() : null;
+    ol.fieldConfig.updated_at = new Date().toISOString();
+    _olStore.saveFieldConfig(ol.currentFieldId, ol.fieldConfig);
+    objectLearningStatus('Configuration saved for field "' + ol.currentFieldId + '".');
+    objectLearningRefreshFieldSelect();
+  });
+}
+
+// Export JSON
+if(els.objectLearningExportConfigBtn){
+  els.objectLearningExportConfigBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    if(!ol.fieldConfig) return;
+    var json = JSON.stringify(ol.fieldConfig, null, 2);
+    var blob = new Blob([json], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'object-learning-' + (ol.currentFieldId || 'field') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    objectLearningStatus('Configuration exported.');
+  });
+}
+
+// Clear field data
+if(els.objectLearningClearConfigBtn){
+  els.objectLearningClearConfigBtn.addEventListener('click', function(){
+    var ol = state.objectLearning;
+    if(!ol.currentFieldId) return;
+    if(_olStore) _olStore.deleteFieldConfig(ol.currentFieldId);
+    ol.fieldConfig = null;
+    ol.referenceDescriptor = null;
+    ol.referenceBbox = null;
+    if(ol.scoringModel) ol.scoringModel.reset();
+    objectLearningStatus('Cleared all data for field "' + ol.currentFieldId + '".');
+    objectLearningRefreshFieldSelect();
+    objectLearningRenderReview();
+    objectLearningRenderDescriptor();
+    renderObjectLearningViewer();
+  });
+}
+
+// Initialize field select on load
+objectLearningRefreshFieldSelect();
+objectLearningSetMode('reference');
 
 /* ====================== Batch Structural Learning (Phase 1) ========== */
 
