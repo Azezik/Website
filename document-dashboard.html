@@ -876,22 +876,42 @@
         <!-- ═══ Graph Learning (WFG2) sub-tab ═══ -->
         <div id="learning-graph-tab" style="display:none;">
           <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
-            WFG2 (WrokitFeatureGraph2) segmentation parameter controls. Sliders map directly to the engine's
-            perceptual color distance, region merge rules, boundary snap, closure reinforcement, and other pipeline parameters.
-            Upload a file to preview, adjust sliders, and regenerate. Use the benchmark panel to validate core segmentation.
+            Upload a document, preview the WFG2 graph, then click <strong>Regenerate</strong> for another interpretation
+            or <strong>Good</strong> to accept. Accepted results train the system to auto-tune WFG2 for similar documents.
           </p>
 
+          <!-- ═══ Primary Action Bar: Upload + Regenerate + Good ═══ -->
           <div class="actions" style="gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
             <label class="btn primary">
               Upload File
               <input id="graph-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
             </label>
-            <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled>Regenerate</button>
-            <button id="graph-learning-save-preset-btn" class="btn" type="button" disabled>Save Tuned Preset</button>
-            <button id="graph-learning-load-preset-btn" class="btn ghost" type="button">Load Preset</button>
-            <button id="graph-learning-clear-history-btn" class="btn ghost" type="button">Clear Attempt History</button>
-            <span id="graph-learning-preset-status" class="sub" style="color:var(--muted);"></span>
+            <button id="graph-learning-regenerate-btn" class="btn" type="button" disabled style="min-width:120px;">Regenerate</button>
+            <button id="graph-learning-good-btn" class="btn primary" type="button" disabled style="min-width:100px;background:#2a7;border-color:#2a7;">Good</button>
+            <span id="graph-learning-regen-count" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;"></span>
+            <span id="graph-learning-strategy-label" class="sub" style="color:var(--muted);font-size:11px;"></span>
           </div>
+
+          <!-- ═══ Training Progress Indicator ═══ -->
+          <div id="graph-learning-training-bar" class="panel minimal" style="margin-bottom:12px;padding:6px 12px;display:none;">
+            <div class="actions" style="gap:16px;flex-wrap:wrap;align-items:center;">
+              <span class="sub">Accepted examples: <strong id="graph-learning-training-count">0</strong></span>
+              <span class="sub">Learned families: <strong id="graph-learning-family-count">0</strong></span>
+              <span class="sub" id="graph-learning-family-match" style="color:var(--muted);font-size:11px;"></span>
+            </div>
+          </div>
+
+          <!-- ═══ Secondary controls (collapsed by default) ═══ -->
+          <details style="margin-bottom:12px;">
+            <summary class="sub" style="cursor:pointer;color:var(--muted);">Presets &amp; History</summary>
+            <div class="actions" style="gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center;">
+              <button id="graph-learning-save-preset-btn" class="btn" type="button" disabled>Save Tuned Preset</button>
+              <button id="graph-learning-load-preset-btn" class="btn ghost" type="button">Load Preset</button>
+              <button id="graph-learning-clear-history-btn" class="btn ghost" type="button">Clear Attempt History</button>
+              <button id="graph-learning-clear-training-btn" class="btn ghost" type="button">Clear Training Data</button>
+              <span id="graph-learning-preset-status" class="sub" style="color:var(--muted);"></span>
+            </div>
+          </details>
 
           <!-- ═══ Pipeline Mode Selector ═══ -->
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
@@ -937,8 +957,15 @@
             </div>
           </div>
 
+          <!-- ═══ Advanced Parameters (collapsed — sliders for power users) ═══ -->
+          <details id="graph-learning-advanced-params" class="panel minimal" style="margin-bottom:12px;">
+            <summary>Advanced Parameters</summary>
+            <p class="sub" style="margin:4px 0 12px;color:var(--muted);font-size:11px;">
+              Fine-grained WFG2 slider controls. For most training, use the Regenerate/Good flow above instead.
+            </p>
+
           <!-- ═══ Section 1: Core Edge Sensitivity ═══ -->
-          <details class="panel minimal" style="margin-bottom:12px;" open>
+          <details class="panel minimal" style="margin-bottom:12px;">
             <summary>Section 1 — Core Edge Sensitivity</summary>
             <div style="padding:8px 0;">
               <div class="wfg2-slider-row" style="margin-bottom:14px;">
@@ -1076,6 +1103,8 @@
             <button id="graph-learning-reset-to-baseline-btn" class="btn ghost" type="button" style="display:none;">Reset to Accepted Baseline</button>
           </div>
 
+          </details><!-- /Advanced Parameters -->
+
           <!-- ═══ Settings State Indicator ═══ -->
           <div id="graph-learning-state-indicator" class="panel minimal" style="margin-bottom:12px;padding:8px 12px;display:none;">
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
@@ -1086,15 +1115,10 @@
             </div>
           </div>
 
-          <!-- ═══ Accept / Continuity Controls ═══ -->
-          <div class="panel minimal" style="margin-bottom:12px;padding:10px 12px;border:1px dashed var(--border,#ccc);">
-            <div class="actions" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">
-              <button id="graph-learning-accept-tuning-btn" class="btn primary" type="button" disabled>Accept Current Tuning</button>
-              <span id="graph-learning-baseline-status" class="sub" style="font-size:11px;color:var(--muted);">No accepted baseline.</span>
-            </div>
-            <p class="sub" style="margin:0;color:var(--muted);font-size:11px;">
-              Saves the current slider values and benchmark state as the accepted learned baseline. Future sessions will start from this baseline instead of defaults.
-            </p>
+          <!-- Accept tuning button (hidden — triggered by Good button now) -->
+          <div style="display:none;">
+            <button id="graph-learning-accept-tuning-btn" type="button" disabled>Accept Current Tuning</button>
+            <span id="graph-learning-baseline-status"></span>
           </div>
 
           <!-- ═══ Benchmark Validation Panel ═══ -->
@@ -1123,7 +1147,7 @@
           </details>
 
           <!-- ═══ Attempt History ═══ -->
-          <details class="panel minimal" open>
+          <details class="panel minimal">
             <summary>Attempt History</summary>
             <div id="graph-learning-attempts" style="margin-top:8px;max-height:220px;overflow:auto;"></div>
           </details>
@@ -1538,6 +1562,7 @@
   <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
   <script src="engines/wrokitvision/wfg2/wfg2-engine.js?v=2.1"></script>
   <script src="engines/wrokitvision/learning/object-learning-engine.js"></script>
+  <script src="engines/wrokitvision/learning/graph-learning-store.js"></script>
   <!-- Data layer modules (loaded before invoice-wizard.js) -->
   <script src="js/data/telemetry.js"></script>
   <script src="js/data/write-queue.js"></script>
