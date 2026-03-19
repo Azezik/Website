@@ -902,6 +902,306 @@
     };
   }
 
+  /* ═══════════════════════════════════════════════════════════════════
+     NOCOLOUR FALLBACK SEGMENTATION
+     ═══════════════════════════════════════════════════════════════════
+     Activated when the standard color partition produces only one region.
+     Recovers structural regions from binary intensity + spatial proximity.
+
+     Step A: Binary normalization (hard threshold → push to B/W)
+     Step B: Micro-component extraction (connected components on dark pixels)
+     Step C: Proximity-based flood clustering (group nearby components)
+     Step D: Region consolidation (bounding shapes, noise discard)          */
+
+  function computeNocolourFallback(surface, params){
+    const p = copyParams(params);
+    const w = surface.width, h = surface.height;
+    const n = w * h;
+    const gray = surface.gray;
+
+    // ── Step A: Binary / High-Contrast Normalization ──
+    // Otsu's threshold to find the optimal split between foreground/background.
+    const histogram = new Int32Array(256);
+    for(let i = 0; i < n; i++) histogram[gray[i]]++;
+
+    let total = n, sum = 0;
+    for(let t = 0; t < 256; t++) sum += t * histogram[t];
+
+    let sumB = 0, wB = 0, maxVariance = 0, bestThreshold = 128;
+    for(let t = 0; t < 256; t++){
+      wB += histogram[t];
+      if(wB === 0) continue;
+      const wF = total - wB;
+      if(wF === 0) break;
+      sumB += t * histogram[t];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if(between > maxVariance){ maxVariance = between; bestThreshold = t; }
+    }
+
+    const binaryLayer = new Uint8Array(n);
+    for(let i = 0; i < n; i++){
+      binaryLayer[i] = gray[i] <= bestThreshold ? 1 : 0; // 1 = dark (foreground)
+    }
+
+    // ── Step B: Micro-Component Extraction ──
+    // Connected-component labeling on dark (foreground) pixels, 8-connected.
+    const componentLabel = new Int32Array(n).fill(-1);
+    const components = []; // { id, pixels: [idx], bbox, area }
+    let nextCompId = 0;
+    const minComponentPixels = 3; // discard single-pixel noise
+
+    for(let i = 0; i < n; i++){
+      if(!binaryLayer[i] || componentLabel[i] >= 0) continue;
+      const compId = nextCompId++;
+      const queue = [i];
+      componentLabel[i] = compId;
+      const pixels = [];
+      let cx0 = w, cy0 = h, cx1 = 0, cy1 = 0;
+
+      while(queue.length){
+        const idx = queue.pop();
+        pixels.push(idx);
+        const px = idx % w, py = (idx / w) | 0;
+        if(px < cx0) cx0 = px; if(py < cy0) cy0 = py;
+        if(px > cx1) cx1 = px; if(py > cy1) cy1 = py;
+
+        // 8-connected neighbors
+        for(let dy = -1; dy <= 1; dy++){
+          const ny = py + dy;
+          if(ny < 0 || ny >= h) continue;
+          for(let dx = -1; dx <= 1; dx++){
+            if(dx === 0 && dy === 0) continue;
+            const nx = px + dx;
+            if(nx < 0 || nx >= w) continue;
+            const ni = ny * w + nx;
+            if(!binaryLayer[ni] || componentLabel[ni] >= 0) continue;
+            componentLabel[ni] = compId;
+            queue.push(ni);
+          }
+        }
+      }
+
+      if(pixels.length >= minComponentPixels){
+        const centroidX = pixels.reduce(function(s, idx){ return s + (idx % w); }, 0) / pixels.length;
+        const centroidY = pixels.reduce(function(s, idx){ return s + ((idx / w) | 0); }, 0) / pixels.length;
+        components.push({
+          id: compId, pixels: pixels, area: pixels.length,
+          bbox: { x: cx0, y: cy0, w: cx1 - cx0 + 1, h: cy1 - cy0 + 1 },
+          centroidX: centroidX, centroidY: centroidY
+        });
+      }
+    }
+
+    // If no foreground components found, return null (cannot recover)
+    if(components.length === 0) return null;
+
+    // ── Step C: Proximity-Based Flood Clustering ──
+    // Dynamic threshold: based on average component spacing.
+    // Use median component dimension as base proximity radius.
+    const compDims = components.map(function(c){
+      return Math.max(c.bbox.w, c.bbox.h);
+    });
+    compDims.sort(function(a, b){ return a - b; });
+    const medianDim = compDims[Math.floor(compDims.length / 2)] || 8;
+    // Proximity threshold: components within this distance are grouped
+    const proximityThreshold = Math.max(8, Math.min(medianDim * 3, Math.min(w, h) * 0.15));
+
+    const clusterLabel = new Int32Array(components.length).fill(-1);
+    const clusters = [];
+    let nextClusterId = 0;
+
+    for(let ci = 0; ci < components.length; ci++){
+      if(clusterLabel[ci] >= 0) continue;
+      const clusterId = nextClusterId++;
+      const cQueue = [ci];
+      clusterLabel[ci] = clusterId;
+      const memberIndices = [];
+
+      while(cQueue.length){
+        const cur = cQueue.pop();
+        memberIndices.push(cur);
+        const curComp = components[cur];
+
+        for(let oi = 0; oi < components.length; oi++){
+          if(clusterLabel[oi] >= 0) continue;
+          const other = components[oi];
+          // Distance between component bounding boxes
+          const dx = Math.max(0, Math.max(curComp.bbox.x - (other.bbox.x + other.bbox.w),
+                                          other.bbox.x - (curComp.bbox.x + curComp.bbox.w)));
+          const dy = Math.max(0, Math.max(curComp.bbox.y - (other.bbox.y + other.bbox.h),
+                                          other.bbox.y - (curComp.bbox.y + curComp.bbox.h)));
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if(dist <= proximityThreshold){
+            clusterLabel[oi] = clusterId;
+            cQueue.push(oi);
+          }
+        }
+      }
+
+      clusters.push({ id: clusterId, componentIndices: memberIndices });
+    }
+
+    // ── Step D: Region Consolidation ──
+    // Convert clusters → regions. Discard noise clusters.
+    const minClusterArea = Math.max(25, Math.round(n * 0.0005));
+    const regions = [];
+    const regionMeans = {};
+
+    // Build per-pixel label map for the fallback
+    const labelMap = new Int32Array(n).fill(-1);
+
+    for(let ki = 0; ki < clusters.length; ki++){
+      const cluster = clusters[ki];
+      let totalArea = 0;
+      let rx0 = w, ry0 = h, rx1 = 0, ry1 = 0;
+      const allPixels = [];
+
+      for(let mi = 0; mi < cluster.componentIndices.length; mi++){
+        const comp = components[cluster.componentIndices[mi]];
+        totalArea += comp.area;
+        if(comp.bbox.x < rx0) rx0 = comp.bbox.x;
+        if(comp.bbox.y < ry0) ry0 = comp.bbox.y;
+        if(comp.bbox.x + comp.bbox.w > rx1) rx1 = comp.bbox.x + comp.bbox.w;
+        if(comp.bbox.y + comp.bbox.h > ry1) ry1 = comp.bbox.y + comp.bbox.h;
+        for(let pi = 0; pi < comp.pixels.length; pi++) allPixels.push(comp.pixels[pi]);
+      }
+
+      if(totalArea < minClusterArea) continue;
+
+      const regionId = regions.length;
+      const bbox = { x: rx0, y: ry0, w: rx1 - rx0, h: ry1 - ry0 };
+      const centerX = rx0 + bbox.w * 0.5;
+      const centerY = ry0 + bbox.h * 0.5;
+
+      // Assign pixels to labelMap
+      for(let pi = 0; pi < allPixels.length; pi++){
+        labelMap[allPixels[pi]] = regionId;
+      }
+
+      // Also fill the bounding box background pixels to this region
+      // so the label map has coverage (white background between characters)
+      for(let y = ry0; y < ry1 && y < h; y++){
+        for(let x = rx0; x < rx1 && x < w; x++){
+          const idx = y * w + x;
+          if(labelMap[idx] === -1) labelMap[idx] = regionId;
+        }
+      }
+
+      // Compute mean gray for the region
+      let sumGray = 0;
+      for(let pi = 0; pi < allPixels.length; pi++) sumGray += gray[allPixels[pi]];
+      const meanGray = sumGray / Math.max(1, allPixels.length);
+
+      // Build contour from bbox corners (simplified rectangular contour)
+      const contour = [
+        { x: rx0, y: ry0 }, { x: rx1, y: ry0 },
+        { x: rx1, y: ry1 }, { x: rx0, y: ry1 }
+      ];
+
+      const fillRatio = totalArea / Math.max(1, bbox.w * bbox.h);
+
+      regionMeans[regionId] = { L: meanGray, A: 0, B: 0 };
+
+      regions.push({
+        id: 'wfg2-nc-' + regionId,
+        type: 'partition_region',
+        partitionId: regionId,
+        bbox: bbox,
+        center: { x: centerX, y: centerY },
+        area: totalArea,
+        contour: contour,
+        confidence: clamp(0.3 + fillRatio * 0.4, 0, 1),
+        tolerance: 0,
+        commitOrder: regionId,
+        surfaceUniformity: 0.5,
+        colorConfidence: 0,
+        closureScore: 0,
+        compactness: clamp(fillRatio, 0, 1),
+        nocolourFallback: true
+      });
+    }
+
+    if(regions.length <= 1) return null; // Fallback didn't help — still 1 or 0 regions
+
+    // Assign remaining unlabeled pixels to nearest region by bbox distance
+    for(let i = 0; i < n; i++){
+      if(labelMap[i] !== -1) continue;
+      const px = i % w, py = (i / w) | 0;
+      let bestId = 0, bestDist = 1e9;
+      for(let ri = 0; ri < regions.length; ri++){
+        const b = regions[ri].bbox;
+        const dx = Math.max(0, Math.max(b.x - px, px - (b.x + b.w)));
+        const dy = Math.max(0, Math.max(b.y - py, py - (b.y + b.h)));
+        const d = dx + dy;
+        if(d < bestDist){ bestDist = d; bestId = ri; }
+      }
+      labelMap[i] = bestId;
+    }
+
+    // Build shared boundaries & adjacency
+    const sharedBoundaries = new Uint8Array(n);
+    const adjSet = new Set();
+    for(let y = 0; y < h; y++){
+      for(let x = 0; x < w; x++){
+        const i = y * w + x;
+        const ml = labelMap[i];
+        if(x < w - 1){
+          const nl = labelMap[i + 1];
+          if(nl !== ml && nl >= 0 && ml >= 0){
+            sharedBoundaries[i] = 1;
+            adjSet.add(ml < nl ? ml + ':' + nl : nl + ':' + ml);
+          }
+        }
+        if(y < h - 1){
+          const nl = labelMap[i + w];
+          if(nl !== ml && nl >= 0 && ml >= 0){
+            sharedBoundaries[i] = 1;
+            adjSet.add(ml < nl ? ml + ':' + nl : nl + ':' + ml);
+          }
+        }
+      }
+    }
+
+    const adjacency = [];
+    for(const pair of adjSet){
+      const sep = pair.indexOf(':');
+      adjacency.push({ from: Number(pair.substring(0, sep)), to: Number(pair.substring(sep + 1)) });
+    }
+
+    // Build edges from adjacency
+    const idLookup = {};
+    for(let ni = 0; ni < regions.length; ni++) idLookup[regions[ni].partitionId] = regions[ni].id;
+    const edges = [];
+    for(let ai = 0; ai < adjacency.length; ai++){
+      const fromId = idLookup[adjacency[ai].from];
+      const toId = idLookup[adjacency[ai].to];
+      if(fromId && toId) edges.push({ from: fromId, to: toId, kind: 'shared_boundary', distance: 0 });
+    }
+
+    return {
+      labelMap: labelMap,
+      sharedBoundaries: sharedBoundaries,
+      nodes: regions,
+      edges: edges,
+      adjacency: adjacency,
+      regionCount: regions.length,
+      regionMeans: regionMeans,
+      nocolourFallback: true,
+      // Debug artifacts
+      nocolourDebug: {
+        binaryLayer: binaryLayer,
+        componentCount: components.length,
+        clusterCount: clusters.length,
+        threshold: bestThreshold,
+        proximityThreshold: proximityThreshold,
+        componentLabel: componentLabel,
+        components: components.map(function(c){ return { id: c.id, bbox: c.bbox, area: c.area, centroidX: c.centroidX, centroidY: c.centroidY }; })
+      }
+    };
+  }
+
   /* ─── Feature graph generation (partition-first architecture) ── */
   function generateFeatureGraph(normalizedSurface, params){
     if(!normalizedSurface?.gray) return null;
@@ -925,8 +1225,18 @@
     let structuralResult = null;
 
     // ── Stage 1: Color-First Partition (mandatory for partition/hybrid/combined) ──
+    let nocolourResult = null;
     if(mode === 'partition' || mode === 'hybrid' || mode === 'combined'){
       partitionResult = computePartition(normalizedSurface, p);
+
+      // ── NOCOLOUR Fallback: triggers when partition produces only 1 region ──
+      if(partitionResult.regionCount <= 1){
+        nocolourResult = computeNocolourFallback(normalizedSurface, p);
+        if(nocolourResult && nocolourResult.regionCount > 1){
+          // Replace the single-region partition with the fallback result
+          partitionResult = nocolourResult;
+        }
+      }
     }
 
     // ── Structural pipeline (for structural/hybrid/combined) ──
@@ -985,7 +1295,8 @@
         labelMap: partitionResult.labelMap,
         sharedBoundaries: partitionResult.sharedBoundaries,
         regionCount: partitionResult.regionCount,
-        adjacency: partitionResult.adjacency
+        adjacency: partitionResult.adjacency,
+        nocolourFallback: !!partitionResult.nocolourFallback
       } : null,
       structural: structuralResult ? {
         nodes: structuralResult.nodes,
@@ -1007,7 +1318,9 @@
         combinedEvidenceMap: combinedEvidence,
         partitionLabelMap: partitionResult ? partitionResult.labelMap : null,
         partitionSharedBoundaries: partitionResult ? partitionResult.sharedBoundaries : null,
-        partitionRegionMeans: partitionResult ? partitionResult.regionMeans : null
+        partitionRegionMeans: partitionResult ? partitionResult.regionMeans : null,
+        nocolourFallbackActive: !!(nocolourResult && nocolourResult.regionCount > 1),
+        nocolourDebug: nocolourResult ? nocolourResult.nocolourDebug : null
       }
     };
     return graph;
