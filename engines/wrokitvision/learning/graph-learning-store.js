@@ -328,14 +328,195 @@ function createGraphFamilyStore(storage) {
 
 /* ── Smart Regeneration Strategy ──────────────────────────────────────────── */
 
+/*
+  AUDIT RESULTS — Parameters that actually affect partition-mode output:
+  ═══════════════════════════════════════════════════════════════════════
+  HIGH IMPACT (used directly in computePartition flood fill):
+    partitionColorTolerance — controls region formation via color distance
+    chromaWeight            — controls color vs luminance dominance in flood fill
+
+  MEDIUM IMPACT (used in partition or color boundary):
+    partitionMinRegionPixels       — minimum pixel count to keep a region
+    partitionBoundaryContinuation  — boundary repair aggressiveness
+    colorDistFloor                 — dead-zone for small color differences
+    colorDistCeiling               — ceiling for color boundary signal
+    colorDistGamma                 — non-linear color distance curve
+
+  NO EFFECT IN PARTITION MODE (structural-only or dead code):
+    mergeThreshold          — structural pipeline only (not called)
+    surfaceUniformityBias   — structural pipeline only
+    gridSize                — structural pipeline only
+    edgeSensitivity         — structural pipeline only
+    minRegionArea           — structural pipeline only
+    colorMergePenalty       — structural pipeline only
+    parentContourBonus      — structural pipeline only
+    rectangularBiasPenalty  — structural pipeline only
+    fragmentationTolerance  — DEAD CODE (never used anywhere)
+    partitionLocalRefinementRange — DEAD CODE (never used anywhere)
+    partitionScore*W        — DEAD CODE (never used anywhere)
+
+  LOW EFFECT (affects intermediate maps not used by partition):
+    closureWeight   — only affects combinedEvidence map (unused by partition)
+    colorWeight     — only affects combinedEvidence map (unused by partition)
+    luminanceWeight — only affects combinedEvidence map (unused by partition)
+    varianceWeight  — only affects combinedEvidence map (unused by partition)
+    closureRadius   — only affects closureMap (unused by partition)
+*/
+
+/** Parameters that actually affect partition-mode output, with valid ranges */
+const EFFECTIVE_PARAMS = [
+  { key: 'partitionColorTolerance', min: 3, max: 50, impact: 'high' },
+  { key: 'chromaWeight',            min: 0.3, max: 1.0, impact: 'high' },
+  { key: 'partitionMinRegionPixels', min: 16, max: 300, impact: 'medium' },
+  { key: 'partitionBoundaryContinuation', min: 0, max: 1, impact: 'medium' },
+  { key: 'colorDistFloor',          min: 0, max: 35, impact: 'medium' },
+  { key: 'colorDistCeiling',        min: 20, max: 80, impact: 'medium' },
+  { key: 'colorDistGamma',          min: 0.5, max: 3.5, impact: 'medium' }
+];
+
+function _clampEffective(p) {
+  for (const def of EFFECTIVE_PARAMS) {
+    if (typeof p[def.key] === 'number') {
+      p[def.key] = Math.max(def.min, Math.min(def.max, p[def.key]));
+    }
+  }
+  return p;
+}
+
+/* ── Graph Change Detection ───────────────────────────────────────────────── */
+
+/**
+ * Compute a lightweight structural fingerprint from graph stats.
+ * Used to detect whether a regeneration actually changed the graph.
+ */
+function computeGraphFingerprint(graphStats) {
+  if (!graphStats) return null;
+  return {
+    regionCount: graphStats.region_count || graphStats.regionCount || 0,
+    meaningfulRegionCount: graphStats.meaningful_region_count || graphStats.meaningfulRegionCount || 0,
+    dominantCoverage: graphStats.dominant_region_coverage || graphStats.dominantRegionCoverage || 0,
+    avgArea: graphStats.avg_region_area || graphStats.avgRegionArea || 0,
+    medianArea: graphStats.median_region_area || graphStats.medianRegionArea || 0,
+    edgeCount: graphStats.edge_count || graphStats.edgeCount || 0,
+    avgEdgesPerNode: graphStats.avg_edges_per_node || graphStats.avgEdgesPerNode || 0,
+    qualityScore: graphStats.quality_score || graphStats.qualityScore || 0
+  };
+}
+
+/**
+ * Measure how much a graph changed between two fingerprints.
+ * Returns { changed: boolean, delta: object, magnitude: number }
+ */
+function measureGraphChange(prevFP, newFP) {
+  if (!prevFP || !newFP) return { changed: true, delta: {}, magnitude: 1.0 };
+
+  const delta = {
+    regionCount: newFP.regionCount - prevFP.regionCount,
+    meaningfulRegionCount: newFP.meaningfulRegionCount - prevFP.meaningfulRegionCount,
+    dominantCoverage: Math.round((newFP.dominantCoverage - prevFP.dominantCoverage) * 1000) / 1000,
+    avgArea: Math.round((newFP.avgArea - prevFP.avgArea) * 10000) / 10000,
+    edgeCount: newFP.edgeCount - prevFP.edgeCount,
+    qualityScore: Math.round((newFP.qualityScore - prevFP.qualityScore) * 1000) / 1000
+  };
+
+  // Magnitude: how much did the graph actually change? (0 = identical, 1+ = major change)
+  const regionPct = prevFP.regionCount > 0
+    ? Math.abs(delta.regionCount) / prevFP.regionCount
+    : (delta.regionCount !== 0 ? 1 : 0);
+  const coverageDelta = Math.abs(delta.dominantCoverage);
+  const edgePct = prevFP.edgeCount > 0
+    ? Math.abs(delta.edgeCount) / prevFP.edgeCount
+    : (delta.edgeCount !== 0 ? 1 : 0);
+
+  const magnitude = regionPct * 0.5 + coverageDelta * 0.3 + edgePct * 0.2;
+
+  // Threshold: anything below 2% is effectively unchanged
+  const changed = magnitude > 0.02;
+
+  return { changed, delta, magnitude: Math.round(magnitude * 1000) / 1000 };
+}
+
+/**
+ * Describe the parameter changes applied in human-readable form.
+ */
+function describeParamChanges(prevParams, newParams) {
+  if (!prevParams || !newParams) return [];
+  const changes = [];
+  for (const def of EFFECTIVE_PARAMS) {
+    const prev = prevParams[def.key];
+    const next = newParams[def.key];
+    if (prev === undefined || next === undefined) continue;
+    const diff = next - prev;
+    if (Math.abs(diff) < 0.001) continue;
+    const sign = diff > 0 ? '+' : '';
+    const val = typeof next === 'number' && next % 1 !== 0
+      ? sign + diff.toFixed(2)
+      : sign + Math.round(diff);
+    changes.push(def.key.replace('partition', 'p.') + ': ' + val);
+  }
+  return changes;
+}
+
+/* ── Feedback types ───────────────────────────────────────────────────────── */
+
+const FEEDBACK_TYPES = Object.freeze({
+  REGENERATE: 'regenerate',
+  TOO_FEW: 'too_few_regions',
+  TOO_MANY: 'too_many_regions',
+  GOOD: 'good'
+});
+
+/* ── Feedback-directed strategy pools ─────────────────────────────────────── */
+
+/**
+ * Compound strategies specifically for "too few regions" feedback.
+ * All changes bias toward MORE separation, MORE sensitivity, LESS merging.
+ */
+const TOO_FEW_COMPOUNDS = [
+  { label: 'split-strong', changes: { partitionColorTolerance: -6, partitionMinRegionPixels: -20 } },
+  { label: 'split-moderate', changes: { partitionColorTolerance: -4, chromaWeight: 0.08 } },
+  { label: 'split-sensitive', changes: { colorDistFloor: -6, colorDistCeiling: -10 } },
+  { label: 'split-fine', changes: { partitionMinRegionPixels: -30, partitionColorTolerance: -3 } },
+  { label: 'split-color-boost', changes: { chromaWeight: 0.12, colorDistFloor: -5, colorDistGamma: -0.4 } },
+  { label: 'split-aggressive', changes: { partitionColorTolerance: -9, partitionMinRegionPixels: -24, colorDistFloor: -4 } },
+  { label: 'split-boundary', changes: { partitionBoundaryContinuation: 0.15, colorDistCeiling: -8 } },
+  { label: 'split-gamma-low', changes: { colorDistGamma: -0.6, partitionColorTolerance: -3 } }
+];
+
+/**
+ * Compound strategies specifically for "too many regions" feedback.
+ * All changes bias toward LESS fragmentation, MORE merging, FEWER regions.
+ */
+const TOO_MANY_COMPOUNDS = [
+  { label: 'merge-strong', changes: { partitionColorTolerance: 7, partitionMinRegionPixels: 24 } },
+  { label: 'merge-moderate', changes: { partitionColorTolerance: 5, chromaWeight: -0.08 } },
+  { label: 'merge-desensitize', changes: { colorDistFloor: 6, colorDistCeiling: 10 } },
+  { label: 'merge-coarse', changes: { partitionMinRegionPixels: 40, partitionColorTolerance: 4 } },
+  { label: 'merge-color-relax', changes: { chromaWeight: -0.12, colorDistFloor: 5, colorDistGamma: 0.4 } },
+  { label: 'merge-aggressive', changes: { partitionColorTolerance: 10, partitionMinRegionPixels: 32, colorDistFloor: 5 } },
+  { label: 'merge-smooth', changes: { partitionBoundaryContinuation: -0.15, colorDistCeiling: 10 } },
+  { label: 'merge-gamma-high', changes: { colorDistGamma: 0.6, partitionColorTolerance: 4 } }
+];
+
+/**
+ * Neutral compound strategies for undirected "regenerate" feedback.
+ * Explores in all directions using only partition-effective parameters.
+ */
+const NEUTRAL_COMPOUNDS = [
+  { label: 'more-regions', changes: { partitionColorTolerance: -5, partitionMinRegionPixels: -16 } },
+  { label: 'fewer-regions', changes: { partitionColorTolerance: 6, partitionMinRegionPixels: 20 } },
+  { label: 'color-sharp', changes: { colorDistFloor: -5, chromaWeight: 0.08, colorDistGamma: -0.3 } },
+  { label: 'color-soft', changes: { colorDistFloor: 5, chromaWeight: -0.08, colorDistGamma: 0.3 } },
+  { label: 'tight-boundaries', changes: { partitionBoundaryContinuation: 0.15, colorDistCeiling: -8 } },
+  { label: 'loose-boundaries', changes: { partitionBoundaryContinuation: -0.15, colorDistCeiling: 8 } },
+  { label: 'detail-preserve', changes: { partitionMinRegionPixels: -24, partitionColorTolerance: -4 } },
+  { label: 'simplify', changes: { partitionMinRegionPixels: 32, partitionColorTolerance: 7 } },
+  { label: 'gamma-low', changes: { colorDistGamma: -0.5, colorDistFloor: -3 } },
+  { label: 'gamma-high', changes: { colorDistGamma: 0.5, colorDistFloor: 3 } }
+];
+
 /**
  * Generate the next WFG2 parameter candidate for regeneration.
- *
- * Strategy priority:
- * 1. If learned families have a match, start from family params
- * 2. If previous accepted examples are similar, use their params as starting point
- * 3. Apply controlled perturbations around the current best
- * 4. Avoid repeating recently tried variants
  *
  * @param {object} opts
  * @param {object} opts.currentParams - Current WFG2 params
@@ -345,109 +526,130 @@ function createGraphFamilyStore(storage) {
  * @param {function} opts.copyParams - WFG2.copyParams function
  * @param {object} opts.familyStore - GraphFamilyStore instance
  * @param {object} opts.trainingStore - GraphTrainingStore instance
- * @returns {{ params, variantLabel, strategy }}
+ * @param {string} opts.feedback - Feedback type: 'regenerate', 'too_few_regions', 'too_many_regions'
+ * @returns {{ params, variantLabel, strategy, paramChanges }}
  */
 function generateNextCandidate(opts) {
   const { currentParams, docFeatures, attemptNumber, triedVariants, copyParams,
-          familyStore, trainingStore } = opts;
+          familyStore, trainingStore, feedback } = opts;
   const copy = copyParams || function(p) { return Object.assign({}, p); };
   const tried = new Set(triedVariants || []);
   const attempt = attemptNumber || 1;
+  const feedbackType = feedback || FEEDBACK_TYPES.REGENERATE;
 
-  // Perturbation definitions
+  // Select compound pool based on feedback
+  let compounds;
+  if (feedbackType === FEEDBACK_TYPES.TOO_FEW) {
+    compounds = TOO_FEW_COMPOUNDS;
+  } else if (feedbackType === FEEDBACK_TYPES.TOO_MANY) {
+    compounds = TOO_MANY_COMPOUNDS;
+  } else {
+    compounds = NEUTRAL_COMPOUNDS;
+  }
+
+  // Single-param perturbations (only effective params, larger offsets)
   const perturbDefs = [
-    { key: 'partitionColorTolerance', offsets: [-6, -3, 3, 6, -9, 9], min: 3, max: 50 },
-    { key: 'mergeThreshold', offsets: [-5, -3, 3, 5, -8, 8], min: 4, max: 50 },
-    { key: 'colorDistFloor', offsets: [-5, -3, 3, 5], min: 0, max: 35 },
-    { key: 'colorDistCeiling', offsets: [-8, -5, 5, 8], min: 20, max: 80 },
-    { key: 'surfaceUniformityBias', offsets: [-0.15, -0.08, 0.08, 0.15], min: 0, max: 1 },
-    { key: 'partitionBoundaryContinuation', offsets: [-0.15, -0.08, 0.08, 0.15], min: 0, max: 1 },
-    { key: 'closureWeight', offsets: [-0.08, 0.08, 0.15, -0.15], min: 0, max: 0.6 },
-    { key: 'colorWeight', offsets: [-0.10, -0.05, 0.05, 0.10], min: 0.3, max: 0.95 },
-    { key: 'partitionMinRegionPixels', offsets: [-24, -12, 12, 24], min: 16, max: 256 },
-    { key: 'colorDistGamma', offsets: [-0.4, -0.2, 0.2, 0.4], min: 0.5, max: 3.5 }
+    { key: 'partitionColorTolerance', offsets: [-8, -5, 5, 8, -12, 12], min: 3, max: 50 },
+    { key: 'chromaWeight',            offsets: [-0.12, -0.06, 0.06, 0.12], min: 0.3, max: 1.0 },
+    { key: 'partitionMinRegionPixels', offsets: [-30, -16, 16, 30], min: 16, max: 300 },
+    { key: 'partitionBoundaryContinuation', offsets: [-0.18, -0.10, 0.10, 0.18], min: 0, max: 1 },
+    { key: 'colorDistFloor',          offsets: [-6, -3, 3, 6], min: 0, max: 35 },
+    { key: 'colorDistCeiling',        offsets: [-10, -5, 5, 10], min: 20, max: 80 },
+    { key: 'colorDistGamma',          offsets: [-0.5, -0.25, 0.25, 0.5], min: 0.5, max: 3.5 }
   ];
 
-  // Compound variants for variety
-  const compounds = [
-    { label: 'more-regions', changes: { partitionColorTolerance: -4, mergeThreshold: -4, partitionMinRegionPixels: -16 } },
-    { label: 'fewer-regions', changes: { partitionColorTolerance: 5, mergeThreshold: 5, partitionMinRegionPixels: 16 } },
-    { label: 'color-sharp', changes: { colorDistFloor: -5, colorWeight: 0.08, colorDistGamma: -0.3 } },
-    { label: 'color-soft', changes: { colorDistFloor: 5, colorWeight: -0.08, colorDistGamma: 0.3 } },
-    { label: 'tight-boundaries', changes: { partitionBoundaryContinuation: 0.12, closureWeight: 0.10 } },
-    { label: 'loose-boundaries', changes: { partitionBoundaryContinuation: -0.12, closureWeight: -0.08 } },
-    { label: 'high-merge', changes: { mergeThreshold: 8, surfaceUniformityBias: 0.15 } },
-    { label: 'low-merge', changes: { mergeThreshold: -8, surfaceUniformityBias: -0.15 } },
-    { label: 'detail-preserve', changes: { partitionMinRegionPixels: -20, partitionColorTolerance: -3, closureWeight: 0.05 } },
-    { label: 'simplify', changes: { partitionMinRegionPixels: 32, partitionColorTolerance: 6, mergeThreshold: 6 } }
-  ];
+  // For directed feedback, filter perturbations to the right direction
+  let directedPerturbDefs = perturbDefs;
+  if (feedbackType === FEEDBACK_TYPES.TOO_FEW) {
+    directedPerturbDefs = perturbDefs.map(def => {
+      let offsets;
+      if (def.key === 'partitionColorTolerance') offsets = [-8, -5, -12];
+      else if (def.key === 'partitionMinRegionPixels') offsets = [-30, -16, -40];
+      else if (def.key === 'chromaWeight') offsets = [0.06, 0.12, 0.18];
+      else if (def.key === 'colorDistFloor') offsets = [-6, -3, -9];
+      else if (def.key === 'colorDistCeiling') offsets = [-10, -5, -15];
+      else if (def.key === 'colorDistGamma') offsets = [-0.5, -0.25, -0.75];
+      else if (def.key === 'partitionBoundaryContinuation') offsets = [0.10, 0.18, 0.25];
+      else offsets = def.offsets;
+      return { ...def, offsets };
+    });
+  } else if (feedbackType === FEEDBACK_TYPES.TOO_MANY) {
+    directedPerturbDefs = perturbDefs.map(def => {
+      let offsets;
+      if (def.key === 'partitionColorTolerance') offsets = [8, 5, 12];
+      else if (def.key === 'partitionMinRegionPixels') offsets = [30, 16, 40];
+      else if (def.key === 'chromaWeight') offsets = [-0.06, -0.12, -0.18];
+      else if (def.key === 'colorDistFloor') offsets = [6, 3, 9];
+      else if (def.key === 'colorDistCeiling') offsets = [10, 5, 15];
+      else if (def.key === 'colorDistGamma') offsets = [0.5, 0.25, 0.75];
+      else if (def.key === 'partitionBoundaryContinuation') offsets = [-0.10, -0.18, -0.25];
+      else offsets = def.offsets;
+      return { ...def, offsets };
+    });
+  }
 
-  // Strategy 1: On early attempts, try family-based params if available
-  if (attempt <= 2 && familyStore && docFeatures?.valid) {
+  function _makeResult(params, variantLabel, strategy) {
+    const changes = describeParamChanges(currentParams, params);
+    return { params: _clampEffective(params), variantLabel, strategy, paramChanges: changes };
+  }
+
+  // Strategy 1: On early attempts with neutral feedback, try family-based params
+  if (feedbackType === FEEDBACK_TYPES.REGENERATE && attempt <= 2 && familyStore && docFeatures?.valid) {
     const match = familyStore.findBestFamily(docFeatures);
     if (match && match.similarity >= 0.55) {
       const famParams = copy(match.family.avgParams);
       const label = 'family-' + (match.family.familyId || 'unknown').slice(0, 8);
       if (!tried.has(label)) {
-        return { params: famParams, variantLabel: label, strategy: 'family-match' };
+        return _makeResult(famParams, label, 'family-match');
       }
     }
   }
 
-  // Strategy 2: Try similar accepted examples' params
-  if (attempt <= 4 && trainingStore && docFeatures?.valid) {
+  // Strategy 2: Try similar accepted examples' params (neutral only)
+  if (feedbackType === FEEDBACK_TYPES.REGENERATE && attempt <= 4 && trainingStore && docFeatures?.valid) {
     const similar = trainingStore.findSimilar(docFeatures, 3);
     for (const { example, similarity } of similar) {
       if (similarity < 0.45) continue;
       const label = 'similar-' + (example.id || 'unknown').slice(0, 8);
       if (!tried.has(label) && example.acceptedParams) {
-        return { params: copy(example.acceptedParams), variantLabel: label, strategy: 'similar-example' };
+        return _makeResult(copy(example.acceptedParams), label, 'similar-example');
       }
     }
   }
 
-  // Strategy 3: Compound variants
-  const compoundIdx = (attempt - 1) % compounds.length;
-  // Try compounds in order, skip already tried
+  // Strategy 3: Compound variants from feedback-appropriate pool
   for (let i = 0; i < compounds.length; i++) {
-    const ci = (compoundIdx + i) % compounds.length;
+    const ci = ((attempt - 1) + i) % compounds.length;
     const comp = compounds[ci];
     if (tried.has(comp.label)) continue;
     const p = copy(currentParams);
     for (const [k, v] of Object.entries(comp.changes)) {
       if (typeof p[k] === 'number') p[k] += v;
     }
-    // Clamp
-    for (const def of perturbDefs) {
-      if (typeof p[def.key] === 'number') {
-        p[def.key] = Math.max(def.min, Math.min(def.max, p[def.key]));
-      }
-    }
-    return { params: p, variantLabel: comp.label, strategy: 'compound' };
+    return _makeResult(p, comp.label, feedbackType === FEEDBACK_TYPES.REGENERATE ? 'compound' : 'directed-' + feedbackType);
   }
 
-  // Strategy 4: Single-parameter perturbations
-  for (const def of perturbDefs) {
+  // Strategy 4: Single-parameter perturbations (direction-filtered)
+  for (const def of directedPerturbDefs) {
     for (const offset of def.offsets) {
       const label = def.key + (offset > 0 ? '+' : '') + offset;
       if (tried.has(label)) continue;
       const p = copy(currentParams);
       p[def.key] = Math.max(def.min, Math.min(def.max, (p[def.key] || 0) + offset));
-      return { params: p, variantLabel: label, strategy: 'single-perturb' };
+      return _makeResult(p, label, 'single-perturb');
     }
   }
 
-  // Strategy 5: Random compound (fallback — should rarely be reached)
+  // Strategy 5: Random compound from effective params only
   const p = copy(currentParams);
   const label = 'random-' + attempt;
-  // Pick 2-3 random perturbations
-  const shuffled = perturbDefs.slice().sort(() => Math.random() - 0.5);
+  const shuffled = directedPerturbDefs.slice().sort(() => Math.random() - 0.5);
   for (let i = 0; i < 3 && i < shuffled.length; i++) {
     const def = shuffled[i];
     const offIdx = Math.floor(Math.random() * def.offsets.length);
     p[def.key] = Math.max(def.min, Math.min(def.max, (p[def.key] || 0) + def.offsets[offIdx]));
   }
-  return { params: p, variantLabel: label, strategy: 'random-compound' };
+  return _makeResult(p, label, 'random-compound');
 }
 
 /* ── Exports ──────────────────────────────────────────────────────────────── */
@@ -458,6 +660,11 @@ const _glExports = {
   createGraphTrainingStore,
   createGraphFamilyStore,
   generateNextCandidate,
+  computeGraphFingerprint,
+  measureGraphChange,
+  describeParamChanges,
+  EFFECTIVE_PARAMS,
+  FEEDBACK_TYPES,
   GRAPH_TRAINING_STORE_KEY,
   GRAPH_FAMILIES_KEY
 };
