@@ -20682,7 +20682,10 @@ function getGraphLearningLayerFlags(){
     sharedBoundaries: !!(document.getElementById('graph-learning-show-shared-boundaries') || {}).checked,
     regionOrder: !!(document.getElementById('graph-learning-show-region-order') || {}).checked,
     confidence: !!(document.getElementById('graph-learning-show-confidence') || {}).checked,
-    colorPartition: !!(document.getElementById('graph-learning-show-color-partition') || {}).checked
+    colorPartition: !!(document.getElementById('graph-learning-show-color-partition') || {}).checked,
+    nocolourBinary: !!(document.getElementById('graph-learning-show-nocolour-binary') || {}).checked,
+    nocolourComponents: !!(document.getElementById('graph-learning-show-nocolour-components') || {}).checked,
+    nocolourClusters: !!(document.getElementById('graph-learning-show-nocolour-clusters') || {}).checked
   };
 }
 
@@ -20931,6 +20934,71 @@ function paintGraphLearningOverlay(ctx){
     }
   }
 
+  // ═══ NOCOLOUR Fallback Debug Layers ═══
+  // Binary layer: shows the thresholded B/W image used by fallback
+  if(flags.nocolourBinary && artf.nocolourDebug?.binaryLayer && nSize.width > 0 && nSize.height > 0){
+    var ncBin = artf.nocolourDebug.binaryLayer;
+    var ncW = nSize.width, ncH = nSize.height;
+    var ncBinImg = ctx.createImageData(ncW, ncH);
+    var ncBinD = ncBinImg.data;
+    for(var nbi = 0, nbj = 0; nbi < ncBin.length; nbi++, nbj += 4){
+      if(ncBin[nbi]){
+        ncBinD[nbj] = 60; ncBinD[nbj + 1] = 20; ncBinD[nbj + 2] = 120; ncBinD[nbj + 3] = 140;
+      }
+    }
+    ctx.putImageData(ncBinImg, 0, 0);
+  }
+
+  // Micro-components: shows individual connected components with distinct colors
+  if(flags.nocolourComponents && artf.nocolourDebug?.components && artf.nocolourDebug?.componentLabel && nSize.width > 0 && nSize.height > 0){
+    var ncCompLabel = artf.nocolourDebug.componentLabel;
+    var ncCompW = nSize.width, ncCompH = nSize.height;
+    var ncCompImg = ctx.createImageData(ncCompW, ncCompH);
+    var ncCompD = ncCompImg.data;
+    var ncCompHues = [0, 40, 80, 120, 160, 200, 240, 280, 320, 20, 60, 100, 140, 180, 220, 260, 300, 340];
+    for(var nci = 0, ncj = 0; nci < ncCompLabel.length; nci++, ncj += 4){
+      var ncLbl = ncCompLabel[nci];
+      if(ncLbl < 0) continue;
+      var ncHue = ncCompHues[ncLbl % ncCompHues.length];
+      // Simple HSL→RGB for overlay
+      var ncHp = ncHue / 60;
+      var ncC = 0.6, ncX = ncC * (1 - Math.abs(ncHp % 2 - 1));
+      var ncRp = 0, ncGp = 0, ncBp = 0;
+      if(ncHp < 1){ ncRp = ncC; ncGp = ncX; }
+      else if(ncHp < 2){ ncRp = ncX; ncGp = ncC; }
+      else if(ncHp < 3){ ncGp = ncC; ncBp = ncX; }
+      else if(ncHp < 4){ ncGp = ncX; ncBp = ncC; }
+      else if(ncHp < 5){ ncRp = ncX; ncBp = ncC; }
+      else { ncRp = ncC; ncBp = ncX; }
+      ncCompD[ncj] = Math.round((ncRp + 0.3) * 255);
+      ncCompD[ncj + 1] = Math.round((ncGp + 0.3) * 255);
+      ncCompD[ncj + 2] = Math.round((ncBp + 0.3) * 255);
+      ncCompD[ncj + 3] = 120;
+    }
+    ctx.putImageData(ncCompImg, 0, 0);
+  }
+
+  // Clustered regions: shows final NOCOLOUR clusters (only when fallback is active)
+  if(flags.nocolourClusters && artf.nocolourFallbackActive && artf.partitionLabelMap && nSize.width > 0 && nSize.height > 0){
+    var ncClustLbl = artf.partitionLabelMap;
+    var ncClW = nSize.width, ncClH = nSize.height;
+    var ncClImg = ctx.createImageData(ncClW, ncClH);
+    var ncClD = ncClImg.data;
+    var ncClPalette = [
+      [0, 200, 120], [200, 60, 60], [60, 120, 220], [220, 180, 40],
+      [160, 40, 200], [40, 200, 200], [200, 120, 60], [100, 200, 60],
+      [200, 60, 160], [60, 60, 200], [200, 200, 60], [60, 200, 60]
+    ];
+    for(var ncCi = 0, ncCj = 0; ncCi < ncClustLbl.length; ncCi++, ncCj += 4){
+      var ncCl = ncClustLbl[ncCi];
+      if(ncCl < 0) continue;
+      var ncCol = ncClPalette[ncCl % ncClPalette.length];
+      ncClD[ncCj] = ncCol[0]; ncClD[ncCj + 1] = ncCol[1]; ncClD[ncCj + 2] = ncCol[2];
+      ncClD[ncCj + 3] = 100;
+    }
+    ctx.putImageData(ncClImg, 0, 0);
+  }
+
   // ═══ Color Partition: Master Segmentation View ═══
   // Dedicated layer that makes each detected region immediately identifiable.
   // High-contrast fills, thick boundaries, centered labels with background.
@@ -21089,7 +21157,8 @@ function graphLearningRunGeneration(opts){
   const colorTag = artf.colorBoundaryActive ? ', color:on' : ', color:off';
   const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
-  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + '.');
+  const nocolourTag = artf.nocolourFallbackActive ? ', NOCOLOUR:on(thresh=' + (artf.nocolourDebug?.threshold ?? '?') + ', comps=' + (artf.nocolourDebug?.componentCount ?? '?') + ', clusters=' + (artf.nocolourDebug?.clusterCount ?? '?') + ')' : '';
+  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
   renderGraphLearningViewer();
 }
 
@@ -21224,7 +21293,10 @@ if(els.graphLearningClearHistoryBtn){
  document.getElementById('graph-learning-show-shared-boundaries'),
  document.getElementById('graph-learning-show-region-order'),
  document.getElementById('graph-learning-show-confidence'),
- document.getElementById('graph-learning-show-color-partition')
+ document.getElementById('graph-learning-show-color-partition'),
+ document.getElementById('graph-learning-show-nocolour-binary'),
+ document.getElementById('graph-learning-show-nocolour-components'),
+ document.getElementById('graph-learning-show-nocolour-clusters')
 ].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
