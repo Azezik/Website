@@ -20866,14 +20866,14 @@ function paintGraphLearningOverlay(ctx){
   if(flags.compiled){
     const hues = [210, 150, 30, 330, 270, 60, 180, 0, 120, 300];
 
-    // Pass 1: Filled regions (contour-following shapes)
+    // Pass 1: Filled regions (contour-following shapes, boosted visibility)
     for(let i = 0; i < nodes.length; i++){
       const node = nodes[i];
       const c = node.contour || [];
       if(c.length < 3) continue;
       const hue = hues[i % hues.length];
-      const alpha = 0.10 + (node.closureScore || 0) * 0.08 + (node.surfaceUniformity || 0) * 0.05;
-      ctx.fillStyle = 'hsla(' + hue + ',55%,55%,' + alpha.toFixed(2) + ')';
+      const alpha = 0.22 + (node.closureScore || 0) * 0.10 + (node.surfaceUniformity || 0) * 0.08;
+      ctx.fillStyle = 'hsla(' + hue + ',65%,50%,' + alpha.toFixed(2) + ')';
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
       for(let j = 1; j < c.length; j++) ctx.lineTo(c[j].x, c[j].y);
@@ -20881,17 +20881,26 @@ function paintGraphLearningOverlay(ctx){
       ctx.fill();
     }
 
-    // Pass 2: Contour strokes (color-confident regions are warm, others teal)
+    // Pass 2: Contour strokes — dual-stroke (dark outline + colored inner) for contrast
     for(const node of nodes){
       const c = node.contour || [];
       if(c.length < 3) continue;
       const colorConf = node.colorConfidence || 0;
+      // Outer dark stroke for contrast on any background
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = (node.closureScore > 0.4 ? 3.5 : 2.8) + 1.5;
+      ctx.beginPath();
+      ctx.moveTo(c[0].x, c[0].y);
+      for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x, c[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      // Inner colored stroke
       if(colorConf > 0.3){
-        ctx.strokeStyle = 'rgba(233,30,99,' + (0.6 + colorConf * 0.35).toFixed(2) + ')';
+        ctx.strokeStyle = 'rgba(233,30,99,' + (0.75 + colorConf * 0.25).toFixed(2) + ')';
       } else {
-        ctx.strokeStyle = 'rgba(0,150,136,0.95)';
+        ctx.strokeStyle = 'rgba(0,180,160,1.0)';
       }
-      ctx.lineWidth = node.closureScore > 0.4 ? 2.0 : 1.4;
+      ctx.lineWidth = node.closureScore > 0.4 ? 3.5 : 2.8;
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
       for(let i = 1; i < c.length; i++) ctx.lineTo(c[i].x, c[i].y);
@@ -20899,12 +20908,12 @@ function paintGraphLearningOverlay(ctx){
       ctx.stroke();
     }
 
-    // Pass 3: Adjacency edges
+    // Pass 3: Adjacency edges (thicker, more visible)
     for(const e of gl.graph?.edges || []){
       const a = idMap.get(e.from), b = idMap.get(e.to);
       if(!a || !b) continue;
-      ctx.strokeStyle = 'rgba(255,152,0,0.55)';
-      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = 'rgba(255,152,0,0.75)';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
       ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
@@ -20917,9 +20926,9 @@ function paintGraphLearningOverlay(ctx){
   if(flags.regions){
     for(const node of nodes){
       const b = node.bbox || {};
-      ctx.fillStyle = flags.compiled ? 'rgba(121,134,203,0.04)' : 'rgba(121,134,203,0.18)';
-      ctx.strokeStyle = 'rgba(63,81,181,0.9)';
-      ctx.lineWidth = 1.2;
+      ctx.fillStyle = flags.compiled ? 'rgba(121,134,203,0.08)' : 'rgba(121,134,203,0.25)';
+      ctx.strokeStyle = 'rgba(63,81,181,0.95)';
+      ctx.lineWidth = 1.8;
       ctx.fillRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
       ctx.strokeRect(b.x || 0, b.y || 0, b.w || 0, b.h || 0);
     }
@@ -20929,8 +20938,8 @@ function paintGraphLearningOverlay(ctx){
     for(const e of gl.graph?.edges || []){
       const a = idMap.get(e.from), b = idMap.get(e.to);
       if(!a || !b) continue;
-      ctx.strokeStyle = 'rgba(255,152,0,0.85)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,152,0,0.9)';
+      ctx.lineWidth = 1.8;
       ctx.beginPath();
       ctx.moveTo(a.center?.x || 0, a.center?.y || 0);
       ctx.lineTo(b.center?.x || 0, b.center?.y || 0);
@@ -20949,9 +20958,9 @@ function paintGraphLearningOverlay(ctx){
       var lbl = lblMap[pi];
       if(lbl < 0) continue;
       var hue = pHues[lbl % pHues.length];
-      // HSL to RGB inline (simplified)
+      // HSL to RGB inline (boosted saturation for visibility)
       var hp = hue / 60;
-      var c1 = 0.45, x1 = c1 * (1 - Math.abs(hp % 2 - 1));
+      var c1 = 0.50, x1 = c1 * (1 - Math.abs(hp % 2 - 1));
       var rp = 0, gp = 0, bp = 0;
       if(hp < 1){ rp = c1; gp = x1; }
       else if(hp < 2){ rp = x1; gp = c1; }
@@ -20959,23 +20968,44 @@ function paintGraphLearningOverlay(ctx){
       else if(hp < 4){ gp = x1; bp = c1; }
       else if(hp < 5){ rp = x1; bp = c1; }
       else { rp = c1; bp = x1; }
-      d[pj] = Math.round((rp + 0.45) * 255);
-      d[pj + 1] = Math.round((gp + 0.45) * 255);
-      d[pj + 2] = Math.round((bp + 0.45) * 255);
-      d[pj + 3] = 55; // low alpha for overlay
+      d[pj] = Math.round((rp + 0.40) * 255);
+      d[pj + 1] = Math.round((gp + 0.40) * 255);
+      d[pj + 2] = Math.round((bp + 0.40) * 255);
+      d[pj + 3] = 100; // increased alpha for clear region visibility
     }
     ctx.putImageData(imgData, 0, 0);
   }
 
-  // ── Shared boundaries overlay ──
+  // ── Shared boundaries overlay (dual-stroke: dark outer + bright inner) ──
   if(flags.sharedBoundaries && artf.partitionSharedBoundaries && nSize.width > 0 && nSize.height > 0){
     var sbMap = artf.partitionSharedBoundaries;
     var sbW = nSize.width, sbH = nSize.height;
     var sbImg = ctx.createImageData(sbW, sbH);
     var sbD = sbImg.data;
-    for(var sbi = 0, sbj = 0; sbi < sbMap.length; sbi++, sbj += 4){
-      if(sbMap[sbi]){
-        sbD[sbj] = 255; sbD[sbj + 1] = 255; sbD[sbj + 2] = 0; sbD[sbj + 3] = 180;
+    // Dilate boundary by 1px for thickness, then draw dark outer + bright inner
+    var sbDilated = new Uint8Array(sbMap.length);
+    for(var sby = 0; sby < sbH; sby++){
+      for(var sbx = 0; sbx < sbW; sbx++){
+        var sbIdx = sby * sbW + sbx;
+        if(sbMap[sbIdx]){
+          for(var sdy = -1; sdy <= 1; sdy++){
+            for(var sdx = -1; sdx <= 1; sdx++){
+              var snx = sbx + sdx, sny = sby + sdy;
+              if(snx >= 0 && snx < sbW && sny >= 0 && sny < sbH){
+                sbDilated[sny * sbW + snx] = sbMap[sny * sbW + snx] ? 2 : (sbDilated[sny * sbW + snx] || 1);
+              }
+            }
+          }
+        }
+      }
+    }
+    for(var sbi = 0, sbj = 0; sbi < sbDilated.length; sbi++, sbj += 4){
+      if(sbDilated[sbi] === 2){
+        // Core boundary pixel: bright yellow
+        sbD[sbj] = 255; sbD[sbj + 1] = 240; sbD[sbj + 2] = 0; sbD[sbj + 3] = 230;
+      } else if(sbDilated[sbi] === 1){
+        // Dilated outer pixel: dark outline for contrast
+        sbD[sbj] = 30; sbD[sbj + 1] = 30; sbD[sbj + 2] = 0; sbD[sbj + 3] = 200;
       }
     }
     ctx.putImageData(sbImg, 0, 0);
@@ -21996,16 +22026,37 @@ function graphLearningUpdateGroupingInfo(){
   };
 })();
 
+/* ── Helper: draw rounded rect path (compatibility fallback for roundRect) ── */
+function _glRoundRectPath(ctx, x, y, w, h, r){
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
 /* ── Grouped graph overlay painting (injected into paintGraphLearningOverlay) ── */
 
 var _origPaintOverlay = paintGraphLearningOverlay;
 paintGraphLearningOverlay = function(ctx){
+  var gl = state.graphLearning;
+  var viewMode = gl.viewMode || 'atomic';
+
+  // Dim base image when in "both" mode for better overlay contrast
+  if(viewMode === 'both' && ctx.canvas){
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  }
+
   // Call original overlay first
   _origPaintOverlay(ctx);
 
-  var gl = state.graphLearning;
   var gg = gl.groupedGraph;
-  var viewMode = gl.viewMode || 'atomic';
   var showGrouped = !!(document.getElementById('graph-learning-show-grouped-overlay') || {}).checked;
   var showScores = !!(document.getElementById('graph-learning-show-merge-scores') || {}).checked;
   var nodes = gl.graph?.nodes || [];
@@ -22020,19 +22071,32 @@ paintGraphLearningOverlay = function(ctx){
       if(group.isSingleton && viewMode !== 'grouped') continue;
       var hue = gHues[gi % gHues.length];
       var b = group.bbox;
-      // Fill the group bounding box with semi-transparent color
-      ctx.fillStyle = 'hsla(' + hue + ',60%,50%,0.12)';
+      // Fill the group bounding box with visible tint
+      ctx.fillStyle = 'hsla(' + hue + ',65%,50%,0.18)';
       ctx.fillRect(b.x, b.y, b.w, b.h);
-      // Stroke the group boundary
-      ctx.strokeStyle = 'hsla(' + hue + ',70%,40%,0.7)';
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([6, 3]);
+      // Dual-stroke group boundary: dark outer + colored inner dashed
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.lineWidth = 5.5;
+      ctx.setLineDash([10, 5]);
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = 'hsla(' + hue + ',80%,55%,0.95)';
+      ctx.lineWidth = 3.5;
       ctx.strokeRect(b.x, b.y, b.w, b.h);
       ctx.setLineDash([]);
-      // Label
-      ctx.font = 'bold 11px IBM Plex Mono, monospace';
-      ctx.fillStyle = 'hsla(' + hue + ',70%,30%,0.9)';
-      ctx.fillText('G' + gi + ' (' + group.atomicMemberCount + ')', b.x + 3, b.y - 4);
+      // Label with background pill
+      var gLabel = 'G' + gi + ' (' + group.atomicMemberCount + ')';
+      var gFontSize = 13;
+      ctx.font = 'bold ' + gFontSize + 'px IBM Plex Mono, monospace';
+      var gTm = ctx.measureText(gLabel);
+      var gPillW = gTm.width + 10;
+      var gPillH = gFontSize + 6;
+      var gPillX = b.x + 3, gPillY = b.y - gPillH - 3;
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.beginPath();
+      _glRoundRectPath(ctx, gPillX, gPillY, gPillW, gPillH, 3);
+      ctx.fill();
+      ctx.fillStyle = 'hsla(' + hue + ',80%,75%,1.0)';
+      ctx.fillText(gLabel, gPillX + 5, gPillY + gPillH - 4);
     }
 
     // Draw grouped adjacency edges
@@ -22044,9 +22108,9 @@ paintGraphLearningOverlay = function(ctx){
         if(gg.groups[ggi].id === gEdge.to) gB = gg.groups[ggi];
       }
       if(!gA || !gB) continue;
-      ctx.strokeStyle = 'rgba(100,50,200,0.5)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(120,50,220,0.8)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
       ctx.beginPath();
       ctx.moveTo(gA.center.x, gA.center.y);
       ctx.lineTo(gB.center.x, gB.center.y);
@@ -22055,9 +22119,12 @@ paintGraphLearningOverlay = function(ctx){
     }
   }
 
-  // ── Merge scores on boundary edges ──
+  // ── Merge scores on boundary edges (with background pill for legibility) ──
   if(gg && showScores && gg.boundaryScores){
-    ctx.font = '9px IBM Plex Mono, monospace';
+    var msFontSize = 12;
+    ctx.font = 'bold ' + msFontSize + 'px IBM Plex Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     for(var si = 0; si < gg.boundaryScores.length; si++){
       var bs = gg.boundaryScores[si];
       var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
@@ -22065,13 +22132,25 @@ paintGraphLearningOverlay = function(ctx){
       var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
       var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
       var scorePct = (bs.score * 100).toFixed(0);
-      if(bs.score >= gl.mergeThreshold){
-        ctx.fillStyle = 'rgba(30,120,30,0.9)';
-      } else {
-        ctx.fillStyle = 'rgba(180,40,40,0.8)';
-      }
-      ctx.fillText(scorePct, mx - 6, my + 3);
+      var isMerge = bs.score >= gl.mergeThreshold;
+      // Background pill
+      var msTm = ctx.measureText(scorePct);
+      var msPillW = msTm.width + 10;
+      var msPillH = msFontSize + 6;
+      ctx.fillStyle = isMerge ? 'rgba(20,100,20,0.85)' : 'rgba(160,30,30,0.85)';
+      ctx.beginPath();
+      _glRoundRectPath(ctx, mx - msPillW / 2, my - msPillH / 2, msPillW, msPillH, 3);
+      ctx.fill();
+      // Border
+      ctx.strokeStyle = isMerge ? 'rgba(80,200,80,0.9)' : 'rgba(255,80,80,0.9)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      // Text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(scorePct, mx, my + 1);
     }
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
   }
 
   // ── Supervision: highlight selected boundary ──
@@ -22081,17 +22160,30 @@ paintGraphLearningOverlay = function(ctx){
     if(sbA && sbB){
       var sbMx = ((sbA.center?.x || 0) + (sbB.center?.x || 0)) / 2;
       var sbMy = ((sbA.center?.y || 0) + (sbB.center?.y || 0)) / 2;
+      // Outer glow ring
       ctx.beginPath();
-      ctx.arc(sbMx, sbMy, 8, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,235,59,0.6)';
+      ctx.arc(sbMx, sbMy, 14, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.25)';
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255,152,0,0.9)';
-      ctx.lineWidth = 2;
+      // Inner highlight circle
+      ctx.beginPath();
+      ctx.arc(sbMx, sbMy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.7)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,140,0,1.0)';
+      ctx.lineWidth = 2.5;
       ctx.stroke();
-      // Show score next to highlight
-      ctx.font = 'bold 10px IBM Plex Mono, monospace';
-      ctx.fillStyle = '#333';
-      ctx.fillText('score=' + (sb.score || 0).toFixed(2), sbMx + 12, sbMy - 2);
+      // Score label with background pill
+      var sbScoreText = 'score=' + (sb.score || 0).toFixed(2);
+      ctx.font = 'bold 12px IBM Plex Mono, monospace';
+      var sbTm = ctx.measureText(sbScoreText);
+      var sbPW = sbTm.width + 8, sbPH = 18;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.beginPath();
+      _glRoundRectPath(ctx, sbMx + 14, sbMy - sbPH / 2, sbPW, sbPH, 3);
+      ctx.fill();
+      ctx.fillStyle = '#FFE082';
+      ctx.fillText(sbScoreText, sbMx + 18, sbMy + 5);
     }
   }
 
@@ -22112,21 +22204,49 @@ paintGraphLearningOverlay = function(ctx){
       var plMx = ((plA.center?.x || 0) + (plB.center?.x || 0)) / 2;
       var plMy = ((plA.center?.y || 0) + (plB.center?.y || 0)) / 2;
       if(pl.label === 'merge'){
+        // Dark outline ring
         ctx.beginPath();
-        ctx.arc(plMx, plMy, 6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(46,125,50,0.7)';
+        ctx.arc(plMx, plMy, 12, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
         ctx.fill();
-        ctx.font = 'bold 8px sans-serif';
-        ctx.fillStyle = '#fff';
-        ctx.fillText('M', plMx - 3, plMy + 3);
+        // Green filled circle
+        ctx.beginPath();
+        ctx.arc(plMx, plMy, 10, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(30,140,40,0.92)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(150,255,150,0.8)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Large bold M
+        ctx.font = 'bold 14px IBM Plex Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('M', plMx, plMy + 1);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
       } else {
+        // Dark outline ring
         ctx.beginPath();
-        ctx.arc(plMx, plMy, 6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(211,47,47,0.7)';
+        ctx.arc(plMx, plMy, 12, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
         ctx.fill();
-        ctx.font = 'bold 8px sans-serif';
-        ctx.fillStyle = '#fff';
-        ctx.fillText('K', plMx - 3, plMy + 3);
+        // Red filled circle
+        ctx.beginPath();
+        ctx.arc(plMx, plMy, 10, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(200,35,35,0.92)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,150,150,0.8)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Large bold K
+        ctx.font = 'bold 14px IBM Plex Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('K', plMx, plMy + 1);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
       }
     }
   }
@@ -22138,14 +22258,17 @@ paintGraphLearningOverlay = function(ctx){
     for(var lpi = 1; lpi < gl.lassoPoints.length; lpi++){
       ctx.lineTo(gl.lassoPoints[lpi].x, gl.lassoPoints[lpi].y);
     }
-    ctx.strokeStyle = 'rgba(33,150,243,0.8)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(33,150,243,0.95)';
+    ctx.lineWidth = 2.5;
     ctx.stroke();
     ctx.setLineDash([]);
     if(gl.lassoPoints.length > 2){
       ctx.closePath();
-      ctx.fillStyle = 'rgba(33,150,243,0.08)';
+      ctx.fillStyle = 'rgba(33,150,243,0.12)';
       ctx.fill();
     }
   }
