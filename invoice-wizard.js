@@ -1945,12 +1945,12 @@ let state = {
     // Grouping layer state
     groupedGraph: null,
     mergeThreshold: 0.55,
-    viewMode: 'grouped', // 'atomic' | 'grouped' | 'both'
+    viewMode: 'atomic', // 'atomic' | 'grouped' | 'both'
+    supervisionMode: null, // null | 'boundary' | 'lasso'
     supervisionSessionId: null,
-    selectionNodeIds: [],
     lassoPoints: [],
     lassoActive: false,
-    hoverPreviewNodeIds: []
+    selectedBoundary: null
   },
   objectLearning: {
     active: false,
@@ -21782,68 +21782,40 @@ function graphLearningUpdateGroupingInfo(){
   }
 }
 
-function graphLearningUpdateSelectionStatus(){
-  var modeLabel = document.getElementById('graph-learning-supervision-mode-label');
-  var gl = state.graphLearning;
-  var count = gl.selectionNodeIds?.length || 0;
-  if(modeLabel) modeLabel.textContent = count > 0
-    ? 'Selected ' + count + ' region' + (count === 1 ? '' : 's') + '. Click Merge Selected Regions to commit.'
-    : 'Click regions to select. Shift-click or drag to multi-select.';
-}
-
-function graphLearningClearSelection(){
-  var gl = state.graphLearning;
-  gl.selectionNodeIds = [];
-  gl.hoverPreviewNodeIds = [];
-  gl.lassoPoints = [];
-  gl.lassoActive = false;
-  graphLearningUpdateSelectionStatus();
-}
-
-function graphLearningMergeSelectedRegions(){
-  var gl = state.graphLearning;
-  var selected = gl.selectionNodeIds || [];
-  if(selected.length < 2 || !_groupingSupervision || !gl.supervisionSessionId) return;
-  var selectedSet = new Set(selected);
-  var adjPairs = [];
-  var edges = gl.graph?.edges || [];
-  for(var ei = 0; ei < edges.length; ei++){
-    if(selectedSet.has(edges[ei].from) && selectedSet.has(edges[ei].to)){
-      adjPairs.push({ from: edges[ei].from, to: edges[ei].to });
-    }
-  }
-  if(adjPairs.length === 0){
-    graphLearningStatus('Selected regions are not adjacent; no merge constraints were created.');
-    return;
-  }
-  _groupingSupervision.addClusterAnnotation({
-    sessionId: gl.supervisionSessionId,
-    memberNodeIds: selected.slice(),
-    adjacencyPairs: adjPairs,
-    boundingBox: null
-  });
-  graphLearningRecomputeGroupedGraph();
-  graphLearningUpdateGroupingInfo();
-  graphLearningStatus('Saved region merge: ' + selected.length + ' regions, ' + adjPairs.length + ' adjacency constraints.');
-  graphLearningClearSelection();
-  renderGraphLearningViewer();
-}
-
-// Region-selection controls
+// Supervision mode buttons
 (function(){
-  var mergeBtn = document.getElementById('graph-learning-merge-selected-btn');
-  var clearBtn = document.getElementById('graph-learning-clear-selection-btn');
-  if(mergeBtn) mergeBtn.addEventListener('click', graphLearningMergeSelectedRegions);
-  if(clearBtn) clearBtn.addEventListener('click', function(){
-    graphLearningClearSelection();
-    renderGraphLearningViewer();
-  });
+  var boundaryBtn = document.getElementById('graph-learning-boundary-mode-btn');
+  var lassoBtn = document.getElementById('graph-learning-lasso-mode-btn');
+  var offBtn = document.getElementById('graph-learning-supervision-off-btn');
+  var modeLabel = document.getElementById('graph-learning-supervision-mode-label');
+  var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
 
+  function setMode(mode){
+    state.graphLearning.supervisionMode = mode;
+    if(boundaryBtn) boundaryBtn.style.fontWeight = mode === 'boundary' ? '700' : '';
+    if(lassoBtn) lassoBtn.style.fontWeight = mode === 'lasso' ? '700' : '';
+    if(modeLabel) modeLabel.textContent = mode === 'boundary' ? 'Click a boundary between regions to label merge/keep' : mode === 'lasso' ? 'Draw a lasso around fragments to group them' : 'No supervision mode active';
+    if(interactionCanvas) interactionCanvas.style.cursor = mode === 'boundary' ? 'crosshair' : mode === 'lasso' ? 'crosshair' : 'default';
+    if(interactionCanvas) interactionCanvas.style.pointerEvents = mode ? 'auto' : 'none';
+    // Clear lasso state on mode switch
+    state.graphLearning.lassoPoints = [];
+    state.graphLearning.lassoActive = false;
+    state.graphLearning.selectedBoundary = null;
+    renderGraphLearningViewer();
+  }
+
+  if(boundaryBtn) boundaryBtn.addEventListener('click', function(){ setMode(state.graphLearning.supervisionMode === 'boundary' ? null : 'boundary'); });
+  if(lassoBtn) lassoBtn.addEventListener('click', function(){ setMode(state.graphLearning.supervisionMode === 'lasso' ? null : 'lasso'); });
+  if(offBtn) offBtn.addEventListener('click', function(){ setMode(null); });
+
+  // Enable supervision buttons when graph is available
   var origRunGen = graphLearningRunGeneration;
   graphLearningRunGeneration = function(opts){
     origRunGen(opts);
-    if(mergeBtn) mergeBtn.disabled = false;
-    if(clearBtn) clearBtn.disabled = false;
+    if(boundaryBtn) boundaryBtn.disabled = false;
+    if(lassoBtn) lassoBtn.disabled = false;
+    if(offBtn) offBtn.disabled = false;
+    // Register supervision session
     var gl = state.graphLearning;
     if(_groupingSupervision && !gl.supervisionSessionId){
       gl.supervisionSessionId = _groupingSupervision.registerSession({
@@ -21856,7 +21828,6 @@ function graphLearningMergeSelectedRegions(){
       });
     }
     graphLearningUpdateGroupingInfo();
-    graphLearningUpdateSelectionStatus();
   };
 })();
 
@@ -21868,7 +21839,6 @@ function graphLearningMergeSelectedRegions(){
     if(!confirm('Clear all grouping supervision data (boundary labels, cluster annotations)?')) return;
     if(_groupingSupervision) _groupingSupervision.clear();
     state.graphLearning.supervisionSessionId = null;
-    graphLearningClearSelection();
     graphLearningRecomputeGroupedGraph();
     graphLearningUpdateGroupingInfo();
     renderGraphLearningViewer();
@@ -21876,7 +21846,7 @@ function graphLearningMergeSelectedRegions(){
   });
 })();
 
-/* ── Interaction Canvas: region-first selection + lasso ───────────── */
+/* ── Interaction Canvas: boundary clicks + lasso drawing ──────────── */
 
 (function(){
   var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
@@ -21892,29 +21862,26 @@ function graphLearningMergeSelectedRegions(){
     return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
   }
 
-  function buildNodePartitionLookup(){
+  function findClosestBoundary(pt){
     var gl = state.graphLearning;
-    if(!gl.graph?.nodes) return null;
-    var byPartition = {};
+    var gg = gl.groupedGraph;
+    if(!gg?.boundaryScores || !gl.graph?.nodes) return null;
     var nodes = gl.graph.nodes;
-    for(var i = 0; i < nodes.length; i++){
-      if(nodes[i]?.partitionId !== undefined && nodes[i]?.partitionId !== null) byPartition[nodes[i].partitionId] = nodes[i].id;
+    var nodeById = {};
+    for(var i = 0; i < nodes.length; i++) nodeById[nodes[i].id] = nodes[i];
+    var bestDist = 30; // max click distance in surface pixels
+    var bestEntry = null;
+    for(var j = 0; j < gg.boundaryScores.length; j++){
+      var bs = gg.boundaryScores[j];
+      var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
+      if(!nA || !nB) continue;
+      // Midpoint of the two centers = boundary location
+      var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
+      var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
+      var d = Math.sqrt((pt.x - mx) * (pt.x - mx) + (pt.y - my) * (pt.y - my));
+      if(d < bestDist){ bestDist = d; bestEntry = bs; }
     }
-    return byPartition;
-  }
-
-  function hitTestNodeAtPoint(pt){
-    var gl = state.graphLearning;
-    var lblMap = gl.graph?.artifacts?.partitionLabelMap;
-    var sz = gl.graph?.normalizedSize;
-    if(!lblMap || !sz?.width || !sz?.height) return null;
-    var x = Math.max(0, Math.min(sz.width - 1, Math.round(pt.x)));
-    var y = Math.max(0, Math.min(sz.height - 1, Math.round(pt.y)));
-    var idx = y * sz.width + x;
-    var partitionId = lblMap[idx];
-    if(partitionId === undefined || partitionId < 0) return null;
-    var byPartition = buildNodePartitionLookup();
-    return byPartition ? byPartition[partitionId] : null;
+    return bestEntry;
   }
 
   function findNodesInLasso(lassoPoints){
@@ -21941,78 +21908,104 @@ function graphLearningMergeSelectedRegions(){
     return inside;
   }
 
-  function updateSelection(nextSelection, additive){
-    var gl = state.graphLearning;
-    var set = new Set(additive ? (gl.selectionNodeIds || []) : []);
-    for(var i = 0; i < nextSelection.length; i++){
-      if(set.has(nextSelection[i])) set.delete(nextSelection[i]);
-      else set.add(nextSelection[i]);
-    }
-    gl.selectionNodeIds = Array.from(set);
-    graphLearningUpdateSelectionStatus();
-  }
-
-  function updateHoverPreview(nodeId){
-    var gl = state.graphLearning;
-    var gg = gl.groupedGraph;
-    if(!nodeId || !gg?.membership){
-      gl.hoverPreviewNodeIds = [];
-      return;
-    }
-    var groupId = gg.membership[nodeId];
-    if(!groupId){ gl.hoverPreviewNodeIds = [nodeId]; return; }
-    for(var gi = 0; gi < (gg.groups || []).length; gi++){
-      if(gg.groups[gi].id === groupId){
-        gl.hoverPreviewNodeIds = (gg.groups[gi].atomicMembers || []).slice();
-        return;
-      }
-    }
-    gl.hoverPreviewNodeIds = [nodeId];
-  }
-
   interactionCanvas.addEventListener('mousedown', function(e){
     var gl = state.graphLearning;
-    if(!gl.graph) return;
+    if(!gl.supervisionMode) return;
     var pt = canvasToSurface(e);
     if(!pt) return;
-    gl.lassoActive = true;
-    gl.lassoPoints = [pt];
+
+    if(gl.supervisionMode === 'lasso'){
+      gl.lassoActive = true;
+      gl.lassoPoints = [pt];
+      return;
+    }
   });
 
   interactionCanvas.addEventListener('mousemove', function(e){
     var gl = state.graphLearning;
-    if(!gl.graph) return;
+    if(!gl.supervisionMode) return;
     var pt = canvasToSurface(e);
     if(!pt) return;
 
-    if(gl.lassoActive){
+    if(gl.supervisionMode === 'lasso' && gl.lassoActive){
       gl.lassoPoints.push(pt);
       renderGraphLearningViewer();
       return;
     }
-    updateHoverPreview(hitTestNodeAtPoint(pt));
-    renderGraphLearningViewer();
+
+    if(gl.supervisionMode === 'boundary'){
+      // Highlight nearest boundary
+      var boundary = findClosestBoundary(pt);
+      gl.selectedBoundary = boundary;
+      renderGraphLearningViewer();
+    }
   });
 
   interactionCanvas.addEventListener('mouseup', function(e){
     var gl = state.graphLearning;
-    if(!gl.graph) return;
+    if(!gl.supervisionMode) return;
     var pt = canvasToSurface(e);
     if(!pt) return;
-    if(!gl.lassoActive) return;
-    gl.lassoActive = false;
-    var additive = !!e.shiftKey;
-    if(gl.lassoPoints.length >= 5){
-      var enclosed = findNodesInLasso(gl.lassoPoints).map(function(n){ return n.id; });
-      if(enclosed.length) updateSelection(enclosed, additive);
-    } else {
-      var clickedNode = hitTestNodeAtPoint(pt);
-      if(clickedNode) updateSelection([clickedNode], additive);
-      else if(!additive) graphLearningClearSelection();
+
+    if(gl.supervisionMode === 'lasso' && gl.lassoActive){
+      gl.lassoActive = false;
+      if(gl.lassoPoints.length < 5) { gl.lassoPoints = []; renderGraphLearningViewer(); return; }
+      // Find nodes inside lasso
+      var enclosed = findNodesInLasso(gl.lassoPoints);
+      if(enclosed.length < 2){ gl.lassoPoints = []; renderGraphLearningViewer(); return; }
+      // Find adjacency pairs within the enclosed set
+      var encIds = new Set(enclosed.map(function(n){ return n.id; }));
+      var adjPairs = [];
+      var edges = gl.graph?.edges || [];
+      for(var ei = 0; ei < edges.length; ei++){
+        if(encIds.has(edges[ei].from) && encIds.has(edges[ei].to)){
+          adjPairs.push({ from: edges[ei].from, to: edges[ei].to });
+        }
+      }
+      if(adjPairs.length > 0 && _groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addClusterAnnotation({
+          sessionId: gl.supervisionSessionId,
+          memberNodeIds: enclosed.map(function(n){ return n.id; }),
+          adjacencyPairs: adjPairs,
+          boundingBox: null
+        });
+        graphLearningRecomputeGroupedGraph();
+        graphLearningUpdateGroupingInfo();
+        graphLearningStatus('Cluster annotation saved: ' + enclosed.length + ' regions, ' + adjPairs.length + ' merge pairs.');
+      }
+      gl.lassoPoints = [];
+      renderGraphLearningViewer();
+      return;
     }
-    gl.lassoPoints = [];
-    updateHoverPreview(hitTestNodeAtPoint(pt));
-    renderGraphLearningViewer();
+
+    if(gl.supervisionMode === 'boundary'){
+      var boundary = findClosestBoundary(pt);
+      if(!boundary) return;
+      // Toggle: if not labeled, label as merge; if merge, switch to keep; if keep, switch to merge
+      var existingLabels = _groupingSupervision && gl.supervisionSessionId ? _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId) : [];
+      var key = boundary.nodeIdA < boundary.nodeIdB ? boundary.nodeIdA + '|' + boundary.nodeIdB : boundary.nodeIdB + '|' + boundary.nodeIdA;
+      var existing = null;
+      for(var li = existingLabels.length - 1; li >= 0; li--){
+        var lk = existingLabels[li].nodeIdA < existingLabels[li].nodeIdB ? existingLabels[li].nodeIdA + '|' + existingLabels[li].nodeIdB : existingLabels[li].nodeIdB + '|' + existingLabels[li].nodeIdA;
+        if(lk === key){ existing = existingLabels[li]; break; }
+      }
+      var newLabel = (!existing || existing.label === 'keep') ? 'merge' : 'keep';
+      if(_groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addBoundaryLabel({
+          sessionId: gl.supervisionSessionId,
+          nodeIdA: boundary.nodeIdA,
+          nodeIdB: boundary.nodeIdB,
+          partitionIdA: boundary.partitionIdA,
+          partitionIdB: boundary.partitionIdB,
+          label: newLabel,
+          features: boundary.features || {}
+        });
+        graphLearningRecomputeGroupedGraph();
+        graphLearningUpdateGroupingInfo();
+        graphLearningStatus('Boundary labeled: ' + newLabel + ' (' + boundary.nodeIdA + ' ↔ ' + boundary.nodeIdB + ', score=' + (boundary.score || 0).toFixed(2) + ')');
+      }
+      renderGraphLearningViewer();
+    }
   });
 
   // Sync interaction canvas size
@@ -22026,8 +22019,8 @@ function graphLearningMergeSelectedRegions(){
       var base = result.base;
       interactionCanvas.style.width = base.style.width;
       interactionCanvas.style.height = base.style.height;
-      interactionCanvas.style.pointerEvents = state.graphLearning.graph ? 'auto' : 'none';
-      interactionCanvas.style.cursor = 'crosshair';
+      // Ensure pointer events are set correctly
+      interactionCanvas.style.pointerEvents = state.graphLearning.supervisionMode ? 'auto' : 'none';
     }
     return result;
   };
@@ -22053,131 +22046,80 @@ var _origPaintOverlay = paintGraphLearningOverlay;
 paintGraphLearningOverlay = function(ctx){
   var gl = state.graphLearning;
   var viewMode = gl.viewMode || 'atomic';
-  var flags = getGraphLearningLayerFlags();
 
-  // Keep legacy diagnostics available via debug mode.
+  // Dim base image when in "both" mode for better overlay contrast
+  if(viewMode === 'both' && ctx.canvas){
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  }
+
+  // Call original overlay first
   _origPaintOverlay(ctx);
 
   var gg = gl.groupedGraph;
   var showGrouped = !!(document.getElementById('graph-learning-show-grouped-overlay') || {}).checked;
-  var showScores = flags.debug && !!(document.getElementById('graph-learning-show-merge-scores') || {}).checked;
+  var showScores = !!(document.getElementById('graph-learning-show-merge-scores') || {}).checked;
   var nodes = gl.graph?.nodes || [];
-  var nodeById = new Map(nodes.map(function(n){ return [n.id, n]; }));
+  var nodeById = {};
+  for(var ni = 0; ni < nodes.length; ni++) nodeById[nodes[ni].id] = nodes[ni];
 
-  function drawRegionMergedOverlay(){
-    if(!gg || !showGrouped || (viewMode !== 'grouped' && viewMode !== 'both')) return;
-    var lblMap = gl.graph?.artifacts?.partitionLabelMap;
-    var nSize = gl.graph?.normalizedSize;
-    if(!lblMap || !nSize?.width || !nSize?.height) return;
-    var width = nSize.width, height = nSize.height;
-    var partitionToNode = {};
-    for(var i = 0; i < nodes.length; i++) if(nodes[i]?.partitionId !== undefined) partitionToNode[nodes[i].partitionId] = nodes[i].id;
-    var groupIndexById = {};
-    var groupSizeByIndex = {};
-    for(var gi = 0; gi < (gg.groups || []).length; gi++){
-      groupIndexById[gg.groups[gi].id] = gi;
-      groupSizeByIndex[gi] = gg.groups[gi].atomicMemberCount || 1;
+  // ── Grouped structure overlay ──
+  if(gg && showGrouped && (viewMode === 'grouped' || viewMode === 'both')){
+    var gHues = [20, 160, 280, 60, 200, 340, 100, 240, 0, 140, 300, 80, 220];
+    for(var gi = 0; gi < gg.groups.length; gi++){
+      var group = gg.groups[gi];
+      if(group.isSingleton && viewMode !== 'grouped') continue;
+      var hue = gHues[gi % gHues.length];
+      var b = group.bbox;
+      // Fill the group bounding box with visible tint
+      ctx.fillStyle = 'hsla(' + hue + ',65%,50%,0.18)';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      // Dual-stroke group boundary: dark outer + colored inner dashed
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.lineWidth = 5.5;
+      ctx.setLineDash([10, 5]);
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = 'hsla(' + hue + ',80%,55%,0.95)';
+      ctx.lineWidth = 3.5;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.setLineDash([]);
+      // Label with background pill
+      var gLabel = 'G' + gi + ' (' + group.atomicMemberCount + ')';
+      var gFontSize = 13;
+      ctx.font = 'bold ' + gFontSize + 'px IBM Plex Mono, monospace';
+      var gTm = ctx.measureText(gLabel);
+      var gPillW = gTm.width + 10;
+      var gPillH = gFontSize + 6;
+      var gPillX = b.x + 3, gPillY = b.y - gPillH - 3;
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.beginPath();
+      _glRoundRectPath(ctx, gPillX, gPillY, gPillW, gPillH, 3);
+      ctx.fill();
+      ctx.fillStyle = 'hsla(' + hue + ',80%,75%,1.0)';
+      ctx.fillText(gLabel, gPillX + 5, gPillY + gPillH - 4);
     }
-    var groupLabelMap = new Int32Array(lblMap.length);
-    groupLabelMap.fill(-1);
-    for(var px = 0; px < lblMap.length; px++){
-      var partId = lblMap[px];
-      if(partId < 0) continue;
-      var nodeId = partitionToNode[partId];
-      var groupId = gg.membership?.[nodeId];
-      if(!groupId) continue;
-      var groupIndex = groupIndexById[groupId];
-      if(groupIndex === undefined) continue;
-      groupLabelMap[px] = groupIndex;
-    }
-    var hues = [210, 30, 150, 330, 60, 270, 180, 0, 120, 300, 45, 195, 285, 75, 345];
-    var imgData = ctx.createImageData(width, height);
-    var data = imgData.data;
-    for(var p = 0, pj = 0; p < groupLabelMap.length; p++, pj += 4){
-      var gix = groupLabelMap[p];
-      if(gix < 0) continue;
-      var hue = hues[gix % hues.length];
-      var hp = hue / 60;
-      var c1 = 0.50, x1 = c1 * (1 - Math.abs(hp % 2 - 1));
-      var rp = 0, gp = 0, bp = 0;
-      if(hp < 1){ rp = c1; gp = x1; }
-      else if(hp < 2){ rp = x1; gp = c1; }
-      else if(hp < 3){ gp = c1; bp = x1; }
-      else if(hp < 4){ gp = x1; bp = c1; }
-      else if(hp < 5){ rp = x1; bp = c1; }
-      else { rp = c1; bp = x1; }
-      data[pj] = Math.round((rp + 0.40) * 255);
-      data[pj + 1] = Math.round((gp + 0.40) * 255);
-      data[pj + 2] = Math.round((bp + 0.40) * 255);
-      data[pj + 3] = 112;
-    }
-    ctx.putImageData(imgData, 0, 0);
 
-    var boundaryImg = ctx.createImageData(width, height);
-    var bd = boundaryImg.data;
-    function paintBoundaryPixel(index, thick){
-      var bj = index * 4;
-      bd[bj] = 20; bd[bj + 1] = 20; bd[bj + 2] = 20; bd[bj + 3] = thick ? 235 : 200;
-    }
-    for(var y = 0; y < height; y++){
-      for(var x = 0; x < width; x++){
-        var idx = y * width + x;
-        var gid = groupLabelMap[idx];
-        if(gid < 0) continue;
-        var strong = (groupSizeByIndex[gid] || 1) > 1;
-        if(x + 1 < width && groupLabelMap[idx + 1] >= 0 && groupLabelMap[idx + 1] !== gid){ paintBoundaryPixel(idx, strong); paintBoundaryPixel(idx + 1, strong); }
-        if(y + 1 < height && groupLabelMap[idx + width] >= 0 && groupLabelMap[idx + width] !== gid){ paintBoundaryPixel(idx, strong); paintBoundaryPixel(idx + width, strong); }
+    // Draw grouped adjacency edges
+    for(var ge = 0; ge < gg.groupedEdges.length; ge++){
+      var gEdge = gg.groupedEdges[ge];
+      var gA = null, gB = null;
+      for(var ggi = 0; ggi < gg.groups.length; ggi++){
+        if(gg.groups[ggi].id === gEdge.from) gA = gg.groups[ggi];
+        if(gg.groups[ggi].id === gEdge.to) gB = gg.groups[ggi];
       }
-    }
-    ctx.putImageData(boundaryImg, 0, 0);
-
-    ctx.font = 'bold 11px IBM Plex Mono, monospace';
-    for(var li = 0; li < (gg.groups || []).length; li++){
-      var group = gg.groups[li];
-      if(!group?.center) continue;
-      var label = 'G' + li + ' · ' + (group.atomicMemberCount || 1);
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillRect(group.center.x - 20, group.center.y - 8, 40, 14);
-      ctx.fillStyle = 'rgba(10,10,10,0.9)';
-      ctx.fillText(label, group.center.x - 18, group.center.y + 2);
-    }
-  }
-
-  drawRegionMergedOverlay();
-
-  // Region-first interaction affordances
-  if((gl.hoverPreviewNodeIds || []).length){
-    var previewSet = new Set(gl.hoverPreviewNodeIds);
-    ctx.strokeStyle = 'rgba(255,235,59,0.95)';
-    ctx.lineWidth = 3;
-    for(var hi = 0; hi < nodes.length; hi++){
-      if(!previewSet.has(nodes[hi].id)) continue;
-      var c = nodes[hi].contour || [];
-      if(c.length < 3) continue;
+      if(!gA || !gB) continue;
+      ctx.strokeStyle = 'rgba(120,50,220,0.8)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
       ctx.beginPath();
-      ctx.moveTo(c[0].x, c[0].y);
-      for(var hk = 1; hk < c.length; hk++) ctx.lineTo(c[hk].x, c[hk].y);
-      ctx.closePath();
+      ctx.moveTo(gA.center.x, gA.center.y);
+      ctx.lineTo(gB.center.x, gB.center.y);
       ctx.stroke();
-    }
-  }
-  if((gl.selectionNodeIds || []).length){
-    var selectedSet = new Set(gl.selectionNodeIds);
-    ctx.strokeStyle = 'rgba(33,150,243,0.95)';
-    ctx.lineWidth = 3;
-    for(var si2 = 0; si2 < nodes.length; si2++){
-      if(!selectedSet.has(nodes[si2].id)) continue;
-      var cs = nodes[si2].contour || [];
-      if(cs.length < 3) continue;
-      ctx.beginPath();
-      ctx.moveTo(cs[0].x, cs[0].y);
-      for(var sk = 1; sk < cs.length; sk++) ctx.lineTo(cs[sk].x, cs[sk].y);
-      ctx.closePath();
-      ctx.stroke();
+      ctx.setLineDash([]);
     }
   }
 
-  // ── Merge scores stay available in debug mode only ──
+  // ── Merge scores on boundary edges (with background pill for legibility) ──
   if(gg && showScores && gg.boundaryScores){
     var msFontSize = 12;
     ctx.font = 'bold ' + msFontSize + 'px IBM Plex Mono, monospace';
@@ -22185,7 +22127,7 @@ paintGraphLearningOverlay = function(ctx){
     ctx.textBaseline = 'middle';
     for(var si = 0; si < gg.boundaryScores.length; si++){
       var bs = gg.boundaryScores[si];
-      var nA = nodeById.get(bs.nodeIdA), nB = nodeById.get(bs.nodeIdB);
+      var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
       if(!nA || !nB) continue;
       var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
       var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
@@ -22211,9 +22153,44 @@ paintGraphLearningOverlay = function(ctx){
     ctx.textBaseline = 'alphabetic';
   }
 
-  // ── M/K markers preserved under debug only ──
-  if(flags.debug && _groupingSupervision && gl.supervisionSessionId){
+  // ── Supervision: highlight selected boundary ──
+  if(gl.selectedBoundary && gl.supervisionMode === 'boundary'){
+    var sb = gl.selectedBoundary;
+    var sbA = nodeById[sb.nodeIdA], sbB = nodeById[sb.nodeIdB];
+    if(sbA && sbB){
+      var sbMx = ((sbA.center?.x || 0) + (sbB.center?.x || 0)) / 2;
+      var sbMy = ((sbA.center?.y || 0) + (sbB.center?.y || 0)) / 2;
+      // Outer glow ring
+      ctx.beginPath();
+      ctx.arc(sbMx, sbMy, 14, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.25)';
+      ctx.fill();
+      // Inner highlight circle
+      ctx.beginPath();
+      ctx.arc(sbMx, sbMy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.7)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,140,0,1.0)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      // Score label with background pill
+      var sbScoreText = 'score=' + (sb.score || 0).toFixed(2);
+      ctx.font = 'bold 12px IBM Plex Mono, monospace';
+      var sbTm = ctx.measureText(sbScoreText);
+      var sbPW = sbTm.width + 8, sbPH = 18;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.beginPath();
+      _glRoundRectPath(ctx, sbMx + 14, sbMy - sbPH / 2, sbPW, sbPH, 3);
+      ctx.fill();
+      ctx.fillStyle = '#FFE082';
+      ctx.fillText(sbScoreText, sbMx + 18, sbMy + 5);
+    }
+  }
+
+  // ── Supervision: draw labeled boundaries ──
+  if(_groupingSupervision && gl.supervisionSessionId){
     var labels = _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId);
+    // Get last label per pair
     var pairLabels = {};
     for(var li2 = 0; li2 < labels.length; li2++){
       var lbl = labels[li2];
@@ -22222,7 +22199,7 @@ paintGraphLearningOverlay = function(ctx){
     }
     for(var pk in pairLabels){
       var pl = pairLabels[pk];
-      var plA = nodeById.get(pl.nodeIdA), plB = nodeById.get(pl.nodeIdB);
+      var plA = nodeById[pl.nodeIdA], plB = nodeById[pl.nodeIdB];
       if(!plA || !plB) continue;
       var plMx = ((plA.center?.x || 0) + (plB.center?.x || 0)) / 2;
       var plMy = ((plA.center?.y || 0) + (plB.center?.y || 0)) / 2;
@@ -22275,7 +22252,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Lasso drawing ──
-  if(gl.lassoPoints && gl.lassoPoints.length > 1){
+  if(gl.supervisionMode === 'lasso' && gl.lassoPoints && gl.lassoPoints.length > 1){
     ctx.beginPath();
     ctx.moveTo(gl.lassoPoints[0].x, gl.lassoPoints[0].y);
     for(var lpi = 1; lpi < gl.lassoPoints.length; lpi++){
