@@ -1717,12 +1717,14 @@
     const compactnessScore = mergedCompactness;
 
     // Weighted combination
+    // Bias toward partition-grounded geometry (shared boundaries + color continuity)
+    // and reduce coarse proxy influence from bbox compactness / fragment heuristics.
     const score = clamp(
-      colorSim * 0.35 +
-      boundaryRatio * 0.25 +
+      colorSim * 0.40 +
+      boundaryRatio * 0.36 +
       uniformitySim * 0.10 +
-      fragmentBonus +
-      compactnessScore * 0.15,
+      fragmentBonus * 0.45 +
+      compactnessScore * 0.06,
       0, 1
     );
 
