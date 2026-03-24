@@ -1623,5 +1623,317 @@
     };
   }
 
-  return { DEFAULT_PARAMS, FEEDBACK_TAGS, PIPELINE_MODES, copyParams, normalizeVisualInput, generateFeatureGraph, computePartition, adaptParametersFromFeedback, createAttemptStore, createPresetStore };
+  /* ═══════════════════════════════════════════════════════════════════════
+     Grouping Layer — Second-stage structure assembly above atomic partition
+     ═════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Compute pairwise merge score between two adjacent atomic regions.
+   * Returns a score in [0, 1] where higher = more likely to merge.
+   *
+   * Features used:
+   *  - Color distance (Lab ΔE between region means)
+   *  - Shared boundary length relative to perimeters
+   *  - Surface uniformity similarity
+   *  - Compactness improvement if merged
+   *  - Area ratio (very unequal sizes favor merge — small fragment absorbed)
+   *
+   * @param {object} nodeA - partition node
+   * @param {object} nodeB - partition node
+   * @param {object} partitionResult - full partition result (for pixel-level data)
+   * @param {object} opts - { width, height, labelMap, sharedBoundaries }
+   * @returns {object} { score, features }
+   */
+  function computeBoundaryMergeScore(nodeA, nodeB, partitionResult, opts){
+    const w = opts.width, h = opts.height;
+    const labelMap = partitionResult.labelMap;
+    const sharedBoundaries = partitionResult.sharedBoundaries;
+    const regionMeans = partitionResult.regionMeans || {};
+    const pidA = nodeA.partitionId, pidB = nodeB.partitionId;
+
+    // 1. Color distance between region means
+    let colorDist = 0;
+    const mA = regionMeans[pidA], mB = regionMeans[pidB];
+    if(mA && mB){
+      colorDist = chromaDominantDeltaE(mA.L, mA.A, mA.B, mB.L, mB.A, mB.B, 0.85);
+    }
+    // Normalize: 0 = identical color, 1 = very different (ΔE ~40+)
+    const colorSim = Math.max(0, 1 - colorDist / 40);
+
+    // 2. Shared boundary length
+    let sharedLen = 0, perimA = 0, perimB = 0;
+    if(labelMap && sharedBoundaries){
+      for(let y = 0; y < h; y++){
+        for(let x = 0; x < w; x++){
+          const i = y * w + x;
+          if(!sharedBoundaries[i]) continue;
+          const lbl = labelMap[i];
+          if(lbl === pidA) perimA++;
+          if(lbl === pidB) perimB++;
+          // Check if this boundary pixel is between A and B
+          if(lbl === pidA || lbl === pidB){
+            const nbrs = [
+              x > 0 ? i - 1 : -1,
+              x < w - 1 ? i + 1 : -1,
+              y > 0 ? i - w : -1,
+              y < h - 1 ? i + w : -1
+            ];
+            for(let k = 0; k < 4; k++){
+              const ni = nbrs[k];
+              if(ni < 0) continue;
+              const nlbl = labelMap[ni];
+              if((lbl === pidA && nlbl === pidB) || (lbl === pidB && nlbl === pidA)){
+                sharedLen++;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    const minPerim = Math.max(1, Math.min(perimA, perimB));
+    const boundaryRatio = Math.min(1, sharedLen / minPerim);
+
+    // 3. Surface uniformity similarity
+    const uA = nodeA.surfaceUniformity || 0.5;
+    const uB = nodeB.surfaceUniformity || 0.5;
+    const uniformitySim = 1 - Math.abs(uA - uB);
+
+    // 4. Area ratio: very small fragments next to large regions favor merge
+    const areaA = nodeA.area || 1, areaB = nodeB.area || 1;
+    const areaRatio = Math.min(areaA, areaB) / Math.max(areaA, areaB);
+    // Small ratio = one is much smaller → favor merge (fragment absorption)
+    const fragmentBonus = areaRatio < 0.15 ? 0.3 : (areaRatio < 0.3 ? 0.15 : 0);
+
+    // 5. Compactness of merged union (approximate via bboxes)
+    const bA = nodeA.bbox, bB = nodeB.bbox;
+    const unionX = Math.min(bA.x, bB.x), unionY = Math.min(bA.y, bB.y);
+    const unionW = Math.max(bA.x + bA.w, bB.x + bB.w) - unionX;
+    const unionH = Math.max(bA.y + bA.h, bB.y + bB.h) - unionY;
+    const unionBboxArea = unionW * unionH;
+    const mergedArea = areaA + areaB;
+    const mergedCompactness = clamp(mergedArea / Math.max(1, unionBboxArea), 0, 1);
+    // Higher compactness = better merged shape
+    const compactnessScore = mergedCompactness;
+
+    // Weighted combination
+    const score = clamp(
+      colorSim * 0.35 +
+      boundaryRatio * 0.25 +
+      uniformitySim * 0.10 +
+      fragmentBonus +
+      compactnessScore * 0.15,
+      0, 1
+    );
+
+    return {
+      score,
+      features: {
+        colorDist: Math.round(colorDist * 100) / 100,
+        colorSim: Math.round(colorSim * 1000) / 1000,
+        boundaryRatio: Math.round(boundaryRatio * 1000) / 1000,
+        sharedLen,
+        uniformitySim: Math.round(uniformitySim * 1000) / 1000,
+        areaRatio: Math.round(areaRatio * 1000) / 1000,
+        fragmentBonus,
+        compactness: Math.round(compactnessScore * 1000) / 1000
+      }
+    };
+  }
+
+  /**
+   * Build a grouped graph from an atomic partition result.
+   *
+   * Uses agglomerative merging: iteratively merge the highest-scoring adjacent
+   * pair until no pair exceeds the merge threshold.
+   *
+   * @param {object} partitionResult - from computePartition()
+   * @param {object} opts
+   * @param {number} opts.width - normalized surface width
+   * @param {number} opts.height - normalized surface height
+   * @param {number} [opts.mergeThreshold=0.55] - minimum score to merge
+   * @param {object} [opts.supervisionConstraints] - { merges: [{a,b}], keeps: [{a,b}] }
+   * @returns {object} grouped graph result
+   */
+  function computeGroupedGraph(partitionResult, opts){
+    const width = opts.width, height = opts.height;
+    const mergeThreshold = opts.mergeThreshold ?? 0.55;
+    const constraints = opts.supervisionConstraints || { merges: [], keeps: [] };
+
+    const atomicNodes = partitionResult.nodes || [];
+    const atomicEdges = partitionResult.edges || [];
+
+    if(atomicNodes.length === 0) return { groups: [], groupedNodes: [], groupedEdges: [], membership: {}, atomicNodes, atomicEdges, boundaryScores: [] };
+
+    // Build adjacency map from atomic edges
+    const adjMap = new Map(); // nodeId → Set of adjacent nodeIds
+    for(const e of atomicEdges){
+      if(!adjMap.has(e.from)) adjMap.set(e.from, new Set());
+      if(!adjMap.has(e.to)) adjMap.set(e.to, new Set());
+      adjMap.get(e.from).add(e.to);
+      adjMap.get(e.to).add(e.from);
+    }
+
+    // Build node lookup
+    const nodeById = new Map(atomicNodes.map(n => [n.id, n]));
+
+    // Compute all pairwise boundary scores
+    const boundaryScores = [];
+    const scoreLookup = new Map(); // "idA|idB" → score entry
+    for(const e of atomicEdges){
+      const nA = nodeById.get(e.from), nB = nodeById.get(e.to);
+      if(!nA || !nB) continue;
+      const result = computeBoundaryMergeScore(nA, nB, partitionResult, { width, height, labelMap: partitionResult.labelMap, sharedBoundaries: partitionResult.sharedBoundaries });
+      const entry = {
+        nodeIdA: e.from, nodeIdB: e.to,
+        partitionIdA: nA.partitionId, partitionIdB: nB.partitionId,
+        score: result.score, features: result.features
+      };
+      boundaryScores.push(entry);
+      const key = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from;
+      scoreLookup.set(key, entry);
+    }
+
+    // Build supervision lookup (constraint overrides)
+    const forceMerge = new Set();
+    const forceKeep = new Set();
+    for(const m of constraints.merges || []){
+      const key = m.a < m.b ? m.a + '|' + m.b : m.b + '|' + m.a;
+      forceMerge.add(key);
+    }
+    for(const k of constraints.keeps || []){
+      const key = k.a < k.b ? k.a + '|' + k.b : k.b + '|' + k.a;
+      forceKeep.add(key);
+    }
+
+    // Union-Find for grouping
+    const parent = new Map();
+    const rank = new Map();
+    for(const n of atomicNodes){
+      parent.set(n.id, n.id);
+      rank.set(n.id, 0);
+    }
+    function find(x){
+      while(parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+      return x;
+    }
+    function union(a, b){
+      const ra = find(a), rb = find(b);
+      if(ra === rb) return;
+      const rkA = rank.get(ra), rkB = rank.get(rb);
+      if(rkA < rkB) parent.set(ra, rb);
+      else if(rkA > rkB) parent.set(rb, ra);
+      else { parent.set(rb, ra); rank.set(ra, rkA + 1); }
+    }
+
+    // Phase 1: Apply forced merges from supervision
+    for(const key of forceMerge){
+      const sep = key.indexOf('|');
+      const a = key.substring(0, sep), b = key.substring(sep + 1);
+      if(nodeById.has(a) && nodeById.has(b)) union(a, b);
+    }
+
+    // Phase 2: Agglomerative merge by score (skip forced keeps)
+    // Sort by score descending
+    const sorted = boundaryScores.slice().sort((a, b) => b.score - a.score);
+    for(const entry of sorted){
+      const key = entry.nodeIdA < entry.nodeIdB
+        ? entry.nodeIdA + '|' + entry.nodeIdB
+        : entry.nodeIdB + '|' + entry.nodeIdA;
+      if(forceKeep.has(key)) continue;
+      if(entry.score < mergeThreshold && !forceMerge.has(key)) continue;
+      union(entry.nodeIdA, entry.nodeIdB);
+    }
+
+    // Build groups from union-find
+    const groupMap = new Map(); // root → [nodeIds]
+    const membership = {}; // nodeId → groupId
+    for(const n of atomicNodes){
+      const root = find(n.id);
+      if(!groupMap.has(root)) groupMap.set(root, []);
+      groupMap.get(root).push(n.id);
+    }
+    let groupIdx = 0;
+    const groups = [];
+    for(const [root, members] of groupMap){
+      const groupId = 'wfg2-g-' + groupIdx;
+      // Compute merged properties
+      let totalArea = 0, sumCx = 0, sumCy = 0;
+      let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+      const memberNodes = members.map(id => nodeById.get(id)).filter(Boolean);
+      for(const mn of memberNodes){
+        totalArea += mn.area || 0;
+        sumCx += (mn.center?.x || 0) * (mn.area || 1);
+        sumCy += (mn.center?.y || 0) * (mn.area || 1);
+        const b = mn.bbox || {};
+        if(b.x < minX) minX = b.x;
+        if(b.y < minY) minY = b.y;
+        if((b.x + b.w) > maxX) maxX = b.x + b.w;
+        if((b.y + b.h) > maxY) maxY = b.y + b.h;
+      }
+      const gNode = {
+        id: groupId, type: 'grouped_structure', groupIndex: groupIdx,
+        atomicMembers: members,
+        atomicMemberCount: members.length,
+        bbox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+        center: { x: totalArea > 0 ? sumCx / totalArea : (minX + maxX) / 2, y: totalArea > 0 ? sumCy / totalArea : (minY + maxY) / 2 },
+        area: totalArea,
+        isSingleton: members.length === 1
+      };
+      groups.push(gNode);
+      for(const mid of members) membership[mid] = groupId;
+      groupIdx++;
+    }
+
+    // Build grouped edges (adjacency between different groups)
+    const groupedEdgeSet = new Set();
+    const groupedEdges = [];
+    for(const e of atomicEdges){
+      const gA = membership[e.from], gB = membership[e.to];
+      if(!gA || !gB || gA === gB) continue;
+      const key = gA < gB ? gA + '|' + gB : gB + '|' + gA;
+      if(groupedEdgeSet.has(key)) continue;
+      groupedEdgeSet.add(key);
+      groupedEdges.push({ from: gA, to: gB, kind: 'grouped_adjacency' });
+    }
+
+    return {
+      groups, groupedNodes: groups, groupedEdges,
+      membership, atomicNodes, atomicEdges,
+      boundaryScores, mergeThreshold
+    };
+  }
+
+  /**
+   * Apply supervision constraints to boundary scores to produce adjusted scores.
+   * This is the learning-aware scoring: constraints shift scores up (merge) or
+   * down (keep) for boundaries that match labeled patterns.
+   *
+   * @param {Array} boundaryScores - from computeGroupedGraph
+   * @param {Array} supervisionExamples - array of { nodeIdA, nodeIdB, label, features }
+   * @returns {Array} adjusted boundary scores
+   */
+  function applySupervisionToScores(boundaryScores, supervisionExamples){
+    if(!supervisionExamples || supervisionExamples.length === 0) return boundaryScores;
+
+    // Build lookup of supervised boundaries
+    const supervised = new Map();
+    for(const ex of supervisionExamples){
+      const key = ex.nodeIdA < ex.nodeIdB ? ex.nodeIdA + '|' + ex.nodeIdB : ex.nodeIdB + '|' + ex.nodeIdA;
+      supervised.set(key, ex);
+    }
+
+    return boundaryScores.map(bs => {
+      const key = bs.nodeIdA < bs.nodeIdB ? bs.nodeIdA + '|' + bs.nodeIdB : bs.nodeIdB + '|' + bs.nodeIdA;
+      const sup = supervised.get(key);
+      if(!sup) return bs;
+      // Direct label override: merge → push score up, keep → push score down
+      let adjusted = bs.score;
+      if(sup.label === 'merge') adjusted = Math.min(1, bs.score + 0.4);
+      else if(sup.label === 'keep') adjusted = Math.max(0, bs.score - 0.4);
+      return { ...bs, score: adjusted, supervised: true, originalScore: bs.score, supervisionLabel: sup.label };
+    });
+  }
+
+  return { DEFAULT_PARAMS, FEEDBACK_TAGS, PIPELINE_MODES, copyParams, normalizeVisualInput, generateFeatureGraph, computePartition, computeGroupedGraph, computeBoundaryMergeScore, applySupervisionToScores, adaptParametersFromFeedback, createAttemptStore, createPresetStore };
 });

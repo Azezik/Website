@@ -1941,7 +1941,16 @@ let state = {
     currentVariantLabel: 'baseline',
     currentStrategy: 'initial',
     docFeatures: null,
-    baselineParams: null
+    baselineParams: null,
+    // Grouping layer state
+    groupedGraph: null,
+    mergeThreshold: 0.55,
+    viewMode: 'atomic', // 'atomic' | 'grouped' | 'both'
+    supervisionMode: null, // null | 'boundary' | 'lasso'
+    supervisionSessionId: null,
+    lassoPoints: [],
+    lassoActive: false,
+    selectedBoundary: null
   },
   objectLearning: {
     active: false,
@@ -20669,6 +20678,8 @@ const _wfg2PresetStore = _wfg2?.createPresetStore ? _wfg2.createPresetStore(loca
 const _glStore = window.GraphLearningStore || null;
 const _glTrainingStore = _glStore?.createGraphTrainingStore ? _glStore.createGraphTrainingStore(localStorage) : null;
 const _glFamilyStore = _glStore?.createGraphFamilyStore ? _glStore.createGraphFamilyStore(localStorage) : null;
+const _gsStore = window.GroupingSupervisionStore || null;
+const _groupingSupervision = _gsStore?.createGroupingSupervisionStore ? _gsStore.createGroupingSupervisionStore(localStorage) : null;
 
 function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
 
@@ -21216,6 +21227,15 @@ function graphLearningRunGeneration(opts){
   if(opts?.feedback) gl.params = _wfg2.adaptParametersFromFeedback(gl.params || _wfg2.DEFAULT_PARAMS, opts.feedback);
   if(!gl.params) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
   gl.graph = _wfg2.generateFeatureGraph(gl.normalizedSurface, gl.params);
+  // Compute grouped graph from partition result
+  if(_wfg2.computeGroupedGraph && gl.graph?.partition){
+    var _partResult = { nodes: gl.graph.nodes, edges: gl.graph.edges, adjacency: gl.graph.partition.adjacency, labelMap: gl.graph.artifacts?.partitionLabelMap, sharedBoundaries: gl.graph.artifacts?.partitionSharedBoundaries, regionMeans: gl.graph.artifacts?.partitionRegionMeans, regionCount: gl.graph.partition.regionCount };
+    var _supConstraints = { merges: [], keeps: [] };
+    if(_groupingSupervision && gl.supervisionSessionId){
+      _supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
+    }
+    gl.groupedGraph = _wfg2.computeGroupedGraph(_partResult, { width: gl.graph.normalizedSize.width, height: gl.graph.normalizedSize.height, mergeThreshold: gl.mergeThreshold, supervisionConstraints: _supConstraints });
+  } else { gl.groupedGraph = null; }
   gl.attemptNumber = (gl.attemptNumber || 0) + 1;
   // Enable all feedback buttons
   if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = false;
@@ -21656,6 +21676,480 @@ graphLearningUpdateTrainingBar();
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
 });
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Grouping Layer UI — supervision, rendering, interaction
+   ═════════════════════════════════════════════════════════════════════ */
+
+// Grouped overlay checkbox listeners
+[document.getElementById('graph-learning-show-grouped-overlay'),
+ document.getElementById('graph-learning-show-merge-scores')
+].forEach(function(el){
+  if(!el) return;
+  el.addEventListener('change', function(){ renderGraphLearningViewer(); });
+});
+
+// View mode selector
+(function(){
+  var viewSelect = document.getElementById('graph-learning-view-mode');
+  if(!viewSelect) return;
+  viewSelect.addEventListener('change', function(){
+    state.graphLearning.viewMode = viewSelect.value;
+    renderGraphLearningViewer();
+  });
+})();
+
+// Merge threshold slider
+(function(){
+  var slider = document.getElementById('graph-learning-merge-threshold');
+  var valLabel = document.getElementById('graph-learning-merge-threshold-val');
+  if(!slider) return;
+  slider.addEventListener('input', function(){
+    var val = Number(slider.value) / 100;
+    state.graphLearning.mergeThreshold = val;
+    if(valLabel) valLabel.textContent = val.toFixed(2);
+    // Recompute grouped graph with new threshold
+    graphLearningRecomputeGroupedGraph();
+    renderGraphLearningViewer();
+    graphLearningUpdateGroupingInfo();
+  });
+})();
+
+function graphLearningRecomputeGroupedGraph(){
+  var gl = state.graphLearning;
+  if(!_wfg2?.computeGroupedGraph || !gl.graph?.partition || !gl.graph?.artifacts?.partitionLabelMap) return;
+  var partResult = { nodes: gl.graph.nodes, edges: gl.graph.edges, adjacency: gl.graph.partition.adjacency, labelMap: gl.graph.artifacts.partitionLabelMap, sharedBoundaries: gl.graph.artifacts.partitionSharedBoundaries, regionMeans: gl.graph.artifacts.partitionRegionMeans, regionCount: gl.graph.partition.regionCount };
+  var supConstraints = { merges: [], keeps: [] };
+  if(_groupingSupervision && gl.supervisionSessionId){
+    supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
+  }
+  gl.groupedGraph = _wfg2.computeGroupedGraph(partResult, { width: gl.graph.normalizedSize.width, height: gl.graph.normalizedSize.height, mergeThreshold: gl.mergeThreshold, supervisionConstraints: supConstraints });
+}
+
+function graphLearningUpdateGroupingInfo(){
+  var bar = document.getElementById('graph-learning-grouping-info');
+  if(!bar) return;
+  var gl = state.graphLearning;
+  var gg = gl.groupedGraph;
+  if(!gg){ bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  var gCountEl = document.getElementById('graph-learning-group-count');
+  if(gCountEl) gCountEl.textContent = gg.groups ? gg.groups.length : 0;
+  // Supervision stats
+  if(_groupingSupervision && gl.supervisionSessionId){
+    var labels = _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId);
+    var clusters = _groupingSupervision.getClusterAnnotationsForSession(gl.supervisionSessionId);
+    var mergeCount = labels.filter(function(l){ return l.label === 'merge'; }).length;
+    var keepCount = labels.filter(function(l){ return l.label === 'keep'; }).length;
+    var blCount = document.getElementById('graph-learning-boundary-label-count');
+    var mlCount = document.getElementById('graph-learning-merge-label-count');
+    var klCount = document.getElementById('graph-learning-keep-label-count');
+    var clCount = document.getElementById('graph-learning-cluster-count');
+    if(blCount) blCount.textContent = labels.length;
+    if(mlCount) mlCount.textContent = mergeCount;
+    if(klCount) klCount.textContent = keepCount;
+    if(clCount) clCount.textContent = clusters.length;
+  }
+}
+
+// Supervision mode buttons
+(function(){
+  var boundaryBtn = document.getElementById('graph-learning-boundary-mode-btn');
+  var lassoBtn = document.getElementById('graph-learning-lasso-mode-btn');
+  var offBtn = document.getElementById('graph-learning-supervision-off-btn');
+  var modeLabel = document.getElementById('graph-learning-supervision-mode-label');
+  var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
+
+  function setMode(mode){
+    state.graphLearning.supervisionMode = mode;
+    if(boundaryBtn) boundaryBtn.style.fontWeight = mode === 'boundary' ? '700' : '';
+    if(lassoBtn) lassoBtn.style.fontWeight = mode === 'lasso' ? '700' : '';
+    if(modeLabel) modeLabel.textContent = mode === 'boundary' ? 'Click a boundary between regions to label merge/keep' : mode === 'lasso' ? 'Draw a lasso around fragments to group them' : 'No supervision mode active';
+    if(interactionCanvas) interactionCanvas.style.cursor = mode === 'boundary' ? 'crosshair' : mode === 'lasso' ? 'crosshair' : 'default';
+    if(interactionCanvas) interactionCanvas.style.pointerEvents = mode ? 'auto' : 'none';
+    // Clear lasso state on mode switch
+    state.graphLearning.lassoPoints = [];
+    state.graphLearning.lassoActive = false;
+    state.graphLearning.selectedBoundary = null;
+    renderGraphLearningViewer();
+  }
+
+  if(boundaryBtn) boundaryBtn.addEventListener('click', function(){ setMode(state.graphLearning.supervisionMode === 'boundary' ? null : 'boundary'); });
+  if(lassoBtn) lassoBtn.addEventListener('click', function(){ setMode(state.graphLearning.supervisionMode === 'lasso' ? null : 'lasso'); });
+  if(offBtn) offBtn.addEventListener('click', function(){ setMode(null); });
+
+  // Enable supervision buttons when graph is available
+  var origRunGen = graphLearningRunGeneration;
+  graphLearningRunGeneration = function(opts){
+    origRunGen(opts);
+    if(boundaryBtn) boundaryBtn.disabled = false;
+    if(lassoBtn) lassoBtn.disabled = false;
+    if(offBtn) offBtn.disabled = false;
+    // Register supervision session
+    var gl = state.graphLearning;
+    if(_groupingSupervision && !gl.supervisionSessionId){
+      gl.supervisionSessionId = _groupingSupervision.registerSession({
+        fileId: gl.fileId,
+        fileName: gl.fileName,
+        engineParams: gl.params,
+        surfaceSize: gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height } : {},
+        atomicRegionCount: gl.graph?.nodes?.length || 0,
+        pipelineMode: gl.graph?.pipelineMode || 'partition'
+      });
+    }
+    graphLearningUpdateGroupingInfo();
+  };
+})();
+
+// Clear supervision data button
+(function(){
+  var btn = document.getElementById('graph-learning-clear-supervision-btn');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    if(!confirm('Clear all grouping supervision data (boundary labels, cluster annotations)?')) return;
+    if(_groupingSupervision) _groupingSupervision.clear();
+    state.graphLearning.supervisionSessionId = null;
+    graphLearningRecomputeGroupedGraph();
+    graphLearningUpdateGroupingInfo();
+    renderGraphLearningViewer();
+    graphLearningStatus('Grouping supervision data cleared.');
+  });
+})();
+
+/* ── Interaction Canvas: boundary clicks + lasso drawing ──────────── */
+
+(function(){
+  var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
+  if(!interactionCanvas) return;
+
+  function canvasToSurface(e){
+    var rect = interactionCanvas.getBoundingClientRect();
+    var gl = state.graphLearning;
+    var surf = gl.normalizedSurface;
+    if(!surf) return null;
+    var scaleX = surf.width / rect.width;
+    var scaleY = surf.height / rect.height;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  function findClosestBoundary(pt){
+    var gl = state.graphLearning;
+    var gg = gl.groupedGraph;
+    if(!gg?.boundaryScores || !gl.graph?.nodes) return null;
+    var nodes = gl.graph.nodes;
+    var nodeById = {};
+    for(var i = 0; i < nodes.length; i++) nodeById[nodes[i].id] = nodes[i];
+    var bestDist = 30; // max click distance in surface pixels
+    var bestEntry = null;
+    for(var j = 0; j < gg.boundaryScores.length; j++){
+      var bs = gg.boundaryScores[j];
+      var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
+      if(!nA || !nB) continue;
+      // Midpoint of the two centers = boundary location
+      var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
+      var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
+      var d = Math.sqrt((pt.x - mx) * (pt.x - mx) + (pt.y - my) * (pt.y - my));
+      if(d < bestDist){ bestDist = d; bestEntry = bs; }
+    }
+    return bestEntry;
+  }
+
+  function findNodesInLasso(lassoPoints){
+    var gl = state.graphLearning;
+    if(!gl.graph?.nodes || lassoPoints.length < 3) return [];
+    var nodes = gl.graph.nodes;
+    var result = [];
+    for(var i = 0; i < nodes.length; i++){
+      var cx = nodes[i].center?.x || 0, cy = nodes[i].center?.y || 0;
+      if(pointInPolygon(cx, cy, lassoPoints)) result.push(nodes[i]);
+    }
+    return result;
+  }
+
+  function pointInPolygon(x, y, poly){
+    var inside = false;
+    for(var i = 0, j = poly.length - 1; i < poly.length; j = i++){
+      var xi = poly[i].x, yi = poly[i].y;
+      var xj = poly[j].x, yj = poly[j].y;
+      if(((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)){
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  interactionCanvas.addEventListener('mousedown', function(e){
+    var gl = state.graphLearning;
+    if(!gl.supervisionMode) return;
+    var pt = canvasToSurface(e);
+    if(!pt) return;
+
+    if(gl.supervisionMode === 'lasso'){
+      gl.lassoActive = true;
+      gl.lassoPoints = [pt];
+      return;
+    }
+  });
+
+  interactionCanvas.addEventListener('mousemove', function(e){
+    var gl = state.graphLearning;
+    if(!gl.supervisionMode) return;
+    var pt = canvasToSurface(e);
+    if(!pt) return;
+
+    if(gl.supervisionMode === 'lasso' && gl.lassoActive){
+      gl.lassoPoints.push(pt);
+      renderGraphLearningViewer();
+      return;
+    }
+
+    if(gl.supervisionMode === 'boundary'){
+      // Highlight nearest boundary
+      var boundary = findClosestBoundary(pt);
+      gl.selectedBoundary = boundary;
+      renderGraphLearningViewer();
+    }
+  });
+
+  interactionCanvas.addEventListener('mouseup', function(e){
+    var gl = state.graphLearning;
+    if(!gl.supervisionMode) return;
+    var pt = canvasToSurface(e);
+    if(!pt) return;
+
+    if(gl.supervisionMode === 'lasso' && gl.lassoActive){
+      gl.lassoActive = false;
+      if(gl.lassoPoints.length < 5) { gl.lassoPoints = []; renderGraphLearningViewer(); return; }
+      // Find nodes inside lasso
+      var enclosed = findNodesInLasso(gl.lassoPoints);
+      if(enclosed.length < 2){ gl.lassoPoints = []; renderGraphLearningViewer(); return; }
+      // Find adjacency pairs within the enclosed set
+      var encIds = new Set(enclosed.map(function(n){ return n.id; }));
+      var adjPairs = [];
+      var edges = gl.graph?.edges || [];
+      for(var ei = 0; ei < edges.length; ei++){
+        if(encIds.has(edges[ei].from) && encIds.has(edges[ei].to)){
+          adjPairs.push({ from: edges[ei].from, to: edges[ei].to });
+        }
+      }
+      if(adjPairs.length > 0 && _groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addClusterAnnotation({
+          sessionId: gl.supervisionSessionId,
+          memberNodeIds: enclosed.map(function(n){ return n.id; }),
+          adjacencyPairs: adjPairs,
+          boundingBox: null
+        });
+        graphLearningRecomputeGroupedGraph();
+        graphLearningUpdateGroupingInfo();
+        graphLearningStatus('Cluster annotation saved: ' + enclosed.length + ' regions, ' + adjPairs.length + ' merge pairs.');
+      }
+      gl.lassoPoints = [];
+      renderGraphLearningViewer();
+      return;
+    }
+
+    if(gl.supervisionMode === 'boundary'){
+      var boundary = findClosestBoundary(pt);
+      if(!boundary) return;
+      // Toggle: if not labeled, label as merge; if merge, switch to keep; if keep, switch to merge
+      var existingLabels = _groupingSupervision && gl.supervisionSessionId ? _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId) : [];
+      var key = boundary.nodeIdA < boundary.nodeIdB ? boundary.nodeIdA + '|' + boundary.nodeIdB : boundary.nodeIdB + '|' + boundary.nodeIdA;
+      var existing = null;
+      for(var li = existingLabels.length - 1; li >= 0; li--){
+        var lk = existingLabels[li].nodeIdA < existingLabels[li].nodeIdB ? existingLabels[li].nodeIdA + '|' + existingLabels[li].nodeIdB : existingLabels[li].nodeIdB + '|' + existingLabels[li].nodeIdA;
+        if(lk === key){ existing = existingLabels[li]; break; }
+      }
+      var newLabel = (!existing || existing.label === 'keep') ? 'merge' : 'keep';
+      if(_groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addBoundaryLabel({
+          sessionId: gl.supervisionSessionId,
+          nodeIdA: boundary.nodeIdA,
+          nodeIdB: boundary.nodeIdB,
+          partitionIdA: boundary.partitionIdA,
+          partitionIdB: boundary.partitionIdB,
+          label: newLabel,
+          features: boundary.features || {}
+        });
+        graphLearningRecomputeGroupedGraph();
+        graphLearningUpdateGroupingInfo();
+        graphLearningStatus('Boundary labeled: ' + newLabel + ' (' + boundary.nodeIdA + ' ↔ ' + boundary.nodeIdB + ', score=' + (boundary.score || 0).toFixed(2) + ')');
+      }
+      renderGraphLearningViewer();
+    }
+  });
+
+  // Sync interaction canvas size
+  var origSync = syncGraphLearningCanvases;
+  syncGraphLearningCanvases = function(){
+    var result = origSync();
+    if(!result) return result;
+    if(interactionCanvas){
+      if(interactionCanvas.width !== result.width) interactionCanvas.width = result.width;
+      if(interactionCanvas.height !== result.height) interactionCanvas.height = result.height;
+      var base = result.base;
+      interactionCanvas.style.width = base.style.width;
+      interactionCanvas.style.height = base.style.height;
+      // Ensure pointer events are set correctly
+      interactionCanvas.style.pointerEvents = state.graphLearning.supervisionMode ? 'auto' : 'none';
+    }
+    return result;
+  };
+})();
+
+/* ── Grouped graph overlay painting (injected into paintGraphLearningOverlay) ── */
+
+var _origPaintOverlay = paintGraphLearningOverlay;
+paintGraphLearningOverlay = function(ctx){
+  // Call original overlay first
+  _origPaintOverlay(ctx);
+
+  var gl = state.graphLearning;
+  var gg = gl.groupedGraph;
+  var viewMode = gl.viewMode || 'atomic';
+  var showGrouped = !!(document.getElementById('graph-learning-show-grouped-overlay') || {}).checked;
+  var showScores = !!(document.getElementById('graph-learning-show-merge-scores') || {}).checked;
+  var nodes = gl.graph?.nodes || [];
+  var nodeById = {};
+  for(var ni = 0; ni < nodes.length; ni++) nodeById[nodes[ni].id] = nodes[ni];
+
+  // ── Grouped structure overlay ──
+  if(gg && showGrouped && (viewMode === 'grouped' || viewMode === 'both')){
+    var gHues = [20, 160, 280, 60, 200, 340, 100, 240, 0, 140, 300, 80, 220];
+    for(var gi = 0; gi < gg.groups.length; gi++){
+      var group = gg.groups[gi];
+      if(group.isSingleton && viewMode !== 'grouped') continue;
+      var hue = gHues[gi % gHues.length];
+      var b = group.bbox;
+      // Fill the group bounding box with semi-transparent color
+      ctx.fillStyle = 'hsla(' + hue + ',60%,50%,0.12)';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      // Stroke the group boundary
+      ctx.strokeStyle = 'hsla(' + hue + ',70%,40%,0.7)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 3]);
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.setLineDash([]);
+      // Label
+      ctx.font = 'bold 11px IBM Plex Mono, monospace';
+      ctx.fillStyle = 'hsla(' + hue + ',70%,30%,0.9)';
+      ctx.fillText('G' + gi + ' (' + group.atomicMemberCount + ')', b.x + 3, b.y - 4);
+    }
+
+    // Draw grouped adjacency edges
+    for(var ge = 0; ge < gg.groupedEdges.length; ge++){
+      var gEdge = gg.groupedEdges[ge];
+      var gA = null, gB = null;
+      for(var ggi = 0; ggi < gg.groups.length; ggi++){
+        if(gg.groups[ggi].id === gEdge.from) gA = gg.groups[ggi];
+        if(gg.groups[ggi].id === gEdge.to) gB = gg.groups[ggi];
+      }
+      if(!gA || !gB) continue;
+      ctx.strokeStyle = 'rgba(100,50,200,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(gA.center.x, gA.center.y);
+      ctx.lineTo(gB.center.x, gB.center.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // ── Merge scores on boundary edges ──
+  if(gg && showScores && gg.boundaryScores){
+    ctx.font = '9px IBM Plex Mono, monospace';
+    for(var si = 0; si < gg.boundaryScores.length; si++){
+      var bs = gg.boundaryScores[si];
+      var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
+      if(!nA || !nB) continue;
+      var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
+      var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
+      var scorePct = (bs.score * 100).toFixed(0);
+      if(bs.score >= gl.mergeThreshold){
+        ctx.fillStyle = 'rgba(30,120,30,0.9)';
+      } else {
+        ctx.fillStyle = 'rgba(180,40,40,0.8)';
+      }
+      ctx.fillText(scorePct, mx - 6, my + 3);
+    }
+  }
+
+  // ── Supervision: highlight selected boundary ──
+  if(gl.selectedBoundary && gl.supervisionMode === 'boundary'){
+    var sb = gl.selectedBoundary;
+    var sbA = nodeById[sb.nodeIdA], sbB = nodeById[sb.nodeIdB];
+    if(sbA && sbB){
+      var sbMx = ((sbA.center?.x || 0) + (sbB.center?.x || 0)) / 2;
+      var sbMy = ((sbA.center?.y || 0) + (sbB.center?.y || 0)) / 2;
+      ctx.beginPath();
+      ctx.arc(sbMx, sbMy, 8, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.6)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,152,0,0.9)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Show score next to highlight
+      ctx.font = 'bold 10px IBM Plex Mono, monospace';
+      ctx.fillStyle = '#333';
+      ctx.fillText('score=' + (sb.score || 0).toFixed(2), sbMx + 12, sbMy - 2);
+    }
+  }
+
+  // ── Supervision: draw labeled boundaries ──
+  if(_groupingSupervision && gl.supervisionSessionId){
+    var labels = _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId);
+    // Get last label per pair
+    var pairLabels = {};
+    for(var li2 = 0; li2 < labels.length; li2++){
+      var lbl = labels[li2];
+      var lKey = lbl.nodeIdA < lbl.nodeIdB ? lbl.nodeIdA + '|' + lbl.nodeIdB : lbl.nodeIdB + '|' + lbl.nodeIdA;
+      pairLabels[lKey] = lbl;
+    }
+    for(var pk in pairLabels){
+      var pl = pairLabels[pk];
+      var plA = nodeById[pl.nodeIdA], plB = nodeById[pl.nodeIdB];
+      if(!plA || !plB) continue;
+      var plMx = ((plA.center?.x || 0) + (plB.center?.x || 0)) / 2;
+      var plMy = ((plA.center?.y || 0) + (plB.center?.y || 0)) / 2;
+      if(pl.label === 'merge'){
+        ctx.beginPath();
+        ctx.arc(plMx, plMy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(46,125,50,0.7)';
+        ctx.fill();
+        ctx.font = 'bold 8px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText('M', plMx - 3, plMy + 3);
+      } else {
+        ctx.beginPath();
+        ctx.arc(plMx, plMy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(211,47,47,0.7)';
+        ctx.fill();
+        ctx.font = 'bold 8px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText('K', plMx - 3, plMy + 3);
+      }
+    }
+  }
+
+  // ── Lasso drawing ──
+  if(gl.supervisionMode === 'lasso' && gl.lassoPoints && gl.lassoPoints.length > 1){
+    ctx.beginPath();
+    ctx.moveTo(gl.lassoPoints[0].x, gl.lassoPoints[0].y);
+    for(var lpi = 1; lpi < gl.lassoPoints.length; lpi++){
+      ctx.lineTo(gl.lassoPoints[lpi].x, gl.lassoPoints[lpi].y);
+    }
+    ctx.strokeStyle = 'rgba(33,150,243,0.8)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if(gl.lassoPoints.length > 2){
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(33,150,243,0.08)';
+      ctx.fill();
+    }
+  }
+};
 
 // Pipeline mode selector
 (function(){
