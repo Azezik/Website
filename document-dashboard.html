@@ -962,38 +962,50 @@
           <!-- ═══ Grouping Layer Controls ═══ -->
           <div class="panel minimal" style="margin-bottom:12px;padding:8px 12px;">
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
-              <strong style="white-space:nowrap;">Grouping</strong>
+              <strong style="white-space:nowrap;">View</strong>
               <select id="graph-learning-view-mode" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
-                <option value="atomic" selected>Atomic Partition</option>
-                <option value="grouped">Grouped Structures</option>
-                <option value="both">Both (Atomic + Grouped)</option>
+                <option value="atomic" selected>Raw Partition</option>
+                <option value="grouped">Grouped / Corrected</option>
+                <option value="both">Both (Raw + Grouped)</option>
               </select>
               <span style="color:var(--border);">|</span>
               <strong style="white-space:nowrap;">Merge Threshold</strong>
               <input type="range" id="graph-learning-merge-threshold" min="0" max="100" value="55" style="width:100px;" />
               <span id="graph-learning-merge-threshold-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:32px;">0.55</span>
+            </div>
+            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+              <strong style="white-space:nowrap;">Region Editing</strong>
+              <button id="graph-learning-region-select-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Select Regions</button>
+              <button id="graph-learning-merge-selected-btn" class="btn" type="button" disabled style="font-size:12px;background:#2a7;border-color:#2a7;color:#fff;">Merge Selected</button>
+              <button id="graph-learning-separate-selected-btn" class="btn" type="button" disabled style="font-size:12px;background:#c44;border-color:#c44;color:#fff;">Separate Selected</button>
+              <button id="graph-learning-clear-selection-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Clear Selection</button>
               <span style="color:var(--border);">|</span>
-              <label><input type="checkbox" id="graph-learning-show-grouped-overlay" checked /> Grouped Overlay</label>
-              <label><input type="checkbox" id="graph-learning-show-merge-scores" /> Merge Scores</label>
+              <span id="graph-learning-selection-info" class="sub" style="color:var(--muted);font-size:11px;">Click regions to select them</span>
             </div>
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
-              <strong style="white-space:nowrap;">Supervision</strong>
-              <button id="graph-learning-boundary-mode-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Boundary Label Mode</button>
-              <button id="graph-learning-lasso-mode-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Lasso Cluster Mode</button>
-              <button id="graph-learning-supervision-off-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Selection Off</button>
-              <span style="color:var(--border);">|</span>
-              <span id="graph-learning-supervision-mode-label" class="sub" style="color:var(--muted);font-size:11px;">No supervision mode active</span>
-              <span style="color:var(--border);">|</span>
               <button id="graph-learning-clear-supervision-btn" class="btn ghost" type="button" style="font-size:11px;">Clear Supervision Data</button>
+              <span style="color:var(--border);">|</span>
+              <details style="display:inline;">
+                <summary class="sub" style="cursor:pointer;color:var(--muted);font-size:11px;">Advanced Debug</summary>
+                <div class="actions" style="gap:8px;flex-wrap:wrap;margin-top:6px;align-items:center;">
+                  <label><input type="checkbox" id="graph-learning-show-grouped-overlay" /> Group Bounding Boxes</label>
+                  <label><input type="checkbox" id="graph-learning-show-merge-scores" /> Merge Scores</label>
+                  <button id="graph-learning-boundary-mode-btn" class="btn ghost" type="button" disabled style="font-size:11px;">Boundary Label Mode</button>
+                  <button id="graph-learning-lasso-mode-btn" class="btn ghost" type="button" disabled style="font-size:11px;">Lasso Cluster Mode</button>
+                  <button id="graph-learning-supervision-off-btn" class="btn ghost" type="button" disabled style="font-size:11px;">Selection Off</button>
+                  <span id="graph-learning-supervision-mode-label" class="sub" style="color:var(--muted);font-size:11px;"></span>
+                </div>
+              </details>
             </div>
           </div>
 
-          <!-- ═══ Grouping Supervision Info Bar ═══ -->
+          <!-- ═══ Grouping Info Bar ═══ -->
           <div id="graph-learning-grouping-info" class="panel minimal" style="margin-bottom:12px;padding:6px 12px;display:none;">
             <div class="actions" style="gap:16px;flex-wrap:wrap;align-items:center;">
               <span class="sub">Groups: <strong id="graph-learning-group-count">0</strong></span>
               <span class="sub">Boundary labels: <strong id="graph-learning-boundary-label-count">0</strong> (<span id="graph-learning-merge-label-count">0</span> merge, <span id="graph-learning-keep-label-count">0</span> keep)</span>
               <span class="sub">Clusters: <strong id="graph-learning-cluster-count">0</strong></span>
+              <span class="sub">Region edits: <strong id="graph-learning-region-edit-count">0</strong></span>
               <span class="sub" id="graph-learning-grouping-status" style="color:var(--muted);font-size:11px;"></span>
             </div>
           </div>

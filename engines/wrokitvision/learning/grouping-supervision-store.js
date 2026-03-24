@@ -205,23 +205,6 @@ function createGroupingSupervisionStore(storage) {
     },
 
     /**
-     * Get summary statistics.
-     * @returns {object}
-     */
-    getSummary() {
-      const data = _load();
-      const mergeCount = data.boundaryLabels.filter(bl => bl.label === 'merge').length;
-      const keepCount = data.boundaryLabels.filter(bl => bl.label === 'keep').length;
-      return {
-        sessionCount: data.sessions.length,
-        totalBoundaryLabels: data.boundaryLabels.length,
-        mergeLabels: mergeCount,
-        keepLabels: keepCount,
-        clusterAnnotations: data.clusterAnnotations.length
-      };
-    },
-
-    /**
      * Export all data for offline analysis / model training.
      * @returns {object}
      */
@@ -235,10 +218,145 @@ function createGroupingSupervisionStore(storage) {
     },
 
     /**
+     * Add a region-merge edit: user selected atomic regions and merged them.
+     * Internally creates pairwise merge labels for all adjacent pairs within
+     * the selected set.  This is the primary supervision signal in the
+     * region-selection editing model.
+     *
+     * @param {object} edit
+     * @param {string} edit.sessionId
+     * @param {Array<string>} edit.regionNodeIds - atomic node IDs to merge
+     * @param {Array<number>} edit.regionPartitionIds - corresponding partition IDs
+     * @param {Array<{from:string,to:string}>} edit.adjacencyPairs - adjacent pairs among the regions
+     * @param {object} [edit.engineContext] - snapshot of engine state for later training
+     */
+    addRegionMerge(edit) {
+      const data = _load();
+      const mergeEntry = {
+        id: 'rm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        type: 'region_merge',
+        sessionId: edit.sessionId,
+        regionNodeIds: edit.regionNodeIds || [],
+        regionPartitionIds: edit.regionPartitionIds || [],
+        adjacencyPairs: edit.adjacencyPairs || [],
+        engineContext: edit.engineContext || null,
+        timestamp: new Date().toISOString()
+      };
+      if (!data.regionEdits) data.regionEdits = [];
+      data.regionEdits.push(mergeEntry);
+
+      // Convert to pairwise merge boundary labels for engine consumption
+      for (const pair of (edit.adjacencyPairs || [])) {
+        if (edit.regionNodeIds.includes(pair.from) && edit.regionNodeIds.includes(pair.to)) {
+          data.boundaryLabels.push({
+            id: 'bl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+            sessionId: edit.sessionId,
+            nodeIdA: pair.from,
+            nodeIdB: pair.to,
+            partitionIdA: null,
+            partitionIdB: null,
+            label: 'merge',
+            features: {},
+            nodeFeatures: null,
+            source: 'region_merge',
+            regionEditId: mergeEntry.id,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      if (data.regionEdits.length > 2000) data.regionEdits = data.regionEdits.slice(-2000);
+      _save(data);
+    },
+
+    /**
+     * Add a region-separate edit: user selected regions that should NOT be grouped.
+     * Creates pairwise keep-separate labels for all adjacent pairs within the set.
+     *
+     * @param {object} edit
+     * @param {string} edit.sessionId
+     * @param {Array<string>} edit.regionNodeIds - atomic node IDs to separate
+     * @param {Array<number>} edit.regionPartitionIds
+     * @param {Array<{from:string,to:string}>} edit.adjacencyPairs
+     * @param {object} [edit.engineContext]
+     */
+    addRegionSeparation(edit) {
+      const data = _load();
+      const sepEntry = {
+        id: 'rs-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        type: 'region_separate',
+        sessionId: edit.sessionId,
+        regionNodeIds: edit.regionNodeIds || [],
+        regionPartitionIds: edit.regionPartitionIds || [],
+        adjacencyPairs: edit.adjacencyPairs || [],
+        engineContext: edit.engineContext || null,
+        timestamp: new Date().toISOString()
+      };
+      if (!data.regionEdits) data.regionEdits = [];
+      data.regionEdits.push(sepEntry);
+
+      // Convert to pairwise keep boundary labels
+      for (const pair of (edit.adjacencyPairs || [])) {
+        if (edit.regionNodeIds.includes(pair.from) && edit.regionNodeIds.includes(pair.to)) {
+          data.boundaryLabels.push({
+            id: 'bl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+            sessionId: edit.sessionId,
+            nodeIdA: pair.from,
+            nodeIdB: pair.to,
+            partitionIdA: null,
+            partitionIdB: null,
+            label: 'keep',
+            features: {},
+            nodeFeatures: null,
+            source: 'region_separate',
+            regionEditId: sepEntry.id,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      if (data.regionEdits.length > 2000) data.regionEdits = data.regionEdits.slice(-2000);
+      _save(data);
+    },
+
+    /**
+     * Get all region edits for a session.
+     * @param {string} sessionId
+     * @returns {Array}
+     */
+    getRegionEditsForSession(sessionId) {
+      const data = _load();
+      return (data.regionEdits || []).filter(re => re.sessionId === sessionId);
+    },
+
+    /**
+     * Get summary statistics (extended with region edit counts).
+     * @returns {object}
+     */
+    getSummary() {
+      const data = _load();
+      const mergeCount = data.boundaryLabels.filter(bl => bl.label === 'merge').length;
+      const keepCount = data.boundaryLabels.filter(bl => bl.label === 'keep').length;
+      const regionEdits = data.regionEdits || [];
+      const regionMerges = regionEdits.filter(re => re.type === 'region_merge').length;
+      const regionSeparations = regionEdits.filter(re => re.type === 'region_separate').length;
+      return {
+        sessionCount: data.sessions.length,
+        totalBoundaryLabels: data.boundaryLabels.length,
+        mergeLabels: mergeCount,
+        keepLabels: keepCount,
+        clusterAnnotations: data.clusterAnnotations.length,
+        regionEdits: regionEdits.length,
+        regionMerges,
+        regionSeparations
+      };
+    },
+
+    /**
      * Clear all supervision data.
      */
     clear() {
-      _save({ sessions: [], boundaryLabels: [], clusterAnnotations: [] });
+      _save({ sessions: [], boundaryLabels: [], clusterAnnotations: [], regionEdits: [] });
     },
 
     /** Storage key for external access */
