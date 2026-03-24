@@ -938,7 +938,7 @@
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
               <strong style="white-space:nowrap;">Output</strong>
               <label style="font-weight:600;"><input type="checkbox" id="graph-learning-show-color-partition" /> Color Partition</label>
-              <label><input type="checkbox" id="graph-learning-show-compiled" /> Compiled Graph</label>
+              <label><input type="checkbox" id="graph-learning-show-compiled" checked /> Compiled Graph</label>
               <label><input type="checkbox" id="graph-learning-show-regions" /> Bounding Boxes</label>
               <label><input type="checkbox" id="graph-learning-show-adjacency" /> Adjacency</label>
               <label><input type="checkbox" id="graph-learning-show-partition" checked /> Partition Overlay</label>
@@ -964,8 +964,8 @@
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
               <strong style="white-space:nowrap;">Grouping</strong>
               <select id="graph-learning-view-mode" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
-                <option value="atomic">Atomic Partition</option>
-                <option value="grouped" selected>Grouped Structures</option>
+                <option value="atomic" selected>Atomic Partition</option>
+                <option value="grouped">Grouped Structures</option>
                 <option value="both">Both (Atomic + Grouped)</option>
               </select>
               <span style="color:var(--border);">|</span>
@@ -973,15 +973,16 @@
               <input type="range" id="graph-learning-merge-threshold" min="0" max="100" value="55" style="width:100px;" />
               <span id="graph-learning-merge-threshold-val" class="sub" style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:32px;">0.55</span>
               <span style="color:var(--border);">|</span>
-              <label><input type="checkbox" id="graph-learning-show-grouped-overlay" checked /> Region-Merged Overlay</label>
-              <label><input type="checkbox" id="graph-learning-show-merge-scores" /> Merge Scores (Debug)</label>
+              <label><input type="checkbox" id="graph-learning-show-grouped-overlay" checked /> Grouped Overlay</label>
+              <label><input type="checkbox" id="graph-learning-show-merge-scores" /> Merge Scores</label>
             </div>
             <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
-              <strong style="white-space:nowrap;">Region Selection</strong>
-              <button id="graph-learning-merge-selected-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Merge Selected Regions</button>
-              <button id="graph-learning-clear-selection-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Clear Selection</button>
+              <strong style="white-space:nowrap;">Supervision</strong>
+              <button id="graph-learning-boundary-mode-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Boundary Label Mode</button>
+              <button id="graph-learning-lasso-mode-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Lasso Cluster Mode</button>
+              <button id="graph-learning-supervision-off-btn" class="btn ghost" type="button" disabled style="font-size:12px;">Selection Off</button>
               <span style="color:var(--border);">|</span>
-              <span id="graph-learning-supervision-mode-label" class="sub" style="color:var(--muted);font-size:11px;">Click regions to select. Shift-click or drag to multi-select.</span>
+              <span id="graph-learning-supervision-mode-label" class="sub" style="color:var(--muted);font-size:11px;">No supervision mode active</span>
               <span style="color:var(--border);">|</span>
               <button id="graph-learning-clear-supervision-btn" class="btn ghost" type="button" style="font-size:11px;">Clear Supervision Data</button>
             </div>
