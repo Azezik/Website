@@ -1946,11 +1946,17 @@ let state = {
     groupedGraph: null,
     mergeThreshold: 0.55,
     viewMode: 'atomic', // 'atomic' | 'grouped' | 'both'
-    supervisionMode: null, // null | 'boundary' | 'lasso'
+    supervisionMode: null, // null | 'boundary' | 'lasso' | 'region_select'
     supervisionSessionId: null,
     lassoPoints: [],
     lassoActive: false,
-    selectedBoundary: null
+    selectedBoundary: null,
+    // Region selection state (new region-editing model)
+    selectedRegions: new Set(), // set of atomic node IDs
+    regionSelectActive: false,
+    // Grouped label map cache
+    groupedLabelMap: null,
+    groupedBoundaries: null
   },
   objectLearning: {
     active: false,
@@ -21264,8 +21270,15 @@ function graphLearningRunGeneration(opts){
     if(_groupingSupervision && gl.supervisionSessionId){
       _supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
     }
-    gl.groupedGraph = _wfg2.computeGroupedGraph(_partResult, { width: gl.graph.normalizedSize.width, height: gl.graph.normalizedSize.height, mergeThreshold: gl.mergeThreshold, supervisionConstraints: _supConstraints });
-  } else { gl.groupedGraph = null; }
+    var _nw = gl.graph.normalizedSize.width, _nh = gl.graph.normalizedSize.height;
+    gl.groupedGraph = _wfg2.computeGroupedGraph(_partResult, { width: _nw, height: _nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: _supConstraints });
+    // Build fused label map for grouped partition-style rendering
+    if(_wfg2.buildGroupedLabelMap && gl.groupedGraph){
+      var _fused = _wfg2.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
+      gl.groupedLabelMap = _fused ? _fused.groupedLabelMap : null;
+      gl.groupedBoundaries = (_fused && _wfg2.computeSharedBoundaries) ? _wfg2.computeSharedBoundaries(_fused.groupedLabelMap, _nw, _nh) : null;
+    }
+  } else { gl.groupedGraph = null; gl.groupedLabelMap = null; gl.groupedBoundaries = null; }
   gl.attemptNumber = (gl.attemptNumber || 0) + 1;
   // Enable all feedback buttons
   if(els.graphLearningGoodBtn) els.graphLearningGoodBtn.disabled = false;
@@ -21753,7 +21766,14 @@ function graphLearningRecomputeGroupedGraph(){
   if(_groupingSupervision && gl.supervisionSessionId){
     supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
   }
-  gl.groupedGraph = _wfg2.computeGroupedGraph(partResult, { width: gl.graph.normalizedSize.width, height: gl.graph.normalizedSize.height, mergeThreshold: gl.mergeThreshold, supervisionConstraints: supConstraints });
+  var nw = gl.graph.normalizedSize.width, nh = gl.graph.normalizedSize.height;
+  gl.groupedGraph = _wfg2.computeGroupedGraph(partResult, { width: nw, height: nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: supConstraints });
+  // Build fused label map for grouped partition-style rendering
+  if(_wfg2.buildGroupedLabelMap && gl.groupedGraph){
+    var fused = _wfg2.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
+    gl.groupedLabelMap = fused ? fused.groupedLabelMap : null;
+    gl.groupedBoundaries = (fused && _wfg2.computeSharedBoundaries) ? _wfg2.computeSharedBoundaries(fused.groupedLabelMap, nw, nh) : null;
+  }
 }
 
 function graphLearningUpdateGroupingInfo(){
@@ -22047,150 +22067,209 @@ paintGraphLearningOverlay = function(ctx){
   var gl = state.graphLearning;
   var viewMode = gl.viewMode || 'atomic';
 
-  // Dim base image when in "both" mode for better overlay contrast
-  if(viewMode === 'both' && ctx.canvas){
-    ctx.fillStyle = 'rgba(0,0,0,0.15)';
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-  }
-
-  // Call original overlay first
-  _origPaintOverlay(ctx);
-
   var gg = gl.groupedGraph;
-  var showGrouped = !!(document.getElementById('graph-learning-show-grouped-overlay') || {}).checked;
+  var showDebugBoxes = !!(document.getElementById('graph-learning-show-grouped-overlay') || {}).checked;
   var showScores = !!(document.getElementById('graph-learning-show-merge-scores') || {}).checked;
   var nodes = gl.graph?.nodes || [];
   var nodeById = {};
   for(var ni = 0; ni < nodes.length; ni++) nodeById[nodes[ni].id] = nodes[ni];
+  var nSize = gl.graph?.normalizedSize || {};
+  var cpW = nSize.width || 0, cpH = nSize.height || 0;
 
-  // ── Grouped structure overlay ──
-  if(gg && showGrouped && (viewMode === 'grouped' || viewMode === 'both')){
-    var gHues = [20, 160, 280, 60, 200, 340, 100, 240, 0, 140, 300, 80, 220];
-    for(var gi = 0; gi < gg.groups.length; gi++){
-      var group = gg.groups[gi];
-      if(group.isSingleton && viewMode !== 'grouped') continue;
-      var hue = gHues[gi % gHues.length];
-      var b = group.bbox;
-      // Fill the group bounding box with visible tint
-      ctx.fillStyle = 'hsla(' + hue + ',65%,50%,0.18)';
-      ctx.fillRect(b.x, b.y, b.w, b.h);
-      // Dual-stroke group boundary: dark outer + colored inner dashed
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.lineWidth = 5.5;
-      ctx.setLineDash([10, 5]);
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
-      ctx.strokeStyle = 'hsla(' + hue + ',80%,55%,0.95)';
-      ctx.lineWidth = 3.5;
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
-      ctx.setLineDash([]);
-      // Label with background pill
-      var gLabel = 'G' + gi + ' (' + group.atomicMemberCount + ')';
-      var gFontSize = 13;
-      ctx.font = 'bold ' + gFontSize + 'px IBM Plex Mono, monospace';
-      var gTm = ctx.measureText(gLabel);
-      var gPillW = gTm.width + 10;
-      var gPillH = gFontSize + 6;
-      var gPillX = b.x + 3, gPillY = b.y - gPillH - 3;
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.beginPath();
-      _glRoundRectPath(ctx, gPillX, gPillY, gPillW, gPillH, 3);
-      ctx.fill();
-      ctx.fillStyle = 'hsla(' + hue + ',80%,75%,1.0)';
-      ctx.fillText(gLabel, gPillX + 5, gPillY + gPillH - 4);
+  // ═══ Grouped / Corrected view: render fused regions in partition style ═══
+  if((viewMode === 'grouped' || viewMode === 'both') && gl.groupedLabelMap && gg && cpW > 0 && cpH > 0){
+
+    // In "both" mode, draw the raw partition first (via original overlay), then the grouped on top
+    if(viewMode === 'both'){
+      // Draw raw partition first at reduced opacity (original overlay handles this)
+      _origPaintOverlay(ctx);
+      // Dim the raw partition layer
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     }
 
-    // Draw grouped adjacency edges
-    for(var ge = 0; ge < gg.groupedEdges.length; ge++){
-      var gEdge = gg.groupedEdges[ge];
-      var gA = null, gB = null;
-      for(var ggi = 0; ggi < gg.groups.length; ggi++){
-        if(gg.groups[ggi].id === gEdge.from) gA = gg.groups[ggi];
-        if(gg.groups[ggi].id === gEdge.to) gB = gg.groups[ggi];
+    // 20 maximally-separated high-saturation colors (same palette as raw partition)
+    var cpPalette = [
+      [230,  25,  75], [ 60, 180,  75], [255, 225,  25], [  0, 130, 200],
+      [245, 130,  48], [145,  30, 180], [ 70, 240, 240], [240,  50, 230],
+      [210, 245,  60], [250, 190, 212], [  0, 128, 128], [220, 190, 255],
+      [170, 110,  40], [255, 250, 200], [128,   0,   0], [170, 255, 195],
+      [128, 128,   0], [255, 215, 180], [  0,   0, 128], [128, 128, 128]
+    ];
+
+    var gLblMap = gl.groupedLabelMap;
+    var gBndMap = gl.groupedBoundaries;
+
+    // Build fused partition image on a temp canvas, then composite onto main
+    var _fusedTmp = document.createElement('canvas');
+    _fusedTmp.width = cpW; _fusedTmp.height = cpH;
+    var _fusedCtx = _fusedTmp.getContext('2d');
+    var cpImg = _fusedCtx.createImageData(cpW, cpH);
+    var cpD = cpImg.data;
+    for(var cpi = 0, cpj = 0; cpi < gLblMap.length; cpi++, cpj += 4){
+      var cpLbl = gLblMap[cpi];
+      if(cpLbl < 0) continue;
+      var cpCol = cpPalette[cpLbl % cpPalette.length];
+      cpD[cpj]     = cpCol[0];
+      cpD[cpj + 1] = cpCol[1];
+      cpD[cpj + 2] = cpCol[2];
+      cpD[cpj + 3] = 160;
+    }
+
+    // Thick boundaries (only between different groups) — dark lines
+    if(gBndMap){
+      var cpBoundary = new Uint8Array(gLblMap.length);
+      for(var byi = 0; byi < cpH; byi++){
+        for(var bxi = 0; bxi < cpW; bxi++){
+          var bIdx = byi * cpW + bxi;
+          if(gBndMap[bIdx]){
+            for(var dy = -1; dy <= 1; dy++){
+              for(var dx = -1; dx <= 1; dx++){
+                var nx = bxi + dx, ny = byi + dy;
+                if(nx >= 0 && nx < cpW && ny >= 0 && ny < cpH){
+                  cpBoundary[ny * cpW + nx] = 1;
+                }
+              }
+            }
+          }
+        }
       }
-      if(!gA || !gB) continue;
-      ctx.strokeStyle = 'rgba(120,50,220,0.8)';
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([6, 4]);
+      for(var bi = 0, bj = 0; bi < cpBoundary.length; bi++, bj += 4){
+        if(cpBoundary[bi]){
+          cpD[bj] = 20; cpD[bj + 1] = 20; cpD[bj + 2] = 30; cpD[bj + 3] = 220;
+        }
+      }
+    }
+
+    _fusedCtx.putImageData(cpImg, 0, 0);
+    ctx.drawImage(_fusedTmp, 0, 0);
+
+    // Pass 3: Group labels — one label per group, centered
+    ctx.save();
+    var gFontSize = Math.max(11, Math.min(16, Math.round(Math.min(cpW, cpH) / 40)));
+    ctx.font = 'bold ' + gFontSize + 'px IBM Plex Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for(var gi = 0; gi < gg.groups.length; gi++){
+      var group = gg.groups[gi];
+      var gcx = group.center?.x || 0, gcy = group.center?.y || 0;
+      var gLabelText = String(gi + 1);
+      var gTm = ctx.measureText(gLabelText);
+      var gPillW = gTm.width + 10;
+      var gPillH = gFontSize + 6;
+      ctx.fillStyle = 'rgba(10, 10, 20, 0.82)';
       ctx.beginPath();
-      ctx.moveTo(gA.center.x, gA.center.y);
-      ctx.lineTo(gB.center.x, gB.center.y);
-      ctx.stroke();
+      _glRoundRectPath(ctx, gcx - gPillW / 2, gcy - gPillH / 2, gPillW, gPillH, 4);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(gLabelText, gcx, gcy + 1);
+    }
+    ctx.restore();
+
+  } else {
+    // Raw partition mode (atomic): call original overlay as-is
+    _origPaintOverlay(ctx);
+  }
+
+  // ── Region selection highlight (composited on top) ──
+  if(gl.selectedRegions && gl.selectedRegions.size > 0 && gl.graph?.artifacts?.partitionLabelMap && cpW > 0 && cpH > 0){
+    var selLblMap = gl.graph.artifacts.partitionLabelMap;
+    var selPids = new Set();
+    for(var sni = 0; sni < nodes.length; sni++){
+      if(gl.selectedRegions.has(nodes[sni].id)){
+        selPids.add(nodes[sni].partitionId);
+      }
+    }
+    if(selPids.size > 0){
+      // Use a temp canvas so putImageData doesn't destroy existing overlay
+      var _selTmp = document.createElement('canvas');
+      _selTmp.width = cpW; _selTmp.height = cpH;
+      var _selCtx = _selTmp.getContext('2d');
+      var selImg = _selCtx.createImageData(cpW, cpH);
+      var selD = selImg.data;
+      for(var si = 0, sj = 0; si < selLblMap.length; si++, sj += 4){
+        if(selPids.has(selLblMap[si])){
+          selD[sj] = 0; selD[sj + 1] = 200; selD[sj + 2] = 255; selD[sj + 3] = 80;
+        }
+      }
+      // Border around selected regions (dilated 2px)
+      for(var sy2 = 0; sy2 < cpH; sy2++){
+        for(var sx2 = 0; sx2 < cpW; sx2++){
+          var si2 = sy2 * cpW + sx2;
+          if(!selPids.has(selLblMap[si2])) continue;
+          var isBorder = false;
+          if(sx2 > 0 && !selPids.has(selLblMap[si2 - 1])) isBorder = true;
+          else if(sx2 < cpW - 1 && !selPids.has(selLblMap[si2 + 1])) isBorder = true;
+          else if(sy2 > 0 && !selPids.has(selLblMap[si2 - cpW])) isBorder = true;
+          else if(sy2 < cpH - 1 && !selPids.has(selLblMap[si2 + cpW])) isBorder = true;
+          if(isBorder){
+            for(var bdy = -2; bdy <= 2; bdy++){
+              for(var bdx = -2; bdx <= 2; bdx++){
+                var bnx = sx2 + bdx, bny = sy2 + bdy;
+                if(bnx >= 0 && bnx < cpW && bny >= 0 && bny < cpH){
+                  var bni = (bny * cpW + bnx) * 4;
+                  selD[bni] = 0; selD[bni + 1] = 220; selD[bni + 2] = 255; selD[bni + 3] = 200;
+                }
+              }
+            }
+          }
+        }
+      }
+      _selCtx.putImageData(selImg, 0, 0);
+      ctx.drawImage(_selTmp, 0, 0);
+    }
+  }
+
+  // ── Advanced Debug: group bounding boxes (behind toggle) ──
+  if(gg && showDebugBoxes && (viewMode === 'grouped' || viewMode === 'both')){
+    var gHues = [20, 160, 280, 60, 200, 340, 100, 240, 0, 140, 300, 80, 220];
+    for(var dgi = 0; dgi < gg.groups.length; dgi++){
+      var dGroup = gg.groups[dgi];
+      if(dGroup.isSingleton) continue;
+      var dHue = gHues[dgi % gHues.length];
+      var db = dGroup.bbox;
+      ctx.strokeStyle = 'hsla(' + dHue + ',80%,55%,0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(db.x, db.y, db.w, db.h);
       ctx.setLineDash([]);
     }
   }
 
-  // ── Merge scores on boundary edges (with background pill for legibility) ──
+  // ── Advanced Debug: merge scores ──
   if(gg && showScores && gg.boundaryScores){
     var msFontSize = 12;
     ctx.font = 'bold ' + msFontSize + 'px IBM Plex Mono, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for(var si = 0; si < gg.boundaryScores.length; si++){
-      var bs = gg.boundaryScores[si];
-      var nA = nodeById[bs.nodeIdA], nB = nodeById[bs.nodeIdB];
-      if(!nA || !nB) continue;
-      var mx = ((nA.center?.x || 0) + (nB.center?.x || 0)) / 2;
-      var my = ((nA.center?.y || 0) + (nB.center?.y || 0)) / 2;
-      var scorePct = (bs.score * 100).toFixed(0);
-      var isMerge = bs.score >= gl.mergeThreshold;
-      // Background pill
-      var msTm = ctx.measureText(scorePct);
-      var msPillW = msTm.width + 10;
-      var msPillH = msFontSize + 6;
-      ctx.fillStyle = isMerge ? 'rgba(20,100,20,0.85)' : 'rgba(160,30,30,0.85)';
+    for(var dsi = 0; dsi < gg.boundaryScores.length; dsi++){
+      var dbs = gg.boundaryScores[dsi];
+      var dnA = nodeById[dbs.nodeIdA], dnB = nodeById[dbs.nodeIdB];
+      if(!dnA || !dnB) continue;
+      var dmx = ((dnA.center?.x || 0) + (dnB.center?.x || 0)) / 2;
+      var dmy = ((dnA.center?.y || 0) + (dnB.center?.y || 0)) / 2;
+      var dScorePct = (dbs.score * 100).toFixed(0);
+      var dIsMerge = dbs.score >= gl.mergeThreshold;
+      var dTm = ctx.measureText(dScorePct);
+      var dPillW = dTm.width + 10;
+      var dPillH = msFontSize + 6;
+      ctx.fillStyle = dIsMerge ? 'rgba(20,100,20,0.85)' : 'rgba(160,30,30,0.85)';
       ctx.beginPath();
-      _glRoundRectPath(ctx, mx - msPillW / 2, my - msPillH / 2, msPillW, msPillH, 3);
+      _glRoundRectPath(ctx, dmx - dPillW / 2, dmy - dPillH / 2, dPillW, dPillH, 3);
       ctx.fill();
-      // Border
-      ctx.strokeStyle = isMerge ? 'rgba(80,200,80,0.9)' : 'rgba(255,80,80,0.9)';
+      ctx.strokeStyle = dIsMerge ? 'rgba(80,200,80,0.9)' : 'rgba(255,80,80,0.9)';
       ctx.lineWidth = 1.2;
       ctx.stroke();
-      // Text
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(scorePct, mx, my + 1);
+      ctx.fillText(dScorePct, dmx, dmy + 1);
     }
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
   }
 
-  // ── Supervision: highlight selected boundary ──
-  if(gl.selectedBoundary && gl.supervisionMode === 'boundary'){
-    var sb = gl.selectedBoundary;
-    var sbA = nodeById[sb.nodeIdA], sbB = nodeById[sb.nodeIdB];
-    if(sbA && sbB){
-      var sbMx = ((sbA.center?.x || 0) + (sbB.center?.x || 0)) / 2;
-      var sbMy = ((sbA.center?.y || 0) + (sbB.center?.y || 0)) / 2;
-      // Outer glow ring
-      ctx.beginPath();
-      ctx.arc(sbMx, sbMy, 14, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,235,59,0.25)';
-      ctx.fill();
-      // Inner highlight circle
-      ctx.beginPath();
-      ctx.arc(sbMx, sbMy, 10, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,235,59,0.7)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255,140,0,1.0)';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-      // Score label with background pill
-      var sbScoreText = 'score=' + (sb.score || 0).toFixed(2);
-      ctx.font = 'bold 12px IBM Plex Mono, monospace';
-      var sbTm = ctx.measureText(sbScoreText);
-      var sbPW = sbTm.width + 8, sbPH = 18;
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      ctx.beginPath();
-      _glRoundRectPath(ctx, sbMx + 14, sbMy - sbPH / 2, sbPW, sbPH, 3);
-      ctx.fill();
-      ctx.fillStyle = '#FFE082';
-      ctx.fillText(sbScoreText, sbMx + 18, sbMy + 5);
-    }
-  }
-
-  // ── Supervision: draw labeled boundaries ──
-  if(_groupingSupervision && gl.supervisionSessionId){
+  // ── Advanced Debug: supervision boundary labels (M/K markers) ──
+  if(gl.supervisionMode === 'boundary' && _groupingSupervision && gl.supervisionSessionId){
     var labels = _groupingSupervision.getBoundaryLabelsForSession(gl.supervisionSessionId);
-    // Get last label per pair
     var pairLabels = {};
     for(var li2 = 0; li2 < labels.length; li2++){
       var lbl = labels[li2];
@@ -22203,67 +22282,47 @@ paintGraphLearningOverlay = function(ctx){
       if(!plA || !plB) continue;
       var plMx = ((plA.center?.x || 0) + (plB.center?.x || 0)) / 2;
       var plMy = ((plA.center?.y || 0) + (plB.center?.y || 0)) / 2;
-      if(pl.label === 'merge'){
-        // Dark outline ring
-        ctx.beginPath();
-        ctx.arc(plMx, plMy, 12, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fill();
-        // Green filled circle
-        ctx.beginPath();
-        ctx.arc(plMx, plMy, 10, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(30,140,40,0.92)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(150,255,150,0.8)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        // Large bold M
-        ctx.font = 'bold 14px IBM Plex Mono, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText('M', plMx, plMy + 1);
-        ctx.textAlign = 'start';
-        ctx.textBaseline = 'alphabetic';
-      } else {
-        // Dark outline ring
-        ctx.beginPath();
-        ctx.arc(plMx, plMy, 12, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fill();
-        // Red filled circle
-        ctx.beginPath();
-        ctx.arc(plMx, plMy, 10, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(200,35,35,0.92)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,150,150,0.8)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        // Large bold K
-        ctx.font = 'bold 14px IBM Plex Mono, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText('K', plMx, plMy + 1);
-        ctx.textAlign = 'start';
-        ctx.textBaseline = 'alphabetic';
-      }
+      ctx.beginPath();
+      ctx.arc(plMx, plMy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = pl.label === 'merge' ? 'rgba(30,140,40,0.92)' : 'rgba(200,35,35,0.92)';
+      ctx.fill();
+      ctx.font = 'bold 14px IBM Plex Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(pl.label === 'merge' ? 'M' : 'K', plMx, plMy + 1);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
     }
   }
 
-  // ── Lasso drawing ──
+  // ── Advanced Debug: selected boundary highlight ──
+  if(gl.selectedBoundary && gl.supervisionMode === 'boundary'){
+    var sb = gl.selectedBoundary;
+    var sbA = nodeById[sb.nodeIdA], sbB = nodeById[sb.nodeIdB];
+    if(sbA && sbB){
+      var sbMx = ((sbA.center?.x || 0) + (sbB.center?.x || 0)) / 2;
+      var sbMy = ((sbA.center?.y || 0) + (sbB.center?.y || 0)) / 2;
+      ctx.beginPath();
+      ctx.arc(sbMx, sbMy, 12, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,59,0.5)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,140,0,1.0)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  // ── Advanced Debug: lasso drawing ──
   if(gl.supervisionMode === 'lasso' && gl.lassoPoints && gl.lassoPoints.length > 1){
     ctx.beginPath();
     ctx.moveTo(gl.lassoPoints[0].x, gl.lassoPoints[0].y);
     for(var lpi = 1; lpi < gl.lassoPoints.length; lpi++){
       ctx.lineTo(gl.lassoPoints[lpi].x, gl.lassoPoints[lpi].y);
     }
-    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-    ctx.lineWidth = 4;
-    ctx.setLineDash([6, 4]);
-    ctx.stroke();
     ctx.strokeStyle = 'rgba(33,150,243,0.95)';
     ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
     if(gl.lassoPoints.length > 2){
@@ -22297,6 +22356,233 @@ paintGraphLearningOverlay = function(ctx){
 renderGraphLearningAttemptHistory();
 renderGraphLearningPresetStatus();
 updateGraphLearningPresetButtons();
+
+/* ═══ Region Selection + Merge/Separate Editing Model ═══ */
+
+(function(){
+  var selectBtn = document.getElementById('graph-learning-region-select-btn');
+  var mergeBtn = document.getElementById('graph-learning-merge-selected-btn');
+  var separateBtn = document.getElementById('graph-learning-separate-selected-btn');
+  var clearSelBtn = document.getElementById('graph-learning-clear-selection-btn');
+  var selectionInfo = document.getElementById('graph-learning-selection-info');
+  var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
+
+  function updateSelectionUI(){
+    var gl = state.graphLearning;
+    var count = gl.selectedRegions ? gl.selectedRegions.size : 0;
+    if(mergeBtn) mergeBtn.disabled = count < 2;
+    if(separateBtn) separateBtn.disabled = count < 2;
+    if(clearSelBtn) clearSelBtn.disabled = count === 0;
+    if(selectionInfo){
+      if(!gl.regionSelectActive){
+        selectionInfo.textContent = 'Click "Select Regions" to begin editing';
+      } else if(count === 0){
+        selectionInfo.textContent = 'Click regions to select them';
+      } else {
+        selectionInfo.textContent = count + ' region' + (count !== 1 ? 's' : '') + ' selected';
+      }
+    }
+  }
+
+  // Toggle region select mode
+  if(selectBtn){
+    selectBtn.addEventListener('click', function(){
+      var gl = state.graphLearning;
+      gl.regionSelectActive = !gl.regionSelectActive;
+      selectBtn.style.fontWeight = gl.regionSelectActive ? '700' : '';
+      selectBtn.textContent = gl.regionSelectActive ? 'Selection Active' : 'Select Regions';
+      if(interactionCanvas){
+        interactionCanvas.style.cursor = gl.regionSelectActive ? 'pointer' : 'default';
+        interactionCanvas.style.pointerEvents = gl.regionSelectActive ? 'auto' : 'none';
+      }
+      // Also activate if a legacy supervision mode is off
+      if(gl.regionSelectActive) gl.supervisionMode = 'region_select';
+      else if(gl.supervisionMode === 'region_select') gl.supervisionMode = null;
+      updateSelectionUI();
+      renderGraphLearningViewer();
+    });
+  }
+
+  // Clear selection
+  if(clearSelBtn){
+    clearSelBtn.addEventListener('click', function(){
+      state.graphLearning.selectedRegions = new Set();
+      updateSelectionUI();
+      renderGraphLearningViewer();
+    });
+  }
+
+  // Find which atomic node a surface point falls in (via labelMap lookup)
+  function findRegionAtPoint(pt){
+    var gl = state.graphLearning;
+    if(!gl.graph?.artifacts?.partitionLabelMap || !gl.graph?.normalizedSize) return null;
+    var w = gl.graph.normalizedSize.width, h = gl.graph.normalizedSize.height;
+    var px = Math.round(pt.x), py = Math.round(pt.y);
+    if(px < 0 || py < 0 || px >= w || py >= h) return null;
+    var labelMap = gl.graph.artifacts.partitionLabelMap;
+    var pid = labelMap[py * w + px];
+    if(pid < 0) return null;
+    // Find the node with this partitionId
+    var nodes = gl.graph.nodes || [];
+    for(var i = 0; i < nodes.length; i++){
+      if(nodes[i].partitionId === pid) return nodes[i];
+    }
+    return null;
+  }
+
+  // Click on interaction canvas to select/deselect regions
+  if(interactionCanvas){
+    interactionCanvas.addEventListener('click', function(e){
+      var gl = state.graphLearning;
+      if(!gl.regionSelectActive) return;
+      var rect = interactionCanvas.getBoundingClientRect();
+      var surf = gl.normalizedSurface;
+      if(!surf) return;
+      var scaleX = surf.width / rect.width;
+      var scaleY = surf.height / rect.height;
+      var pt = { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+      var node = findRegionAtPoint(pt);
+      if(!node) return;
+      // Toggle selection
+      if(gl.selectedRegions.has(node.id)){
+        gl.selectedRegions.delete(node.id);
+      } else {
+        gl.selectedRegions.add(node.id);
+      }
+      updateSelectionUI();
+      renderGraphLearningViewer();
+    });
+  }
+
+  // Merge Selected: merge all selected regions into one group
+  if(mergeBtn){
+    mergeBtn.addEventListener('click', function(){
+      var gl = state.graphLearning;
+      if(!gl.selectedRegions || gl.selectedRegions.size < 2) return;
+      var selectedIds = Array.from(gl.selectedRegions);
+      var selectedPids = [];
+      var nodes = gl.graph?.nodes || [];
+      var nodeById = {};
+      for(var i = 0; i < nodes.length; i++) nodeById[nodes[i].id] = nodes[i];
+      for(var j = 0; j < selectedIds.length; j++){
+        var n = nodeById[selectedIds[j]];
+        if(n) selectedPids.push(n.partitionId);
+      }
+      // Find adjacency pairs among selected
+      var selSet = new Set(selectedIds);
+      var adjPairs = [];
+      var edges = gl.graph?.edges || [];
+      for(var ei = 0; ei < edges.length; ei++){
+        if(selSet.has(edges[ei].from) && selSet.has(edges[ei].to)){
+          adjPairs.push({ from: edges[ei].from, to: edges[ei].to });
+        }
+      }
+      // Register supervision session if needed
+      if(_groupingSupervision && !gl.supervisionSessionId){
+        gl.supervisionSessionId = _groupingSupervision.registerSession({
+          fileId: gl.fileId,
+          fileName: gl.fileName,
+          engineParams: gl.params,
+          surfaceSize: gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height } : {},
+          atomicRegionCount: nodes.length,
+          pipelineMode: gl.graph?.pipelineMode || 'partition'
+        });
+      }
+      // Store the region merge edit
+      if(_groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addRegionMerge({
+          sessionId: gl.supervisionSessionId,
+          regionNodeIds: selectedIds,
+          regionPartitionIds: selectedPids,
+          adjacencyPairs: adjPairs,
+          engineContext: { mergeThreshold: gl.mergeThreshold, params: gl.params }
+        });
+      }
+      // Recompute grouped graph (the new boundary labels from the merge will take effect)
+      graphLearningRecomputeGroupedGraph();
+      graphLearningUpdateGroupingInfo();
+      // Clear selection after action
+      gl.selectedRegions = new Set();
+      updateSelectionUI();
+      renderGraphLearningViewer();
+      graphLearningStatus('Merged ' + selectedIds.length + ' regions. Groups: ' + (gl.groupedGraph?.groups?.length || '?'));
+    });
+  }
+
+  // Separate Selected: mark selected regions as should-not-be-grouped
+  if(separateBtn){
+    separateBtn.addEventListener('click', function(){
+      var gl = state.graphLearning;
+      if(!gl.selectedRegions || gl.selectedRegions.size < 2) return;
+      var selectedIds = Array.from(gl.selectedRegions);
+      var selectedPids = [];
+      var nodes = gl.graph?.nodes || [];
+      var nodeById = {};
+      for(var i = 0; i < nodes.length; i++) nodeById[nodes[i].id] = nodes[i];
+      for(var j = 0; j < selectedIds.length; j++){
+        var n = nodeById[selectedIds[j]];
+        if(n) selectedPids.push(n.partitionId);
+      }
+      var selSet = new Set(selectedIds);
+      var adjPairs = [];
+      var edges = gl.graph?.edges || [];
+      for(var ei = 0; ei < edges.length; ei++){
+        if(selSet.has(edges[ei].from) && selSet.has(edges[ei].to)){
+          adjPairs.push({ from: edges[ei].from, to: edges[ei].to });
+        }
+      }
+      if(_groupingSupervision && !gl.supervisionSessionId){
+        gl.supervisionSessionId = _groupingSupervision.registerSession({
+          fileId: gl.fileId,
+          fileName: gl.fileName,
+          engineParams: gl.params,
+          surfaceSize: gl.normalizedSurface ? { width: gl.normalizedSurface.width, height: gl.normalizedSurface.height } : {},
+          atomicRegionCount: nodes.length,
+          pipelineMode: gl.graph?.pipelineMode || 'partition'
+        });
+      }
+      if(_groupingSupervision && gl.supervisionSessionId){
+        _groupingSupervision.addRegionSeparation({
+          sessionId: gl.supervisionSessionId,
+          regionNodeIds: selectedIds,
+          regionPartitionIds: selectedPids,
+          adjacencyPairs: adjPairs,
+          engineContext: { mergeThreshold: gl.mergeThreshold, params: gl.params }
+        });
+      }
+      graphLearningRecomputeGroupedGraph();
+      graphLearningUpdateGroupingInfo();
+      gl.selectedRegions = new Set();
+      updateSelectionUI();
+      renderGraphLearningViewer();
+      graphLearningStatus('Separated ' + selectedIds.length + ' regions. Groups: ' + (gl.groupedGraph?.groups?.length || '?'));
+    });
+  }
+
+  // Enable region editing buttons when a graph is generated
+  var _origRunGen2 = graphLearningRunGeneration;
+  graphLearningRunGeneration = function(opts){
+    _origRunGen2(opts);
+    if(selectBtn) selectBtn.disabled = false;
+    // Clear selection on new generation
+    state.graphLearning.selectedRegions = new Set();
+    updateSelectionUI();
+  };
+
+  // Update grouping info bar to include region edit count
+  var _origUpdateGroupInfo = graphLearningUpdateGroupingInfo;
+  graphLearningUpdateGroupingInfo = function(){
+    _origUpdateGroupInfo();
+    var gl = state.graphLearning;
+    var reCountEl = document.getElementById('graph-learning-region-edit-count');
+    if(reCountEl && _groupingSupervision && gl.supervisionSessionId){
+      var edits = _groupingSupervision.getRegionEditsForSession(gl.supervisionSessionId);
+      reCountEl.textContent = edits.length;
+    } else if(reCountEl){
+      reCountEl.textContent = '0';
+    }
+  };
+})();
 
 /* ═══ WFG2 Slider-Based Parameter Controls ═══ */
 

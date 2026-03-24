@@ -1935,5 +1935,147 @@
     });
   }
 
-  return { DEFAULT_PARAMS, FEEDBACK_TAGS, PIPELINE_MODES, copyParams, normalizeVisualInput, generateFeatureGraph, computePartition, computeGroupedGraph, computeBoundaryMergeScore, applySupervisionToScores, adaptParametersFromFeedback, createAttemptStore, createPresetStore };
+  /**
+   * Build a fused label map from a grouped graph result.
+   * Remaps the atomic partition labelMap so that all atomic regions belonging
+   * to the same group share one label (the group index).  This produces a
+   * pixel-level map suitable for rendering grouped regions in the same
+   * partition-style visualization (solid fills, merged contours, etc.).
+   *
+   * @param {Int32Array} atomicLabelMap - original partition labelMap (pixel → partitionId)
+   * @param {object} groupedGraph - result from computeGroupedGraph()
+   * @param {Array} atomicNodes - the atomic partition nodes (need partitionId per node)
+   * @returns {{ groupedLabelMap: Int32Array, groupCount: number, groupColors: Array }}
+   */
+  function buildGroupedLabelMap(atomicLabelMap, groupedGraph, atomicNodes){
+    if(!atomicLabelMap || !groupedGraph?.membership || !atomicNodes) return null;
+    const membership = groupedGraph.membership; // nodeId → groupId
+    const groups = groupedGraph.groups || [];
+
+    // Build partitionId → groupIndex mapping
+    const pidToGroupIdx = new Map();
+    const groupIdToIdx = new Map();
+    for(let gi = 0; gi < groups.length; gi++){
+      groupIdToIdx.set(groups[gi].id, gi);
+    }
+    for(const node of atomicNodes){
+      const groupId = membership[node.id];
+      if(groupId !== undefined){
+        const gIdx = groupIdToIdx.get(groupId);
+        if(gIdx !== undefined) pidToGroupIdx.set(node.partitionId, gIdx);
+      }
+    }
+
+    // Remap the label map
+    const out = new Int32Array(atomicLabelMap.length);
+    for(let i = 0; i < atomicLabelMap.length; i++){
+      const pid = atomicLabelMap[i];
+      const gIdx = pidToGroupIdx.get(pid);
+      out[i] = gIdx !== undefined ? gIdx : pid;
+    }
+
+    // Build shared boundaries for the grouped label map (boundaries only between different groups)
+    const w = Math.round(Math.sqrt(atomicLabelMap.length)); // approximate; caller should pass width
+    // We return the map; boundary computation is done by the caller with correct width/height
+
+    return { groupedLabelMap: out, groupCount: groups.length };
+  }
+
+  /**
+   * Compute shared boundaries for a label map.
+   * Returns a Uint8Array where 1 = pixel is on a boundary between two different labels.
+   * @param {Int32Array} labelMap
+   * @param {number} w - width
+   * @param {number} h - height
+   * @returns {Uint8Array}
+   */
+  function computeSharedBoundaries(labelMap, w, h){
+    const n = w * h;
+    const boundaries = new Uint8Array(n);
+    for(let y = 0; y < h; y++){
+      for(let x = 0; x < w; x++){
+        const i = y * w + x;
+        const ml = labelMap[i];
+        if(x < w - 1 && labelMap[i + 1] !== ml) boundaries[i] = 1;
+        else if(y < h - 1 && labelMap[i + w] !== ml) boundaries[i] = 1;
+      }
+    }
+    return boundaries;
+  }
+
+  /**
+   * Compute the outer contour (convex hull) for each group in a grouped label map.
+   * Returns an array of { groupIndex, contour: [{x,y}], center: {x,y}, bbox, area, atomicMembers }.
+   *
+   * @param {Int32Array} groupedLabelMap
+   * @param {number} w - width
+   * @param {number} h - height
+   * @param {object} groupedGraph - from computeGroupedGraph()
+   * @param {Array} atomicNodes
+   * @returns {Array}
+   */
+  function computeGroupedContours(groupedLabelMap, w, h, groupedGraph, atomicNodes){
+    if(!groupedLabelMap || !groupedGraph?.groups) return [];
+    const groups = groupedGraph.groups;
+    const boundaries = computeSharedBoundaries(groupedLabelMap, w, h);
+
+    // For each group, collect boundary points and compute stats
+    const result = [];
+    for(let gi = 0; gi < groups.length; gi++){
+      const grp = groups[gi];
+      const borderPoints = [];
+      let area = 0, sumX = 0, sumY = 0;
+      let x0 = w, y0 = h, x1 = 0, y1 = 0;
+
+      for(let y = 0; y < h; y++){
+        for(let x = 0; x < w; x++){
+          const i = y * w + x;
+          if(groupedLabelMap[i] !== gi) continue;
+          area++;
+          sumX += x;
+          sumY += y;
+          if(x < x0) x0 = x;
+          if(y < y0) y0 = y;
+          if(x > x1) x1 = x;
+          if(y > y1) y1 = y;
+          // Boundary: adjacent to a different group or image edge
+          if(boundaries[i] || x === 0 || y === 0 || x === w - 1 || y === h - 1){
+            borderPoints.push([x, y]);
+          }
+        }
+      }
+
+      if(area === 0) continue;
+
+      // Subsample border points for hull computation
+      const maxPts = 600;
+      let pts = borderPoints;
+      if(pts.length > maxPts){
+        const step = Math.ceil(pts.length / maxPts);
+        const sampled = [];
+        for(let si = 0; si < pts.length; si += step) sampled.push(pts[si]);
+        pts = sampled;
+      }
+
+      const contourPts = pts.length >= 3
+        ? hull(pts).map(function(pt){ return { x: pt[0], y: pt[1] }; })
+        : [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+
+      result.push({
+        groupIndex: gi,
+        id: grp.id,
+        contour: contourPts,
+        center: { x: sumX / area, y: sumY / area },
+        bbox: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 },
+        area: area,
+        atomicMembers: grp.atomicMembers || [],
+        atomicMemberCount: grp.atomicMemberCount || 1,
+        isSingleton: grp.isSingleton || false
+      });
+    }
+
+    return result;
+  }
+
+  return { DEFAULT_PARAMS, FEEDBACK_TAGS, PIPELINE_MODES, copyParams, normalizeVisualInput, generateFeatureGraph, computePartition, computeGroupedGraph, computeBoundaryMergeScore, applySupervisionToScores, buildGroupedLabelMap, computeSharedBoundaries, computeGroupedContours, adaptParametersFromFeedback, createAttemptStore, createPresetStore };
 });
