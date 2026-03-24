@@ -21186,7 +21186,7 @@ function paintGraphLearningOverlay(ctx){
       var ln = nodes[li];
       var lx = ln.center?.x || 0;
       var ly = ln.center?.y || 0;
-      var labelText = String(li + 1);
+      var labelText = 'P' + String(ln.partitionId);
       var tm = ctx.measureText(labelText);
       var pillW = tm.width + 10;
       var pillH = cpFontSize + 6;
@@ -21774,6 +21774,16 @@ function graphLearningRecomputeGroupedGraph(){
     gl.groupedLabelMap = fused ? fused.groupedLabelMap : null;
     gl.groupedBoundaries = (fused && _wfg2.computeSharedBoundaries) ? _wfg2.computeSharedBoundaries(fused.groupedLabelMap, nw, nh) : null;
   }
+  if(typeof gl.refreshSelectionInspector === 'function') gl.refreshSelectionInspector();
+}
+
+function graphLearningDisplayGroupId(groupId, groupedGraph){
+  if(!groupId) return '—';
+  var groups = groupedGraph?.groups || [];
+  for(var gi = 0; gi < groups.length; gi++){
+    if(groups[gi].id === groupId) return 'G' + String(gi + 1);
+  }
+  return groupId;
 }
 
 function graphLearningUpdateGroupingInfo(){
@@ -22153,7 +22163,7 @@ paintGraphLearningOverlay = function(ctx){
     for(var gi = 0; gi < gg.groups.length; gi++){
       var group = gg.groups[gi];
       var gcx = group.center?.x || 0, gcy = group.center?.y || 0;
-      var gLabelText = String(gi + 1);
+      var gLabelText = 'G' + String(gi + 1);
       var gTm = ctx.measureText(gLabelText);
       var gPillW = gTm.width + 10;
       var gPillH = gFontSize + 6;
@@ -22365,7 +22375,40 @@ updateGraphLearningPresetButtons();
   var separateBtn = document.getElementById('graph-learning-separate-selected-btn');
   var clearSelBtn = document.getElementById('graph-learning-clear-selection-btn');
   var selectionInfo = document.getElementById('graph-learning-selection-info');
+  var selectionAtomicIds = document.getElementById('graph-learning-selection-atomic-ids');
+  var selectionGroupIds = document.getElementById('graph-learning-selection-group-ids');
+  var selectionGroupMembers = document.getElementById('graph-learning-selection-group-members');
+  var selectionGroupSize = document.getElementById('graph-learning-selection-group-size');
+  var selectionType = document.getElementById('graph-learning-selection-type');
+  var selectionActionPreview = document.getElementById('graph-learning-selection-action-preview');
   var interactionCanvas = document.getElementById('graph-learning-interaction-canvas');
+
+  function formatPidList(values){
+    if(!values || values.length === 0) return '—';
+    return '[' + values.join(', ') + ']';
+  }
+
+  function buildGroupingInspectorData(gl){
+    var nodes = gl.graph?.nodes || [];
+    var gg = gl.groupedGraph;
+    var nodeById = {};
+    for(var ni = 0; ni < nodes.length; ni++) nodeById[nodes[ni].id] = nodes[ni];
+    var groupIndexById = {};
+    var groupPidMembersById = {};
+    if(gg?.groups){
+      for(var gi = 0; gi < gg.groups.length; gi++){
+        var grp = gg.groups[gi];
+        groupIndexById[grp.id] = gi;
+        var pids = [];
+        for(var mi = 0; mi < (grp.atomicMembers || []).length; mi++){
+          var mNode = nodeById[grp.atomicMembers[mi]];
+          if(mNode && mNode.partitionId !== undefined) pids.push(mNode.partitionId);
+        }
+        groupPidMembersById[grp.id] = pids.sort(function(a, b){ return a - b; });
+      }
+    }
+    return { nodeById: nodeById, groupIndexById: groupIndexById, groupPidMembersById: groupPidMembersById };
+  }
 
   function updateSelectionUI(){
     var gl = state.graphLearning;
@@ -22382,6 +22425,62 @@ updateGraphLearningPresetButtons();
         selectionInfo.textContent = count + ' region' + (count !== 1 ? 's' : '') + ' selected';
       }
     }
+
+    var inspector = buildGroupingInspectorData(gl);
+    var selectedNodeIds = gl.selectedRegions ? Array.from(gl.selectedRegions) : [];
+    var selectedPids = [];
+    var selectedGroupIds = new Set();
+    for(var i = 0; i < selectedNodeIds.length; i++){
+      var node = inspector.nodeById[selectedNodeIds[i]];
+      if(!node) continue;
+      selectedPids.push(node.partitionId);
+      var gId = gl.groupedGraph?.membership ? gl.groupedGraph.membership[node.id] : null;
+      if(gId) selectedGroupIds.add(gId);
+    }
+    selectedPids.sort(function(a, b){ return a - b; });
+    var selectedGroupList = Array.from(selectedGroupIds);
+    var groupLabels = selectedGroupList.map(function(gid){
+      var idx = inspector.groupIndexById[gid];
+      return idx !== undefined ? 'G' + String(idx + 1) : gid;
+    });
+
+    var memberSummaries = [];
+    var uniqueGroupSizes = new Set();
+    for(var gsi = 0; gsi < groupLabels.length; gsi++){
+      var rawGroupId = selectedGroupList[gsi];
+      var gm = inspector.groupPidMembersById[rawGroupId] || [];
+      uniqueGroupSizes.add(gm.length);
+      memberSummaries.push(groupLabels[gsi] + ': ' + formatPidList(gm));
+    }
+
+    var selType = 'none';
+    if(selectedPids.length === 1){
+      if(groupLabels.length === 1){
+        var oneRaw = selectedGroupList[0];
+        var oneMembers = inspector.groupPidMembersById[oneRaw] || [];
+        selType = oneMembers.length > 1 ? 'single member of multi-region group' : 'single atomic region (singleton group)';
+      } else {
+        selType = 'single atomic region';
+      }
+    } else if(selectedPids.length > 1){
+      selType = groupLabels.length <= 1 ? 'multiple atomic regions from same group' : 'multiple atomic regions from different groups';
+    }
+
+    var preview = 'Select one or more atomic regions.';
+    if(selectedPids.length === 1){
+      preview = 'Merge Selected needs at least 2 selected atomic regions.';
+    } else if(selectedPids.length > 1){
+      preview = groupLabels.length <= 1
+        ? 'Separate Selected will add keep constraints between adjacent selected atomic regions.'
+        : 'Merge Selected will add merge constraints across adjacent selected atomic regions.';
+    }
+
+    if(selectionAtomicIds) selectionAtomicIds.textContent = formatPidList(selectedPids);
+    if(selectionGroupIds) selectionGroupIds.textContent = groupLabels.length ? groupLabels.join(', ') : '—';
+    if(selectionGroupMembers) selectionGroupMembers.textContent = memberSummaries.length ? memberSummaries.join(' | ') : '—';
+    if(selectionGroupSize) selectionGroupSize.textContent = uniqueGroupSizes.size === 1 && uniqueGroupSizes.size > 0 ? String(Array.from(uniqueGroupSizes)[0]) : (uniqueGroupSizes.size > 1 ? Array.from(uniqueGroupSizes).join(', ') : '—');
+    if(selectionType) selectionType.textContent = selType;
+    if(selectionActionPreview) selectionActionPreview.textContent = preview;
   }
 
   // Toggle region select mode
@@ -22505,7 +22604,19 @@ updateGraphLearningPresetButtons();
       gl.selectedRegions = new Set();
       updateSelectionUI();
       renderGraphLearningViewer();
-      graphLearningStatus('Merged ' + selectedIds.length + ' regions. Groups: ' + (gl.groupedGraph?.groups?.length || '?'));
+      var mergedGroupLabels = new Set();
+      var mergedPids = [];
+      var membership = gl.groupedGraph?.membership || {};
+      for(var mi = 0; mi < selectedIds.length; mi++){
+        var sid = selectedIds[mi];
+        var gid = membership[sid];
+        if(gid) mergedGroupLabels.add(graphLearningDisplayGroupId(gid, gl.groupedGraph));
+        var mn = nodeById[sid];
+        if(mn && mn.partitionId !== undefined) mergedPids.push(mn.partitionId);
+      }
+      mergedPids.sort(function(a, b){ return a - b; });
+      var mergedGroupText = Array.from(mergedGroupLabels);
+      graphLearningStatus('Created/updated ' + (mergedGroupText.length ? mergedGroupText.join(', ') : 'group(s)') + ' from atomic regions ' + formatPidList(mergedPids) + '.');
     });
   }
 
@@ -22555,7 +22666,20 @@ updateGraphLearningPresetButtons();
       gl.selectedRegions = new Set();
       updateSelectionUI();
       renderGraphLearningViewer();
-      graphLearningStatus('Separated ' + selectedIds.length + ' regions. Groups: ' + (gl.groupedGraph?.groups?.length || '?'));
+      var separatedPids = [];
+      for(var si = 0; si < selectedIds.length; si++){
+        var sn = nodeById[selectedIds[si]];
+        if(sn && sn.partitionId !== undefined) separatedPids.push(sn.partitionId);
+      }
+      separatedPids.sort(function(a, b){ return a - b; });
+      var resultingGroups = new Set();
+      var afterMembership = gl.groupedGraph?.membership || {};
+      for(var ai = 0; ai < selectedIds.length; ai++){
+        var ag = afterMembership[selectedIds[ai]];
+        if(ag) resultingGroups.add(graphLearningDisplayGroupId(ag, gl.groupedGraph));
+      }
+      var rg = Array.from(resultingGroups);
+      graphLearningStatus('Applied separation constraints to atomic regions ' + formatPidList(separatedPids) + '; resulting groups: ' + (rg.length ? rg.join(', ') : 'none') + '.');
     });
   }
 
@@ -22568,6 +22692,8 @@ updateGraphLearningPresetButtons();
     state.graphLearning.selectedRegions = new Set();
     updateSelectionUI();
   };
+
+  state.graphLearning.refreshSelectionInspector = updateSelectionUI;
 
   // Update grouping info bar to include region edit count
   var _origUpdateGroupInfo = graphLearningUpdateGroupingInfo;
