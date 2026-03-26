@@ -873,15 +873,20 @@
           </div>
         </div><!-- /learning-batch-tab -->
 
-        <!-- ═══ Graph Learning (WFG2) sub-tab ═══ -->
+        <!-- ═══ Graph Learning (WFG2 / WFG3) sub-tab ═══ -->
         <div id="learning-graph-tab" style="display:none;">
           <p class="sub" style="margin:4px 0 12px;color:var(--muted);">
-            Upload a document, preview the WFG2 graph, then click <strong>Regenerate</strong> for another interpretation
-            or <strong>Good</strong> to accept. Accepted results train the system to auto-tune WFG2 for similar documents.
+            Upload a document, preview the selected feature graph engine output, then click <strong>Regenerate</strong> for another interpretation
+            or <strong>Good</strong> to accept. Accepted results train the system to auto-tune the selected engine for similar documents.
           </p>
 
           <!-- ═══ Primary Action Bar: Upload + Feedback Buttons ═══ -->
           <div class="actions" style="gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:center;">
+            <label class="sub" for="graph-learning-engine-select" style="font-weight:600;">Engine</label>
+            <select id="graph-learning-engine-select" style="font-size:13px;padding:3px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
+              <option value="wfg2" selected>WFG2</option>
+              <option value="wfg3">WFG3</option>
+            </select>
             <label class="btn primary">
               Upload File
               <input id="graph-learning-file-input" type="file" accept="image/png,image/jpeg,application/pdf" style="display:none" />
@@ -1022,7 +1027,7 @@
           </div>
 
           <div id="graph-learning-viewer" class="panel minimal" style="margin-bottom:12px;padding:10px;">
-            <div class="sub" style="margin-bottom:8px;color:var(--muted);">WFG2 Compiled Graph — all evidence layers combined into final structural output</div>
+            <div class="sub" id="graph-learning-engine-caption" style="margin-bottom:8px;color:var(--muted);">WFG2 Compiled Graph — all evidence layers combined into final structural output</div>
             <div style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg,#fafafa);">
               <canvas id="graph-learning-base-canvas" style="display:block;border-radius:7px;"></canvas>
               <canvas id="graph-learning-overlay-canvas" style="position:absolute;left:0;top:0;pointer-events:none;"></canvas>
@@ -1034,7 +1039,7 @@
           <details id="graph-learning-advanced-params" class="panel minimal" style="margin-bottom:12px;">
             <summary>Advanced Parameters</summary>
             <p class="sub" style="margin:4px 0 12px;color:var(--muted);font-size:11px;">
-              Fine-grained WFG2 slider controls. For most training, use the Regenerate/Good flow above instead.
+              Fine-grained graph-engine slider controls. For most training, use the Regenerate/Good flow above instead.
             </p>
 
           <!-- ═══ Section 1: Core Edge Sensitivity ═══ -->
@@ -1634,6 +1639,7 @@
   <script src="engines/core/engine-registry.js"></script>
   <script src="engines/wrokitvision/learning/browser-learning-bundle.js"></script>
   <script src="engines/wrokitvision/wfg2/wfg2-engine.js?v=2.1"></script>
+  <script src="engines/wrokitvision/wfg3/wfg3-browser-engine.js?v=1"></script>
   <script src="engines/wrokitvision/learning/object-learning-engine.js"></script>
   <script src="engines/wrokitvision/learning/graph-learning-store.js"></script>
   <script src="engines/wrokitvision/learning/grouping-supervision-store.js"></script>
