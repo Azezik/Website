@@ -505,6 +505,7 @@ const els = {
   learningSessionFileCount: document.getElementById('learning-session-file-count'),
   learningSessionStarted: document.getElementById('learning-session-started'),
   graphLearningFileInput: document.getElementById('graph-learning-file-input'),
+  graphLearningEngineSelect: document.getElementById('graph-learning-engine-select'),
   graphLearningRegenerateBtn: document.getElementById('graph-learning-regenerate-btn'),
   graphLearningSavePresetBtn: document.getElementById('graph-learning-save-preset-btn'),
   graphLearningLoadPresetBtn: document.getElementById('graph-learning-load-preset-btn'),
@@ -530,6 +531,7 @@ const els = {
   graphLearningAttempts: document.getElementById('graph-learning-attempts'),
   graphLearningPresetStatus: document.getElementById('graph-learning-preset-status'),
   graphLearningViewer: document.getElementById('graph-learning-viewer'),
+  graphLearningEngineCaption: document.getElementById('graph-learning-engine-caption'),
   graphLearningBaseCanvas: document.getElementById('graph-learning-base-canvas'),
   graphLearningOverlayCanvas: document.getElementById('graph-learning-overlay-canvas'),
   objectLearningFileInput: document.getElementById('object-learning-file-input'),
@@ -1925,6 +1927,7 @@ let state = {
   },
   graphLearning: {
     active: false,
+    engineType: 'wfg2',
     sessionId: null,
     fileId: null,
     fileName: '',
@@ -20676,9 +20679,10 @@ if(els.learningNewSessionBtn){
 
 /* ====================== End Vision Learning Mode ==================== */
 
-/* ====================== Graph Learning (WFG2) ======================= */
+/* ====================== Graph Learning (WFG2 / WFG3) ======================= */
 
 const _wfg2 = window.WrokitFeatureGraph2 || null;
+const _wfg3 = window.WrokitFeatureGraph3 || null;
 const _wfg2Store = _wfg2?.createAttemptStore ? _wfg2.createAttemptStore(localStorage) : null;
 const _wfg2PresetStore = _wfg2?.createPresetStore ? _wfg2.createPresetStore(localStorage) : null;
 const _glStore = window.GraphLearningStore || null;
@@ -20689,8 +20693,32 @@ const _groupingSupervision = _gsStore?.createGroupingSupervisionStore ? _gsStore
 
 function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
 
+function getGraphLearningEngineType(){
+  var key = String(state.graphLearning?.engineType || 'wfg2').toLowerCase();
+  return key === 'wfg3' ? 'wfg3' : 'wfg2';
+}
+
+function getGraphLearningEngine(){
+  var engineType = getGraphLearningEngineType();
+  if(engineType === 'wfg3' && _wfg3) return _wfg3;
+  return _wfg2;
+}
+
+function graphLearningEngineLabel(){
+  return getGraphLearningEngineType() === 'wfg3' ? 'WFG3' : 'WFG2';
+}
+
+function syncGraphLearningEngineUI(){
+  if(els.graphLearningEngineSelect){
+    els.graphLearningEngineSelect.value = getGraphLearningEngineType();
+  }
+  if(els.graphLearningEngineCaption){
+    els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
+  }
+}
+
 function graphLearningSessionId(){
-  if(!state.graphLearning.sessionId) state.graphLearning.sessionId = 'wfg2sess-' + Date.now().toString(36);
+  if(!state.graphLearning.sessionId) state.graphLearning.sessionId = getGraphLearningEngineType() + 'sess-' + Date.now().toString(36);
   return state.graphLearning.sessionId;
 }
 
@@ -20703,7 +20731,7 @@ function renderGraphLearningPresetStatus(){
     return;
   }
   const stamp = preset.savedAt ? new Date(preset.savedAt).toLocaleString() : 'unknown time';
-  els.graphLearningPresetStatus.textContent = 'Preset: ' + (preset.name || 'WFG2 Baseline') + ' (saved ' + stamp + ')';
+  els.graphLearningPresetStatus.textContent = 'Preset: ' + (preset.name || (graphLearningEngineLabel() + ' Baseline')) + ' (saved ' + stamp + ')';
   state.graphLearning.activePreset = preset;
 }
 
@@ -20713,14 +20741,15 @@ function updateGraphLearningPresetButtons(){
 }
 
 function graphLearningSaveCurrentPreset(opts){
-  if(!_wfg2PresetStore || !_wfg2 || !state.graphLearning?.params) return null;
+  var engine = getGraphLearningEngine();
+  if(!_wfg2PresetStore || !engine || !state.graphLearning?.params) return null;
   const gl = state.graphLearning;
   const previous = _wfg2PresetStore.get();
   const saved = _wfg2PresetStore.save({
-    presetId: previous?.presetId || 'wfg2-baseline',
-    name: previous?.name || 'WFG2 Baseline',
+    presetId: previous?.presetId || (getGraphLearningEngineType() + '-baseline'),
+    name: previous?.name || (graphLearningEngineLabel() + ' Baseline'),
     createdAt: previous?.createdAt || null,
-    params: _wfg2.copyParams(gl.params),
+    params: engine.copyParams(gl.params),
     sourceAttemptId: gl.lastAttemptId || null,
     sourceResult: opts?.sourceResult || null,
     sourceFileName: gl.fileName || null
@@ -20731,10 +20760,11 @@ function graphLearningSaveCurrentPreset(opts){
 }
 
 function graphLearningLoadPresetIntoSession(){
-  if(!_wfg2PresetStore || !_wfg2) return null;
+  var engine = getGraphLearningEngine();
+  if(!_wfg2PresetStore || !engine) return null;
   const preset = _wfg2PresetStore.get();
   if(!preset?.params) return null;
-  state.graphLearning.params = _wfg2.copyParams(preset.params);
+  state.graphLearning.params = engine.copyParams(preset.params);
   state.graphLearning.activePreset = preset;
   updateGraphLearningPresetButtons();
   return preset;
@@ -21258,25 +21288,26 @@ function graphLearningCaptureAttempt(result, feedback){
 }
 
 function graphLearningRunGeneration(opts){
-  if(!_wfg2 || !state.graphLearning.normalizedSurface) return;
+  var engine = getGraphLearningEngine();
+  if(!engine || !state.graphLearning.normalizedSurface) return;
   const gl = state.graphLearning;
-  if(opts?.feedback) gl.params = _wfg2.adaptParametersFromFeedback(gl.params || _wfg2.DEFAULT_PARAMS, opts.feedback);
-  if(!gl.params) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
-  gl.graph = _wfg2.generateFeatureGraph(gl.normalizedSurface, gl.params);
+  if(opts?.feedback) gl.params = engine.adaptParametersFromFeedback(gl.params || engine.DEFAULT_PARAMS, opts.feedback);
+  if(!gl.params) gl.params = engine.copyParams(engine.DEFAULT_PARAMS);
+  gl.graph = engine.generateFeatureGraph(gl.normalizedSurface, gl.params);
   // Compute grouped graph from partition result
-  if(_wfg2.computeGroupedGraph && gl.graph?.partition){
+  if(engine.computeGroupedGraph && gl.graph?.partition){
     var _partResult = { nodes: gl.graph.nodes, edges: gl.graph.edges, adjacency: gl.graph.partition.adjacency, labelMap: gl.graph.artifacts?.partitionLabelMap, sharedBoundaries: gl.graph.artifacts?.partitionSharedBoundaries, regionMeans: gl.graph.artifacts?.partitionRegionMeans, regionCount: gl.graph.partition.regionCount };
     var _supConstraints = { merges: [], keeps: [] };
     if(_groupingSupervision && gl.supervisionSessionId){
       _supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
     }
     var _nw = gl.graph.normalizedSize.width, _nh = gl.graph.normalizedSize.height;
-    gl.groupedGraph = _wfg2.computeGroupedGraph(_partResult, { width: _nw, height: _nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: _supConstraints });
+    gl.groupedGraph = engine.computeGroupedGraph(_partResult, { width: _nw, height: _nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: _supConstraints });
     // Build fused label map for grouped partition-style rendering
-    if(_wfg2.buildGroupedLabelMap && gl.groupedGraph){
-      var _fused = _wfg2.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
+    if(engine.buildGroupedLabelMap && gl.groupedGraph){
+      var _fused = engine.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
       gl.groupedLabelMap = _fused ? _fused.groupedLabelMap : null;
-      gl.groupedBoundaries = (_fused && _wfg2.computeSharedBoundaries) ? _wfg2.computeSharedBoundaries(_fused.groupedLabelMap, _nw, _nh) : null;
+      gl.groupedBoundaries = (_fused && engine.computeSharedBoundaries) ? engine.computeSharedBoundaries(_fused.groupedLabelMap, _nw, _nh) : null;
     }
   } else { gl.groupedGraph = null; gl.groupedLabelMap = null; gl.groupedBoundaries = null; }
   gl.attemptNumber = (gl.attemptNumber || 0) + 1;
@@ -21303,7 +21334,7 @@ function graphLearningRunGeneration(opts){
   const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
   const nocolourTag = artf.nocolourFallbackActive ? ', NOCOLOUR:on(thresh=' + (artf.nocolourDebug?.threshold ?? '?') + ', comps=' + (artf.nocolourDebug?.componentCount ?? '?') + ', clusters=' + (artf.nocolourDebug?.clusterCount ?? '?') + ')' : '';
-  graphLearningStatus('Attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
+  graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
   renderGraphLearningViewer();
 }
 
@@ -21352,11 +21383,12 @@ function graphLearningCaptureGray(page){
 }
 
 async function graphLearningOpenFile(file){
-  if(!file || !_wfg2) return;
+  var engine = getGraphLearningEngine();
+  if(!file || !engine) return;
   const gl = state.graphLearning;
   gl.active = true;
   gl.fileName = file.name || 'untitled';
-  gl.fileId = 'wfg2file-' + Date.now().toString(36);
+  gl.fileId = getGraphLearningEngineType() + 'file-' + Date.now().toString(36);
   gl.attemptNumber = 0;
   gl.lastAttemptId = null;
   gl.latestFeedback = null;
@@ -21375,7 +21407,7 @@ async function graphLearningOpenFile(file){
   try {
     await openFile(file);
   } catch(err){
-    console.error('[WFG2][GraphLearning] openFile failed', err);
+    console.error('[' + graphLearningEngineLabel() + '][GraphLearning] openFile failed', err);
     clearGraphLearningViewer();
     graphLearningStatus('Could not load this file for Graph Learning.');
     return;
@@ -21387,7 +21419,7 @@ async function graphLearningOpenFile(file){
     graphLearningStatus('File loaded but no render surface was available.');
     return;
   }
-  gl.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  gl.normalizedSurface = engine.normalizeVisualInput(img, { maxSide: 1300 });
   if(!gl.normalizedSurface){
     clearGraphLearningViewer();
     graphLearningStatus('Normalization failed for this file.');
@@ -21402,21 +21434,21 @@ async function graphLearningOpenFile(file){
   // Determine starting params: learned family > preset > defaults
   let startSource = 'defaults';
   const loadedPreset = graphLearningLoadPresetIntoSession();
-  if(!loadedPreset) gl.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  if(!loadedPreset) gl.params = engine.copyParams(engine.DEFAULT_PARAMS);
   else startSource = 'preset';
 
   // Try learned family match (overrides preset if confident)
   if(_glFamilyStore && gl.docFeatures?.valid){
     const match = _glFamilyStore.findBestFamily(gl.docFeatures);
     if(match && match.similarity >= 0.60){
-      gl.params = _wfg2.copyParams(match.family.avgParams);
+      gl.params = engine.copyParams(match.family.avgParams);
       startSource = 'family-match (sim=' + match.similarity.toFixed(2) + ')';
       var famLabel = document.getElementById('graph-learning-family-match');
       if(famLabel) famLabel.textContent = 'Starting from learned family (similarity ' + (match.similarity * 100).toFixed(0) + '%)';
     }
   }
 
-  gl.baselineParams = _wfg2.copyParams(gl.params);
+  gl.baselineParams = engine.copyParams(gl.params);
   gl.triedVariants = ['baseline'];
   gl.currentVariantLabel = 'baseline';
   gl.currentStrategy = startSource;
@@ -21426,7 +21458,7 @@ async function graphLearningOpenFile(file){
   graphLearningUpdateTrainingBar();
   graphLearningUpdateRegenCount();
   if(loadedPreset && startSource === 'preset'){
-    graphLearningStatus('Loaded preset "' + (loadedPreset.name || 'WFG2 Baseline') + '" and generated attempt ' + gl.attemptNumber + '.');
+    graphLearningStatus('Loaded preset "' + (loadedPreset.name || (graphLearningEngineLabel() + ' Baseline')) + '" and generated attempt ' + gl.attemptNumber + '.');
   } else if(startSource.startsWith('family')){
     graphLearningStatus('Auto-selected learned family params. Attempt ' + gl.attemptNumber + '.');
   }
@@ -21440,15 +21472,37 @@ if(els.graphLearningFileInput){
     await graphLearningOpenFile(file);
   });
 }
+if(els.graphLearningEngineSelect){
+  els.graphLearningEngineSelect.addEventListener('change', function(e){
+    var nextType = String(e?.target?.value || 'wfg2').toLowerCase() === 'wfg3' ? 'wfg3' : 'wfg2';
+    if(nextType === 'wfg3' && !_wfg3){
+      graphLearningStatus('WFG3 is not available in this build. Falling back to WFG2.');
+      state.graphLearning.engineType = 'wfg2';
+    } else {
+      state.graphLearning.engineType = nextType;
+      var engine = getGraphLearningEngine();
+      if(state.graphLearning?.normalizedSurface && engine){
+        state.graphLearning.params = engine.copyParams(engine.DEFAULT_PARAMS);
+        graphLearningRunGeneration({ _skipSliderSync: true });
+        graphLearningStatus('Switched to ' + graphLearningEngineLabel() + ' and regenerated current upload.');
+      } else {
+        graphLearningStatus('Graph Learning engine set to ' + graphLearningEngineLabel() + '. Upload a file to run.');
+      }
+    }
+    syncGraphLearningEngineUI();
+  });
+}
+syncGraphLearningEngineUI();
 /**
  * Shared regeneration handler with feedback type, change detection, and retry.
  * @param {string} feedbackType - 'regenerate', 'too_few_regions', 'too_many_regions'
  */
 function graphLearningDoRegenerate(feedbackType){
   var gl = state.graphLearning;
-  if(!gl.normalizedSurface || !_wfg2) return;
+  var engine = getGraphLearningEngine();
+  if(!gl.normalizedSurface || !engine) return;
   var ft = feedbackType || 'regenerate';
-  var prevParams = gl.params ? _wfg2.copyParams(gl.params) : null;
+  var prevParams = gl.params ? engine.copyParams(gl.params) : null;
   var MAX_RETRIES = 3;
 
   if(!_glStore?.generateNextCandidate){
@@ -21462,11 +21516,11 @@ function graphLearningDoRegenerate(feedbackType){
 
   for(var retry = 0; retry < MAX_RETRIES; retry++){
     candidate = _glStore.generateNextCandidate({
-      currentParams: gl.params || _wfg2.DEFAULT_PARAMS,
+      currentParams: gl.params || engine.DEFAULT_PARAMS,
       docFeatures: gl.docFeatures,
       attemptNumber: gl.attemptNumber + 1 + retry,
       triedVariants: gl.triedVariants || [],
-      copyParams: _wfg2.copyParams.bind(_wfg2),
+      copyParams: engine.copyParams.bind(engine),
       familyStore: _glFamilyStore,
       trainingStore: _glTrainingStore,
       feedback: ft
@@ -21484,7 +21538,7 @@ function graphLearningDoRegenerate(feedbackType){
         break; // Meaningful change achieved
       }
       // No change — retry with a different strategy
-      console.log('[WFG2][GraphLearning] Strategy "' + candidate.variantLabel + '" had no effect (magnitude=' + changeResult.magnitude + '), retrying…');
+      console.log('[' + graphLearningEngineLabel() + '][GraphLearning] Strategy "' + candidate.variantLabel + '" had no effect (magnitude=' + changeResult.magnitude + '), retrying…');
     } else {
       break; // No fingerprint comparison available, accept result
     }
@@ -21760,19 +21814,20 @@ graphLearningUpdateTrainingBar();
 
 function graphLearningRecomputeGroupedGraph(){
   var gl = state.graphLearning;
-  if(!_wfg2?.computeGroupedGraph || !gl.graph?.partition || !gl.graph?.artifacts?.partitionLabelMap) return;
+  var engine = getGraphLearningEngine();
+  if(!engine?.computeGroupedGraph || !gl.graph?.partition || !gl.graph?.artifacts?.partitionLabelMap) return;
   var partResult = { nodes: gl.graph.nodes, edges: gl.graph.edges, adjacency: gl.graph.partition.adjacency, labelMap: gl.graph.artifacts.partitionLabelMap, sharedBoundaries: gl.graph.artifacts.partitionSharedBoundaries, regionMeans: gl.graph.artifacts.partitionRegionMeans, regionCount: gl.graph.partition.regionCount };
   var supConstraints = { merges: [], keeps: [] };
   if(_groupingSupervision && gl.supervisionSessionId){
     supConstraints = _groupingSupervision.buildConstraints(gl.supervisionSessionId);
   }
   var nw = gl.graph.normalizedSize.width, nh = gl.graph.normalizedSize.height;
-  gl.groupedGraph = _wfg2.computeGroupedGraph(partResult, { width: nw, height: nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: supConstraints });
+  gl.groupedGraph = engine.computeGroupedGraph(partResult, { width: nw, height: nh, mergeThreshold: gl.mergeThreshold, supervisionConstraints: supConstraints });
   // Build fused label map for grouped partition-style rendering
-  if(_wfg2.buildGroupedLabelMap && gl.groupedGraph){
-    var fused = _wfg2.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
+  if(engine.buildGroupedLabelMap && gl.groupedGraph){
+    var fused = engine.buildGroupedLabelMap(gl.graph.artifacts.partitionLabelMap, gl.groupedGraph, gl.graph.nodes);
     gl.groupedLabelMap = fused ? fused.groupedLabelMap : null;
-    gl.groupedBoundaries = (fused && _wfg2.computeSharedBoundaries) ? _wfg2.computeSharedBoundaries(fused.groupedLabelMap, nw, nh) : null;
+    gl.groupedBoundaries = (fused && engine.computeSharedBoundaries) ? engine.computeSharedBoundaries(fused.groupedLabelMap, nw, nh) : null;
   }
   if(typeof gl.refreshSelectionInspector === 'function') gl.refreshSelectionInspector();
 }
@@ -22867,8 +22922,9 @@ const WFG2_SLIDER_DEFS = {
 const WFG2_SLIDER_IDS = Object.keys(WFG2_SLIDER_DEFS);
 
 function wfg2ReadSlidersToParams(){
-  if(!_wfg2) return null;
-  const p = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  const engine = getGraphLearningEngine();
+  if(!engine) return null;
+  const p = engine.copyParams(engine.DEFAULT_PARAMS);
   // Store raw slider values for reliable round-tripping (no reverse-engineering needed)
   p._sliderValues = {};
   for(const id of WFG2_SLIDER_IDS){
@@ -22968,8 +23024,9 @@ if(els.graphLearningApplySlidersBtn){
 // Reset to defaults
 if(els.graphLearningResetDefaultsBtn){
   els.graphLearningResetDefaultsBtn.addEventListener('click', function(){
-    if(!_wfg2) return;
-    state.graphLearning.params = _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+    const engine = getGraphLearningEngine();
+    if(!engine) return;
+    state.graphLearning.params = engine.copyParams(engine.DEFAULT_PARAMS);
     wfg2SyncSlidersFromParams(state.graphLearning.params);
     if(state.graphLearning.normalizedSurface){
       graphLearningRunGeneration();
@@ -23207,15 +23264,16 @@ const WFG2_BENCHMARKS = [
 ];
 
 function wfg2RunBenchmarks(params){
-  if(!_wfg2) return [];
-  const p = params || state.graphLearning?.params || _wfg2.copyParams(_wfg2.DEFAULT_PARAMS);
+  const engine = getGraphLearningEngine();
+  if(!engine) return [];
+  const p = params || state.graphLearning?.params || engine.copyParams(engine.DEFAULT_PARAMS);
   var results = [];
   for(var i = 0; i < WFG2_BENCHMARKS.length; i++){
     var bench = WFG2_BENCHMARKS[i];
     var imgData = wfg2CreateBenchmarkImage(bench.id, 200);
-    var surface = _wfg2.normalizeVisualInput(imgData, { maxSide: 200 });
+    var surface = engine.normalizeVisualInput(imgData, { maxSide: 200 });
     var graph = null;
-    try { graph = _wfg2.generateFeatureGraph(surface, p); } catch(e){ /* engine error */ }
+    try { graph = engine.generateFeatureGraph(surface, p); } catch(e){ /* engine error */ }
     var validation = bench.validate(graph);
     results.push({
       id: bench.id, label: bench.label, description: bench.description,
@@ -23400,12 +23458,13 @@ function wfg2RenderBenchmarkAlert(coreCheck){
 // Run benchmarks button
 if(els.graphLearningRunBenchmarksBtn){
   els.graphLearningRunBenchmarksBtn.addEventListener('click', function(){
-    if(!_wfg2){
-      if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = 'WFG2 engine not loaded.';
+    var engine = getGraphLearningEngine();
+    if(!engine){
+      if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = graphLearningEngineLabel() + ' engine not loaded.';
       return;
     }
     if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = 'Running benchmarks...';
-    var params = state.graphLearning?.params || (_wfg2 ? _wfg2.copyParams(_wfg2.DEFAULT_PARAMS) : null);
+    var params = state.graphLearning?.params || engine.copyParams(engine.DEFAULT_PARAMS);
     var results = wfg2RunBenchmarks(params);
     var passed = results.filter(function(r){ return r.pass; }).length;
     if(els.graphLearningBenchmarkStatus) els.graphLearningBenchmarkStatus.textContent = passed + '/' + results.length + ' passed.';
