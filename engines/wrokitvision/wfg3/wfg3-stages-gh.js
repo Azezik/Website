@@ -323,6 +323,107 @@
     }
     overlays.group_map = { width: W, height: H, data: groupOv };
 
+    // ── Overlay 6a: tile_seeding_debug (tile-mode only) ──
+    if (tokens && tokens._tileDebugInfo) {
+      var tdi = tokens._tileDebugInfo;
+      var tileOv = new Uint8ClampedArray(N * 4);
+      var tileSz = tdi.tileSz;
+      var tileNX = tdi.tilesX;
+      var tileNY = tdi.tilesY;
+      var perTile = tdi.perTileCounts;
+      var fbSet = {};
+      if (tdi.fallbackTiles) {
+        for (var fbi = 0; fbi < tdi.fallbackTiles.length; fbi++) fbSet[tdi.fallbackTiles[fbi]] = true;
+      }
+      // Find max tile count for heatmap normalization
+      var maxTC = 1;
+      for (var tci = 0; tci < perTile.length; tci++) {
+        if (perTile[tci] > maxTC) maxTC = perTile[tci];
+      }
+      // Draw per-tile heatmap
+      for (var hty = 0; hty < tileNY; hty++) {
+        for (var htx = 0; htx < tileNX; htx++) {
+          var htIdx = hty * tileNX + htx;
+          var tc = perTile[htIdx] || 0;
+          var isFallback = !!fbSet[htIdx];
+          var x0 = htx * tileSz, y0 = hty * tileSz;
+          var x1 = Math.min(x0 + tileSz, W), y1 = Math.min(y0 + tileSz, H);
+          var intensity = tc / maxTC;
+          var r, g, b;
+          if (isFallback) {
+            // Fallback tiles: blue tint
+            r = 40; g = 80; b = 200;
+          } else {
+            // Heatmap: green(low) → yellow → red(high)
+            if (intensity < 0.5) {
+              r = Math.round(intensity * 2 * 255);
+              g = 255;
+              b = 0;
+            } else {
+              r = 255;
+              g = Math.round((1 - (intensity - 0.5) * 2) * 255);
+              b = 0;
+            }
+          }
+          var alpha = 60 + Math.round(intensity * 60);
+          for (var tpy = y0; tpy < y1; tpy++) {
+            for (var tpx = x0; tpx < x1; tpx++) {
+              var tpIdx = (tpy * W + tpx) * 4;
+              tileOv[tpIdx]     = r;
+              tileOv[tpIdx + 1] = g;
+              tileOv[tpIdx + 2] = b;
+              tileOv[tpIdx + 3] = alpha;
+            }
+          }
+          // Draw tile border (white, 1px)
+          for (var bx = x0; bx < x1; bx++) {
+            var topIdx = (y0 * W + bx) * 4;
+            tileOv[topIdx] = 255; tileOv[topIdx+1] = 255; tileOv[topIdx+2] = 255; tileOv[topIdx+3] = 180;
+            if (y1 - 1 < H) {
+              var botIdx = ((y1 - 1) * W + bx) * 4;
+              tileOv[botIdx] = 255; tileOv[botIdx+1] = 255; tileOv[botIdx+2] = 255; tileOv[botIdx+3] = 180;
+            }
+          }
+          for (var by = y0; by < y1; by++) {
+            var leftIdx = (by * W + x0) * 4;
+            tileOv[leftIdx] = 255; tileOv[leftIdx+1] = 255; tileOv[leftIdx+2] = 255; tileOv[leftIdx+3] = 180;
+            if (x1 - 1 < W) {
+              var rightIdx = (by * W + x1 - 1) * 4;
+              tileOv[rightIdx] = 255; tileOv[rightIdx+1] = 255; tileOv[rightIdx+2] = 255; tileOv[rightIdx+3] = 180;
+            }
+          }
+        }
+      }
+      overlays.tile_heatmap = { width: W, height: H, data: tileOv };
+
+      // Overlay 6b: fallback/stagger/refine token markers
+      var markerCmds = [];
+      for (var mi = 0; mi < tokens.length; mi++) {
+        var mt = tokens[mi];
+        if (mt._fallback) {
+          markerCmds.push({ x: mt.x, y: mt.y, type: 'fallback', color: [40, 80, 200] });
+        } else if (mt._staggered) {
+          markerCmds.push({ x: mt.x, y: mt.y, type: 'stagger', color: [255, 165, 0] });
+        } else if (mt._refined) {
+          markerCmds.push({ x: mt.x, y: mt.y, type: 'refine', color: [255, 0, 255] });
+        }
+      }
+      overlays.tile_token_markers = { kind: 'commands', commands: markerCmds };
+
+      // Overlay 6c: debug stats summary
+      overlays.tile_debug_stats = {
+        kind: 'stats',
+        totalTokens: tdi.totalTokens,
+        totalEdgeCandidates: tdi.totalEdgeCandidates,
+        fallbackTileCount: tdi.fallbackTiles ? tdi.fallbackTiles.length : 0,
+        staggerCount: tdi.staggerCount || 0,
+        refineCount: tdi.refineCount || 0,
+        tilesX: tileNX,
+        tilesY: tileNY,
+        tileSizePx: tileSz
+      };
+    }
+
     // ── Overlay 6: structure_graph ──
     // Stored as drawing commands (nodes + edges for canvas rendering)
     var sgCmds = { nodes: [], edges: [] };
