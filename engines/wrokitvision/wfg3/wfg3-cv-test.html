@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WFG3 CV Bridge - Phase 1 Test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; background: #1a1a1a; color: #ccc; padding: 16px; }
+  h1 { font-size: 16px; margin-bottom: 12px; color: #eee; }
+  h2 { font-size: 13px; margin: 16px 0 8px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 4px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+  .cell { text-align: center; }
+  .cell canvas { display: block; border: 1px solid #444; background: #000; }
+  .cell .label { font-size: 11px; margin-top: 4px; color: #888; }
+  #log { background: #111; border: 1px solid #333; padding: 8px; font-size: 11px;
+         max-height: 260px; overflow-y: auto; white-space: pre-wrap; margin-top: 12px; }
+  .pass { color: #6f6; } .fail { color: #f66; } .info { color: #69f; }
+  #status { font-size: 13px; margin-bottom: 8px; padding: 6px; border-radius: 3px; }
+  #status.ok { background: #1a3a1a; color: #6f6; }
+  #status.err { background: #3a1a1a; color: #f66; }
+  #drop-zone { border: 2px dashed #555; padding: 20px; text-align: center; margin-bottom: 12px;
+               cursor: pointer; color: #777; font-size: 12px; }
+  #drop-zone.hover { border-color: #69f; color: #69f; }
+</style>
+</head>
+<body>
+<h1>WFG3 CV Bridge &mdash; Phase 1 Test Harness</h1>
+<div id="status">Loading&hellip;</div>
+
+<div id="drop-zone">Drop an image here or click to load &mdash; or use the built-in synthetic test image</div>
+<input type="file" id="file-input" accept="image/*" style="display:none">
+
+<h2>Synthetic Test Input</h2>
+<div class="row" id="input-row"></div>
+
+<h2>CV Bridge Outputs</h2>
+<div class="row" id="output-row"></div>
+
+<h2>Test Log</h2>
+<div id="log"></div>
+
+<script src="wfg3-cv.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var CV = window._WFG3_CV;
+  var logEl = document.getElementById('log');
+  var statusEl = document.getElementById('status');
+  var inputRow = document.getElementById('input-row');
+  var outputRow = document.getElementById('output-row');
+  var dropZone = document.getElementById('drop-zone');
+  var fileInput = document.getElementById('file-input');
+  var passed = 0, failed = 0;
+
+  function log(msg, cls) {
+    var span = document.createElement('span');
+    span.className = cls || '';
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function assert(cond, label) {
+    if (cond) { passed++; log('PASS  ' + label, 'pass'); }
+    else { failed++; log('FAIL  ' + label, 'fail'); }
+  }
+
+  function updateStatus() {
+    if (failed > 0) {
+      statusEl.textContent = passed + ' passed, ' + failed + ' FAILED';
+      statusEl.className = 'err';
+    } else {
+      statusEl.textContent = passed + ' passed, 0 failed — OpenCV.js: ' + (CV.hasOpenCV() ? 'loaded' : 'not loaded (pure-JS fallbacks active)');
+      statusEl.className = 'ok';
+    }
+  }
+
+  /* ---- Canvas helpers ---- */
+
+  function makeCanvas(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.style.width = Math.min(w, 300) + 'px';
+    c.style.height = Math.min(h, 300) + 'px';
+    c.style.imageRendering = 'pixelated';
+    return c;
+  }
+
+  function showGray(parent, data, w, h, label) {
+    var c = makeCanvas(w, h);
+    var ctx = c.getContext('2d');
+    var img = ctx.createImageData(w, h);
+    for (var i = 0; i < w * h; i++) {
+      var v = data[i];
+      img.data[i * 4] = v; img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    var cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.appendChild(c);
+    var lbl = document.createElement('div');
+    lbl.className = 'label'; lbl.textContent = label;
+    cell.appendChild(lbl);
+    parent.appendChild(cell);
+    return c;
+  }
+
+  function showFloat(parent, data, w, h, label) {
+    // Normalize float array to 0-255 for display
+    var maxV = 0;
+    for (var i = 0; i < data.length; i++) {
+      var v = Math.abs(data[i]);
+      if (v > maxV) maxV = v;
+    }
+    if (maxV < 1) maxV = 1;
+    var u8 = new Uint8Array(data.length);
+    for (var j = 0; j < data.length; j++) u8[j] = Math.min(255, Math.round(Math.abs(data[j]) / maxV * 255));
+    return showGray(parent, u8, w, h, label);
+  }
+
+  function showRGB(parent, r, g, b, w, h, label) {
+    var c = makeCanvas(w, h);
+    var ctx = c.getContext('2d');
+    var img = ctx.createImageData(w, h);
+    for (var i = 0; i < w * h; i++) {
+      img.data[i * 4] = r[i]; img.data[i * 4 + 1] = g[i];
+      img.data[i * 4 + 2] = b[i]; img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    var cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.appendChild(c);
+    var lbl = document.createElement('div');
+    lbl.className = 'label'; lbl.textContent = label;
+    cell.appendChild(lbl);
+    parent.appendChild(cell);
+    return c;
+  }
+
+  /* ---- Synthetic test image (invoice-like) ---- */
+
+  function makeSyntheticImage(w, h) {
+    var n = w * h;
+    var r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n);
+    var gray = new Uint8Array(n);
+
+    // Fill background: light gray
+    for (var i = 0; i < n; i++) { r[i] = 240; g[i] = 238; b[i] = 235; }
+
+    function fillRect(x0, y0, x1, y1, cr, cg, cb) {
+      for (var yy = y0; yy <= y1 && yy < h; yy++) {
+        for (var xx = x0; xx <= x1 && xx < w; xx++) {
+          var idx = yy * w + xx;
+          r[idx] = cr; g[idx] = cg; b[idx] = cb;
+        }
+      }
+    }
+
+    // Header bar (dark)
+    fillRect(20, 15, w - 20, 55, 30, 30, 35);
+    // Title text area (white on dark)
+    fillRect(30, 22, 180, 48, 230, 230, 230);
+    // Content rows (alternating)
+    for (var row = 0; row < 6; row++) {
+      var ry = 75 + row * 32;
+      var bg = (row % 2 === 0) ? 250 : 225;
+      fillRect(25, ry, w - 25, ry + 26, bg, bg, bg);
+      // Text-like blocks
+      fillRect(30, ry + 6, 30 + 80 + row * 5, ry + 18, 50, 50, 50);
+      // Number column
+      fillRect(w - 80, ry + 6, w - 35, ry + 18, 40, 40, 120);
+    }
+    // Footer box (dark)
+    fillRect(w - 130, h - 55, w - 25, h - 20, 25, 60, 25);
+    // Red accent line
+    fillRect(20, 60, w - 20, 62, 200, 40, 40);
+
+    // Compute grayscale
+    for (var j = 0; j < n; j++) {
+      gray[j] = Math.round(0.299 * r[j] + 0.587 * g[j] + 0.114 * b[j]);
+    }
+
+    return { r: r, g: g, b: b, gray: gray, width: w, height: h };
+  }
+
+  /* ---- Run full test suite on an image ---- */
+
+  function runTests(img) {
+    passed = 0; failed = 0;
+    inputRow.innerHTML = '';
+    outputRow.innerHTML = '';
+    logEl.innerHTML = '';
+
+    var W = img.width, H = img.height, N = W * H;
+    log('Image: ' + W + 'x' + H + ' (' + N + ' pixels)', 'info');
+    log('OpenCV.js: ' + (CV.hasOpenCV() ? 'YES' : 'NO (using pure-JS fallbacks)'), 'info');
+    log('', '');
+
+    // Show input
+    showRGB(inputRow, img.r, img.g, img.b, W, H, 'Input RGB (' + W + 'x' + H + ')');
+    showGray(inputRow, img.gray, W, H, 'Input Gray');
+
+    // --- Test 1: Resize ---
+    log('--- Resize ---', 'info');
+    var halfW = Math.round(W / 2), halfH = Math.round(H / 2);
+    var t0 = performance.now();
+    var resized = CV.resizeGray(img.gray, W, H, halfW, halfH);
+    var t1 = performance.now();
+    assert(resized.length === halfW * halfH, 'resizeGray output size = ' + halfW + 'x' + halfH);
+    assert(resized instanceof Uint8Array, 'resizeGray returns Uint8Array');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showGray(outputRow, resized, halfW, halfH, 'Resized Gray');
+
+    var resizedRGB = CV.resizeRGB(img.r, img.g, img.b, W, H, halfW, halfH);
+    assert(resizedRGB.r.length === halfW * halfH, 'resizeRGB output size');
+    showRGB(outputRow, resizedRGB.r, resizedRGB.g, resizedRGB.b, halfW, halfH, 'Resized RGB');
+
+    // --- Test 2: Gaussian Blur ---
+    log('--- Gaussian Blur ---', 'info');
+    t0 = performance.now();
+    var blurred = CV.gaussianBlur(img.gray, W, H, 2);
+    t1 = performance.now();
+    assert(blurred.length === N, 'gaussianBlur output size');
+    assert(blurred instanceof Uint8Array, 'gaussianBlur returns Uint8Array');
+    // Blurred should differ from original
+    var diffCount = 0;
+    for (var di = 0; di < N; di++) if (blurred[di] !== img.gray[di]) diffCount++;
+    assert(diffCount > N * 0.05, 'gaussianBlur modifies pixels (' + diffCount + ' changed)');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showGray(outputRow, blurred, W, H, 'Gaussian Blur');
+
+    // --- Test 3: Bilateral Filter ---
+    log('--- Bilateral Filter ---', 'info');
+    t0 = performance.now();
+    var bilateral = CV.bilateralFilter(img.gray, W, H, 3, 35, 35);
+    t1 = performance.now();
+    assert(bilateral.length === N, 'bilateralFilter output size');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showGray(outputRow, bilateral, W, H, 'Bilateral Filter');
+
+    // --- Test 4: RGB to LAB ---
+    log('--- RGB to LAB ---', 'info');
+    t0 = performance.now();
+    var lab = CV.rgbToLAB(img.r, img.g, img.b, N);
+    t1 = performance.now();
+    assert(lab.L.length === N, 'rgbToLAB L channel size');
+    assert(lab.a.length === N, 'rgbToLAB a channel size');
+    assert(lab.b.length === N, 'rgbToLAB b channel size');
+    assert(lab.L instanceof Float32Array, 'L is Float32Array');
+    // Spot-check: pure white (255,255,255) -> L~100
+    var whiteL = CV.rgbToLAB(new Uint8Array([255]), new Uint8Array([255]), new Uint8Array([255]), 1);
+    assert(whiteL.L[0] > 95 && whiteL.L[0] <= 100.1, 'white -> L=' + whiteL.L[0].toFixed(2) + ' (expect ~100)');
+    // pure black -> L~0
+    var blackL = CV.rgbToLAB(new Uint8Array([0]), new Uint8Array([0]), new Uint8Array([0]), 1);
+    assert(blackL.L[0] < 1, 'black -> L=' + blackL.L[0].toFixed(2) + ' (expect ~0)');
+    // pure red -> positive a
+    var redLab = CV.rgbToLAB(new Uint8Array([255]), new Uint8Array([0]), new Uint8Array([0]), 1);
+    assert(redLab.a[0] > 40, 'red -> a=' + redLab.a[0].toFixed(2) + ' (expect large positive)');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showFloat(outputRow, lab.L, W, H, 'LAB - L channel');
+
+    // --- Test 5: Sobel Gradients ---
+    log('--- Sobel Gradients ---', 'info');
+    t0 = performance.now();
+    var sobel = CV.sobelGradients(img.gray, W, H);
+    t1 = performance.now();
+    assert(sobel.gx.length === N, 'sobelGradients gx size');
+    assert(sobel.mag.length === N, 'sobelGradients mag size');
+    assert(sobel.gx instanceof Float32Array, 'gx is Float32Array');
+    // Magnitude should be nonzero on a structured image
+    var nonzero = 0;
+    for (var si = 0; si < N; si++) if (sobel.mag[si] > 1) nonzero++;
+    assert(nonzero > 100, 'sobelGradients has ' + nonzero + ' nonzero magnitude pixels');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showFloat(outputRow, sobel.mag, W, H, 'Sobel Magnitude');
+
+    // --- Test 6: Canny Edge ---
+    log('--- Canny Edge Detection ---', 'info');
+    t0 = performance.now();
+    var edges = CV.cannyEdge(img.gray, W, H, 50, 150);
+    t1 = performance.now();
+    assert(edges.length === N, 'cannyEdge output size');
+    assert(edges instanceof Uint8Array, 'cannyEdge returns Uint8Array');
+    var edgeCount = 0;
+    for (var ei = 0; ei < N; ei++) if (edges[ei] === 255) edgeCount++;
+    assert(edgeCount > 50, 'cannyEdge found ' + edgeCount + ' edge pixels');
+    assert(edgeCount < N * 0.5, 'cannyEdge not over-saturated');
+    // Verify binary: only 0 or 255
+    var validBinary = true;
+    for (var bi = 0; bi < N; bi++) if (edges[bi] !== 0 && edges[bi] !== 255) { validBinary = false; break; }
+    assert(validBinary, 'cannyEdge output is strictly binary (0 or 255)');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showGray(outputRow, edges, W, H, 'Canny Edges');
+
+    // --- Test 7: Morphology ---
+    log('--- Morphological Ops ---', 'info');
+    t0 = performance.now();
+    var dilated = CV.dilate(edges, W, H, 1);
+    t1 = performance.now();
+    assert(dilated.length === N, 'dilate output size');
+    var dilCount = 0;
+    for (var dli = 0; dli < N; dli++) if (dilated[dli] > 0) dilCount++;
+    assert(dilCount >= edgeCount, 'dilate expands edges (' + dilCount + ' >= ' + edgeCount + ')');
+    log('  Dilate time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+
+    var closed = CV.morphClose(edges, W, H, 1);
+    assert(closed.length === N, 'morphClose output size');
+    var opened = CV.morphOpen(edges, W, H, 1);
+    assert(opened.length === N, 'morphOpen output size');
+    showGray(outputRow, dilated, W, H, 'Dilated Edges');
+    showGray(outputRow, closed, W, H, 'Morph Close');
+
+    // --- Test 8: LAB Neighbor Delta ---
+    log('--- LAB Neighbor Delta ---', 'info');
+    t0 = performance.now();
+    var labDelta = CV.labNeighborDelta(lab.L, lab.a, lab.b, W, H);
+    t1 = performance.now();
+    assert(labDelta.length === N, 'labNeighborDelta output size');
+    assert(labDelta instanceof Float32Array, 'labNeighborDelta returns Float32');
+    var deltaPositive = 0;
+    for (var ldi = 0; ldi < N; ldi++) if (labDelta[ldi] > 1) deltaPositive++;
+    assert(deltaPositive > 50, 'labNeighborDelta has ' + deltaPositive + ' significant deltas');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showFloat(outputRow, labDelta, W, H, 'LAB Neighbor Delta');
+
+    // --- Test 9: Distance Transform ---
+    log('--- Distance Transform ---', 'info');
+    // Invert edges: foreground = non-edge
+    var invEdges = new Uint8Array(N);
+    for (var ie = 0; ie < N; ie++) invEdges[ie] = edges[ie] === 0 ? 255 : 0;
+    t0 = performance.now();
+    var dist = CV.distanceTransform(invEdges, W, H);
+    t1 = performance.now();
+    assert(dist.length === N, 'distanceTransform output size');
+    assert(dist instanceof Float32Array, 'distanceTransform returns Float32');
+    // Edge pixels should have distance 0
+    var edgeZero = true;
+    for (var dti = 0; dti < N; dti++) {
+      if (edges[dti] === 255 && dist[dti] > 0.01) { edgeZero = false; break; }
+    }
+    assert(edgeZero, 'distanceTransform: edge pixels have distance ~0');
+    // Interior pixels should have distance > 0
+    var maxDist = 0;
+    for (var md = 0; md < N; md++) if (dist[md] > maxDist) maxDist = dist[md];
+    assert(maxDist > 5, 'distanceTransform max distance = ' + maxDist.toFixed(1));
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+    showFloat(outputRow, dist, W, H, 'Distance Transform');
+
+    // --- Test 10: Connected Components ---
+    log('--- Connected Components ---', 'info');
+    t0 = performance.now();
+    var cc = CV.connectedComponents(invEdges, W, H);
+    t1 = performance.now();
+    assert(cc.labels.length === N, 'connectedComponents output size');
+    assert(cc.labels instanceof Int32Array, 'connectedComponents returns Int32Array');
+    assert(cc.count > 0, 'connectedComponents found ' + cc.count + ' components');
+    assert(cc.count < 5000, 'connectedComponents count reasonable (' + cc.count + ')');
+    log('  Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+
+    // Colorize component labels for display
+    var ccR = new Uint8Array(N), ccG = new Uint8Array(N), ccB = new Uint8Array(N);
+    var palette = [];
+    // Deterministic palette using simple hash
+    for (var pi = 0; pi <= cc.count; pi++) {
+      palette.push([
+        (pi * 67 + 30) % 200 + 55,
+        (pi * 131 + 50) % 200 + 55,
+        (pi * 199 + 70) % 200 + 55
+      ]);
+    }
+    palette[0] = [0, 0, 0]; // background
+    for (var ci = 0; ci < N; ci++) {
+      var lbl = cc.labels[ci];
+      var col = palette[lbl % palette.length];
+      ccR[ci] = col[0]; ccG[ci] = col[1]; ccB[ci] = col[2];
+    }
+    showRGB(outputRow, ccR, ccG, ccB, W, H, 'Connected Components (' + cc.count + ')');
+
+    // --- Test 11: Watershed ---
+    log('--- Watershed ---', 'info');
+    // Use top of distance transform as markers
+    var markers = new Int32Array(N);
+    var threshDist = maxDist * 0.35;
+    var markerMask = new Uint8Array(N);
+    for (var wi = 0; wi < N; wi++) {
+      markerMask[wi] = dist[wi] > threshDist ? 255 : 0;
+    }
+    var markerCC = CV.connectedComponents(markerMask, W, H);
+    for (var mi = 0; mi < N; mi++) markers[mi] = markerCC.labels[mi];
+
+    // Use gradient magnitude as priority (normalize to 0-255)
+    var gradNorm = new Float32Array(N);
+    var maxG = 0;
+    for (var gn = 0; gn < N; gn++) if (sobel.mag[gn] > maxG) maxG = sobel.mag[gn];
+    if (maxG < 1) maxG = 1;
+    for (var gn2 = 0; gn2 < N; gn2++) gradNorm[gn2] = sobel.mag[gn2] / maxG * 255;
+
+    t0 = performance.now();
+    var ws = CV.watershed(markers, gradNorm, W, H);
+    t1 = performance.now();
+    assert(ws.length === N, 'watershed output size');
+    assert(ws instanceof Int32Array, 'watershed returns Int32Array');
+    // Count unique labels
+    var wsSet = {};
+    for (var wsi = 0; wsi < N; wsi++) if (ws[wsi] > 0) wsSet[ws[wsi]] = true;
+    var wsCount = Object.keys(wsSet).length;
+    assert(wsCount > 1, 'watershed produced ' + wsCount + ' regions');
+    // Check coverage: every pixel should be labeled (>0 or -1 boundary)
+    var unlabeled = 0;
+    for (var ul = 0; ul < N; ul++) if (ws[ul] === 0) unlabeled++;
+    assert(unlabeled === 0, 'watershed full coverage (unlabeled: ' + unlabeled + ')');
+    log('  Regions: ' + wsCount + ', Time: ' + (t1 - t0).toFixed(1) + 'ms', '');
+
+    // Colorize watershed for display
+    var wsR = new Uint8Array(N), wsG = new Uint8Array(N), wsB = new Uint8Array(N);
+    var wsPalette = [];
+    for (var wp = 0; wp <= wsCount + 2; wp++) {
+      wsPalette.push([
+        (wp * 83 + 40) % 200 + 55,
+        (wp * 157 + 60) % 200 + 55,
+        (wp * 211 + 80) % 200 + 55
+      ]);
+    }
+    for (var wc = 0; wc < N; wc++) {
+      if (ws[wc] === -1) { wsR[wc] = 255; wsG[wc] = 255; wsB[wc] = 255; }
+      else {
+        var wCol = wsPalette[Math.abs(ws[wc]) % wsPalette.length];
+        wsR[wc] = wCol[0]; wsG[wc] = wCol[1]; wsB[wc] = wCol[2];
+      }
+    }
+    showRGB(outputRow, wsR, wsG, wsB, W, H, 'Watershed (' + wsCount + ' regions)');
+
+    // --- Test 12: Contrast Stretch ---
+    log('--- Contrast Stretch ---', 'info');
+    var stretched = CV.contrastStretch(img.gray, N);
+    assert(stretched.length === N, 'contrastStretch output size');
+    // Find new range
+    var slo = 255, shi = 0;
+    for (var cs = 0; cs < N; cs++) {
+      if (stretched[cs] < slo) slo = stretched[cs];
+      if (stretched[cs] > shi) shi = stretched[cs];
+    }
+    assert(slo === 0 || shi === 255, 'contrastStretch stretches range (lo=' + slo + ' hi=' + shi + ')');
+    showGray(outputRow, stretched, W, H, 'Contrast Stretch');
+
+    // --- Summary ---
+    log('', '');
+    log('========================================', 'info');
+    log('TOTAL: ' + passed + ' passed, ' + failed + ' failed', failed > 0 ? 'fail' : 'pass');
+    updateStatus();
+  }
+
+  /* ---- Image loading from file ---- */
+
+  function loadImageFromFile(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var imgEl = new Image();
+      imgEl.onload = function () {
+        var maxSide = 600;
+        var w = imgEl.width, h = imgEl.height;
+        if (Math.max(w, h) > maxSide) {
+          var s = maxSide / Math.max(w, h);
+          w = Math.round(w * s); h = Math.round(h * s);
+        }
+        var c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        var ctx = c.getContext('2d');
+        ctx.drawImage(imgEl, 0, 0, w, h);
+        var id = ctx.getImageData(0, 0, w, h);
+        var n = w * h;
+        var r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n), gray = new Uint8Array(n);
+        for (var i = 0; i < n; i++) {
+          r[i] = id.data[i * 4]; g[i] = id.data[i * 4 + 1]; b[i] = id.data[i * 4 + 2];
+          gray[i] = Math.round(0.299 * r[i] + 0.587 * g[i] + 0.114 * b[i]);
+        }
+        runTests({ r: r, g: g, b: b, gray: gray, width: w, height: h });
+      };
+      imgEl.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  dropZone.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () { if (fileInput.files[0]) loadImageFromFile(fileInput.files[0]); });
+  dropZone.addEventListener('dragover', function (e) { e.preventDefault(); dropZone.classList.add('hover'); });
+  dropZone.addEventListener('dragleave', function () { dropZone.classList.remove('hover'); });
+  dropZone.addEventListener('drop', function (e) {
+    e.preventDefault(); dropZone.classList.remove('hover');
+    if (e.dataTransfer.files[0]) loadImageFromFile(e.dataTransfer.files[0]);
+  });
+
+  /* ---- Auto-run on synthetic image ---- */
+
+  var synth = makeSyntheticImage(320, 280);
+  runTests(synth);
+
+})();
+</script>
+</body>
+</html>
