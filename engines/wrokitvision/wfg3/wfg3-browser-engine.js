@@ -1,13 +1,14 @@
 /**
  * WFG3 Browser Engine — stand-alone, no WFG2 dependency.
  *
- * Runs the real WFG3 pipeline (Stages A–F implemented, G–H stubbed)
- * using wfg3-cv.js, wfg3-stages-ac.js, and wfg3-stages-df.js.
+ * Runs the real WFG3 pipeline (Stages A–H) using wfg3-cv.js,
+ * wfg3-stages-ac.js, wfg3-stages-df.js, and wfg3-stages-gh.js.
  *
  * Exposes window.WrokitFeatureGraph3 with the same public API shape
  * that the Wrokit app expects from a graph learning engine.
  *
- * Depends on: wfg3-cv.js, wfg3-stages-ac.js, wfg3-stages-df.js (must be loaded first)
+ * Depends on: wfg3-cv.js, wfg3-stages-ac.js, wfg3-stages-df.js,
+ *             wfg3-stages-gh.js (must be loaded first)
  */
 (function (global) {
   'use strict';
@@ -17,6 +18,7 @@
   if (!CV) throw new Error('wfg3-browser-engine.js requires wfg3-cv.js');
   if (!Stages) throw new Error('wfg3-browser-engine.js requires wfg3-stages-ac.js');
   if (!Stages.stageD) throw new Error('wfg3-browser-engine.js requires wfg3-stages-df.js');
+  if (!Stages.stageG) throw new Error('wfg3-browser-engine.js requires wfg3-stages-gh.js');
 
   /* ── Default params (WFG3-native, not borrowed from WFG2) ── */
 
@@ -60,7 +62,19 @@
     groupMergeThreshold: 0.45,
     groupMinPerimeterRatio: 0.15,
 
-    // Pipeline mode (WFG3 currently only supports 'partition')
+    // Stage G
+    alignmentThresholdPx: 8,
+    supportGapMaxPx: 20,
+    repetitionSizeRatio: 1.25,
+    repetitionMaxDistPx: 220,
+    containmentOverlap: 0.90,
+
+    // Stage H
+    debugTokenStride: 8,
+    debugGraphStride: 12,
+    debugNodeRadius: 4,
+
+    // Pipeline mode
     pipelineMode: 'partition'
   });
 
@@ -80,13 +94,14 @@
     return surface;
   }
 
-  /* ── Stages B–F: generateFeatureGraph ── */
+  /* ── Stages B–H: generateFeatureGraph ── */
 
   function generateFeatureGraph(normalizedSurface, params) {
     if (!normalizedSurface) return null;
     var p = params || DEFAULT_PARAMS;
     var cfgAC = Object.assign({}, Stages.DEFAULT_CONFIG_AC, p);
     var cfgDF = Object.assign({}, Stages.DEFAULT_CONFIG_DF, p);
+    var cfgGH = Object.assign({}, Stages.DEFAULT_CONFIG_GH, p);
 
     var w = normalizedSurface.width;
     var h = normalizedSurface.height;
@@ -116,6 +131,12 @@
           boundaries: partition.boundaries
         }
       : Stages.stageF(partition, normalizedSurface, cfgDF);
+
+    // Run Stage G: Structure Graph (spatial relationships between groups)
+    var structureGraph = Stages.stageG(groupMap, cfgGH);
+
+    // Run Stage H: Debug Visualization (in-memory overlays)
+    var debugArtifacts = Stages.stageH(normalizedSurface, evidence, tokens, boundaryGraph, partition, groupMap, structureGraph, cfgGH);
 
     // Cache for computeGroupedGraph re-runs with different thresholds
     _lastSurface = normalizedSurface;
@@ -231,6 +252,15 @@
         wfg3_groupCount: isPartitionOnly ? 0 : groupMap.groupCount,
         wfg3_groups: isPartitionOnly ? {} : groupMap.groups,
         wfg3_groupBoundaries: isPartitionOnly ? null : groupMap.boundaries,
+
+        // WFG3-specific Stage G artifacts
+        wfg3_structureGraph: structureGraph,
+        wfg3_structureNodeCount: Object.keys(structureGraph.nodes).length,
+        wfg3_structureEdgeCount: structureGraph.edges.length,
+        wfg3_structureEdgesByType: structureGraph.edgesByType,
+
+        // WFG3-specific Stage H artifacts
+        wfg3_debugOverlays: debugArtifacts.overlays,
 
         // Backend indicator
         wfg3_backend: CV.hasOpenCV() ? 'OpenCV.js' : 'pure-JS',
