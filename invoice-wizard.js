@@ -20786,6 +20786,32 @@ function syncGraphLearningEngineUI(){
       els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
     }
   }
+  var wfg3SeedingSection = document.getElementById('graph-learning-wfg3-seeding-section');
+  if(wfg3SeedingSection) wfg3SeedingSection.style.display = isWfg3 ? '' : 'none';
+  if(isWfg3) wfg3SyncSeedingControls(state.graphLearning.params || null);
+}
+
+/** Read the three WFG3 seeding controls and apply their values to params in-place. */
+function wfg3ApplySeedingControls(params){
+  var modeEl = document.getElementById('wfg3-seeding-mode');
+  var staggerEl = document.getElementById('wfg3-seeding-staggered');
+  var refineEl = document.getElementById('wfg3-seeding-refinement');
+  if(modeEl) params.tokenSeedingMode = modeEl.value;
+  if(staggerEl) params.seedStaggeredPass = staggerEl.checked;
+  if(refineEl) params.seedRefinementEnabled = refineEl.checked;
+}
+
+/** Sync the three WFG3 seeding controls from a params object (or engine defaults). */
+function wfg3SyncSeedingControls(params){
+  var engine = getGraphLearningEngine();
+  var src = params || (engine ? engine.DEFAULT_PARAMS : null);
+  if(!src) return;
+  var modeEl = document.getElementById('wfg3-seeding-mode');
+  var staggerEl = document.getElementById('wfg3-seeding-staggered');
+  var refineEl = document.getElementById('wfg3-seeding-refinement');
+  if(modeEl) modeEl.value = src.tokenSeedingMode || 'tile_min_coverage';
+  if(staggerEl) staggerEl.checked = !!src.seedStaggeredPass;
+  if(refineEl) refineEl.checked = !!src.seedRefinementEnabled;
 }
 
 function graphLearningSessionId(){
@@ -23550,6 +23576,16 @@ for(const id of WFG2_SLIDER_IDS){
 // Apply sliders button
 if(els.graphLearningApplySlidersBtn){
   els.graphLearningApplySlidersBtn.addEventListener('click', function(){
+    if(getGraphLearningEngineType() === 'wfg3'){
+      var engine = getGraphLearningEngine();
+      var curParams = state.graphLearning.params || engine.copyParams(engine.DEFAULT_PARAMS);
+      wfg3ApplySeedingControls(curParams);
+      state.graphLearning.params = curParams;
+      graphLearningRunGeneration({ _skipSliderSync: true });
+      graphLearningCaptureAttempt('slider-tuned', { tags: ['wfg3_seeding_adjustment'], rating: null });
+      graphLearningStatus('Applied WFG3 seeding settings and regenerated.');
+      return;
+    }
     const p = wfg2ReadSlidersToParams();
     if(!p) return;
     state.graphLearning.params = p;
@@ -23567,6 +23603,7 @@ if(els.graphLearningResetDefaultsBtn){
     if(!engine) return;
     state.graphLearning.params = engine.copyParams(engine.DEFAULT_PARAMS);
     wfg2SyncSlidersFromParams(state.graphLearning.params);
+    if(getGraphLearningEngineType() === 'wfg3') wfg3SyncSeedingControls(state.graphLearning.params);
     if(state.graphLearning.normalizedSurface){
       graphLearningRunGeneration();
       graphLearningStatus('Reset to default parameters and regenerated.');

@@ -1191,6 +1191,37 @@
             </div>
           </details>
 
+          <!-- ═══ Section 5: WFG3 Stage C Seeding (shown only when WFG3 is active) ═══ -->
+          <details id="graph-learning-wfg3-seeding-section" class="panel minimal" style="margin-bottom:12px;display:none;" open>
+            <summary>Section 5 — WFG3 Stage C Seeding</summary>
+            <div style="padding:8px 0;">
+              <div style="margin-bottom:14px;">
+                <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <strong style="font-size:13px;">Seeding Mode</strong>
+                </label>
+                <select id="wfg3-seeding-mode" style="width:100%;font-size:13px;padding:4px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
+                  <option value="tile_min_coverage">Tile Min Coverage (experimental — recommended)</option>
+                  <option value="global_stride">Global Stride (original)</option>
+                </select>
+                <p class="sub" style="margin:4px 0 0;color:var(--muted);font-size:11px;">Global Stride = sample every Nth edge pixel. Tile Min Coverage = spatially fair, evidence-aware seeding with guaranteed coverage per tile.</p>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                  <input type="checkbox" id="wfg3-seeding-staggered" />
+                  <span style="font-size:13px;font-weight:600;">Staggered Pass</span>
+                </label>
+                <p class="sub" style="margin:4px 0 0 22px;color:var(--muted);font-size:11px;">Run a second offset tiling pass at half-budget to reduce aliasing and improve thin boundary capture.</p>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                  <input type="checkbox" id="wfg3-seeding-refinement" />
+                  <span style="font-size:13px;font-weight:600;">Corridor Refinement</span>
+                </label>
+                <p class="sub" style="margin:4px 0 0 22px;color:var(--muted);font-size:11px;">Densify tokens along corridors where adjacent tokens show directional and color-side agreement. Bounded by max density multiplier.</p>
+              </div>
+            </div>
+          </details>
+
           <!-- ═══ Apply / Reset controls ═══ -->
           <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
             <button id="graph-learning-apply-sliders-btn" class="btn primary" type="button" disabled>Apply Parameters + Regenerate</button>
