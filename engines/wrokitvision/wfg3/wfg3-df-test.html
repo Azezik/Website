@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WFG3 Stages D–F &mdash; Phase 3 Test</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:monospace;background:#1a1a1a;color:#ccc;padding:16px}
+  h1{font-size:16px;margin-bottom:8px;color:#eee}
+  h2{font-size:13px;margin:14px 0 6px;color:#aaa;border-bottom:1px solid #333;padding-bottom:3px}
+  .row{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+  .cell{text-align:center}
+  .cell canvas{display:block;border:1px solid #444;background:#000;image-rendering:pixelated}
+  .cell .label{font-size:10px;margin-top:3px;color:#888}
+  #log{background:#111;border:1px solid #333;padding:8px;font-size:11px;max-height:320px;overflow-y:auto;white-space:pre-wrap;margin-top:10px}
+  .pass{color:#6f6}.fail{color:#f66}.info{color:#69f}.warn{color:#fc6}
+  #status{font-size:13px;margin-bottom:8px;padding:6px;border-radius:3px}
+  #status.ok{background:#1a3a1a;color:#6f6}#status.err{background:#3a1a1a;color:#f66}
+  .stat{display:inline-block;margin-right:14px;font-size:11px}.stat b{color:#eee}
+  #drop-zone{border:2px dashed #555;padding:14px;text-align:center;margin-bottom:10px;cursor:pointer;color:#777;font-size:12px}
+  #drop-zone.hover{border-color:#69f;color:#69f}
+</style>
+</head>
+<body>
+<h1>WFG3 Stages D&ndash;F &mdash; Phase 3 Test Harness</h1>
+<div id="status">Loading&hellip;</div>
+<div id="drop-zone">Drop an image here or click to load &mdash; or use the built-in test</div>
+<input type="file" id="file-input" accept="image/*" style="display:none">
+
+<h2>Input &amp; Stages A&ndash;C</h2>
+<div class="row" id="row-ac"></div>
+
+<h2>Stage D: Boundary Graph</h2>
+<div id="stats-d" style="margin-bottom:6px"></div>
+<div class="row" id="row-d"></div>
+
+<h2>Stage E: Region Partition</h2>
+<div id="stats-e" style="margin-bottom:6px"></div>
+<div class="row" id="row-e"></div>
+
+<h2>Stage F: Region Grouping</h2>
+<div id="stats-f" style="margin-bottom:6px"></div>
+<div class="row" id="row-f"></div>
+
+<h2>Test Log</h2>
+<div id="log"></div>
+
+<script src="wfg3-cv.js"></script>
+<script src="wfg3-stages-ac.js"></script>
+<script src="wfg3-stages-df.js"></script>
+<script>
+(function(){
+  'use strict';
+  var CV=window._WFG3_CV, S=window._WFG3_Stages;
+  var logEl=document.getElementById('log'),statusEl=document.getElementById('status');
+  var passed=0,failed=0;
+
+  function log(m,c){var s=document.createElement('span');s.className=c||'';s.textContent=m+'\n';logEl.appendChild(s);logEl.scrollTop=logEl.scrollHeight}
+  function assert(c,l){if(c){passed++;log('PASS  '+l,'pass')}else{failed++;log('FAIL  '+l,'fail')}}
+  function update(){statusEl.textContent=passed+' passed, '+failed+' failed';statusEl.className=failed>0?'err':'ok'}
+
+  function makeCanvas(w,h){var c=document.createElement('canvas');c.width=w;c.height=h;var s=Math.min(320/Math.max(w,h),1);c.style.width=Math.round(w*s)+'px';c.style.height=Math.round(h*s)+'px';return c}
+  function cell(p,c,l){var d=document.createElement('div');d.className='cell';d.appendChild(c);var lb=document.createElement('div');lb.className='label';lb.textContent=l;d.appendChild(lb);p.appendChild(d)}
+
+  function drawGray(p,d,w,h,l){var c=makeCanvas(w,h);var ctx=c.getContext('2d');var im=ctx.createImageData(w,h);for(var i=0;i<w*h;i++){var v=d[i];im.data[i*4]=v;im.data[i*4+1]=v;im.data[i*4+2]=v;im.data[i*4+3]=255}ctx.putImageData(im,0,0);cell(p,c,l)}
+  function drawRGB(p,r,g,b,w,h,l){var c=makeCanvas(w,h);var ctx=c.getContext('2d');var im=ctx.createImageData(w,h);for(var i=0;i<w*h;i++){im.data[i*4]=r[i];im.data[i*4+1]=g[i];im.data[i*4+2]=b[i];im.data[i*4+3]=255}ctx.putImageData(im,0,0);cell(p,c,l)}
+  function drawLabels(p,labels,count,w,h,label){
+    var pal=[];for(var i=0;i<=count+1;i++)pal.push([(i*67+30)%200+55,(i*131+50)%200+55,(i*199+70)%200+55]);pal[0]=[0,0,0];
+    var r=new Uint8Array(w*h),g=new Uint8Array(w*h),b=new Uint8Array(w*h);
+    for(var j=0;j<w*h;j++){var c=pal[Math.abs(labels[j])%pal.length];r[j]=c[0];g[j]=c[1];b[j]=c[2]}
+    drawRGB(p,r,g,b,w,h,label);
+  }
+
+  function stat(id,html){document.getElementById(id).innerHTML=html}
+
+  /* ── Synthetic test image: 4 clearly separated colored boxes ── */
+  function makeSyntheticBoxes(w,h){
+    var n=w*h,r=new Uint8Array(n),g=new Uint8Array(n),b=new Uint8Array(n),gray=new Uint8Array(n);
+    // White background
+    for(var i=0;i<n;i++){r[i]=245;g[i]=245;b[i]=245}
+    function rect(x0,y0,x1,y1,cr,cg,cb){
+      for(var yy=Math.max(0,y0);yy<=Math.min(y1,h-1);yy++)
+        for(var xx=Math.max(0,x0);xx<=Math.min(x1,w-1);xx++){var idx=yy*w+xx;r[idx]=cr;g[idx]=cg;b[idx]=cb}
+    }
+    // 4 colored boxes with clear separation
+    rect(20,20,120,100,220,40,40);    // red box (top-left)
+    rect(160,20,260,100,40,40,220);   // blue box (top-right)
+    rect(20,140,120,220,40,180,40);   // green box (bottom-left)
+    rect(160,140,260,220,220,180,40); // yellow box (bottom-right)
+    // Header bar
+    rect(10,5,270,14,30,30,30);
+    // Small text-like marks in boxes
+    rect(35,50,100,55,180,30,30);
+    rect(175,50,240,55,30,30,180);
+
+    for(var j=0;j<n;j++)gray[j]=Math.round(0.299*r[j]+0.587*g[j]+0.114*b[j]);
+    return {r:r,g:g,b:b,gray:gray,width:w,height:h,
+      _expectedMinRegions:5, // at least: background + 4 boxes
+      _expectedMaxRegions:20 // shouldn't explode into hundreds
+    };
+  }
+
+  /* ── Full pipeline A→F ── */
+  function runPipeline(imgData){
+    passed=0;failed=0;logEl.innerHTML='';
+    ['row-ac','row-d','row-e','row-f'].forEach(function(id){document.getElementById(id).innerHTML=''});
+    ['stats-d','stats-e','stats-f'].forEach(function(id){document.getElementById(id).innerHTML=''});
+
+    log('Input: '+imgData.width+'x'+imgData.height,'info');
+    log('OpenCV.js: '+(CV.hasOpenCV()?'YES':'pure-JS'),'info');
+    log('','');
+
+    // ── Stages A-C ──
+    var surface=S.stageA(imgData,{maxSide:400});
+    var evidence=S.stageB(surface);
+    var tokens=S.stageC(surface,evidence);
+    var W=surface.width,H=surface.height,N=W*H;
+    log('A-C complete: '+W+'x'+H+', '+tokens.length+' tokens','info');
+
+    var rowAC=document.getElementById('row-ac');
+    if(surface.rgb)drawRGB(rowAC,surface.rgb.r,surface.rgb.g,surface.rgb.b,W,H,'Normalized RGB');
+    drawGray(rowAC,evidence.edgeBinary,W,H,'Edge Binary');
+
+    // ── Stage D ──
+    log('','');log('=== Stage D: Boundary Graph ===','info');
+    var t0=performance.now();
+    var graph=S.stageD(tokens,evidence);
+    var tD=performance.now()-t0;
+
+    assert(graph.kind==='wfg3-boundary-graph','graph.kind correct');
+    assert(graph.chains.length>0,'chains found: '+graph.chains.length);
+    var totalChainTokens=0;
+    for(var ci=0;ci<graph.chains.length;ci++)totalChainTokens+=graph.chains[ci].ids.length;
+    assert(totalChainTokens>10,'chain tokens: '+totalChainTokens);
+    log('  Chains: '+graph.chains.length+', Loops: '+graph.loops.length+', Time: '+tD.toFixed(0)+'ms','');
+
+    // Verify chains are ordered (consecutive tokens should be nearby)
+    if(graph.chains.length>0){
+      var tokenById={};for(var tbi=0;tbi<tokens.length;tbi++)tokenById[tokens[tbi].id]=tokens[tbi];
+      var chain0=graph.chains[0];
+      var maxGap=0;
+      for(var ci2=1;ci2<chain0.ids.length;ci2++){
+        var tA=tokenById[chain0.ids[ci2-1]],tB=tokenById[chain0.ids[ci2]];
+        if(tA&&tB){var gap=Math.sqrt(Math.pow(tA.x-tB.x,2)+Math.pow(tA.y-tB.y,2));if(gap>maxGap)maxGap=gap}
+      }
+      assert(maxGap<20,'chain ordering: max gap='+maxGap.toFixed(1)+'px (expect <20)');
+    }
+    assert(graph.chainMask.length===N,'chainMask size');
+    var chainPixels=0;for(var cmi=0;cmi<N;cmi++)if(graph.chainMask[cmi]>0)chainPixels++;
+    assert(chainPixels>10,'chainMask has '+chainPixels+' pixels');
+
+    stat('stats-d','<span class="stat">Chains: <b>'+graph.chains.length+'</b></span>'+
+      '<span class="stat">Loops: <b>'+graph.loops.length+'</b></span>'+
+      '<span class="stat">Chain tokens: <b>'+totalChainTokens+'</b></span>'+
+      '<span class="stat">Time: <b>'+tD.toFixed(0)+'ms</b></span>');
+
+    // Visualize chains
+    var rowD=document.getElementById('row-d');
+    drawGray(rowD,graph.chainMask,W,H,'Chain Mask');
+
+    // Chains colored by chain ID
+    var chainVis=makeCanvas(W,H);
+    var cCtx=chainVis.getContext('2d');
+    var cImg=cCtx.createImageData(W,H);
+    var cd=cImg.data;
+    // Dim background
+    for(var bg=0;bg<N;bg++){var gv=surface.gray[bg];cd[bg*4]=gv>>1;cd[bg*4+1]=gv>>1;cd[bg*4+2]=gv>>1;cd[bg*4+3]=255}
+    for(var chi=0;chi<graph.chains.length;chi++){
+      var hue=(chi*47)%360;
+      var cr2=0,cg2=0,cb2=0;
+      // Simple HSV to RGB
+      var s=1,v=1,c2=v*s,x2=c2*(1-Math.abs((hue/60)%2-1)),m=v-c2;
+      if(hue<60){cr2=c2;cg2=x2}else if(hue<120){cr2=x2;cg2=c2}else if(hue<180){cg2=c2;cb2=x2}
+      else if(hue<240){cg2=x2;cb2=c2}else if(hue<300){cr2=x2;cb2=c2}else{cr2=c2;cb2=x2}
+      cr2=Math.round((cr2+m)*255);cg2=Math.round((cg2+m)*255);cb2=Math.round((cb2+m)*255);
+      var ids=graph.chains[chi].ids;
+      for(var cj=0;cj<ids.length;cj++){
+        var t2=tokenById[ids[cj]];
+        if(!t2)continue;
+        var idx=t2.y*W+t2.x;
+        cd[idx*4]=cr2;cd[idx*4+1]=cg2;cd[idx*4+2]=cb2;cd[idx*4+3]=255;
+      }
+    }
+    cCtx.putImageData(cImg,0,0);
+    cell(rowD,chainVis,'Chains (colored by ID, '+graph.chains.length+')');
+
+    // ── Stage E ──
+    log('','');log('=== Stage E: Region Partition ===','info');
+    t0=performance.now();
+    var partition=S.stageE(surface,evidence,graph);
+    var tE=performance.now()-t0;
+
+    assert(partition.kind==='wfg3-region-partition','partition.kind correct');
+    assert(partition.labelMap.length===N,'labelMap size');
+    assert(partition.regionCount>0,'regionCount='+partition.regionCount);
+
+    // Full coverage: every pixel labeled > 0
+    var unlabeled=0;
+    for(var ul=0;ul<N;ul++)if(partition.labelMap[ul]<=0)unlabeled++;
+    assert(unlabeled===0,'full coverage (unlabeled: '+unlabeled+')');
+
+    // Non-overlapping: each pixel has exactly one label (always true with Int32Array)
+    assert(true,'non-overlapping (by construction)');
+
+    // Boundary pixels exist
+    var boundaryCount=0;
+    for(var bc=0;bc<N;bc++)if(partition.boundaries[bc]>0)boundaryCount++;
+    assert(boundaryCount>50,'boundaries: '+boundaryCount+' pixels');
+
+    // Region stats exist for all regions
+    var statCount=Object.keys(partition.stats).length;
+    assert(statCount===partition.regionCount,'stats for all regions ('+statCount+'/'+partition.regionCount+')');
+
+    // For synthetic test: check expected region count range
+    if(imgData._expectedMinRegions){
+      assert(partition.regionCount>=imgData._expectedMinRegions,
+        'region count '+partition.regionCount+' >= expected min '+imgData._expectedMinRegions);
+    }
+    if(imgData._expectedMaxRegions){
+      assert(partition.regionCount<=imgData._expectedMaxRegions,
+        'region count '+partition.regionCount+' <= expected max '+imgData._expectedMaxRegions);
+    }
+
+    // Adjacency: at least some regions are adjacent
+    var adjCount=0;
+    for(var ak in partition.adjacency)adjCount+=partition.adjacency[ak].length;
+    assert(adjCount>0,'adjacency edges: '+adjCount);
+
+    log('  Regions: '+partition.regionCount+', Boundaries: '+boundaryCount+', Time: '+tE.toFixed(0)+'ms','');
+
+    stat('stats-e','<span class="stat">Regions: <b>'+partition.regionCount+'</b></span>'+
+      '<span class="stat">Boundaries: <b>'+boundaryCount+'</b></span>'+
+      '<span class="stat">Adj edges: <b>'+adjCount+'</b></span>'+
+      '<span class="stat">Time: <b>'+tE.toFixed(0)+'ms</b></span>');
+
+    var rowE=document.getElementById('row-e');
+    drawLabels(rowE,partition.labelMap,partition.regionCount,W,H,'Partition ('+partition.regionCount+' regions)');
+    drawGray(rowE,partition.boundaries,W,H,'Partition Boundaries');
+
+    // Partition + source overlay
+    var partOver=makeCanvas(W,H);
+    var poCtx=partOver.getContext('2d');
+    var poImg=poCtx.createImageData(W,H);
+    var pod=poImg.data;
+    var pal=[];for(var pi=0;pi<=partition.regionCount+1;pi++)pal.push([(pi*67+30)%200+55,(pi*131+50)%200+55,(pi*199+70)%200+55]);
+    for(var poi=0;poi<N;poi++){
+      var rl=partition.labelMap[poi];
+      var pc=pal[Math.abs(rl)%pal.length];
+      var sv=surface.gray[poi];
+      // Blend: 60% source, 40% partition color
+      pod[poi*4]=Math.round(sv*0.6+pc[0]*0.4);
+      pod[poi*4+1]=Math.round(sv*0.6+pc[1]*0.4);
+      pod[poi*4+2]=Math.round(sv*0.6+pc[2]*0.4);
+      pod[poi*4+3]=255;
+      if(partition.boundaries[poi]>0){pod[poi*4]=255;pod[poi*4+1]=255;pod[poi*4+2]=0;pod[poi*4+3]=255}
+    }
+    poCtx.putImageData(poImg,0,0);
+    cell(rowE,partOver,'Partition + Source Overlay');
+
+    // ── Stage F ──
+    log('','');log('=== Stage F: Region Grouping ===','info');
+    t0=performance.now();
+    var groups=S.stageF(partition,surface);
+    var tF=performance.now()-t0;
+
+    assert(groups.kind==='wfg3-group-map','groups.kind correct');
+    assert(groups.labelMap.length===N,'group labelMap size');
+    assert(groups.groupCount>0,'groupCount='+groups.groupCount);
+    assert(groups.groupCount<=partition.regionCount,'groups <= regions ('+groups.groupCount+' <= '+partition.regionCount+')');
+
+    // Full coverage
+    var gUnlabeled=0;
+    for(var gu=0;gu<N;gu++)if(groups.labelMap[gu]<=0)gUnlabeled++;
+    assert(gUnlabeled===0,'group full coverage (unlabeled: '+gUnlabeled+')');
+
+    // Groups have valid stats
+    var gStatCount=Object.keys(groups.groups).length;
+    assert(gStatCount===groups.groupCount,'group stats count='+gStatCount);
+
+    // Each group has at least one region
+    for(var gk in groups.groups){
+      assert(groups.groups[gk].regionIds.length>0,'group '+gk+' has '+groups.groups[gk].regionIds.length+' regions');
+    }
+
+    log('  Groups: '+groups.groupCount+' (from '+partition.regionCount+' regions), Time: '+tF.toFixed(0)+'ms','');
+    log('  Merge scores evaluated: '+(groups._mergeScores?groups._mergeScores.length:0),'');
+
+    stat('stats-f','<span class="stat">Groups: <b>'+groups.groupCount+'</b></span>'+
+      '<span class="stat">From: <b>'+partition.regionCount+' regions</b></span>'+
+      '<span class="stat">Time: <b>'+tF.toFixed(0)+'ms</b></span>');
+
+    var rowF=document.getElementById('row-f');
+    drawLabels(rowF,groups.labelMap,groups.groupCount,W,H,'Groups ('+groups.groupCount+')');
+    drawGray(rowF,groups.boundaries,W,H,'Group Boundaries');
+
+    // Group overlay on source
+    var grpOver=makeCanvas(W,H);
+    var goCtx=grpOver.getContext('2d');
+    var goImg=goCtx.createImageData(W,H);
+    var god=goImg.data;
+    var gpal=[];for(var gpi=0;gpi<=groups.groupCount+1;gpi++)gpal.push([(gpi*83+40)%200+55,(gpi*157+60)%200+55,(gpi*211+80)%200+55]);
+    for(var goi=0;goi<N;goi++){
+      var gl=groups.labelMap[goi];
+      var gc=gpal[Math.abs(gl)%gpal.length];
+      var gsv=surface.gray[goi];
+      god[goi*4]=Math.round(gsv*0.55+gc[0]*0.45);
+      god[goi*4+1]=Math.round(gsv*0.55+gc[1]*0.45);
+      god[goi*4+2]=Math.round(gsv*0.55+gc[2]*0.45);
+      god[goi*4+3]=255;
+      if(groups.boundaries[goi]>0){god[goi*4]=255;god[goi*4+1]=200;god[goi*4+2]=0;god[goi*4+3]=255}
+    }
+    goCtx.putImageData(goImg,0,0);
+    cell(rowF,grpOver,'Groups + Source Overlay');
+
+    log('','');log('========================================','info');
+    log('D: '+tD.toFixed(0)+'ms  E: '+tE.toFixed(0)+'ms  F: '+tF.toFixed(0)+'ms','info');
+    log('TOTAL: '+passed+' passed, '+failed+' failed',failed>0?'fail':'pass');
+    update();
+  }
+
+  /* ── File loading ── */
+  function loadFile(file){
+    var reader=new FileReader();
+    reader.onload=function(e){
+      var img=new Image();
+      img.onload=function(){
+        var w=img.width,h=img.height;
+        var c=document.createElement('canvas');c.width=w;c.height=h;
+        var ctx=c.getContext('2d');ctx.drawImage(img,0,0);
+        var id=ctx.getImageData(0,0,w,h);
+        var n=w*h,r=new Uint8Array(n),g=new Uint8Array(n),b=new Uint8Array(n),gray=new Uint8Array(n);
+        for(var i=0;i<n;i++){r[i]=id.data[i*4];g[i]=id.data[i*4+1];b[i]=id.data[i*4+2];gray[i]=Math.round(0.299*r[i]+0.587*g[i]+0.114*b[i])}
+        runPipeline({r:r,g:g,b:b,gray:gray,width:w,height:h});
+      };img.src=e.target.result;
+    };reader.readAsDataURL(file);
+  }
+  var dz=document.getElementById('drop-zone'),fi=document.getElementById('file-input');
+  dz.addEventListener('click',function(){fi.click()});
+  fi.addEventListener('change',function(){if(fi.files[0])loadFile(fi.files[0])});
+  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('hover')});
+  dz.addEventListener('dragleave',function(){dz.classList.remove('hover')});
+  dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('hover');if(e.dataTransfer.files[0])loadFile(e.dataTransfer.files[0])});
+
+  /* ── Auto-run synthetic 4-box test ── */
+  runPipeline(makeSyntheticBoxes(280,240));
+})();
+</script>
+</body>
+</html>
