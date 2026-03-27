@@ -940,14 +940,14 @@
               </select>
               <span class="sub" id="graph-learning-pipeline-info" style="color:var(--muted);font-size:11px;">Non-overlapping color-first partition is the primary segmentation.</span>
             </div>
-            <div class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
+            <div id="graph-learning-legacy-layer-controls" class="actions" style="gap:10px;flex-wrap:wrap;align-items:center;">
               <strong style="white-space:nowrap;">Output</strong>
               <label style="font-weight:600;"><input type="checkbox" id="graph-learning-show-color-partition" /> Color Partition</label>
               <label><input type="checkbox" id="graph-learning-show-compiled" checked /> Compiled Graph</label>
               <label><input type="checkbox" id="graph-learning-show-regions" /> Bounding Boxes</label>
               <label><input type="checkbox" id="graph-learning-show-adjacency" /> Adjacency</label>
-              <label><input type="checkbox" id="graph-learning-show-partition" checked /> Partition Overlay</label>
-              <label><input type="checkbox" id="graph-learning-show-shared-boundaries" /> Shared Boundaries</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-partition" checked /> Partition Overlay</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-shared-boundaries" /> Shared Boundaries</label>
               <span style="color:var(--border);">|</span>
               <strong style="white-space:nowrap;">Evidence</strong>
               <label><input type="checkbox" id="graph-learning-show-color-evidence" /> Color</label>
@@ -961,6 +961,23 @@
               <label><input type="checkbox" id="graph-learning-show-nocolour-components" /> Components</label>
               <label><input type="checkbox" id="graph-learning-show-nocolour-clusters" /> Clusters</label>
               <span class="sub" id="graph-learning-status" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
+            </div>
+            <div id="graph-learning-wfg3-layer-controls" class="actions" style="display:none;gap:10px;flex-wrap:wrap;align-items:center;">
+              <strong style="white-space:nowrap;">WFG3 Output</strong>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-tokens" checked /> Tokens</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-chains" checked /> Chains</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-atomic-regions" checked /> Atomic Regions</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-groups" /> Groups</label>
+              <label><input type="checkbox" id="graph-learning-show-partition" checked /> Partition Overlay</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-group-boundaries" checked /> Group Boundaries</label>
+              <label><input type="checkbox" id="graph-learning-show-shared-boundaries" /> Shared Boundaries</label>
+              <span style="color:var(--border);">|</span>
+              <strong style="white-space:nowrap;">WFG3 Evidence</strong>
+              <label><input type="checkbox" id="graph-learning-show-color-evidence" /> LAB Δ Heatmap</label>
+              <label><input type="checkbox" id="graph-learning-show-closure-evidence" /> Gradient Heatmap</label>
+              <label><input type="checkbox" id="graph-learning-show-debug" /> Token Confidence Heatmap</label>
+              <label><input type="checkbox" id="graph-learning-show-wfg3-edge-binary" /> Edge Binary</label>
+              <span class="sub" id="graph-learning-status-wfg3" style="margin-left:auto;color:var(--muted);">No file loaded.</span>
             </div>
           </div>
 

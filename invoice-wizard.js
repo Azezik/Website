@@ -532,6 +532,17 @@ const els = {
   graphLearningPresetStatus: document.getElementById('graph-learning-preset-status'),
   graphLearningViewer: document.getElementById('graph-learning-viewer'),
   graphLearningEngineCaption: document.getElementById('graph-learning-engine-caption'),
+  graphLearningLegacyLayerControls: document.getElementById('graph-learning-legacy-layer-controls'),
+  graphLearningWfg3LayerControls: document.getElementById('graph-learning-wfg3-layer-controls'),
+  graphLearningShowWfg3Tokens: document.getElementById('graph-learning-show-wfg3-tokens'),
+  graphLearningShowWfg3Chains: document.getElementById('graph-learning-show-wfg3-chains'),
+  graphLearningShowWfg3AtomicRegions: document.getElementById('graph-learning-show-wfg3-atomic-regions'),
+  graphLearningShowWfg3Groups: document.getElementById('graph-learning-show-wfg3-groups'),
+  graphLearningShowWfg3Partition: document.getElementById('graph-learning-show-wfg3-partition'),
+  graphLearningShowWfg3GroupBoundaries: document.getElementById('graph-learning-show-wfg3-group-boundaries'),
+  graphLearningShowWfg3SharedBoundaries: document.getElementById('graph-learning-show-wfg3-shared-boundaries'),
+  graphLearningShowWfg3EdgeBinary: document.getElementById('graph-learning-show-wfg3-edge-binary'),
+  graphLearningStatusWfg3: document.getElementById('graph-learning-status-wfg3'),
   graphLearningBaseCanvas: document.getElementById('graph-learning-base-canvas'),
   graphLearningOverlayCanvas: document.getElementById('graph-learning-overlay-canvas'),
   objectLearningFileInput: document.getElementById('object-learning-file-input'),
@@ -20691,7 +20702,11 @@ const _glFamilyStore = _glStore?.createGraphFamilyStore ? _glStore.createGraphFa
 const _gsStore = window.GroupingSupervisionStore || null;
 const _groupingSupervision = _gsStore?.createGroupingSupervisionStore ? _gsStore.createGroupingSupervisionStore(localStorage) : null;
 
-function graphLearningStatus(msg){ if(els.graphLearningStatus) els.graphLearningStatus.textContent = msg || ''; }
+function graphLearningStatus(msg){
+  var text = msg || '';
+  if(els.graphLearningStatus) els.graphLearningStatus.textContent = text;
+  if(els.graphLearningStatusWfg3) els.graphLearningStatusWfg3.textContent = text;
+}
 
 function getGraphLearningEngineType(){
   var key = String(state.graphLearning?.engineType || 'wfg2').toLowerCase();
@@ -20708,12 +20723,60 @@ function graphLearningEngineLabel(){
   return getGraphLearningEngineType() === 'wfg3' ? 'WFG3' : 'WFG2';
 }
 
+function syncGraphLearningPipelineModeUI(){
+  var modeSelect = document.getElementById('graph-learning-pipeline-mode');
+  var modeInfo = document.getElementById('graph-learning-pipeline-info');
+  if(!modeSelect) return;
+  var isWfg3 = getGraphLearningEngineType() === 'wfg3';
+  var current = String(modeSelect.value || 'partition');
+  if(isWfg3){
+    modeSelect.innerHTML = '' +
+      '<option value="partition">A–F Full Pipeline (Partition + Grouping)</option>' +
+      '<option value="partition_only">A–E Partition Only (No Group Merging)</option>';
+    if(current !== 'partition' && current !== 'partition_only') current = 'partition';
+    modeSelect.value = current;
+    if(modeInfo){
+      modeInfo.textContent = current === 'partition_only'
+        ? 'Runs WFG3 through Stage E only. Group outputs are intentionally disabled.'
+        : 'Runs WFG3 Stages A–F: boundary evidence → tokens → chains → partition → grouping.';
+    }
+  } else {
+    modeSelect.innerHTML = '' +
+      '<option value="partition">Partition-Only (Color-First)</option>' +
+      '<option value="structural">Structural-Only (Legacy)</option>' +
+      '<option value="hybrid">Hybrid (Partition + Structural Refinement)</option>' +
+      '<option value="combined">Combined View</option>';
+    if(!modeSelect.querySelector('option[value="' + current + '"]')) current = 'partition';
+    modeSelect.value = current;
+    if(modeInfo){
+      var modeDescriptions = {
+        partition: 'Non-overlapping color-first partition is the primary segmentation.',
+        structural: 'Legacy grid-based structural region growing (overlapping regions possible).',
+        hybrid: 'Partition first, then structural refinement enriches partition regions.',
+        combined: 'Both partition and structural run; partition is authoritative.'
+      };
+      modeInfo.textContent = modeDescriptions[current] || '';
+    }
+  }
+  if(state.graphLearning?.params){
+    state.graphLearning.params.pipelineMode = modeSelect.value;
+  }
+}
+
 function syncGraphLearningEngineUI(){
+  var isWfg3 = getGraphLearningEngineType() === 'wfg3';
   if(els.graphLearningEngineSelect){
     els.graphLearningEngineSelect.value = getGraphLearningEngineType();
   }
+  syncGraphLearningPipelineModeUI();
+  if(els.graphLearningLegacyLayerControls){
+    els.graphLearningLegacyLayerControls.style.display = isWfg3 ? 'none' : '';
+  }
+  if(els.graphLearningWfg3LayerControls){
+    els.graphLearningWfg3LayerControls.style.display = isWfg3 ? '' : 'none';
+  }
   if(els.graphLearningEngineCaption){
-    if(getGraphLearningEngineType() === 'wfg3'){
+    if(isWfg3){
       els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013F) — boundary graph + watershed partition + region grouping [browser-native]';
     } else {
       els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
@@ -20793,6 +20856,7 @@ function renderGraphLearningAttemptHistory(){
 }
 
 function getGraphLearningLayerFlags(){
+  var isWfg3 = getGraphLearningEngineType() === 'wfg3';
   return {
     compiled: !!(document.getElementById('graph-learning-show-compiled') || {}).checked,
     regions: !!els.graphLearningShowRegions?.checked,
@@ -20807,7 +20871,16 @@ function getGraphLearningLayerFlags(){
     colorPartition: !!(document.getElementById('graph-learning-show-color-partition') || {}).checked,
     nocolourBinary: !!(document.getElementById('graph-learning-show-nocolour-binary') || {}).checked,
     nocolourComponents: !!(document.getElementById('graph-learning-show-nocolour-components') || {}).checked,
-    nocolourClusters: !!(document.getElementById('graph-learning-show-nocolour-clusters') || {}).checked
+    nocolourClusters: !!(document.getElementById('graph-learning-show-nocolour-clusters') || {}).checked,
+    wfg3Tokens: isWfg3 ? !!els.graphLearningShowWfg3Tokens?.checked : false,
+    wfg3Chains: isWfg3 ? !!els.graphLearningShowWfg3Chains?.checked : false,
+    wfg3AtomicRegions: isWfg3 ? !!els.graphLearningShowWfg3AtomicRegions?.checked : false,
+    wfg3Groups: isWfg3 ? !!els.graphLearningShowWfg3Groups?.checked : false,
+    wfg3GroupBoundaries: isWfg3 ? !!els.graphLearningShowWfg3GroupBoundaries?.checked : false,
+    wfg3EdgeBinary: isWfg3 ? !!els.graphLearningShowWfg3EdgeBinary?.checked : false,
+    wfg3PartitionOverlay: isWfg3 ? !!els.graphLearningShowWfg3Partition?.checked : false,
+    wfg3SharedBoundaries: isWfg3 ? !!els.graphLearningShowWfg3SharedBoundaries?.checked : false,
+    wfg3TokenConfidenceHeatmap: isWfg3 ? !!els.graphLearningShowDebug?.checked : false
   };
 }
 
@@ -21298,8 +21371,9 @@ function graphLearningRunGeneration(opts){
   if(opts?.feedback) gl.params = engine.adaptParametersFromFeedback(gl.params || engine.DEFAULT_PARAMS, opts.feedback);
   if(!gl.params) gl.params = engine.copyParams(engine.DEFAULT_PARAMS);
   gl.graph = engine.generateFeatureGraph(gl.normalizedSurface, gl.params);
+  var wfg3PartitionOnly = gl.graph?.engine === 'wfg3' && gl.graph?.pipelineMode === 'partition_only';
   // Compute grouped graph from partition result
-  if(engine.computeGroupedGraph && gl.graph?.partition){
+  if(engine.computeGroupedGraph && gl.graph?.partition && !wfg3PartitionOnly){
     var _partResult = { nodes: gl.graph.nodes, edges: gl.graph.edges, adjacency: gl.graph.partition.adjacency, labelMap: gl.graph.artifacts?.partitionLabelMap, sharedBoundaries: gl.graph.artifacts?.partitionSharedBoundaries, regionMeans: gl.graph.artifacts?.partitionRegionMeans, regionCount: gl.graph.partition.regionCount };
     var _supConstraints = { merges: [], keeps: [] };
     if(_groupingSupervision && gl.supervisionSessionId){
@@ -21339,7 +21413,7 @@ function graphLearningRunGeneration(opts){
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
   const nocolourTag = artf.nocolourFallbackActive ? ', NOCOLOUR:on(thresh=' + (artf.nocolourDebug?.threshold ?? '?') + ', comps=' + (artf.nocolourDebug?.componentCount ?? '?') + ', clusters=' + (artf.nocolourDebug?.clusterCount ?? '?') + ')' : '';
   if(gl.graph?.engine === 'wfg3'){
-    graphLearningStatus('WFG3 A\u2013C attempt ' + gl.attemptNumber + ': ' + (artf.wfg3_tokenCount || 0) + ' tokens, ' + (artf.wfg3_contourCount || 0) + ' contours, backend: ' + (artf.wfg3_backend || '?') + ', color: ' + (artf.colorBoundaryActive ? 'on' : 'off') + '.');
+    graphLearningStatus('WFG3 A\u2013F attempt ' + gl.attemptNumber + ': ' + (artf.wfg3_tokenCount || 0) + ' tokens, ' + (artf.wfg3_chainCount || 0) + ' chains, ' + (artf.wfg3_regionCount || 0) + ' regions, ' + (wfg3PartitionOnly ? 'grouping:off' : ('groups:' + (artf.wfg3_groupCount || 0))) + ', backend: ' + (artf.wfg3_backend || '?') + '.');
   } else {
     graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
   }
@@ -21776,7 +21850,15 @@ graphLearningUpdateTrainingBar();
  document.getElementById('graph-learning-show-color-partition'),
  document.getElementById('graph-learning-show-nocolour-binary'),
  document.getElementById('graph-learning-show-nocolour-components'),
- document.getElementById('graph-learning-show-nocolour-clusters')
+ document.getElementById('graph-learning-show-nocolour-clusters'),
+ document.getElementById('graph-learning-show-wfg3-tokens'),
+ document.getElementById('graph-learning-show-wfg3-chains'),
+ document.getElementById('graph-learning-show-wfg3-atomic-regions'),
+ document.getElementById('graph-learning-show-wfg3-groups'),
+ document.getElementById('graph-learning-show-wfg3-partition'),
+ document.getElementById('graph-learning-show-wfg3-group-boundaries'),
+ document.getElementById('graph-learning-show-wfg3-shared-boundaries'),
+ document.getElementById('graph-learning-show-wfg3-edge-binary')
 ].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
@@ -22447,7 +22529,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 1: Edge binary overlay (dilated for visibility) ──
-  if(flags.partition && artf.wfg3_edgeBinary){
+  if(flags.wfg3EdgeBinary && artf.wfg3_edgeBinary){
     var eb = artf.wfg3_edgeBinary;
     var ebThick = hv ? dilateMask(eb, W, H, 1) : eb;
     var edgeData = ctx.createImageData(W, H);
@@ -22499,7 +22581,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 6: Region partition coloring (Stage E) ──
-  if(flags.partition && artf.wfg3_labelMap){
+  if(flags.wfg3PartitionOverlay && artf.wfg3_labelMap){
     var lm = artf.wfg3_labelMap;
     var rc = artf.wfg3_regionCount || 0;
     if(rc > 0){
@@ -22537,7 +22619,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 7: Region boundaries (Stage E) — dilated bright yellow ──
-  if(flags.partition && artf.wfg3_regionBoundaries){
+  if(flags.wfg3AtomicRegions && artf.wfg3_regionBoundaries){
     var rb = artf.wfg3_regionBoundaries;
     var rbThick = hv ? dilateMask(rb, W, H, 1) : rb;
     var rbImg = ctx.createImageData(W, H);
@@ -22551,7 +22633,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 8: Group boundaries (Stage F) — dilated thick bright cyan ──
-  if(flags.partition && artf.wfg3_groupBoundaries){
+  if(flags.wfg3GroupBoundaries && artf.wfg3_groupBoundaries){
     var gb = artf.wfg3_groupBoundaries;
     var gbThick = hv ? dilateMask(gb, W, H, 2) : gb;
     var gbImg = ctx.createImageData(W, H);
@@ -22565,7 +22647,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 9: Chain mask (Stage D) — rendered as thick magenta lines ──
-  if(flags.debug && artf.wfg3_chainMask){
+  if(flags.wfg3Chains && artf.wfg3_chainMask){
     var cm = artf.wfg3_chainMask;
     var cmThick = hv ? dilateMask(cm, W, H, 2) : dilateMask(cm, W, H, 1);
     var cmImg = ctx.createImageData(W, H);
@@ -22579,7 +22661,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 4: Boundary tokens — large cross markers with dark halo ──
-  if(flags.compiled && tokens.length > 0){
+  if(flags.wfg3Tokens && tokens.length > 0){
     var stride = Math.max(1, Math.round(tokens.length / 800));
     var armLen = hv ? 14 : 6;    // half-length of tangent arm
     var normLen = hv ? 12 : 5;   // length of normal arm
@@ -22650,7 +22732,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 5: Confidence heatmap (debug) — large filled squares ──
-  if(flags.debug && tokens.length > 0){
+  if(flags.wfg3TokenConfidenceHeatmap && tokens.length > 0){
     var pixSz = hv ? 5 : 2;
     var halfPx = pixSz / 2;
     for(var ci = 0; ci < tokens.length; ci++){
@@ -22664,6 +22746,71 @@ paintGraphLearningOverlay = function(ctx){
       ctx.fillStyle = 'rgba(' + cr2 + ',' + cg2 + ',0,0.9)';
       ctx.fillRect(ct.x - halfPx, ct.y - halfPx, pixSz, pixSz);
     }
+  }
+
+  // ── Atomic region outlines/labels (Stage E) ──
+  if(flags.wfg3AtomicRegions && Array.isArray(gl.graph.nodes) && gl.graph.nodes.length){
+    ctx.save();
+    ctx.lineWidth = hv ? 1.8 : 1.2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.font = 'bold 10px "IBM Plex Mono", monospace';
+    for(var ari = 0; ari < gl.graph.nodes.length; ari++){
+      var an = gl.graph.nodes[ari];
+      var ab = an?.bbox || {};
+      if(!(ab.w > 0 && ab.h > 0)) continue;
+      ctx.strokeRect(ab.x, ab.y, ab.w, ab.h);
+      ctx.fillRect(ab.x, ab.y - 11, 26, 11);
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.fillText('R' + String(an.id), ab.x + 2, ab.y - 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    }
+    ctx.restore();
+  }
+
+  // ── Group overlay (Stage F grouped label map + group ids) ──
+  if(flags.wfg3Groups && gl.groupedGraph?.labelMap){
+    var gMap = gl.groupedGraph.labelMap;
+    var gCount = gl.groupedGraph.groupCount || 0;
+    if(gCount > 0){
+      var gImg = ctx.createImageData(W, H);
+      var gData = gImg.data;
+      for(var gi2 = 0, gj2 = 0; gi2 < N; gi2++, gj2 += 4){
+        var glbl = gMap[gi2];
+        if(glbl > 0){
+          var gh = (glbl * 97.113) % 360;
+          var gs = 0.65, glt = 0.5;
+          var gc = (1 - Math.abs(2 * glt - 1)) * gs;
+          var gx = gc * (1 - Math.abs(((gh / 60) % 2) - 1));
+          var gm3 = glt - gc / 2;
+          var gr1 = 0, gg1 = 0, gb1 = 0;
+          var ghs = (gh / 60) | 0;
+          if(ghs === 0){ gr1 = gc; gg1 = gx; }
+          else if(ghs === 1){ gr1 = gx; gg1 = gc; }
+          else if(ghs === 2){ gg1 = gc; gb1 = gx; }
+          else if(ghs === 3){ gg1 = gx; gb1 = gc; }
+          else if(ghs === 4){ gr1 = gx; gb1 = gc; }
+          else { gr1 = gc; gb1 = gx; }
+          gData[gj2] = Math.round((gr1 + gm3) * 255);
+          gData[gj2 + 1] = Math.round((gg1 + gm3) * 255);
+          gData[gj2 + 2] = Math.round((gb1 + gm3) * 255);
+          gData[gj2 + 3] = hv ? 72 : 55;
+        }
+      }
+      ctx.putImageData(gImg, 0, 0);
+    }
+  }
+
+  if(flags.wfg3SharedBoundaries && artf.partitionSharedBoundaries){
+    var wb = artf.partitionSharedBoundaries;
+    var wbImg = ctx.createImageData(W, H);
+    var wbd = wbImg.data;
+    for(var wbi = 0, wbj = 0; wbi < N; wbi++, wbj += 4){
+      if(wb[wbi]){
+        wbd[wbj] = 255; wbd[wbj + 1] = 255; wbd[wbj + 2] = 255; wbd[wbj + 3] = hv ? 200 : 120;
+      }
+    }
+    ctx.putImageData(wbImg, 0, 0);
   }
 
   // ── WFG3 info badge ──
@@ -22704,17 +22851,14 @@ window.wfg3ToggleHighVis = function() {
 (function(){
   var modeSelect = document.getElementById('graph-learning-pipeline-mode');
   var modeInfo = document.getElementById('graph-learning-pipeline-info');
-  var modeDescriptions = {
-    partition: 'Non-overlapping color-first partition is the primary segmentation.',
-    structural: 'Legacy grid-based structural region growing (overlapping regions possible).',
-    hybrid: 'Partition first, then structural refinement enriches partition regions.',
-    combined: 'Both partition and structural run; partition is authoritative.'
-  };
   if(modeSelect){
     modeSelect.addEventListener('change', function(){
       var mode = modeSelect.value;
-      if(modeInfo) modeInfo.textContent = modeDescriptions[mode] || '';
       if(state.graphLearning.params) state.graphLearning.params.pipelineMode = mode;
+      syncGraphLearningPipelineModeUI();
+      if(modeInfo && !modeInfo.textContent){
+        modeInfo.textContent = '';
+      }
       if(state.graphLearning.normalizedSurface) graphLearningRunGeneration({ _skipSliderSync: true });
     });
   }
