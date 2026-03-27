@@ -119,8 +119,18 @@
     // Run Stage E: Region Partition (boundary-graph-informed watershed)
     var partition = Stages.stageE(normalizedSurface, evidence, boundaryGraph, cfgDF);
 
-    // Run Stage F: Region Grouping (union-find merge)
-    var groupMap = Stages.stageF(partition, normalizedSurface, cfgDF);
+    var pipelineMode = (p && p.pipelineMode) || 'partition';
+    var isPartitionOnly = pipelineMode === 'partition_only';
+
+    // Run Stage F: Region Grouping (union-find merge) unless explicitly disabled.
+    var groupMap = isPartitionOnly
+      ? {
+          labelMap: partition.labelMap,
+          groupCount: partition.regionCount,
+          groups: {},
+          boundaries: partition.boundaries
+        }
+      : Stages.stageF(partition, normalizedSurface, cfgDF);
 
     // Run Stage G: Structure Graph (spatial relationships between groups)
     var structureGraph = Stages.stageG(groupMap, cfgGH);
@@ -203,7 +213,7 @@
       engine: 'wfg3',
       version: 1,
       parameters: copyParams(p),
-      pipelineMode: p.pipelineMode || 'partition',
+      pipelineMode: pipelineMode,
       normalizedSize: { width: w, height: h },
 
       nodes: nodes,
@@ -239,9 +249,9 @@
 
         // WFG3-specific Stage F artifacts
         wfg3_groupLabelMap: groupMap.labelMap,
-        wfg3_groupCount: groupMap.groupCount,
-        wfg3_groups: groupMap.groups,
-        wfg3_groupBoundaries: groupMap.boundaries,
+        wfg3_groupCount: isPartitionOnly ? 0 : groupMap.groupCount,
+        wfg3_groups: isPartitionOnly ? {} : groupMap.groups,
+        wfg3_groupBoundaries: isPartitionOnly ? null : groupMap.boundaries,
 
         // WFG3-specific Stage G artifacts
         wfg3_structureGraph: structureGraph,
