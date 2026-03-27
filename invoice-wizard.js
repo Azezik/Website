@@ -20685,6 +20685,10 @@ const _wfg2 = window.WrokitFeatureGraph2 || null;
 const _wfg3 = window.WrokitFeatureGraph3 || null;
 const _wfg2Store = _wfg2?.createAttemptStore ? _wfg2.createAttemptStore(localStorage) : null;
 const _wfg2PresetStore = _wfg2?.createPresetStore ? _wfg2.createPresetStore(localStorage) : null;
+const _wfg3Store = _wfg3?.createAttemptStore ? _wfg3.createAttemptStore(localStorage) : null;
+const _wfg3PresetStore = _wfg3?.createPresetStore ? _wfg3.createPresetStore(localStorage) : null;
+function _getActiveAttemptStore(){ return getGraphLearningEngineType() === 'wfg3' ? _wfg3Store : _wfg2Store; }
+function _getActivePresetStore(){ return getGraphLearningEngineType() === 'wfg3' ? _wfg3PresetStore : _wfg2PresetStore; }
 const _glStore = window.GraphLearningStore || null;
 const _glTrainingStore = _glStore?.createGraphTrainingStore ? _glStore.createGraphTrainingStore(localStorage) : null;
 const _glFamilyStore = _glStore?.createGraphFamilyStore ? _glStore.createGraphFamilyStore(localStorage) : null;
@@ -20714,7 +20718,7 @@ function syncGraphLearningEngineUI(){
   }
   if(els.graphLearningEngineCaption){
     if(getGraphLearningEngineType() === 'wfg3'){
-      els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013F) — boundary graph + watershed partition + region grouping [browser-native]';
+      els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013H) — full 8-stage pipeline: evidence \u2192 tokens \u2192 graph \u2192 partition \u2192 groups \u2192 structure [browser-native]';
     } else {
       els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
     }
@@ -20728,7 +20732,8 @@ function graphLearningSessionId(){
 
 function renderGraphLearningPresetStatus(){
   if(!els.graphLearningPresetStatus) return;
-  const preset = _wfg2PresetStore?.get ? _wfg2PresetStore.get() : null;
+  var _ps = _getActivePresetStore();
+  const preset = _ps?.get ? _ps.get() : null;
   if(!preset){
     els.graphLearningPresetStatus.textContent = 'Preset: none saved';
     state.graphLearning.activePreset = null;
@@ -20741,15 +20746,17 @@ function renderGraphLearningPresetStatus(){
 
 function updateGraphLearningPresetButtons(){
   if(els.graphLearningSavePresetBtn) els.graphLearningSavePresetBtn.disabled = !state.graphLearning?.params;
-  if(els.graphLearningLoadPresetBtn) els.graphLearningLoadPresetBtn.disabled = !_wfg2PresetStore?.get || !_wfg2PresetStore.get();
+  var _psBt = _getActivePresetStore();
+  if(els.graphLearningLoadPresetBtn) els.graphLearningLoadPresetBtn.disabled = !_psBt?.get || !_psBt.get();
 }
 
 function graphLearningSaveCurrentPreset(opts){
   var engine = getGraphLearningEngine();
-  if(!_wfg2PresetStore || !engine || !state.graphLearning?.params) return null;
+  var _psSave = _getActivePresetStore();
+  if(!_psSave || !engine || !state.graphLearning?.params) return null;
   const gl = state.graphLearning;
-  const previous = _wfg2PresetStore.get();
-  const saved = _wfg2PresetStore.save({
+  const previous = _psSave.get();
+  const saved = _psSave.save({
     presetId: previous?.presetId || (getGraphLearningEngineType() + '-baseline'),
     name: previous?.name || (graphLearningEngineLabel() + ' Baseline'),
     createdAt: previous?.createdAt || null,
@@ -20765,8 +20772,9 @@ function graphLearningSaveCurrentPreset(opts){
 
 function graphLearningLoadPresetIntoSession(){
   var engine = getGraphLearningEngine();
-  if(!_wfg2PresetStore || !engine) return null;
-  const preset = _wfg2PresetStore.get();
+  var _psLoad = _getActivePresetStore();
+  if(!_psLoad || !engine) return null;
+  const preset = _psLoad.get();
   if(!preset?.params) return null;
   state.graphLearning.params = engine.copyParams(preset.params);
   state.graphLearning.activePreset = preset;
@@ -20775,8 +20783,9 @@ function graphLearningLoadPresetIntoSession(){
 }
 
 function renderGraphLearningAttemptHistory(){
-  if(!els.graphLearningAttempts || !_wfg2Store) return;
-  const rows = _wfg2Store.getAll().slice().reverse().slice(0, 50);
+  var _asHist = _getActiveAttemptStore();
+  if(!els.graphLearningAttempts || !_asHist) return;
+  const rows = _asHist.getAll().slice().reverse().slice(0, 50);
   if(!rows.length){
     els.graphLearningAttempts.innerHTML = '<p class="sub" style="color:var(--muted);">No attempts yet.</p>';
     return;
@@ -21266,10 +21275,11 @@ function clearGraphLearningViewer(){
 }
 
 function graphLearningCaptureAttempt(result, feedback){
-  if(!_wfg2Store || !state.graphLearning.graph) return;
+  var _asCap = _getActiveAttemptStore();
+  if(!_asCap || !state.graphLearning.graph) return;
   const gl = state.graphLearning;
   const attempt = {
-    attemptId: 'wfg2a-' + Date.now().toString(36),
+    attemptId: getGraphLearningEngineType() + 'a-' + Date.now().toString(36),
     sessionId: graphLearningSessionId(),
     attemptNumber: gl.attemptNumber,
     fileId: gl.fileId,
@@ -21284,7 +21294,7 @@ function graphLearningCaptureAttempt(result, feedback){
     previousAttemptId: gl.lastAttemptId || null,
     summary: { regionCount: gl.graph.nodes?.length || 0, edgeCount: gl.graph.edges?.length || 0 }
   };
-  _wfg2Store.addAttempt(attempt);
+  _asCap.addAttempt(attempt);
   gl.lastAttemptId = attempt.attemptId;
   renderGraphLearningAttemptHistory();
   renderGraphLearningPresetStatus();
@@ -21339,7 +21349,13 @@ function graphLearningRunGeneration(opts){
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
   const nocolourTag = artf.nocolourFallbackActive ? ', NOCOLOUR:on(thresh=' + (artf.nocolourDebug?.threshold ?? '?') + ', comps=' + (artf.nocolourDebug?.componentCount ?? '?') + ', clusters=' + (artf.nocolourDebug?.clusterCount ?? '?') + ')' : '';
   if(gl.graph?.engine === 'wfg3'){
-    graphLearningStatus('WFG3 A\u2013C attempt ' + gl.attemptNumber + ': ' + (artf.wfg3_tokenCount || 0) + ' tokens, ' + (artf.wfg3_contourCount || 0) + ' contours, backend: ' + (artf.wfg3_backend || '?') + ', color: ' + (artf.colorBoundaryActive ? 'on' : 'off') + '.');
+    graphLearningStatus('WFG3 A\u2013H attempt ' + gl.attemptNumber + ': ' +
+      (artf.wfg3_tokenCount || 0) + ' tokens, ' +
+      (artf.wfg3_chainCount || 0) + ' chains, ' +
+      (artf.wfg3_regionCount || 0) + ' regions, ' +
+      (artf.wfg3_groupCount || 0) + ' groups, ' +
+      (artf.wfg3_structureEdgeCount || 0) + ' struct edges, ' +
+      'backend: ' + (artf.wfg3_backend || '?') + '.');
   } else {
     graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
   }
@@ -21579,7 +21595,7 @@ if(els.graphLearningTooManyBtn){ els.graphLearningTooManyBtn.addEventListener('c
 if(els.graphLearningSavePresetBtn){
   els.graphLearningSavePresetBtn.addEventListener('click', function(){
     const saved = graphLearningSaveCurrentPreset({ sourceResult: 'manual-save' });
-    if(saved) graphLearningStatus('Saved preset "' + (saved.name || 'WFG2 Baseline') + '".');
+    if(saved) graphLearningStatus('Saved preset "' + (saved.name || (graphLearningEngineLabel() + ' Baseline')) + '".');
   });
 }
 if(els.graphLearningLoadPresetBtn){
@@ -21591,16 +21607,17 @@ if(els.graphLearningLoadPresetBtn){
     }
     if(state.graphLearning.normalizedSurface){
       graphLearningRunGeneration();
-      graphLearningStatus('Loaded preset "' + (preset.name || 'WFG2 Baseline') + '" and regenerated.');
+      graphLearningStatus('Loaded preset "' + (preset.name || (graphLearningEngineLabel() + ' Baseline')) + '" and regenerated.');
     } else {
-      graphLearningStatus('Loaded preset "' + (preset.name || 'WFG2 Baseline') + '". Upload a file to use it.');
+      graphLearningStatus('Loaded preset "' + (preset.name || (graphLearningEngineLabel() + ' Baseline')) + '". Upload a file to use it.');
     }
   });
 }
 if(els.graphLearningClearHistoryBtn){
   els.graphLearningClearHistoryBtn.addEventListener('click', function(){
-    if(!_wfg2Store) return;
-    if(confirm('Clear WFG2 graph-learning attempt history?')){ _wfg2Store.clear(); renderGraphLearningAttemptHistory(); }
+    var _asClear = _getActiveAttemptStore();
+    if(!_asClear) return;
+    if(confirm('Clear ' + graphLearningEngineLabel() + ' graph-learning attempt history?')){ _asClear.clear(); renderGraphLearningAttemptHistory(); }
   });
 }
 
@@ -22666,15 +22683,90 @@ paintGraphLearningOverlay = function(ctx){
     }
   }
 
+  // ── Layer 10: Structure graph (Stage G) — nodes + typed edges ──
+  if(flags.compiled && artf.wfg3_structureGraph){
+    var sg = artf.wfg3_structureGraph;
+    var sgNodes = sg.nodes;
+    var sgEdges = sg.edges;
+
+    // Edge type → color (bright, distinct)
+    var sgTypeColor = {
+      adjacent:               hv ? 'rgba(255,165,0,0.9)'  : 'rgba(255,165,0,0.5)',
+      containment:            hv ? 'rgba(255,0,0,0.9)'    : 'rgba(255,0,0,0.5)',
+      alignment_horizontal:   hv ? 'rgba(0,200,255,0.9)'  : 'rgba(0,200,255,0.5)',
+      alignment_vertical:     hv ? 'rgba(180,0,255,0.9)'  : 'rgba(180,0,255,0.5)',
+      support:                hv ? 'rgba(0,255,128,0.9)'   : 'rgba(0,255,128,0.5)',
+      repetition:             hv ? 'rgba(255,255,0,0.9)'   : 'rgba(255,255,0,0.5)'
+    };
+    var sgEdgeW = hv ? 3.5 : 1.5;
+    var sgNodeR = hv ? 7 : 4;
+    var sgLabelFont = hv ? 'bold 12px monospace' : '10px monospace';
+
+    ctx.lineCap = 'round';
+
+    // Draw edges
+    for(var sei = 0; sei < sgEdges.length; sei++){
+      var se = sgEdges[sei];
+      var srcN = sgNodes[se.src];
+      var dstN = sgNodes[se.dst];
+      if(!srcN || !dstN) continue;
+
+      // Dark halo
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = sgEdgeW + 3;
+      ctx.beginPath(); ctx.moveTo(srcN.cx, srcN.cy); ctx.lineTo(dstN.cx, dstN.cy); ctx.stroke();
+
+      // Colored edge
+      ctx.strokeStyle = sgTypeColor[se.type] || 'rgba(200,200,200,0.6)';
+      ctx.lineWidth = sgEdgeW;
+      ctx.beginPath(); ctx.moveTo(srcN.cx, srcN.cy); ctx.lineTo(dstN.cx, dstN.cy); ctx.stroke();
+    }
+
+    // Draw nodes
+    for(var nid in sgNodes){
+      var sn = sgNodes[nid];
+      // Halo
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.beginPath(); ctx.arc(sn.cx, sn.cy, sgNodeR + 2, 0, 6.283); ctx.fill();
+      // Node
+      ctx.fillStyle = hv ? 'rgba(0,255,255,1)' : 'rgba(0,255,255,0.8)';
+      ctx.beginPath(); ctx.arc(sn.cx, sn.cy, sgNodeR, 0, 6.283); ctx.fill();
+      // Label
+      ctx.font = sgLabelFont;
+      ctx.fillStyle = 'rgba(0,0,0,0.9)';
+      ctx.fillText('G' + nid, sn.cx + sgNodeR + 2 + 1, sn.cy + 4 + 1);
+      ctx.fillStyle = '#fff';
+      ctx.fillText('G' + nid, sn.cx + sgNodeR + 2, sn.cy + 4);
+    }
+
+    // Edge type legend (bottom-left)
+    if(hv){
+      var legendTypes = ['adjacent','containment','alignment_horizontal','alignment_vertical','support','repetition'];
+      var legendLabels = ['Adjacent','Containment','Align-H','Align-V','Support','Repetition'];
+      var lgX = 8, lgY = H - 10 - legendTypes.length * 16;
+      ctx.fillStyle = 'rgba(0,0,0,0.85)';
+      ctx.fillRect(lgX - 4, lgY - 14, 130, legendTypes.length * 16 + 10);
+      ctx.font = 'bold 10px monospace';
+      for(var lgi = 0; lgi < legendTypes.length; lgi++){
+        var ly = lgY + lgi * 16;
+        ctx.fillStyle = sgTypeColor[legendTypes[lgi]];
+        ctx.fillRect(lgX, ly, 12, 10);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(legendLabels[lgi], lgX + 16, ly + 9);
+      }
+    }
+  }
+
   // ── WFG3 info badge ──
   ctx.save();
-  var badge = 'WFG3 A\u2013F';
+  var badge = 'WFG3 A\u2013H';
   if(hv) badge += ' [HIGH VIS]';
   var backend = artf.wfg3_backend || '?';
   var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tok  |  ' +
     (artf.wfg3_chainCount || 0) + ' chains  |  ' +
     (artf.wfg3_regionCount || 0) + ' rgn  |  ' +
-    (artf.wfg3_groupCount || 0) + ' grp  |  ' + backend;
+    (artf.wfg3_groupCount || 0) + ' grp  |  ' +
+    (artf.wfg3_structureEdgeCount || 0) + ' struct  |  ' + backend;
 
   ctx.font = 'bold 13px "IBM Plex Mono", monospace';
   var tw = ctx.measureText(info).width;
@@ -24042,7 +24134,8 @@ function wfg2RefreshDebugInspector(){
   lines.push('');
 
   lines.push('=== Preset (localStorage) ===');
-  var preset = _wfg2PresetStore?.get ? _wfg2PresetStore.get() : null;
+  var _psDiag = _getActivePresetStore();
+  var preset = _psDiag?.get ? _psDiag.get() : null;
   if(preset){
     lines.push('  Name: ' + (preset.name || 'unnamed'));
     lines.push('  Saved: ' + (preset.savedAt || 'unknown'));
