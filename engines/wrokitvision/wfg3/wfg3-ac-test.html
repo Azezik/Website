@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WFG3 Stages A–C &mdash; Phase 2 Test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; background: #1a1a1a; color: #ccc; padding: 16px; }
+  h1 { font-size: 16px; margin-bottom: 8px; color: #eee; }
+  h2 { font-size: 13px; margin: 14px 0 6px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 3px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+  .cell { text-align: center; }
+  .cell canvas { display: block; border: 1px solid #444; background: #000; image-rendering: pixelated; }
+  .cell .label { font-size: 10px; margin-top: 3px; color: #888; }
+  #log { background: #111; border: 1px solid #333; padding: 8px; font-size: 11px;
+         max-height: 300px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; }
+  .pass { color: #6f6; } .fail { color: #f66; } .info { color: #69f; } .warn { color: #fc6; }
+  #status { font-size: 13px; margin-bottom: 8px; padding: 6px; border-radius: 3px; }
+  #status.ok { background: #1a3a1a; color: #6f6; }
+  #status.err { background: #3a1a1a; color: #f66; }
+  #drop-zone { border: 2px dashed #555; padding: 16px; text-align: center; margin-bottom: 10px;
+               cursor: pointer; color: #777; font-size: 12px; }
+  #drop-zone.hover { border-color: #69f; color: #69f; }
+  .stat { display: inline-block; margin-right: 14px; font-size: 11px; }
+  .stat b { color: #eee; }
+</style>
+</head>
+<body>
+<h1>WFG3 Stages A&ndash;C &mdash; Phase 2 Test Harness</h1>
+<div id="status">Loading&hellip;</div>
+<div id="drop-zone">Drop an image here or click to load &mdash; or use the built-in synthetic test</div>
+<input type="file" id="file-input" accept="image/*" style="display:none">
+
+<h2>Stage A: Normalization</h2>
+<div id="stats-a" style="margin-bottom:6px"></div>
+<div class="row" id="row-a"></div>
+
+<h2>Stage B: Boundary Evidence</h2>
+<div id="stats-b" style="margin-bottom:6px"></div>
+<div class="row" id="row-b"></div>
+
+<h2>Stage C: Boundary Tokens</h2>
+<div id="stats-c" style="margin-bottom:6px"></div>
+<div class="row" id="row-c"></div>
+
+<h2>Test Log</h2>
+<div id="log"></div>
+
+<script src="wfg3-cv.js"></script>
+<script src="wfg3-stages-ac.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var CV = window._WFG3_CV;
+  var S  = window._WFG3_Stages;
+  var logEl = document.getElementById('log');
+  var statusEl = document.getElementById('status');
+  var dropZone = document.getElementById('drop-zone');
+  var fileInput = document.getElementById('file-input');
+  var passed = 0, failed = 0;
+
+  function log(msg, cls) {
+    var s = document.createElement('span');
+    s.className = cls || ''; s.textContent = msg + '\n';
+    logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight;
+  }
+  function assert(cond, label) {
+    if (cond) { passed++; log('PASS  ' + label, 'pass'); }
+    else      { failed++; log('FAIL  ' + label, 'fail'); }
+  }
+  function updateStatus() {
+    statusEl.textContent = passed + ' passed, ' + failed + ' failed' +
+      ' — OpenCV.js: ' + (CV.hasOpenCV() ? 'loaded' : 'pure-JS fallbacks');
+    statusEl.className = failed > 0 ? 'err' : 'ok';
+  }
+
+  /* ---- Canvas helpers ---- */
+
+  function makeCanvas(w, h, maxPx) {
+    maxPx = maxPx || 320;
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var s = Math.min(maxPx / Math.max(w, h), 1);
+    c.style.width  = Math.round(w * s) + 'px';
+    c.style.height = Math.round(h * s) + 'px';
+    return c;
+  }
+  function cell(parent, canvas, label) {
+    var d = document.createElement('div'); d.className = 'cell';
+    d.appendChild(canvas);
+    var l = document.createElement('div'); l.className = 'label'; l.textContent = label;
+    d.appendChild(l); parent.appendChild(d);
+  }
+  function drawGray(parent, data, w, h, label) {
+    var c = makeCanvas(w, h);
+    var ctx = c.getContext('2d');
+    var img = ctx.createImageData(w, h);
+    for (var i = 0; i < w * h; i++) {
+      var v = data[i]; img.data[i*4] = v; img.data[i*4+1] = v; img.data[i*4+2] = v; img.data[i*4+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    cell(parent, c, label);
+  }
+  function drawFloat(parent, data, w, h, label) {
+    var mx = 0;
+    for (var i = 0; i < data.length; i++) { var v = Math.abs(data[i]); if (v > mx) mx = v; }
+    if (mx < 1) mx = 1;
+    var u8 = new Uint8Array(data.length);
+    for (var j = 0; j < data.length; j++) u8[j] = Math.min(255, Math.round(Math.abs(data[j]) / mx * 255));
+    drawGray(parent, u8, w, h, label);
+  }
+  function drawRGB(parent, r, g, b, w, h, label) {
+    var c = makeCanvas(w, h);
+    var ctx = c.getContext('2d');
+    var img = ctx.createImageData(w, h);
+    for (var i = 0; i < w * h; i++) {
+      img.data[i*4] = r[i]; img.data[i*4+1] = g[i]; img.data[i*4+2] = b[i]; img.data[i*4+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    cell(parent, c, label);
+  }
+
+  function stat(parentId, html) {
+    document.getElementById(parentId).innerHTML = html;
+  }
+
+  /* ---- Synthetic image ---- */
+
+  function makeSyntheticImage(w, h) {
+    var n = w * h;
+    var r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n), gray = new Uint8Array(n);
+    for (var i = 0; i < n; i++) { r[i] = 240; g[i] = 238; b[i] = 235; }
+    function rect(x0, y0, x1, y1, cr, cg, cb) {
+      for (var yy = Math.max(0,y0); yy <= Math.min(y1,h-1); yy++)
+        for (var xx = Math.max(0,x0); xx <= Math.min(x1,w-1); xx++) {
+          var idx = yy * w + xx; r[idx] = cr; g[idx] = cg; b[idx] = cb;
+        }
+    }
+    rect(20,15,w-20,55,30,30,35);   // header
+    rect(30,22,180,48,230,230,230);  // title block
+    rect(20,60,w-20,62,200,40,40);   // accent line
+    for (var row = 0; row < 6; row++) {
+      var ry = 75 + row * 32; var bg = row % 2 === 0 ? 250 : 225;
+      rect(25,ry,w-25,ry+26,bg,bg,bg);
+      rect(30,ry+6,110+row*5,ry+18,50,50,50);
+      rect(w-80,ry+6,w-35,ry+18,40,40,120);
+    }
+    rect(w-130,h-55,w-25,h-20,25,60,25); // footer
+    for (var j = 0; j < n; j++) gray[j] = Math.round(0.299*r[j]+0.587*g[j]+0.114*b[j]);
+    return { r:r, g:g, b:b, gray:gray, width:w, height:h };
+  }
+
+  /* ---- Run Stages A–C ---- */
+
+  function runPipeline(imgData) {
+    passed = 0; failed = 0;
+    logEl.innerHTML = '';
+    document.getElementById('row-a').innerHTML = '';
+    document.getElementById('row-b').innerHTML = '';
+    document.getElementById('row-c').innerHTML = '';
+    document.getElementById('stats-a').innerHTML = '';
+    document.getElementById('stats-b').innerHTML = '';
+    document.getElementById('stats-c').innerHTML = '';
+
+    log('Input: ' + imgData.width + 'x' + imgData.height, 'info');
+    log('OpenCV.js: ' + (CV.hasOpenCV() ? 'YES' : 'pure-JS'), 'info');
+    log('', '');
+
+    /* ---------- Stage A ---------- */
+    log('=== Stage A: Normalization ===', 'info');
+    var t0 = performance.now();
+    var surface = S.stageA(imgData, { maxSide: 600 });
+    var tA = performance.now() - t0;
+
+    assert(surface !== null, 'stageA returns non-null');
+    assert(surface.kind === 'wfg3-normalized-surface', 'surface.kind correct');
+    assert(surface.gray instanceof Uint8Array, 'gray is Uint8Array');
+    assert(surface.gray.length === surface.width * surface.height, 'gray size matches w*h');
+    assert(surface.width <= 600 && surface.height <= 600, 'respects maxSide=600 (' + surface.width + 'x' + surface.height + ')');
+    assert(surface.artifacts.denoised === true, 'denoised flag set');
+    if (imgData.r) {
+      assert(surface.artifacts.hasColor === true, 'hasColor when RGB provided');
+      assert(surface.lab !== null, 'LAB computed from color');
+      assert(surface.lab.L instanceof Float32Array, 'LAB.L is Float32');
+    }
+    log('  Time: ' + tA.toFixed(1) + 'ms  Size: ' + surface.width + 'x' + surface.height +
+        '  Scale: ' + surface.source.scale.toFixed(3), '');
+
+    var rowA = document.getElementById('row-a');
+    if (surface.rgb) drawRGB(rowA, surface.rgb.r, surface.rgb.g, surface.rgb.b, surface.width, surface.height, 'RGB (normalized)');
+    drawGray(rowA, surface.gray, surface.width, surface.height, 'Gray (denoised)');
+    if (surface.lab) {
+      drawFloat(rowA, surface.lab.L, surface.width, surface.height, 'LAB - L');
+      drawFloat(rowA, surface.lab.a, surface.width, surface.height, 'LAB - a');
+      drawFloat(rowA, surface.lab.b, surface.width, surface.height, 'LAB - b');
+    }
+    stat('stats-a',
+      '<span class="stat">Size: <b>' + surface.width + 'x' + surface.height + '</b></span>' +
+      '<span class="stat">Scale: <b>' + surface.source.scale.toFixed(3) + '</b></span>' +
+      '<span class="stat">Color: <b>' + (surface.artifacts.hasColor ? 'yes' : 'gray-only') + '</b></span>' +
+      '<span class="stat">Denoise: <b>' + surface.artifacts.denoiseMode + '</b></span>' +
+      '<span class="stat">Time: <b>' + tA.toFixed(0) + 'ms</b></span>'
+    );
+
+    /* ---------- Stage B ---------- */
+    log('', '');
+    log('=== Stage B: Boundary Evidence ===', 'info');
+    t0 = performance.now();
+    var evidence = S.stageB(surface);
+    var tB = performance.now() - t0;
+
+    var W = surface.width, H = surface.height, N = W * H;
+    assert(evidence.kind === 'wfg3-boundary-evidence', 'evidence.kind correct');
+    assert(evidence.edgeBinary.length === N, 'edgeBinary size');
+    assert(evidence.edgeWeighted.length === N, 'edgeWeighted size');
+    assert(evidence.gradX.length === N, 'gradX size');
+    assert(evidence.gradMag.length === N, 'gradMag size');
+    assert(evidence.labDelta.length === N, 'labDelta size');
+
+    var edgeCount = 0;
+    for (var ei = 0; ei < N; ei++) if (evidence.edgeBinary[ei] > 0) edgeCount++;
+    assert(edgeCount > 50, 'edgeBinary has ' + edgeCount + ' edge pixels');
+    assert(edgeCount < N * 0.5, 'edges not oversaturated (' + (edgeCount/N*100).toFixed(1) + '%)');
+    assert(evidence.contourCount > 0, 'contourCount = ' + evidence.contourCount);
+
+    // Verify edgeBinary is strictly binary (0 or 255)
+    var binaryOK = true;
+    for (var bi = 0; bi < N; bi++) {
+      if (evidence.edgeBinary[bi] !== 0 && evidence.edgeBinary[bi] !== 255) { binaryOK = false; break; }
+    }
+    assert(binaryOK, 'edgeBinary is strictly binary');
+
+    log('  Time: ' + tB.toFixed(1) + 'ms  Edges: ' + edgeCount + '  Contours: ' + evidence.contourCount, '');
+
+    var rowB = document.getElementById('row-b');
+    drawGray(rowB, evidence.edgeBinary, W, H, 'Edge Binary');
+    drawGray(rowB, evidence.edgeWeighted, W, H, 'Edge Weighted');
+    drawFloat(rowB, evidence.gradMag, W, H, 'Gradient Magnitude');
+    drawFloat(rowB, evidence.labDelta, W, H, 'LAB Neighbor Delta');
+
+    stat('stats-b',
+      '<span class="stat">Edges: <b>' + edgeCount + '</b> (' + (edgeCount/N*100).toFixed(1) + '%)</span>' +
+      '<span class="stat">Contours: <b>' + evidence.contourCount + '</b></span>' +
+      '<span class="stat">Time: <b>' + tB.toFixed(0) + 'ms</b></span>'
+    );
+
+    /* ---------- Stage C ---------- */
+    log('', '');
+    log('=== Stage C: Boundary Tokens ===', 'info');
+    t0 = performance.now();
+    var tokens = S.stageC(surface, evidence);
+    var tC = performance.now() - t0;
+
+    assert(Array.isArray(tokens), 'tokens is array');
+    assert(tokens.length > 10, 'token count = ' + tokens.length + ' (expect > 10)');
+
+    // Validate token structure
+    if (tokens.length > 0) {
+      var t = tokens[0];
+      assert(typeof t.id === 'number', 'token has numeric id');
+      assert(typeof t.x === 'number' && typeof t.y === 'number', 'token has x, y');
+      assert(typeof t.tangentX === 'number' && typeof t.tangentY === 'number', 'token has tangent');
+      assert(typeof t.normalX === 'number' && typeof t.normalY === 'number', 'token has normal');
+      assert(Array.isArray(t.leftLab) && t.leftLab.length === 3, 'token has leftLab [L,a,b]');
+      assert(Array.isArray(t.rightLab) && t.rightLab.length === 3, 'token has rightLab [L,a,b]');
+      assert(typeof t.deltaE === 'number', 'token has deltaE');
+      assert(typeof t.confidence === 'number' && t.confidence >= 0 && t.confidence <= 1, 'token confidence in [0,1]');
+
+      // Check that normal is approximately unit-length
+      var nLen = Math.sqrt(t.normalX * t.normalX + t.normalY * t.normalY);
+      assert(Math.abs(nLen - 1.0) < 0.01, 'normal is unit length (' + nLen.toFixed(4) + ')');
+
+      // Check tangent is perpendicular to normal
+      var dot = t.tangentX * t.normalX + t.tangentY * t.normalY;
+      assert(Math.abs(dot) < 0.01, 'tangent perpendicular to normal (dot=' + dot.toFixed(4) + ')');
+    }
+
+    // Check that all tokens fall on edge pixels
+    var onEdge = 0;
+    for (var ti = 0; ti < tokens.length; ti++) {
+      var tk = tokens[ti];
+      if (evidence.edgeBinary[tk.y * W + tk.x] > 0) onEdge++;
+    }
+    assert(onEdge === tokens.length, 'all tokens on edge pixels (' + onEdge + '/' + tokens.length + ')');
+
+    // Check side-awareness: left and right LAB should differ for high-confidence tokens
+    var highConf = tokens.filter(function(t) { return t.confidence > 0.3; });
+    if (highConf.length > 0) {
+      var sidesDiffer = 0;
+      for (var si = 0; si < highConf.length; si++) {
+        if (highConf[si].deltaE > 3) sidesDiffer++;
+      }
+      assert(sidesDiffer > highConf.length * 0.5,
+        'high-confidence tokens have different sides (' + sidesDiffer + '/' + highConf.length + ')');
+    }
+
+    // Confidence distribution
+    var confBuckets = [0, 0, 0, 0, 0]; // [0-0.2, 0.2-0.4, 0.4-0.6, 0.6-0.8, 0.8-1.0]
+    for (var ci = 0; ci < tokens.length; ci++) {
+      var b = Math.min(4, Math.floor(tokens[ci].confidence * 5));
+      confBuckets[b]++;
+    }
+
+    log('  Time: ' + tC.toFixed(1) + 'ms  Tokens: ' + tokens.length +
+        '  High-conf(>0.3): ' + highConf.length, '');
+    log('  Confidence dist: ' + confBuckets.map(function(v,i){
+      return ((i*20)+'-'+((i+1)*20)+'%: '+v);
+    }).join(', '), '');
+
+    stat('stats-c',
+      '<span class="stat">Tokens: <b>' + tokens.length + '</b></span>' +
+      '<span class="stat">High-conf: <b>' + highConf.length + '</b></span>' +
+      '<span class="stat">Time: <b>' + tC.toFixed(0) + 'ms</b></span>'
+    );
+
+    // --- Visualize tokens ---
+    var rowC = document.getElementById('row-c');
+
+    // Token overlay on source
+    var c1 = makeCanvas(W, H);
+    var ctx1 = c1.getContext('2d');
+    // Draw source image as background
+    if (surface.rgb) {
+      var imgD = ctx1.createImageData(W, H);
+      for (var pi = 0; pi < N; pi++) {
+        imgD.data[pi*4]   = surface.rgb.r[pi];
+        imgD.data[pi*4+1] = surface.rgb.g[pi];
+        imgD.data[pi*4+2] = surface.rgb.b[pi];
+        imgD.data[pi*4+3] = 255;
+      }
+      ctx1.putImageData(imgD, 0, 0);
+    } else {
+      var imgD2 = ctx1.createImageData(W, H);
+      for (var gi = 0; gi < N; gi++) {
+        var v = surface.gray[gi];
+        imgD2.data[gi*4] = v; imgD2.data[gi*4+1] = v; imgD2.data[gi*4+2] = v; imgD2.data[gi*4+3] = 255;
+      }
+      ctx1.putImageData(imgD2, 0, 0);
+    }
+
+    // Draw tokens: tangent line (yellow) + normal arrow (green)
+    var stride = Math.max(1, Math.round(tokens.length / 600)); // draw up to ~600 tokens
+    for (var di = 0; di < tokens.length; di += stride) {
+      var tok = tokens[di];
+      var alpha = 0.3 + tok.confidence * 0.7;
+
+      // Tangent line
+      ctx1.strokeStyle = 'rgba(255,200,0,' + alpha.toFixed(2) + ')';
+      ctx1.lineWidth = 1;
+      ctx1.beginPath();
+      ctx1.moveTo(tok.x - tok.tangentX * 5, tok.y - tok.tangentY * 5);
+      ctx1.lineTo(tok.x + tok.tangentX * 5, tok.y + tok.tangentY * 5);
+      ctx1.stroke();
+
+      // Normal arrow
+      ctx1.strokeStyle = 'rgba(0,255,0,' + alpha.toFixed(2) + ')';
+      ctx1.beginPath();
+      ctx1.moveTo(tok.x, tok.y);
+      ctx1.lineTo(tok.x + tok.normalX * 4, tok.y + tok.normalY * 4);
+      ctx1.stroke();
+    }
+    cell(rowC, c1, 'Tokens on Source (stride=' + stride + ')');
+
+    // Confidence heatmap
+    var confImg = new Uint8Array(N);
+    for (var hi = 0; hi < tokens.length; hi++) {
+      var tt = tokens[hi];
+      var idx = tt.y * W + tt.x;
+      confImg[idx] = Math.round(tt.confidence * 255);
+    }
+    drawGray(rowC, confImg, W, H, 'Token Confidence Map');
+
+    // Side color visualization: left side = token pixel colored by leftLab L
+    var leftImg = new Uint8Array(N);
+    var rightImg = new Uint8Array(N);
+    for (var vi = 0; vi < tokens.length; vi++) {
+      var vt = tokens[vi];
+      var vIdx = vt.y * W + vt.x;
+      leftImg[vIdx] = CV.clamp(Math.round(vt.leftLab[0] * 2.55), 0, 255);
+      rightImg[vIdx] = CV.clamp(Math.round(vt.rightLab[0] * 2.55), 0, 255);
+    }
+    drawGray(rowC, leftImg, W, H, 'Left-side L');
+    drawGray(rowC, rightImg, W, H, 'Right-side L');
+
+    // DeltaE heatmap
+    var deImg = new Uint8Array(N);
+    var maxDE = 0;
+    for (var ddi = 0; ddi < tokens.length; ddi++) if (tokens[ddi].deltaE > maxDE) maxDE = tokens[ddi].deltaE;
+    if (maxDE < 1) maxDE = 1;
+    for (var dei = 0; dei < tokens.length; dei++) {
+      var dt = tokens[dei];
+      deImg[dt.y * W + dt.x] = Math.min(255, Math.round(dt.deltaE / maxDE * 255));
+    }
+    drawGray(rowC, deImg, W, H, 'DeltaE Heatmap');
+
+    /* ---------- Summary ---------- */
+    log('', '');
+    log('========================================', 'info');
+    log('Stage A: ' + tA.toFixed(0) + 'ms  Stage B: ' + tB.toFixed(0) + 'ms  Stage C: ' + tC.toFixed(0) + 'ms', 'info');
+    log('TOTAL: ' + passed + ' passed, ' + failed + ' failed', failed > 0 ? 'fail' : 'pass');
+    updateStatus();
+  }
+
+  /* ---- Image loading ---- */
+
+  function loadFile(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var img = new Image();
+      img.onload = function () {
+        var w = img.width, h = img.height;
+        var c = document.createElement('canvas'); c.width = w; c.height = h;
+        var ctx = c.getContext('2d'); ctx.drawImage(img, 0, 0);
+        var id = ctx.getImageData(0, 0, w, h);
+        var n = w * h;
+        var r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n), gray = new Uint8Array(n);
+        for (var i = 0; i < n; i++) {
+          r[i] = id.data[i*4]; g[i] = id.data[i*4+1]; b[i] = id.data[i*4+2];
+          gray[i] = Math.round(0.299*r[i] + 0.587*g[i] + 0.114*b[i]);
+        }
+        runPipeline({ r:r, g:g, b:b, gray:gray, width:w, height:h });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  dropZone.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () { if (fileInput.files[0]) loadFile(fileInput.files[0]); });
+  dropZone.addEventListener('dragover', function (e) { e.preventDefault(); dropZone.classList.add('hover'); });
+  dropZone.addEventListener('dragleave', function () { dropZone.classList.remove('hover'); });
+  dropZone.addEventListener('drop', function (e) {
+    e.preventDefault(); dropZone.classList.remove('hover');
+    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+
+  /* ---- Auto-run synthetic ---- */
+  runPipeline(makeSyntheticImage(320, 280));
+})();
+</script>
+</body>
+</html>
