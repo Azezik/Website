@@ -22408,19 +22408,14 @@ paintGraphLearningOverlay = function(ctx){
 
 /* ── WFG3-specific overlay rendering (intercepts when WFG3 engine is active) ── */
 
-var _wfg3HighVisibilityMode = false; // Set to true for thick lines, bright colors, large arrows
+var _wfg3HighVisibilityMode = true; // ON by default — exaggerated debug style
 
 var _priorPaintOverlay = paintGraphLearningOverlay;
 paintGraphLearningOverlay = function(ctx){
   var gl = state.graphLearning;
   if(!gl.graph || gl.graph.engine !== 'wfg3'){
-    // Not WFG3 — fall through to normal (WFG2 + grouped) rendering
     return _priorPaintOverlay(ctx);
   }
-
-  // ═══ WFG3 Rendering Path ═══
-  // This is genuinely separate from WFG2.  Everything below comes from
-  // Stage B (evidence) and Stage C (tokens) artifacts.
 
   var artf = gl.graph.artifacts || {};
   var nSize = gl.graph.normalizedSize || {};
@@ -22429,28 +22424,43 @@ paintGraphLearningOverlay = function(ctx){
   var N = W * H;
   var flags = getGraphLearningLayerFlags();
   var tokens = artf.wfg3_tokens || [];
-
-  // High visibility mode: scale up all visual elements
   var hv = _wfg3HighVisibilityMode;
-  var lineWidthScale = hv ? 2.5 : 1;
-  var arrowLenScale = hv ? 1.8 : 1;
-  var opacityBoost = hv ? 1.3 : 1;
 
-  // ── Layer 1: Edge binary overlay ──
+  // ── Helper: dilate a pixel mask to make it thicker ──
+  function dilateMask(src, w, h, radius) {
+    var out = new Uint8Array(w * h);
+    for(var y = 0; y < h; y++){
+      for(var x = 0; x < w; x++){
+        if(src[y * w + x] > 0){
+          for(var dy = -radius; dy <= radius; dy++){
+            for(var dx = -radius; dx <= radius; dx++){
+              var ny2 = y + dy, nx2 = x + dx;
+              if(ny2 >= 0 && ny2 < h && nx2 >= 0 && nx2 < w){
+                out[ny2 * w + nx2] = 255;
+              }
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  // ── Layer 1: Edge binary overlay (dilated for visibility) ──
   if(flags.partition && artf.wfg3_edgeBinary){
+    var eb = artf.wfg3_edgeBinary;
+    var ebThick = hv ? dilateMask(eb, W, H, 1) : eb;
     var edgeData = ctx.createImageData(W, H);
     var ed = edgeData.data;
-    var eb = artf.wfg3_edgeBinary;
-    var edgeAlpha = hv ? 180 : 100;
     for(var i = 0, j = 0; i < N; i++, j += 4){
-      if(eb[i] > 0){
-        ed[j] = 0; ed[j+1] = 255; ed[j+2] = 200; ed[j+3] = edgeAlpha;
+      if(ebThick[i] > 0){
+        ed[j] = 0; ed[j+1] = 255; ed[j+2] = 100; ed[j+3] = hv ? 200 : 100;
       }
     }
     ctx.putImageData(edgeData, 0, 0);
   }
 
-  // ── Layer 2: LAB delta heatmap (WFG3-only, no WFG2 equivalent) ──
+  // ── Layer 2: LAB delta heatmap ──
   if(flags.colorEvidence && artf.wfg3_labDelta){
     var labD = artf.wfg3_labDelta;
     var maxD = 0;
@@ -22458,21 +22468,19 @@ paintGraphLearningOverlay = function(ctx){
     if(maxD < 1) maxD = 1;
     var labImg = ctx.createImageData(W, H);
     var ld = labImg.data;
-    var labAlphaBase = hv ? 120 : 40, labAlphaScale = hv ? 180 : 140;
     for(var lj = 0, lk = 0; lj < N; lj++, lk += 4){
       var v = labD[lj] / maxD;
       if(v > 0.02){
-        // Blue-to-red heatmap, brighter in high-vis
         ld[lk]   = Math.round(v * 255);
-        ld[lk+1] = Math.round((1 - Math.abs(v - 0.5) * 2) * (hv ? 200 : 180));
+        ld[lk+1] = Math.round((1 - Math.abs(v - 0.5) * 2) * 200);
         ld[lk+2] = Math.round((1 - v) * 255);
-        ld[lk+3] = Math.round(labAlphaBase + v * labAlphaScale);
+        ld[lk+3] = hv ? Math.round(100 + v * 180) : Math.round(40 + v * 140);
       }
     }
     ctx.putImageData(labImg, 0, 0);
   }
 
-  // ── Layer 3: Gradient magnitude (diagnostic) ──
+  // ── Layer 3: Gradient magnitude ──
   if(flags.closureEvidence && artf.wfg3_gradMag){
     var gm = artf.wfg3_gradMag;
     var maxG = 0;
@@ -22480,77 +22488,14 @@ paintGraphLearningOverlay = function(ctx){
     if(maxG < 1) maxG = 1;
     var gradImg = ctx.createImageData(W, H);
     var gd = gradImg.data;
-    var gradAlphaScale = hv ? 200 : 120;
     for(var gj = 0, gk = 0; gj < N; gj++, gk += 4){
       var gv = gm[gj] / maxG;
       if(gv > 0.03){
-        gd[gk] = 255; gd[gk+1] = 255; gd[gk+2] = 0; // bright yellow
-        gd[gk+3] = Math.round(gv * gradAlphaScale);
+        gd[gk] = 255; gd[gk+1] = 255; gd[gk+2] = 0;
+        gd[gk+3] = hv ? Math.round(gv * 220) : Math.round(gv * 120);
       }
     }
     ctx.putImageData(gradImg, 0, 0);
-  }
-
-  // ── Layer 4: Boundary tokens with tangent/normal arrows ──
-  // This is the key WFG3 proof: side-aware oriented markers.
-  if(flags.compiled && tokens.length > 0){
-    var stride = Math.max(1, Math.round(tokens.length / 800));
-    var arrowLen = (hv ? 10 : 6) * arrowLenScale;
-    var normalLen = (hv ? 8 : 5) * arrowLenScale;
-
-    for(var ti = 0; ti < tokens.length; ti += stride){
-      var tok = tokens[ti];
-      var alpha = 0.35 + tok.confidence * 0.65;
-      if(hv) alpha = Math.min(1.0, alpha * 1.2); // boost alpha in high-vis
-
-      // Tangent line (bright yellow)
-      ctx.strokeStyle = 'rgba(255,255,0,' + alpha.toFixed(2) + ')';
-      ctx.lineWidth = 2.5 * lineWidthScale;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      ctx.moveTo(tok.x - tok.tangentX * arrowLen, tok.y - tok.tangentY * arrowLen);
-      ctx.lineTo(tok.x + tok.tangentX * arrowLen, tok.y + tok.tangentY * arrowLen);
-      ctx.stroke();
-
-      // Normal arrow (bright green toward left side, bright red toward right side)
-      ctx.strokeStyle = 'rgba(0,255,100,' + alpha.toFixed(2) + ')';
-      ctx.lineWidth = 3.0 * lineWidthScale;
-      ctx.beginPath();
-      ctx.moveTo(tok.x, tok.y);
-      var nx = tok.x + tok.normalX * normalLen;
-      var ny = tok.y + tok.normalY * normalLen;
-      ctx.lineTo(nx, ny);
-      ctx.stroke();
-      // Arrowhead (larger in high-vis)
-      ctx.fillStyle = 'rgba(0,255,100,' + alpha.toFixed(2) + ')';
-      ctx.beginPath();
-      ctx.arc(nx, ny, hv ? 2.5 : 1.2, 0, 6.283);
-      ctx.fill();
-
-      // Anti-normal stub (bright red = right side)
-      ctx.strokeStyle = 'rgba(255,80,80,' + (Math.min(1.0, alpha * 0.9)).toFixed(2) + ')';
-      ctx.lineWidth = 2.0 * lineWidthScale;
-      ctx.beginPath();
-      ctx.moveTo(tok.x, tok.y);
-      ctx.lineTo(tok.x - tok.normalX * normalLen * 0.5, tok.y - tok.normalY * normalLen * 0.5);
-      ctx.stroke();
-    }
-  }
-
-  // ── Layer 5: Confidence heatmap (when debug flag is on) ──
-  if(flags.debug && tokens.length > 0){
-    var pixelSize = hv ? 2 : 1;
-    for(var ci = 0; ci < tokens.length; ci++){
-      var ct = tokens[ci];
-      var conf = ct.confidence;
-      // Green = high confidence, orange = medium, red = low (brighter in high-vis)
-      var cr = conf < 0.5 ? 255 : Math.round(255 * (1 - conf) * 2);
-      var cg = conf > 0.5 ? 255 : Math.round(255 * conf * 2);
-      var cbAlpha = hv ? 0.9 : 0.7;
-      ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',0,' + cbAlpha + ')';
-      ctx.fillRect(ct.x - pixelSize / 2, ct.y - pixelSize / 2, pixelSize, pixelSize);
-    }
   }
 
   // ── Layer 6: Region partition coloring (Stage E) ──
@@ -22558,35 +22503,32 @@ paintGraphLearningOverlay = function(ctx){
     var lm = artf.wfg3_labelMap;
     var rc = artf.wfg3_regionCount || 0;
     if(rc > 0){
-      // Generate distinct colors per region using golden-ratio hue spread
       var regionColors = [];
       for(var rci = 0; rci <= rc; rci++){
-        var hue = (rci * 137.508) % 360;
-        regionColors.push(hue);
+        regionColors.push((rci * 137.508) % 360);
       }
       var partImg = ctx.createImageData(W, H);
       var pd = partImg.data;
-      var partAlpha = hv ? 95 : 55;
+      var partAlpha = hv ? 120 : 55;
+      var sat = hv ? 0.85 : 0.6;
+      var rC2 = sat; // at l=0.5, chroma = sat
+      var rm2 = 0.5 - rC2 / 2;
       for(var pj = 0, pk = 0; pj < N; pj++, pk += 4){
         var rl = lm[pj];
         if(rl > 0){
           var rh = regionColors[rl] || 0;
-          // HSL to RGB (simplified, s=0.7 in high-vis for better saturation, l=0.5)
-          var sat = hv ? 0.7 : 0.6;
-          var rC = (1 - Math.abs(2 * 0.5 - 1)) * sat;
-          var rX = rC * (1 - Math.abs(((rh / 60) % 2) - 1));
-          var rm = 0.5 - rC / 2;
+          var rX2 = rC2 * (1 - Math.abs(((rh / 60) % 2) - 1));
           var rr1, rg1, rb1;
           var rhs = (rh / 60) | 0;
-          if(rhs === 0){ rr1 = rC; rg1 = rX; rb1 = 0; }
-          else if(rhs === 1){ rr1 = rX; rg1 = rC; rb1 = 0; }
-          else if(rhs === 2){ rr1 = 0; rg1 = rC; rb1 = rX; }
-          else if(rhs === 3){ rr1 = 0; rg1 = rX; rb1 = rC; }
-          else if(rhs === 4){ rr1 = rX; rg1 = 0; rb1 = rC; }
-          else { rr1 = rC; rg1 = 0; rb1 = rX; }
-          pd[pk]   = Math.round((rr1 + rm) * 255);
-          pd[pk+1] = Math.round((rg1 + rm) * 255);
-          pd[pk+2] = Math.round((rb1 + rm) * 255);
+          if(rhs === 0){ rr1 = rC2; rg1 = rX2; rb1 = 0; }
+          else if(rhs === 1){ rr1 = rX2; rg1 = rC2; rb1 = 0; }
+          else if(rhs === 2){ rr1 = 0; rg1 = rC2; rb1 = rX2; }
+          else if(rhs === 3){ rr1 = 0; rg1 = rX2; rb1 = rC2; }
+          else if(rhs === 4){ rr1 = rX2; rg1 = 0; rb1 = rC2; }
+          else { rr1 = rC2; rg1 = 0; rb1 = rX2; }
+          pd[pk]   = Math.round((rr1 + rm2) * 255);
+          pd[pk+1] = Math.round((rg1 + rm2) * 255);
+          pd[pk+2] = Math.round((rb1 + rm2) * 255);
           pd[pk+3] = partAlpha;
         }
       }
@@ -22594,67 +22536,160 @@ paintGraphLearningOverlay = function(ctx){
     }
   }
 
-  // ── Layer 7: Region boundaries (Stage E, bright lines) ──
+  // ── Layer 7: Region boundaries (Stage E) — dilated bright yellow ──
   if(flags.partition && artf.wfg3_regionBoundaries){
     var rb = artf.wfg3_regionBoundaries;
+    var rbThick = hv ? dilateMask(rb, W, H, 1) : rb;
     var rbImg = ctx.createImageData(W, H);
     var rbd = rbImg.data;
-    var rbAlpha = hv ? 220 : 140;
     for(var rbi = 0, rbj = 0; rbi < N; rbi++, rbj += 4){
-      if(rb[rbi] > 0){
-        rbd[rbj] = 255; rbd[rbj+1] = 255; rbd[rbj+2] = 0; rbd[rbj+3] = rbAlpha;
+      if(rbThick[rbi] > 0){
+        rbd[rbj] = 255; rbd[rbj+1] = 255; rbd[rbj+2] = 0; rbd[rbj+3] = hv ? 240 : 140;
       }
     }
     ctx.putImageData(rbImg, 0, 0);
   }
 
-  // ── Layer 8: Group boundaries (Stage F, bright cyan lines) ──
+  // ── Layer 8: Group boundaries (Stage F) — dilated thick bright cyan ──
   if(flags.partition && artf.wfg3_groupBoundaries){
     var gb = artf.wfg3_groupBoundaries;
+    var gbThick = hv ? dilateMask(gb, W, H, 2) : gb;
     var gbImg = ctx.createImageData(W, H);
     var gbd = gbImg.data;
-    var gbAlpha = hv ? 255 : 200;
     for(var gbi = 0, gbj = 0; gbi < N; gbi++, gbj += 4){
-      if(gb[gbi] > 0){
-        gbd[gbj] = 0; gbd[gbj+1] = 255; gbd[gbj+2] = 255; gbd[gbj+3] = gbAlpha;
+      if(gbThick[gbi] > 0){
+        gbd[gbj] = 0; gbd[gbj+1] = 255; gbd[gbj+2] = 255; gbd[gbj+3] = 255;
       }
     }
     ctx.putImageData(gbImg, 0, 0);
   }
 
-  // ── Layer 9: Chain mask overlay (Stage D, when debug is on) ──
+  // ── Layer 9: Chain mask (Stage D) — rendered as thick magenta lines ──
   if(flags.debug && artf.wfg3_chainMask){
     var cm = artf.wfg3_chainMask;
+    var cmThick = hv ? dilateMask(cm, W, H, 2) : dilateMask(cm, W, H, 1);
     var cmImg = ctx.createImageData(W, H);
     var cmd = cmImg.data;
-    var cmAlpha = hv ? 220 : 180;
     for(var cmi = 0, cmj = 0; cmi < N; cmi++, cmj += 4){
-      if(cm[cmi] > 0){
-        cmd[cmj] = 255; cmd[cmj+1] = 150; cmd[cmj+2] = 255; cmd[cmj+3] = cmAlpha;
+      if(cmThick[cmi] > 0){
+        cmd[cmj] = 255; cmd[cmj+1] = 0; cmd[cmj+2] = 255; cmd[cmj+3] = hv ? 240 : 180;
       }
     }
     ctx.putImageData(cmImg, 0, 0);
   }
 
-  // ── WFG3 info badge (always visible when WFG3 is active) ──
+  // ── Layer 4: Boundary tokens — large cross markers with dark halo ──
+  if(flags.compiled && tokens.length > 0){
+    var stride = Math.max(1, Math.round(tokens.length / 800));
+    var armLen = hv ? 14 : 6;    // half-length of tangent arm
+    var normLen = hv ? 12 : 5;   // length of normal arm
+    var haloW = hv ? 7 : 2;      // dark outline width
+    var tangentW = hv ? 4 : 1.5;
+    var normalW = hv ? 4.5 : 2;
+    var antiW = hv ? 3 : 1;
+    var dotR = hv ? 4 : 1.5;     // arrowhead dot radius
+    var centerR = hv ? 3 : 0;    // center cross marker radius
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for(var ti = 0; ti < tokens.length; ti += stride){
+      var tok = tokens[ti];
+      var alpha = hv ? 1.0 : (0.35 + tok.confidence * 0.65);
+
+      var tx0 = tok.x - tok.tangentX * armLen;
+      var ty0 = tok.y - tok.tangentY * armLen;
+      var tx1 = tok.x + tok.tangentX * armLen;
+      var ty1 = tok.y + tok.tangentY * armLen;
+      var nxEnd = tok.x + tok.normalX * normLen;
+      var nyEnd = tok.y + tok.normalY * normLen;
+      var anxEnd = tok.x - tok.normalX * normLen * 0.5;
+      var anyEnd = tok.y - tok.normalY * normLen * 0.5;
+
+      // ─ Dark halo pass (draw all lines fat and black first) ─
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+
+      ctx.lineWidth = tangentW + haloW;
+      ctx.beginPath(); ctx.moveTo(tx0, ty0); ctx.lineTo(tx1, ty1); ctx.stroke();
+
+      ctx.lineWidth = normalW + haloW;
+      ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(nxEnd, nyEnd); ctx.stroke();
+
+      ctx.lineWidth = antiW + haloW;
+      ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(anxEnd, anyEnd); ctx.stroke();
+
+      // ─ Color pass: tangent (hot yellow) ─
+      ctx.strokeStyle = 'rgba(255,255,0,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = tangentW;
+      ctx.beginPath(); ctx.moveTo(tx0, ty0); ctx.lineTo(tx1, ty1); ctx.stroke();
+
+      // ─ Color pass: normal (electric green → left side) ─
+      ctx.strokeStyle = 'rgba(0,255,0,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = normalW;
+      ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(nxEnd, nyEnd); ctx.stroke();
+
+      // Arrowhead dot with halo
+      ctx.fillStyle = 'rgba(0,0,0,0.85)';
+      ctx.beginPath(); ctx.arc(nxEnd, nyEnd, dotR + 2, 0, 6.283); ctx.fill();
+      ctx.fillStyle = 'rgba(0,255,0,' + alpha.toFixed(2) + ')';
+      ctx.beginPath(); ctx.arc(nxEnd, nyEnd, dotR, 0, 6.283); ctx.fill();
+
+      // ─ Color pass: anti-normal (bright red → right side) ─
+      ctx.strokeStyle = 'rgba(255,0,0,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = antiW;
+      ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(anxEnd, anyEnd); ctx.stroke();
+
+      // ─ Center crosshair marker (high-vis only) ─
+      if(hv && centerR > 0){
+        ctx.fillStyle = 'rgba(0,0,0,0.9)';
+        ctx.beginPath(); ctx.arc(tok.x, tok.y, centerR + 1.5, 0, 6.283); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath(); ctx.arc(tok.x, tok.y, centerR, 0, 6.283); ctx.fill();
+      }
+    }
+  }
+
+  // ── Layer 5: Confidence heatmap (debug) — large filled squares ──
+  if(flags.debug && tokens.length > 0){
+    var pixSz = hv ? 5 : 2;
+    var halfPx = pixSz / 2;
+    for(var ci = 0; ci < tokens.length; ci++){
+      var ct = tokens[ci];
+      var conf = ct.confidence;
+      var cr2 = conf < 0.5 ? 255 : Math.round(255 * (1 - conf) * 2);
+      var cg2 = conf > 0.5 ? 255 : Math.round(255 * conf * 2);
+      // Black outline
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillRect(ct.x - halfPx - 1, ct.y - halfPx - 1, pixSz + 2, pixSz + 2);
+      ctx.fillStyle = 'rgba(' + cr2 + ',' + cg2 + ',0,0.9)';
+      ctx.fillRect(ct.x - halfPx, ct.y - halfPx, pixSz, pixSz);
+    }
+  }
+
+  // ── WFG3 info badge ──
   ctx.save();
-  var badge = 'Engine: WFG3 A\u2013F';
+  var badge = 'WFG3 A\u2013F';
   if(hv) badge += ' [HIGH VIS]';
-  var backend = artf.wfg3_backend || 'unknown';
+  var backend = artf.wfg3_backend || '?';
   var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tok  |  ' +
     (artf.wfg3_chainCount || 0) + ' chains  |  ' +
-    (artf.wfg3_regionCount || 0) + ' regions  |  ' +
-    (artf.wfg3_groupCount || 0) + ' groups  |  ' + backend;
+    (artf.wfg3_regionCount || 0) + ' rgn  |  ' +
+    (artf.wfg3_groupCount || 0) + ' grp  |  ' + backend;
 
-  ctx.font = (hv ? 'bold 12px' : 'bold 11px') + ' "IBM Plex Mono", monospace';
+  ctx.font = 'bold 13px "IBM Plex Mono", monospace';
   var tw = ctx.measureText(info).width;
-  var bx = 6, by = 6, bw = tw + 16, bh = hv ? 26 : 22;
-  ctx.fillStyle = hv ? 'rgba(0,0,0,0.88)' : 'rgba(0,0,0,0.78)';
+  var bx = 6, by = 6, bw = tw + 20, bh = 28;
+  ctx.fillStyle = 'rgba(0,0,0,0.92)';
   ctx.beginPath();
-  _glRoundRectPath(ctx, bx, by, bw, bh, 4);
+  _glRoundRectPath(ctx, bx, by, bw, bh, 5);
   ctx.fill();
+  ctx.strokeStyle = hv ? '#00ff00' : '#4fc3f7';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  _glRoundRectPath(ctx, bx, by, bw, bh, 5);
+  ctx.stroke();
   ctx.fillStyle = hv ? '#00ff00' : '#4fc3f7';
-  ctx.fillText(info, bx + 8, by + (hv ? 17 : 15));
+  ctx.fillText(info, bx + 10, by + 19);
   ctx.restore();
 };
 
