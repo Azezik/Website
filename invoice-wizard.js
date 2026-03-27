@@ -20713,7 +20713,11 @@ function syncGraphLearningEngineUI(){
     els.graphLearningEngineSelect.value = getGraphLearningEngineType();
   }
   if(els.graphLearningEngineCaption){
-    els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
+    if(getGraphLearningEngineType() === 'wfg3'){
+      els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013C) — boundary evidence + side-aware tokens [browser-native]';
+    } else {
+      els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
+    }
   }
 }
 
@@ -21334,7 +21338,11 @@ function graphLearningRunGeneration(opts){
   const closureTag = artf.closureActive ? ', closure:on(' + (artf.enclosedRegionCount || 0) + ' enclosed)' : '';
   const calTag = artf.colorBoundaryActive ? ', ΔE floor=' + (prm.colorDistFloor ?? '?') + ' γ=' + ((prm.colorDistGamma ?? 0).toFixed(1)) + ' unif=' + ((prm.surfaceUniformityBias ?? 0).toFixed(2)) : '';
   const nocolourTag = artf.nocolourFallbackActive ? ', NOCOLOUR:on(thresh=' + (artf.nocolourDebug?.threshold ?? '?') + ', comps=' + (artf.nocolourDebug?.componentCount ?? '?') + ', clusters=' + (artf.nocolourDebug?.clusterCount ?? '?') + ')' : '';
-  graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
+  if(gl.graph?.engine === 'wfg3'){
+    graphLearningStatus('WFG3 A\u2013C attempt ' + gl.attemptNumber + ': ' + (artf.wfg3_tokenCount || 0) + ' tokens, ' + (artf.wfg3_contourCount || 0) + ' contours, backend: ' + (artf.wfg3_backend || '?') + ', color: ' + (artf.colorBoundaryActive ? 'on' : 'off') + '.');
+  } else {
+    graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
+  }
   renderGraphLearningViewer();
 }
 
@@ -22396,6 +22404,157 @@ paintGraphLearningOverlay = function(ctx){
       ctx.fill();
     }
   }
+};
+
+/* ── WFG3-specific overlay rendering (intercepts when WFG3 engine is active) ── */
+
+var _priorPaintOverlay = paintGraphLearningOverlay;
+paintGraphLearningOverlay = function(ctx){
+  var gl = state.graphLearning;
+  if(!gl.graph || gl.graph.engine !== 'wfg3'){
+    // Not WFG3 — fall through to normal (WFG2 + grouped) rendering
+    return _priorPaintOverlay(ctx);
+  }
+
+  // ═══ WFG3 Rendering Path ═══
+  // This is genuinely separate from WFG2.  Everything below comes from
+  // Stage B (evidence) and Stage C (tokens) artifacts.
+
+  var artf = gl.graph.artifacts || {};
+  var nSize = gl.graph.normalizedSize || {};
+  var W = nSize.width || 0, H = nSize.height || 0;
+  if(W === 0 || H === 0) return;
+  var N = W * H;
+  var flags = getGraphLearningLayerFlags();
+  var tokens = artf.wfg3_tokens || [];
+
+  // ── Layer 1: Edge binary overlay ──
+  if(flags.partition && artf.wfg3_edgeBinary){
+    var edgeData = ctx.createImageData(W, H);
+    var ed = edgeData.data;
+    var eb = artf.wfg3_edgeBinary;
+    for(var i = 0, j = 0; i < N; i++, j += 4){
+      if(eb[i] > 0){
+        ed[j] = 0; ed[j+1] = 255; ed[j+2] = 200; ed[j+3] = 100;
+      }
+    }
+    ctx.putImageData(edgeData, 0, 0);
+  }
+
+  // ── Layer 2: LAB delta heatmap (WFG3-only, no WFG2 equivalent) ──
+  if(flags.colorEvidence && artf.wfg3_labDelta){
+    var labD = artf.wfg3_labDelta;
+    var maxD = 0;
+    for(var li = 0; li < N; li++) if(labD[li] > maxD) maxD = labD[li];
+    if(maxD < 1) maxD = 1;
+    var labImg = ctx.createImageData(W, H);
+    var ld = labImg.data;
+    for(var lj = 0, lk = 0; lj < N; lj++, lk += 4){
+      var v = labD[lj] / maxD;
+      if(v > 0.02){
+        // Blue-to-red heatmap
+        ld[lk]   = Math.round(v * 255);
+        ld[lk+1] = Math.round((1 - Math.abs(v - 0.5) * 2) * 180);
+        ld[lk+2] = Math.round((1 - v) * 255);
+        ld[lk+3] = Math.round(40 + v * 140);
+      }
+    }
+    ctx.putImageData(labImg, 0, 0);
+  }
+
+  // ── Layer 3: Gradient magnitude (diagnostic) ──
+  if(flags.closureEvidence && artf.wfg3_gradMag){
+    var gm = artf.wfg3_gradMag;
+    var maxG = 0;
+    for(var gi = 0; gi < N; gi++) if(gm[gi] > maxG) maxG = gm[gi];
+    if(maxG < 1) maxG = 1;
+    var gradImg = ctx.createImageData(W, H);
+    var gd = gradImg.data;
+    for(var gj = 0, gk = 0; gj < N; gj++, gk += 4){
+      var gv = gm[gj] / maxG;
+      if(gv > 0.03){
+        gd[gk] = 180; gd[gk+1] = 255; gd[gk+2] = 0;
+        gd[gk+3] = Math.round(gv * 120);
+      }
+    }
+    ctx.putImageData(gradImg, 0, 0);
+  }
+
+  // ── Layer 4: Boundary tokens with tangent/normal arrows ──
+  // This is the key WFG3 proof: side-aware oriented markers.
+  if(flags.compiled && tokens.length > 0){
+    var stride = Math.max(1, Math.round(tokens.length / 800));
+    var arrowLen = 6;
+    var normalLen = 5;
+
+    for(var ti = 0; ti < tokens.length; ti += stride){
+      var tok = tokens[ti];
+      var alpha = 0.35 + tok.confidence * 0.65;
+
+      // Tangent line (yellow)
+      ctx.strokeStyle = 'rgba(255,210,0,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(tok.x - tok.tangentX * arrowLen, tok.y - tok.tangentY * arrowLen);
+      ctx.lineTo(tok.x + tok.tangentX * arrowLen, tok.y + tok.tangentY * arrowLen);
+      ctx.stroke();
+
+      // Normal arrow (green toward left side, red toward right side)
+      // Green side = where leftLab was sampled
+      ctx.strokeStyle = 'rgba(0,255,80,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(tok.x, tok.y);
+      var nx = tok.x + tok.normalX * normalLen;
+      var ny = tok.y + tok.normalY * normalLen;
+      ctx.lineTo(nx, ny);
+      ctx.stroke();
+      // Arrowhead
+      ctx.fillStyle = 'rgba(0,255,80,' + alpha.toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.arc(nx, ny, 1.2, 0, 6.283);
+      ctx.fill();
+
+      // Anti-normal stub (red = right side)
+      ctx.strokeStyle = 'rgba(255,60,60,' + (alpha * 0.6).toFixed(2) + ')';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(tok.x, tok.y);
+      ctx.lineTo(tok.x - tok.normalX * normalLen * 0.5, tok.y - tok.normalY * normalLen * 0.5);
+      ctx.stroke();
+    }
+  }
+
+  // ── Layer 5: Confidence heatmap (when debug flag is on) ──
+  if(flags.debug && tokens.length > 0){
+    for(var ci = 0; ci < tokens.length; ci++){
+      var ct = tokens[ci];
+      var conf = ct.confidence;
+      // Green = high confidence, orange = medium, red = low
+      var cr = conf < 0.5 ? 255 : Math.round(255 * (1 - conf) * 2);
+      var cg = conf > 0.5 ? 255 : Math.round(255 * conf * 2);
+      ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',0,0.7)';
+      ctx.fillRect(ct.x, ct.y, 1, 1);
+    }
+  }
+
+  // ── WFG3 info badge (always visible when WFG3 is active) ──
+  ctx.save();
+  var badge = 'Engine: WFG3 A\u2013C';
+  var backend = artf.wfg3_backend || 'unknown';
+  var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tokens  |  ' +
+    (artf.wfg3_contourCount || 0) + ' contours  |  backend: ' + backend;
+
+  ctx.font = 'bold 11px "IBM Plex Mono", monospace';
+  var tw = ctx.measureText(info).width;
+  var bx = 6, by = 6, bw = tw + 16, bh = 22;
+  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  ctx.beginPath();
+  _glRoundRectPath(ctx, bx, by, bw, bh, 4);
+  ctx.fill();
+  ctx.fillStyle = '#4fc3f7';
+  ctx.fillText(info, bx + 8, by + 15);
+  ctx.restore();
 };
 
 // Pipeline mode selector
