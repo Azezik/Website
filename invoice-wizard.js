@@ -22408,6 +22408,8 @@ paintGraphLearningOverlay = function(ctx){
 
 /* ── WFG3-specific overlay rendering (intercepts when WFG3 engine is active) ── */
 
+var _wfg3HighVisibilityMode = false; // Set to true for thick lines, bright colors, large arrows
+
 var _priorPaintOverlay = paintGraphLearningOverlay;
 paintGraphLearningOverlay = function(ctx){
   var gl = state.graphLearning;
@@ -22428,14 +22430,21 @@ paintGraphLearningOverlay = function(ctx){
   var flags = getGraphLearningLayerFlags();
   var tokens = artf.wfg3_tokens || [];
 
+  // High visibility mode: scale up all visual elements
+  var hv = _wfg3HighVisibilityMode;
+  var lineWidthScale = hv ? 2.5 : 1;
+  var arrowLenScale = hv ? 1.8 : 1;
+  var opacityBoost = hv ? 1.3 : 1;
+
   // ── Layer 1: Edge binary overlay ──
   if(flags.partition && artf.wfg3_edgeBinary){
     var edgeData = ctx.createImageData(W, H);
     var ed = edgeData.data;
     var eb = artf.wfg3_edgeBinary;
+    var edgeAlpha = hv ? 180 : 100;
     for(var i = 0, j = 0; i < N; i++, j += 4){
       if(eb[i] > 0){
-        ed[j] = 0; ed[j+1] = 255; ed[j+2] = 200; ed[j+3] = 100;
+        ed[j] = 0; ed[j+1] = 255; ed[j+2] = 200; ed[j+3] = edgeAlpha;
       }
     }
     ctx.putImageData(edgeData, 0, 0);
@@ -22449,14 +22458,15 @@ paintGraphLearningOverlay = function(ctx){
     if(maxD < 1) maxD = 1;
     var labImg = ctx.createImageData(W, H);
     var ld = labImg.data;
+    var labAlphaBase = hv ? 120 : 40, labAlphaScale = hv ? 180 : 140;
     for(var lj = 0, lk = 0; lj < N; lj++, lk += 4){
       var v = labD[lj] / maxD;
       if(v > 0.02){
-        // Blue-to-red heatmap
+        // Blue-to-red heatmap, brighter in high-vis
         ld[lk]   = Math.round(v * 255);
-        ld[lk+1] = Math.round((1 - Math.abs(v - 0.5) * 2) * 180);
+        ld[lk+1] = Math.round((1 - Math.abs(v - 0.5) * 2) * (hv ? 200 : 180));
         ld[lk+2] = Math.round((1 - v) * 255);
-        ld[lk+3] = Math.round(40 + v * 140);
+        ld[lk+3] = Math.round(labAlphaBase + v * labAlphaScale);
       }
     }
     ctx.putImageData(labImg, 0, 0);
@@ -22470,11 +22480,12 @@ paintGraphLearningOverlay = function(ctx){
     if(maxG < 1) maxG = 1;
     var gradImg = ctx.createImageData(W, H);
     var gd = gradImg.data;
+    var gradAlphaScale = hv ? 200 : 120;
     for(var gj = 0, gk = 0; gj < N; gj++, gk += 4){
       var gv = gm[gj] / maxG;
       if(gv > 0.03){
-        gd[gk] = 180; gd[gk+1] = 255; gd[gk+2] = 0;
-        gd[gk+3] = Math.round(gv * 120);
+        gd[gk] = 255; gd[gk+1] = 255; gd[gk+2] = 0; // bright yellow
+        gd[gk+3] = Math.round(gv * gradAlphaScale);
       }
     }
     ctx.putImageData(gradImg, 0, 0);
@@ -22484,40 +22495,42 @@ paintGraphLearningOverlay = function(ctx){
   // This is the key WFG3 proof: side-aware oriented markers.
   if(flags.compiled && tokens.length > 0){
     var stride = Math.max(1, Math.round(tokens.length / 800));
-    var arrowLen = 6;
-    var normalLen = 5;
+    var arrowLen = (hv ? 10 : 6) * arrowLenScale;
+    var normalLen = (hv ? 8 : 5) * arrowLenScale;
 
     for(var ti = 0; ti < tokens.length; ti += stride){
       var tok = tokens[ti];
       var alpha = 0.35 + tok.confidence * 0.65;
+      if(hv) alpha = Math.min(1.0, alpha * 1.2); // boost alpha in high-vis
 
-      // Tangent line (yellow)
-      ctx.strokeStyle = 'rgba(255,210,0,' + alpha.toFixed(2) + ')';
-      ctx.lineWidth = 1.2;
+      // Tangent line (bright yellow)
+      ctx.strokeStyle = 'rgba(255,255,0,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = 2.5 * lineWidthScale;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(tok.x - tok.tangentX * arrowLen, tok.y - tok.tangentY * arrowLen);
       ctx.lineTo(tok.x + tok.tangentX * arrowLen, tok.y + tok.tangentY * arrowLen);
       ctx.stroke();
 
-      // Normal arrow (green toward left side, red toward right side)
-      // Green side = where leftLab was sampled
-      ctx.strokeStyle = 'rgba(0,255,80,' + alpha.toFixed(2) + ')';
-      ctx.lineWidth = 1.5;
+      // Normal arrow (bright green toward left side, bright red toward right side)
+      ctx.strokeStyle = 'rgba(0,255,100,' + alpha.toFixed(2) + ')';
+      ctx.lineWidth = 3.0 * lineWidthScale;
       ctx.beginPath();
       ctx.moveTo(tok.x, tok.y);
       var nx = tok.x + tok.normalX * normalLen;
       var ny = tok.y + tok.normalY * normalLen;
       ctx.lineTo(nx, ny);
       ctx.stroke();
-      // Arrowhead
-      ctx.fillStyle = 'rgba(0,255,80,' + alpha.toFixed(2) + ')';
+      // Arrowhead (larger in high-vis)
+      ctx.fillStyle = 'rgba(0,255,100,' + alpha.toFixed(2) + ')';
       ctx.beginPath();
-      ctx.arc(nx, ny, 1.2, 0, 6.283);
+      ctx.arc(nx, ny, hv ? 2.5 : 1.2, 0, 6.283);
       ctx.fill();
 
-      // Anti-normal stub (red = right side)
-      ctx.strokeStyle = 'rgba(255,60,60,' + (alpha * 0.6).toFixed(2) + ')';
-      ctx.lineWidth = 1;
+      // Anti-normal stub (bright red = right side)
+      ctx.strokeStyle = 'rgba(255,80,80,' + (Math.min(1.0, alpha * 0.9)).toFixed(2) + ')';
+      ctx.lineWidth = 2.0 * lineWidthScale;
       ctx.beginPath();
       ctx.moveTo(tok.x, tok.y);
       ctx.lineTo(tok.x - tok.normalX * normalLen * 0.5, tok.y - tok.normalY * normalLen * 0.5);
@@ -22527,14 +22540,16 @@ paintGraphLearningOverlay = function(ctx){
 
   // ── Layer 5: Confidence heatmap (when debug flag is on) ──
   if(flags.debug && tokens.length > 0){
+    var pixelSize = hv ? 2 : 1;
     for(var ci = 0; ci < tokens.length; ci++){
       var ct = tokens[ci];
       var conf = ct.confidence;
-      // Green = high confidence, orange = medium, red = low
+      // Green = high confidence, orange = medium, red = low (brighter in high-vis)
       var cr = conf < 0.5 ? 255 : Math.round(255 * (1 - conf) * 2);
       var cg = conf > 0.5 ? 255 : Math.round(255 * conf * 2);
-      ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',0,0.7)';
-      ctx.fillRect(ct.x, ct.y, 1, 1);
+      var cbAlpha = hv ? 0.9 : 0.7;
+      ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',0,' + cbAlpha + ')';
+      ctx.fillRect(ct.x - pixelSize / 2, ct.y - pixelSize / 2, pixelSize, pixelSize);
     }
   }
 
@@ -22551,14 +22566,16 @@ paintGraphLearningOverlay = function(ctx){
       }
       var partImg = ctx.createImageData(W, H);
       var pd = partImg.data;
+      var partAlpha = hv ? 95 : 55;
       for(var pj = 0, pk = 0; pj < N; pj++, pk += 4){
         var rl = lm[pj];
         if(rl > 0){
           var rh = regionColors[rl] || 0;
-          // HSL to RGB (simplified, s=0.6, l=0.5)
-          var rC = 0.48; // (1 - |2*0.5 - 1|) * 0.6
+          // HSL to RGB (simplified, s=0.7 in high-vis for better saturation, l=0.5)
+          var sat = hv ? 0.7 : 0.6;
+          var rC = (1 - Math.abs(2 * 0.5 - 1)) * sat;
           var rX = rC * (1 - Math.abs(((rh / 60) % 2) - 1));
-          var rm = 0.26; // 0.5 - 0.48/2
+          var rm = 0.5 - rC / 2;
           var rr1, rg1, rb1;
           var rhs = (rh / 60) | 0;
           if(rhs === 0){ rr1 = rC; rg1 = rX; rb1 = 0; }
@@ -22570,7 +22587,7 @@ paintGraphLearningOverlay = function(ctx){
           pd[pk]   = Math.round((rr1 + rm) * 255);
           pd[pk+1] = Math.round((rg1 + rm) * 255);
           pd[pk+2] = Math.round((rb1 + rm) * 255);
-          pd[pk+3] = 55;
+          pd[pk+3] = partAlpha;
         }
       }
       ctx.putImageData(partImg, 0, 0);
@@ -22582,22 +22599,24 @@ paintGraphLearningOverlay = function(ctx){
     var rb = artf.wfg3_regionBoundaries;
     var rbImg = ctx.createImageData(W, H);
     var rbd = rbImg.data;
+    var rbAlpha = hv ? 220 : 140;
     for(var rbi = 0, rbj = 0; rbi < N; rbi++, rbj += 4){
       if(rb[rbi] > 0){
-        rbd[rbj] = 255; rbd[rbj+1] = 255; rbd[rbj+2] = 0; rbd[rbj+3] = 140;
+        rbd[rbj] = 255; rbd[rbj+1] = 255; rbd[rbj+2] = 0; rbd[rbj+3] = rbAlpha;
       }
     }
     ctx.putImageData(rbImg, 0, 0);
   }
 
-  // ── Layer 8: Group boundaries (Stage F, thick cyan lines) ──
+  // ── Layer 8: Group boundaries (Stage F, bright cyan lines) ──
   if(flags.partition && artf.wfg3_groupBoundaries){
     var gb = artf.wfg3_groupBoundaries;
     var gbImg = ctx.createImageData(W, H);
     var gbd = gbImg.data;
+    var gbAlpha = hv ? 255 : 200;
     for(var gbi = 0, gbj = 0; gbi < N; gbi++, gbj += 4){
       if(gb[gbi] > 0){
-        gbd[gbj] = 0; gbd[gbj+1] = 230; gbd[gbj+2] = 255; gbd[gbj+3] = 200;
+        gbd[gbj] = 0; gbd[gbj+1] = 255; gbd[gbj+2] = 255; gbd[gbj+3] = gbAlpha;
       }
     }
     ctx.putImageData(gbImg, 0, 0);
@@ -22608,9 +22627,10 @@ paintGraphLearningOverlay = function(ctx){
     var cm = artf.wfg3_chainMask;
     var cmImg = ctx.createImageData(W, H);
     var cmd = cmImg.data;
+    var cmAlpha = hv ? 220 : 180;
     for(var cmi = 0, cmj = 0; cmi < N; cmi++, cmj += 4){
       if(cm[cmi] > 0){
-        cmd[cmj] = 255; cmd[cmj+1] = 100; cmd[cmj+2] = 255; cmd[cmj+3] = 180;
+        cmd[cmj] = 255; cmd[cmj+1] = 150; cmd[cmj+2] = 255; cmd[cmj+3] = cmAlpha;
       }
     }
     ctx.putImageData(cmImg, 0, 0);
@@ -22619,22 +22639,30 @@ paintGraphLearningOverlay = function(ctx){
   // ── WFG3 info badge (always visible when WFG3 is active) ──
   ctx.save();
   var badge = 'Engine: WFG3 A\u2013F';
+  if(hv) badge += ' [HIGH VIS]';
   var backend = artf.wfg3_backend || 'unknown';
   var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tok  |  ' +
     (artf.wfg3_chainCount || 0) + ' chains  |  ' +
     (artf.wfg3_regionCount || 0) + ' regions  |  ' +
     (artf.wfg3_groupCount || 0) + ' groups  |  ' + backend;
 
-  ctx.font = 'bold 11px "IBM Plex Mono", monospace';
+  ctx.font = (hv ? 'bold 12px' : 'bold 11px') + ' "IBM Plex Mono", monospace';
   var tw = ctx.measureText(info).width;
-  var bx = 6, by = 6, bw = tw + 16, bh = 22;
-  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  var bx = 6, by = 6, bw = tw + 16, bh = hv ? 26 : 22;
+  ctx.fillStyle = hv ? 'rgba(0,0,0,0.88)' : 'rgba(0,0,0,0.78)';
   ctx.beginPath();
   _glRoundRectPath(ctx, bx, by, bw, bh, 4);
   ctx.fill();
-  ctx.fillStyle = '#4fc3f7';
-  ctx.fillText(info, bx + 8, by + 15);
+  ctx.fillStyle = hv ? '#00ff00' : '#4fc3f7';
+  ctx.fillText(info, bx + 8, by + (hv ? 17 : 15));
   ctx.restore();
+};
+
+// ── High visibility debug mode toggle ──
+window.wfg3ToggleHighVis = function() {
+  _wfg3HighVisibilityMode = !_wfg3HighVisibilityMode;
+  console.log('[WFG3] High visibility debug mode: ' + (_wfg3HighVisibilityMode ? 'ON' : 'OFF'));
+  if(state.graphLearning?.normalizedSurface) renderGraphLearningViewer();
 };
 
 // Pipeline mode selector
