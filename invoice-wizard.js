@@ -20714,7 +20714,7 @@ function syncGraphLearningEngineUI(){
   }
   if(els.graphLearningEngineCaption){
     if(getGraphLearningEngineType() === 'wfg3'){
-      els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013C) — boundary evidence + side-aware tokens [browser-native]';
+      els.graphLearningEngineCaption.textContent = 'WFG3 Pipeline (Stages A\u2013F) — boundary graph + watershed partition + region grouping [browser-native]';
     } else {
       els.graphLearningEngineCaption.textContent = graphLearningEngineLabel() + ' Compiled Graph — all evidence layers combined into final structural output';
     }
@@ -22538,12 +22538,92 @@ paintGraphLearningOverlay = function(ctx){
     }
   }
 
+  // ── Layer 6: Region partition coloring (Stage E) ──
+  if(flags.partition && artf.wfg3_labelMap){
+    var lm = artf.wfg3_labelMap;
+    var rc = artf.wfg3_regionCount || 0;
+    if(rc > 0){
+      // Generate distinct colors per region using golden-ratio hue spread
+      var regionColors = [];
+      for(var rci = 0; rci <= rc; rci++){
+        var hue = (rci * 137.508) % 360;
+        regionColors.push(hue);
+      }
+      var partImg = ctx.createImageData(W, H);
+      var pd = partImg.data;
+      for(var pj = 0, pk = 0; pj < N; pj++, pk += 4){
+        var rl = lm[pj];
+        if(rl > 0){
+          var rh = regionColors[rl] || 0;
+          // HSL to RGB (simplified, s=0.6, l=0.5)
+          var rC = 0.48; // (1 - |2*0.5 - 1|) * 0.6
+          var rX = rC * (1 - Math.abs(((rh / 60) % 2) - 1));
+          var rm = 0.26; // 0.5 - 0.48/2
+          var rr1, rg1, rb1;
+          var rhs = (rh / 60) | 0;
+          if(rhs === 0){ rr1 = rC; rg1 = rX; rb1 = 0; }
+          else if(rhs === 1){ rr1 = rX; rg1 = rC; rb1 = 0; }
+          else if(rhs === 2){ rr1 = 0; rg1 = rC; rb1 = rX; }
+          else if(rhs === 3){ rr1 = 0; rg1 = rX; rb1 = rC; }
+          else if(rhs === 4){ rr1 = rX; rg1 = 0; rb1 = rC; }
+          else { rr1 = rC; rg1 = 0; rb1 = rX; }
+          pd[pk]   = Math.round((rr1 + rm) * 255);
+          pd[pk+1] = Math.round((rg1 + rm) * 255);
+          pd[pk+2] = Math.round((rb1 + rm) * 255);
+          pd[pk+3] = 55;
+        }
+      }
+      ctx.putImageData(partImg, 0, 0);
+    }
+  }
+
+  // ── Layer 7: Region boundaries (Stage E, bright lines) ──
+  if(flags.partition && artf.wfg3_regionBoundaries){
+    var rb = artf.wfg3_regionBoundaries;
+    var rbImg = ctx.createImageData(W, H);
+    var rbd = rbImg.data;
+    for(var rbi = 0, rbj = 0; rbi < N; rbi++, rbj += 4){
+      if(rb[rbi] > 0){
+        rbd[rbj] = 255; rbd[rbj+1] = 255; rbd[rbj+2] = 0; rbd[rbj+3] = 140;
+      }
+    }
+    ctx.putImageData(rbImg, 0, 0);
+  }
+
+  // ── Layer 8: Group boundaries (Stage F, thick cyan lines) ──
+  if(flags.partition && artf.wfg3_groupBoundaries){
+    var gb = artf.wfg3_groupBoundaries;
+    var gbImg = ctx.createImageData(W, H);
+    var gbd = gbImg.data;
+    for(var gbi = 0, gbj = 0; gbi < N; gbi++, gbj += 4){
+      if(gb[gbi] > 0){
+        gbd[gbj] = 0; gbd[gbj+1] = 230; gbd[gbj+2] = 255; gbd[gbj+3] = 200;
+      }
+    }
+    ctx.putImageData(gbImg, 0, 0);
+  }
+
+  // ── Layer 9: Chain mask overlay (Stage D, when debug is on) ──
+  if(flags.debug && artf.wfg3_chainMask){
+    var cm = artf.wfg3_chainMask;
+    var cmImg = ctx.createImageData(W, H);
+    var cmd = cmImg.data;
+    for(var cmi = 0, cmj = 0; cmi < N; cmi++, cmj += 4){
+      if(cm[cmi] > 0){
+        cmd[cmj] = 255; cmd[cmj+1] = 100; cmd[cmj+2] = 255; cmd[cmj+3] = 180;
+      }
+    }
+    ctx.putImageData(cmImg, 0, 0);
+  }
+
   // ── WFG3 info badge (always visible when WFG3 is active) ──
   ctx.save();
-  var badge = 'Engine: WFG3 A\u2013C';
+  var badge = 'Engine: WFG3 A\u2013F';
   var backend = artf.wfg3_backend || 'unknown';
-  var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tokens  |  ' +
-    (artf.wfg3_contourCount || 0) + ' contours  |  backend: ' + backend;
+  var info = badge + '  |  ' + (artf.wfg3_tokenCount || 0) + ' tok  |  ' +
+    (artf.wfg3_chainCount || 0) + ' chains  |  ' +
+    (artf.wfg3_regionCount || 0) + ' regions  |  ' +
+    (artf.wfg3_groupCount || 0) + ' groups  |  ' + backend;
 
   ctx.font = 'bold 11px "IBM Plex Mono", monospace';
   var tw = ctx.measureText(info).width;
