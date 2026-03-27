@@ -48,7 +48,7 @@
     tokenMinConfidence: 0.05,
 
     // Stage C: Tile-based seeding (experimental)
-    tokenSeedingMode: 'global_stride',
+    tokenSeedingMode: 'tile_min_coverage',
     seedTileSizePx: 64,
     seedMinPerTile: 2,
     seedMaxPerTile: 40,
