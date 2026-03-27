@@ -95,7 +95,19 @@
     tokenStep:                2,     // sample every Nth edge pixel (in scan order)
     tokenSideSamplePx:        3,     // pixels offset along normal for side LAB sampling
     tokenConfidenceDeltaEMax: 40.0,  // deltaE at which confidence = 1.0
-    tokenMinConfidence:       0.05   // discard tokens below this confidence
+    tokenMinConfidence:       0.05,  // discard tokens below this confidence
+
+    // Stage C: Tile-based seeding (experimental)
+    tokenSeedingMode:         'global_stride', // 'global_stride' | 'tile_min_coverage'
+    seedTileSizePx:           64,
+    seedMinPerTile:           2,
+    seedMaxPerTile:           40,
+    seedExtraScale:           1.5,   // multiplier for extra nodes in strong tiles
+    seedStaggeredPass:        false,
+    seedFallbackMode:         'grid', // 'grid' | 'low_gradient'
+    seedNmsRadiusPx:          3,
+    seedRefinementEnabled:    false,
+    seedRefinementMaxDensity: 2.0    // max densification multiplier
   });
 
   /* ==================================================================
@@ -279,6 +291,467 @@
    *  Stage C: Boundary Tokens
    * ================================================================== */
 
+  /* ── Shared: construct a single token from a pixel position ── */
+
+  function _makeToken(id, px, py, surface, evidence, cfg) {
+    var w = surface.width, h = surface.height;
+    var gx = evidence.gradX, gy = evidence.gradY;
+    var sampleD = cfg.tokenSideSamplePx;
+    var deMax = cfg.tokenConfidenceDeltaEMax;
+    var idx = py * w + px;
+
+    var hasLab = !!surface.lab;
+    var L  = hasLab ? surface.lab.L : null;
+    var la = hasLab ? surface.lab.a : null;
+    var lb = hasLab ? surface.lab.b : null;
+    var grayArr = surface.gray;
+
+    // Local gradient → normal direction
+    var rawGx = gx[idx], rawGy = gy[idx];
+    var gMag = Math.sqrt(rawGx * rawGx + rawGy * rawGy);
+    var nx, ny;
+    if (gMag < 0.001) {
+      var accX = 0, accY = 0;
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          var sy = py + dy, sx = px + dx;
+          if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
+            accX += gx[sy * w + sx];
+            accY += gy[sy * w + sx];
+          }
+        }
+      }
+      var aMag = Math.sqrt(accX * accX + accY * accY);
+      if (aMag < 0.001) { nx = 1; ny = 0; }
+      else { nx = accX / aMag; ny = accY / aMag; }
+    } else {
+      nx = rawGx / gMag; ny = rawGy / gMag;
+    }
+
+    var tx = -ny, ty = nx;
+
+    var lx = CV.clamp(Math.round(px + nx * sampleD), 0, w - 1);
+    var ly = CV.clamp(Math.round(py + ny * sampleD), 0, h - 1);
+    var rx = CV.clamp(Math.round(px - nx * sampleD), 0, w - 1);
+    var ry = CV.clamp(Math.round(py - ny * sampleD), 0, h - 1);
+
+    var leftLab, rightLab, deltaE;
+    if (hasLab) {
+      var li = ly * w + lx, rri = ry * w + rx;
+      leftLab  = [L[li],  la[li],  lb[li]];
+      rightLab = [L[rri], la[rri], lb[rri]];
+      var dL = leftLab[0] - rightLab[0];
+      var da = leftLab[1] - rightLab[1];
+      var db = leftLab[2] - rightLab[2];
+      deltaE = Math.sqrt(dL * dL + da * da + db * db);
+    } else {
+      var lVal = grayArr[ly * w + lx];
+      var rVal = grayArr[ry * w + rx];
+      leftLab  = [lVal * (100 / 255), 0, 0];
+      rightLab = [rVal * (100 / 255), 0, 0];
+      deltaE = Math.abs(leftLab[0] - rightLab[0]);
+    }
+
+    var confidence = Math.min(1.0, deltaE / deMax);
+    return {
+      id: id, x: px, y: py,
+      tangentX: tx, tangentY: ty,
+      normalX: nx, normalY: ny,
+      leftLab: leftLab, rightLab: rightLab,
+      deltaE: deltaE, confidence: confidence
+    };
+  }
+
+  /* ── Evidence score for candidate ranking (tile mode) ── */
+
+  function _evidenceScore(px, py, evidence, w) {
+    var idx = py * w + px;
+    var ew = evidence.edgeWeighted[idx] / 255.0;
+    var gm = Math.min(evidence.gradMag[idx] / 255.0, 1.0);
+    var ld = Math.min(evidence.labDelta[idx] / 100.0, 1.0);
+    return 0.5 * ew + 0.3 * gm + 0.2 * ld;
+  }
+
+  /* ── NMS: suppress nearby candidates within radius (by descending score) ── */
+
+  function _nmsFilter(candidates, radius) {
+    // candidates: [{x,y,score},...] — mutated sort OK, returns new array
+    if (!candidates.length || radius <= 0) return candidates;
+    candidates.sort(function (a, b) { return b.score - a.score; });
+    var r2 = radius * radius;
+    var kept = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var suppress = false;
+      for (var j = 0; j < kept.length; j++) {
+        var dx = c.x - kept[j].x, dy = c.y - kept[j].y;
+        if (dx * dx + dy * dy < r2) { suppress = true; break; }
+      }
+      if (!suppress) kept.push(c);
+    }
+    return kept;
+  }
+
+  /* ── Fallback: evenly spaced grid points ── */
+
+  function _fallbackGrid(x0, y0, x1, y1, count) {
+    var tw = x1 - x0, th = y1 - y0;
+    if (tw < 1 || th < 1) return [];
+    var side = Math.max(1, Math.ceil(Math.sqrt(count)));
+    var pts = [];
+    for (var gy = 0; gy < side; gy++) {
+      for (var gx = 0; gx < side; gx++) {
+        if (pts.length >= count) break;
+        var px = x0 + Math.round((gx + 0.5) * tw / side);
+        var py = y0 + Math.round((gy + 0.5) * th / side);
+        pts.push({ x: Math.min(px, x1 - 1), y: Math.min(py, y1 - 1) });
+      }
+    }
+    return pts;
+  }
+
+  /* ── Fallback: low-gradient sampling ── */
+
+  function _fallbackLowGradient(x0, y0, x1, y1, evidence, w, count, nmsR) {
+    var pts = [];
+    for (var py = y0; py < y1; py += 2) {
+      for (var px = x0; px < x1; px += 2) {
+        var gm = evidence.gradMag[py * w + px];
+        pts.push({ x: px, y: py, score: 1.0 / (1.0 + gm) });
+      }
+    }
+    if (!pts.length) return _fallbackGrid(x0, y0, x1, y1, count);
+    var filtered = _nmsFilter(pts, nmsR);
+    var result = [];
+    for (var i = 0; i < Math.min(count, filtered.length); i++) {
+      result.push({ x: filtered[i].x, y: filtered[i].y });
+    }
+    return result;
+  }
+
+  /* ── Original global-stride seeding (preserved exactly) ── */
+
+  function _seedGlobalStride(surface, evidence, cfg) {
+    var w = surface.width, h = surface.height;
+    var edge = evidence.edgeBinary;
+    var step = Math.max(1, cfg.tokenStep);
+    var minConf = cfg.tokenMinConfidence;
+
+    var positions = [];
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (edge[y * w + x] > 0) positions.push(x | (y << 16));
+      }
+    }
+
+    var tokens = [];
+    var nextId = 0;
+    for (var pi = 0; pi < positions.length; pi += step) {
+      var packed = positions[pi];
+      var px = packed & 0xFFFF;
+      var py = packed >>> 16;
+      var tok = _makeToken(nextId, px, py, surface, evidence, cfg);
+      if (tok.confidence < minConf) continue;
+      tok.id = nextId++;
+      tokens.push(tok);
+    }
+    return tokens;
+  }
+
+  /* ── Tile-based minimum-coverage seeding (new experimental mode) ── */
+
+  function _seedTileMinCoverage(surface, evidence, cfg) {
+    var w = surface.width, h = surface.height;
+    var edge = evidence.edgeBinary;
+    var tileSz = Math.max(8, cfg.seedTileSizePx || 64);
+    var minPer = Math.max(1, cfg.seedMinPerTile || 2);
+    var maxPer = Math.max(minPer, cfg.seedMaxPerTile || 40);
+    var extraScale = Math.max(1.0, cfg.seedExtraScale || 1.5);
+    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
+    var fallbackMode = cfg.seedFallbackMode || 'grid';
+    var minConf = cfg.tokenMinConfidence;
+
+    var tilesX = Math.ceil(w / tileSz);
+    var tilesY = Math.ceil(h / tileSz);
+
+    // Pre-collect edge pixel positions per tile
+    // Use a flat array indexed by tile to avoid object overhead
+    var tileCount = tilesX * tilesY;
+    var tileLists = new Array(tileCount);
+    for (var ti = 0; ti < tileCount; ti++) tileLists[ti] = [];
+
+    for (var ey = 0; ey < h; ey++) {
+      var tyIdx = (ey / tileSz) | 0;
+      var rowOff = ey * w;
+      for (var ex = 0; ex < w; ex++) {
+        if (edge[rowOff + ex] > 0) {
+          var txIdx = (ex / tileSz) | 0;
+          tileLists[tyIdx * tilesX + txIdx].push(ex | (ey << 16));
+        }
+      }
+    }
+
+    // Compute global mean evidence score for adaptive allocation
+    var scoreSum = 0, scoreCount = 0;
+    var tileScored = new Array(tileCount); // [{x,y,score}[]]
+    for (var t = 0; t < tileCount; t++) {
+      var list = tileLists[t];
+      var scored = [];
+      for (var si = 0; si < list.length; si++) {
+        var spx = list[si] & 0xFFFF;
+        var spy = list[si] >>> 16;
+        var sc = _evidenceScore(spx, spy, evidence, w);
+        scored.push({ x: spx, y: spy, score: sc });
+        scoreSum += sc;
+        scoreCount++;
+      }
+      tileScored[t] = scored;
+    }
+    var globalMeanScore = scoreCount > 0 ? scoreSum / scoreCount : 0.1;
+
+    var tokens = [];
+    var nextId = 0;
+
+    // Debug info
+    var debugInfo = {
+      tileSz: tileSz, tilesX: tilesX, tilesY: tilesY,
+      perTileCounts: new Int32Array(tileCount),
+      fallbackTiles: [],
+      totalEdgeCandidates: scoreCount
+    };
+
+    for (var tyI = 0; tyI < tilesY; tyI++) {
+      for (var txI = 0; txI < tilesX; txI++) {
+        var tIdx = tyI * tilesX + txI;
+        var x0 = txI * tileSz;
+        var y0 = tyI * tileSz;
+        var x1 = Math.min(x0 + tileSz, w);
+        var y1 = Math.min(y0 + tileSz, h);
+
+        var candidates = tileScored[tIdx];
+
+        if (candidates.length > 0) {
+          // Compute tile mean evidence score
+          var tileMean = 0;
+          for (var ci = 0; ci < candidates.length; ci++) tileMean += candidates[ci].score;
+          tileMean /= candidates.length;
+
+          // Budget: minPer + extra proportional to evidence strength
+          var extra = Math.round((tileMean / Math.max(globalMeanScore, 0.01)) * extraScale);
+          var budget = Math.min(maxPer, Math.max(minPer, minPer + extra));
+
+          // NMS to prevent clumping
+          var filtered = _nmsFilter(candidates, nmsR);
+
+          // Take top-budget (already sorted by score descending from NMS)
+          var selected = filtered.length > budget ? filtered.slice(0, budget) : filtered;
+
+          for (var si2 = 0; si2 < selected.length; si2++) {
+            var tok = _makeToken(nextId, selected[si2].x, selected[si2].y, surface, evidence, cfg);
+            if (tok.confidence >= minConf) {
+              tok.id = nextId++;
+              tokens.push(tok);
+            }
+          }
+          debugInfo.perTileCounts[tIdx] = selected.length;
+        } else {
+          // Fallback: tile has no edge candidates
+          debugInfo.fallbackTiles.push(tIdx);
+
+          var fallbackPts;
+          if (fallbackMode === 'low_gradient') {
+            fallbackPts = _fallbackLowGradient(x0, y0, x1, y1, evidence, w, minPer, nmsR);
+          } else {
+            fallbackPts = _fallbackGrid(x0, y0, x1, y1, minPer);
+          }
+
+          for (var fi = 0; fi < fallbackPts.length; fi++) {
+            var ftok = _makeToken(nextId, fallbackPts[fi].x, fallbackPts[fi].y, surface, evidence, cfg);
+            ftok.id = nextId++;
+            ftok._fallback = true; // flag for debug
+            tokens.push(ftok);
+          }
+          debugInfo.perTileCounts[tIdx] = fallbackPts.length;
+        }
+      }
+    }
+
+    return { tokens: tokens, debugInfo: debugInfo };
+  }
+
+  /* ── Staggered second pass (thin-line protection) ── */
+
+  function _staggeredPass(surface, evidence, cfg, existingTokens) {
+    var w = surface.width, h = surface.height;
+    var edge = evidence.edgeBinary;
+    var tileSz = Math.max(8, cfg.seedTileSizePx || 64);
+    var half = tileSz >> 1;
+    var minPer = Math.max(1, ((cfg.seedMinPerTile || 2) >> 1) || 1);
+    var maxPer = Math.max(minPer, ((cfg.seedMaxPerTile || 40) >> 1) || 1);
+    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
+    var minConf = cfg.tokenMinConfidence;
+    var nmsR2 = nmsR * nmsR;
+
+    // Build spatial set of existing positions for dedup
+    var posSet = {};
+    for (var ei = 0; ei < existingTokens.length; ei++) {
+      var et = existingTokens[ei];
+      posSet[et.x + ',' + et.y] = true;
+    }
+
+    // Offset tile grid by half
+    var tilesX = Math.ceil(w / tileSz) + 1;
+    var tilesY = Math.ceil(h / tileSz) + 1;
+
+    // Collect edge pixels into offset tiles
+    var tileLists = {};
+    for (var ey = 0; ey < h; ey++) {
+      var tyIdx = ((ey - half) / tileSz) | 0;
+      var rowOff = ey * w;
+      for (var ex = 0; ex < w; ex++) {
+        if (edge[rowOff + ex] > 0) {
+          var txIdx = ((ex - half) / tileSz) | 0;
+          var tKey = txIdx + ',' + tyIdx;
+          if (!tileLists[tKey]) tileLists[tKey] = [];
+          tileLists[tKey].push(ex | (ey << 16));
+        }
+      }
+    }
+
+    var nextId = 0;
+    for (var ni = 0; ni < existingTokens.length; ni++) {
+      if (existingTokens[ni].id >= nextId) nextId = existingTokens[ni].id + 1;
+    }
+
+    var newTokens = [];
+    for (var tKey2 in tileLists) {
+      var list = tileLists[tKey2];
+      var scored = [];
+      for (var si = 0; si < list.length; si++) {
+        var spx = list[si] & 0xFFFF;
+        var spy = list[si] >>> 16;
+        scored.push({ x: spx, y: spy, score: _evidenceScore(spx, spy, evidence, w) });
+      }
+      var filtered = _nmsFilter(scored, nmsR);
+      var budget = Math.min(maxPer, Math.max(minPer, filtered.length));
+      var selected = filtered.length > budget ? filtered.slice(0, budget) : filtered;
+
+      for (var si2 = 0; si2 < selected.length; si2++) {
+        var sx = selected[si2].x, sy = selected[si2].y;
+        // Dedup: skip if too close to existing token
+        var pk = sx + ',' + sy;
+        if (posSet[pk]) continue;
+
+        // Distance-based dedup against existing tokens (check nearby)
+        var tooClose = false;
+        for (var ci = 0; ci < existingTokens.length; ci++) {
+          var dx = sx - existingTokens[ci].x, dy = sy - existingTokens[ci].y;
+          if (dx * dx + dy * dy < nmsR2) { tooClose = true; break; }
+        }
+        if (tooClose) continue;
+
+        var tok = _makeToken(nextId, sx, sy, surface, evidence, cfg);
+        if (tok.confidence >= minConf) {
+          tok.id = nextId++;
+          tok._staggered = true;
+          newTokens.push(tok);
+          posSet[pk] = true;
+        }
+      }
+    }
+    return newTokens;
+  }
+
+  /* ── Local refinement pass (corridor densification) ── */
+
+  function _refinementPass(surface, evidence, cfg, tokens) {
+    if (!tokens.length || tokens.length < 4) return [];
+
+    var maxDensity = cfg.seedRefinementMaxDensity || 2.0;
+    var nmsR = cfg.seedNmsRadiusPx || 3;
+    var w = surface.width, h = surface.height;
+    var originalCount = tokens.length;
+    var maxNew = Math.floor(originalCount * (maxDensity - 1.0));
+    if (maxNew <= 0) return [];
+
+    // Build spatial grid for fast neighbor lookup
+    var cell = Math.max(4, nmsR * 2);
+    var grid = {};
+    for (var gi = 0; gi < tokens.length; gi++) {
+      var gk = ((tokens[gi].x / cell) | 0) + ',' + ((tokens[gi].y / cell) | 0);
+      if (!grid[gk]) grid[gk] = [];
+      grid[gk].push(tokens[gi]);
+    }
+
+    var radius = (cfg.graphNeighborRadius || 4) * 2.5;
+    var cosTol = Math.cos(25 * Math.PI / 180); // tighter than Stage D default
+    var sideTol = 15.0;
+
+    var newTokens = [];
+    var nextId = 0;
+    for (var ni = 0; ni < tokens.length; ni++) {
+      if (tokens[ni].id >= nextId) nextId = tokens[ni].id + 1;
+    }
+
+    var usedPos = {};
+    for (var ui = 0; ui < tokens.length; ui++) usedPos[tokens[ui].x + ',' + tokens[ui].y] = true;
+
+    for (var ti = 0; ti < tokens.length; ti++) {
+      if (newTokens.length >= maxNew) break;
+      var t = tokens[ti];
+      var gcx = (t.x / cell) | 0, gcy = (t.y / cell) | 0;
+
+      // Find corridor neighbors
+      var corridorNeis = [];
+      for (var dgy = -1; dgy <= 1; dgy++) {
+        for (var dgx = -1; dgx <= 1; dgx++) {
+          var nk = (gcx + dgx) + ',' + (gcy + dgy);
+          var bucket = grid[nk];
+          if (!bucket) continue;
+          for (var bi = 0; bi < bucket.length; bi++) {
+            var n = bucket[bi];
+            if (n.id === t.id) continue;
+            var ddx = n.x - t.x, ddy = n.y - t.y;
+            var dist = Math.sqrt(ddx * ddx + ddy * ddy);
+            if (dist > radius || dist < 1) continue;
+            var dot = Math.abs(t.tangentX * n.tangentX + t.tangentY * n.tangentY);
+            if (dot < cosTol) continue;
+            // Side agreement
+            var ll = Math.sqrt(
+              Math.pow(t.leftLab[0] - n.leftLab[0], 2) +
+              Math.pow(t.leftLab[1] - n.leftLab[1], 2) +
+              Math.pow(t.leftLab[2] - n.leftLab[2], 2));
+            var rr = Math.sqrt(
+              Math.pow(t.rightLab[0] - n.rightLab[0], 2) +
+              Math.pow(t.rightLab[1] - n.rightLab[1], 2) +
+              Math.pow(t.rightLab[2] - n.rightLab[2], 2));
+            if (ll <= sideTol && rr <= sideTol) corridorNeis.push(n);
+          }
+        }
+      }
+
+      if (corridorNeis.length < 2) continue;
+
+      // Densify: place midpoints to first 2 corridor neighbors
+      for (var cn = 0; cn < Math.min(2, corridorNeis.length); cn++) {
+        if (newTokens.length >= maxNew) break;
+        var mx = ((t.x + corridorNeis[cn].x) >> 1);
+        var my = ((t.y + corridorNeis[cn].y) >> 1);
+        var mk = mx + ',' + my;
+        if (usedPos[mk]) continue;
+        if (mx < 0 || mx >= w || my < 0 || my >= h) continue;
+        var mtok = _makeToken(nextId, mx, my, surface, evidence, cfg);
+        mtok.id = nextId++;
+        mtok._refined = true;
+        newTokens.push(mtok);
+        usedPos[mk] = true;
+      }
+    }
+    return newTokens;
+  }
+
+  /* ── Main Stage C entry point ── */
+
   /**
    * @param {Object} surface    NormalizedSurface
    * @param {Object} evidence   BoundaryEvidence
@@ -287,113 +760,40 @@
    */
   function stageC_boundaryTokens(surface, evidence, cfg) {
     cfg = cfg || DEFAULT_CONFIG_AC;
-    var w = surface.width, h = surface.height;
-    var edge = evidence.edgeBinary;
-    var gx = evidence.gradX;
-    var gy = evidence.gradY;
-    var step = Math.max(1, cfg.tokenStep);
-    var sampleD = cfg.tokenSideSamplePx;
-    var deMax = cfg.tokenConfidenceDeltaEMax;
-    var minConf = cfg.tokenMinConfidence;
+    var mode = cfg.tokenSeedingMode || 'global_stride';
 
-    // Collect edge pixel positions in scan order
-    var positions = [];
-    for (var y = 0; y < h; y++) {
-      for (var x = 0; x < w; x++) {
-        if (edge[y * w + x] > 0) positions.push(x | (y << 16));
+    if (mode === 'tile_min_coverage') {
+      var result = _seedTileMinCoverage(surface, evidence, cfg);
+      var tokens = result.tokens;
+      var debugInfo = result.debugInfo;
+
+      // Staggered second pass
+      var staggerCount = 0;
+      if (cfg.seedStaggeredPass) {
+        var staggerTokens = _staggeredPass(surface, evidence, cfg, tokens);
+        for (var si = 0; si < staggerTokens.length; si++) tokens.push(staggerTokens[si]);
+        staggerCount = staggerTokens.length;
       }
+
+      // Optional refinement pass
+      var refineCount = 0;
+      if (cfg.seedRefinementEnabled) {
+        var refineTokens = _refinementPass(surface, evidence, cfg, tokens);
+        for (var ri = 0; ri < refineTokens.length; ri++) tokens.push(refineTokens[ri]);
+        refineCount = refineTokens.length;
+      }
+
+      // Attach debug info to returned array (non-enumerable so it won't break iteration)
+      debugInfo.staggerCount = staggerCount;
+      debugInfo.refineCount = refineCount;
+      debugInfo.totalTokens = tokens.length;
+      tokens._tileDebugInfo = debugInfo;
+
+      return tokens;
     }
 
-    var hasLab = !!surface.lab;
-    var L = hasLab ? surface.lab.L : null;
-    var la = hasLab ? surface.lab.a : null;
-    var lb = hasLab ? surface.lab.b : null;
-    // Fallback: use grayscale as pseudo-L if no color
-    var grayArr = surface.gray;
-
-    var tokens = [];
-    var nextId = 0;
-
-    for (var pi = 0; pi < positions.length; pi += step) {
-      var packed = positions[pi];
-      var px = packed & 0xFFFF;
-      var py = packed >>> 16;
-      var idx = py * w + px;
-
-      // Local gradient → normal direction
-      var rawGx = gx[idx];
-      var rawGy = gy[idx];
-      var gMag = Math.sqrt(rawGx * rawGx + rawGy * rawGy);
-
-      var nx, ny;
-      if (gMag < 0.001) {
-        // Zero gradient at this pixel: try a small neighborhood average
-        var accX = 0, accY = 0;
-        for (var dy = -1; dy <= 1; dy++) {
-          for (var dx = -1; dx <= 1; dx++) {
-            var sy = py + dy, sx = px + dx;
-            if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
-              accX += gx[sy * w + sx];
-              accY += gy[sy * w + sx];
-            }
-          }
-        }
-        var aMag = Math.sqrt(accX * accX + accY * accY);
-        if (aMag < 0.001) { nx = 1; ny = 0; } // degenerate: pick arbitrary
-        else { nx = accX / aMag; ny = accY / aMag; }
-      } else {
-        nx = rawGx / gMag;
-        ny = rawGy / gMag;
-      }
-
-      // Tangent = 90 degrees to normal
-      var tx = -ny;
-      var ty = nx;
-
-      // Sample LAB (or gray) on each side of the boundary
-      var lx = CV.clamp(Math.round(px + nx * sampleD), 0, w - 1);
-      var ly = CV.clamp(Math.round(py + ny * sampleD), 0, h - 1);
-      var rx = CV.clamp(Math.round(px - nx * sampleD), 0, w - 1);
-      var ry = CV.clamp(Math.round(py - ny * sampleD), 0, h - 1);
-
-      var leftLab, rightLab, deltaE;
-
-      if (hasLab) {
-        var li = ly * w + lx;
-        var rri = ry * w + rx;
-        leftLab = [L[li], la[li], lb[li]];
-        rightLab = [L[rri], la[rri], lb[rri]];
-        var dL = leftLab[0] - rightLab[0];
-        var da = leftLab[1] - rightLab[1];
-        var db = leftLab[2] - rightLab[2];
-        deltaE = Math.sqrt(dL * dL + da * da + db * db);
-      } else {
-        var lVal = grayArr[ly * w + lx];
-        var rVal = grayArr[ry * w + rx];
-        leftLab = [lVal * (100 / 255), 0, 0];
-        rightLab = [rVal * (100 / 255), 0, 0];
-        deltaE = Math.abs(leftLab[0] - rightLab[0]);
-      }
-
-      var confidence = Math.min(1.0, deltaE / deMax);
-      if (confidence < minConf) continue;
-
-      tokens.push({
-        id: nextId++,
-        x: px,
-        y: py,
-        tangentX: tx,
-        tangentY: ty,
-        normalX: nx,
-        normalY: ny,
-        leftLab: leftLab,
-        rightLab: rightLab,
-        deltaE: deltaE,
-        confidence: confidence
-      });
-    }
-
-    return tokens;
+    // Default: original global_stride mode
+    return _seedGlobalStride(surface, evidence, cfg);
   }
 
   /* ==================================================================

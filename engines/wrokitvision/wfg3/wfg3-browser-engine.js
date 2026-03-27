@@ -47,6 +47,18 @@
     tokenConfidenceDeltaEMax: 40.0,
     tokenMinConfidence: 0.05,
 
+    // Stage C: Tile-based seeding (experimental)
+    tokenSeedingMode: 'global_stride',
+    seedTileSizePx: 64,
+    seedMinPerTile: 2,
+    seedMaxPerTile: 40,
+    seedExtraScale: 1.5,
+    seedStaggeredPass: false,
+    seedFallbackMode: 'grid',
+    seedNmsRadiusPx: 3,
+    seedRefinementEnabled: false,
+    seedRefinementMaxDensity: 2.0,
+
     // Stage D
     graphNeighborRadius: 4,
     graphOrientationTolDeg: 35,
@@ -234,6 +246,8 @@
         // WFG3-specific Stage C artifacts
         wfg3_tokens: tokens,
         wfg3_tokenCount: tokens.length,
+        wfg3_tokenSeedingMode: (p && p.tokenSeedingMode) || 'global_stride',
+        wfg3_tileDebugInfo: tokens._tileDebugInfo || null,
 
         // WFG3-specific Stage D artifacts
         wfg3_boundaryGraph: boundaryGraph,
