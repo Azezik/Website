@@ -18,6 +18,15 @@ class WFG3Config:
     token_step: int = 2
     token_side_sample_px: int = 2
     token_confidence_deltae_scale: float = 40.0
+    token_seeding_mode: str = "global_stride"  # global_stride | uniform_scaffold
+    token_min_confidence: float = 0.05
+    scaffold_spacing_px: int = 12
+    scaffold_staggered: bool = True
+    scaffold_evidence_gate_min: float = 0.04
+    scaffold_snap_radius: int = 4
+    scaffold_snap_enabled: bool = True
+    scaffold_max_tokens: int = 25000
+    scaffold_min_spacing: int = 5
     graph_neighbor_radius: int = 3
     graph_orientation_tol_deg: float = 30.0
     graph_side_deltae_tol: float = 20.0
