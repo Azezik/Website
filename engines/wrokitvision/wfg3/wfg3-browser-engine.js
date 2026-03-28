@@ -59,6 +59,15 @@
     seedRefinementEnabled: false,
     seedRefinementMaxDensity: 2.0,
 
+    // Stage C: Uniform scaffold seeding (experimental)
+    scaffoldSpacingPx: 12,
+    scaffoldStaggered: true,
+    scaffoldEvidenceGateMin: 0.04,
+    scaffoldSnapRadius: 4,
+    scaffoldSnapEnabled: true,
+    scaffoldMaxTokens: 25000,
+    scaffoldMinSpacing: 5,
+
     // Stage D
     graphNeighborRadius: 4,
     graphOrientationTolDeg: 35,

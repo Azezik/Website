@@ -424,6 +424,76 @@
       };
     }
 
+    // ── Overlay 6d: scaffold debug (uniform_scaffold mode) ──
+    if (tokens && tokens._scaffoldDebugInfo) {
+      var sdi = tokens._scaffoldDebugInfo;
+
+      // Scaffold token marker overlay: color-code by pass and snap status
+      var scaffoldCmds = [];
+      for (var sci = 0; sci < tokens.length; sci++) {
+        var st = tokens[sci];
+        if (!st._scaffold) continue;
+        var scColor;
+        if (st._scaffoldPass === 1) {
+          scColor = st._scaffold && (st.x % 1 === 0) ? [0, 220, 120] : [0, 220, 120]; // green: pass 1
+        } else {
+          scColor = [0, 160, 255]; // blue: pass 2 (staggered)
+        }
+        scaffoldCmds.push({
+          x: st.x, y: st.y,
+          type: 'scaffold_p' + st._scaffoldPass,
+          color: scColor,
+          conf: st.confidence
+        });
+      }
+      overlays.scaffold_token_markers = { kind: 'commands', commands: scaffoldCmds };
+
+      // Scaffold lattice grid overlay (faint grid showing where proposals were)
+      var scaffoldGridOv = new Uint8ClampedArray(N * 4);
+      var sSpacing = sdi.spacing || 12;
+      // Draw faint lattice dots at proposed positions
+      for (var sgy = 0; sgy < H; sgy += sSpacing) {
+        for (var sgx = 0; sgx < W; sgx += sSpacing) {
+          var sgIdx = (sgy * W + sgx) * 4;
+          scaffoldGridOv[sgIdx]     = 255;
+          scaffoldGridOv[sgIdx + 1] = 255;
+          scaffoldGridOv[sgIdx + 2] = 255;
+          scaffoldGridOv[sgIdx + 3] = 50;
+        }
+      }
+      // Staggered pass dots
+      if (sdi.staggered) {
+        var shx = (sSpacing / 2) | 0, shy = (sSpacing / 2) | 0;
+        for (var sgy2 = shy; sgy2 < H; sgy2 += sSpacing) {
+          for (var sgx2 = shx; sgx2 < W; sgx2 += sSpacing) {
+            var sgIdx2 = (sgy2 * W + sgx2) * 4;
+            scaffoldGridOv[sgIdx2]     = 180;
+            scaffoldGridOv[sgIdx2 + 1] = 180;
+            scaffoldGridOv[sgIdx2 + 2] = 255;
+            scaffoldGridOv[sgIdx2 + 3] = 40;
+          }
+        }
+      }
+      overlays.scaffold_lattice = { width: W, height: H, data: scaffoldGridOv };
+
+      // Scaffold debug stats summary
+      overlays.scaffold_debug_stats = {
+        kind: 'stats',
+        mode: 'uniform_scaffold',
+        spacing: sdi.spacing,
+        staggered: sdi.staggered,
+        proposedCount: sdi.proposedCount,
+        gatedOutCount: sdi.gatedOutCount,
+        snappedCount: sdi.snappedCount,
+        spacingSuppressedCount: sdi.spacingSuppressedCount,
+        capReachedCount: sdi.capReachedCount,
+        confidenceDropCount: sdi.confidenceDropCount,
+        pass1Count: sdi.pass1Count,
+        pass2Count: sdi.pass2Count,
+        totalTokens: sdi.totalTokens
+      };
+    }
+
     // ── Overlay 6: structure_graph ──
     // Stored as drawing commands (nodes + edges for canvas rendering)
     var sgCmds = { nodes: [], edges: [] };

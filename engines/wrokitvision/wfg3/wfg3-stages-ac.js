@@ -107,7 +107,16 @@
     seedFallbackMode:         'grid', // 'grid' | 'low_gradient'
     seedNmsRadiusPx:          3,
     seedRefinementEnabled:    false,
-    seedRefinementMaxDensity: 2.0    // max densification multiplier
+    seedRefinementMaxDensity: 2.0,   // max densification multiplier
+
+    // Stage C: Uniform scaffold seeding (experimental)
+    scaffoldSpacingPx:        12,    // base lattice spacing in pixels
+    scaffoldStaggered:        true,  // add half-offset second pass
+    scaffoldEvidenceGateMin:  0.04,  // minimum local evidence to accept a scaffold point
+    scaffoldSnapRadius:       4,     // max pixels to snap toward a stronger local peak
+    scaffoldSnapEnabled:      true,  // enable/disable local snap
+    scaffoldMaxTokens:        25000, // global token cap (browser safety)
+    scaffoldMinSpacing:       5      // minimum distance between final tokens after snap
   });
 
   /* ==================================================================
@@ -750,6 +759,192 @@
     return newTokens;
   }
 
+  /* ── Uniform scaffold seeding (experimental: fair spatial sampling) ── */
+
+  /**
+   * _localEvidenceAt — sample a small neighborhood and return max evidence.
+   * Uses edgeWeighted, gradMag, labDelta within a 3×3 window.
+   * Returns a value in [0, 1].
+   */
+  function _localEvidenceAt(px, py, evidence, w, h) {
+    var best = 0;
+    for (var dy = -1; dy <= 1; dy++) {
+      var sy = py + dy;
+      if (sy < 0 || sy >= h) continue;
+      for (var dx = -1; dx <= 1; dx++) {
+        var sx = px + dx;
+        if (sx < 0 || sx >= w) continue;
+        var idx = sy * w + sx;
+        var ew = evidence.edgeWeighted[idx] / 255.0;
+        var gm = Math.min(evidence.gradMag[idx] / 255.0, 1.0);
+        var ld = Math.min(evidence.labDelta[idx] / 100.0, 1.0);
+        var val = 0.4 * ew + 0.35 * gm + 0.25 * ld;
+        if (val > best) best = val;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * _snapToLocalPeak — find the pixel with strongest evidence within snapRadius.
+   * Returns {x, y, snapped: boolean}.
+   */
+  function _snapToLocalPeak(px, py, evidence, w, h, snapRadius) {
+    var bestX = px, bestY = py;
+    var bestScore = -1;
+    var r = snapRadius;
+    var y0 = Math.max(0, py - r), y1 = Math.min(h - 1, py + r);
+    var x0 = Math.max(0, px - r), x1 = Math.min(w - 1, px + r);
+    var r2 = r * r;
+    for (var sy = y0; sy <= y1; sy++) {
+      for (var sx = x0; sx <= x1; sx++) {
+        var ddx = sx - px, ddy = sy - py;
+        if (ddx * ddx + ddy * ddy > r2) continue;
+        var idx = sy * w + sx;
+        var ew = evidence.edgeWeighted[idx] / 255.0;
+        var gm = Math.min(evidence.gradMag[idx] / 255.0, 1.0);
+        var sc = 0.5 * ew + 0.5 * gm;
+        if (sc > bestScore) {
+          bestScore = sc;
+          bestX = sx;
+          bestY = sy;
+        }
+      }
+    }
+    return { x: bestX, y: bestY, snapped: (bestX !== px || bestY !== py) };
+  }
+
+  function _seedUniformScaffold(surface, evidence, cfg) {
+    var w = surface.width, h = surface.height;
+    var spacing = Math.max(4, cfg.scaffoldSpacingPx || 12);
+    var doStagger = cfg.scaffoldStaggered !== false;
+    var gateMin = cfg.scaffoldEvidenceGateMin || 0.04;
+    var snapR = Math.max(0, cfg.scaffoldSnapRadius || 4);
+    var doSnap = cfg.scaffoldSnapEnabled !== false && snapR > 0;
+    var maxTokens = cfg.scaffoldMaxTokens || 25000;
+    var minSpacing = cfg.scaffoldMinSpacing || 5;
+    var minConf = cfg.tokenMinConfidence;
+    var minSpacing2 = minSpacing * minSpacing;
+
+    // Debug tracking
+    var debugInfo = {
+      spacing: spacing,
+      staggered: doStagger,
+      proposedCount: 0,
+      gatedOutCount: 0,
+      snappedCount: 0,
+      spacingSuppressedCount: 0,
+      capReachedCount: 0,
+      confidenceDropCount: 0,
+      pass1Count: 0,
+      pass2Count: 0,
+      totalTokens: 0
+    };
+
+    // Spatial occupancy grid for minimum spacing enforcement
+    var occCell = Math.max(3, minSpacing);
+    var occW = Math.ceil(w / occCell);
+    var occH = Math.ceil(h / occCell);
+    var occupied = new Uint8Array(occW * occH);
+
+    function isOccupied(px, py) {
+      var gcx = (px / occCell) | 0;
+      var gcy = (py / occCell) | 0;
+      // Check 3×3 neighborhood of grid cells
+      for (var dy = -1; dy <= 1; dy++) {
+        var cy = gcy + dy;
+        if (cy < 0 || cy >= occH) continue;
+        for (var dx = -1; dx <= 1; dx++) {
+          var cx = gcx + dx;
+          if (cx < 0 || cx >= occW) continue;
+          if (occupied[cy * occW + cx]) return true;
+        }
+      }
+      return false;
+    }
+
+    function markOccupied(px, py) {
+      var gcx = (px / occCell) | 0;
+      var gcy = (py / occCell) | 0;
+      if (gcx >= 0 && gcx < occW && gcy >= 0 && gcy < occH) {
+        occupied[gcy * occW + gcx] = 1;
+      }
+    }
+
+    var tokens = [];
+    var nextId = 0;
+
+    /**
+     * Process one lattice pass.
+     * offsetX, offsetY shift the grid origin for staggered passes.
+     */
+    function processPass(offsetX, offsetY, passLabel) {
+      var passCount = 0;
+      for (var gy = offsetY; gy < h; gy += spacing) {
+        for (var gx = offsetX; gx < w; gx += spacing) {
+          if (tokens.length >= maxTokens) {
+            debugInfo.capReachedCount++;
+            return passCount;
+          }
+
+          debugInfo.proposedCount++;
+
+          var px = gx, py = gy;
+
+          // A. Light local evidence gating
+          var localEv = _localEvidenceAt(px, py, evidence, w, h);
+          if (localEv < gateMin) {
+            debugInfo.gatedOutCount++;
+            continue;
+          }
+
+          // B. Optional local snap toward stronger evidence peak
+          if (doSnap) {
+            var snapped = _snapToLocalPeak(px, py, evidence, w, h, snapR);
+            px = snapped.x;
+            py = snapped.y;
+            if (snapped.snapped) debugInfo.snappedCount++;
+          }
+
+          // C. Minimum spacing enforcement (post-snap)
+          if (isOccupied(px, py)) {
+            debugInfo.spacingSuppressedCount++;
+            continue;
+          }
+
+          // D. Construct token using standard _makeToken
+          var tok = _makeToken(nextId, px, py, surface, evidence, cfg);
+          if (tok.confidence < minConf) {
+            debugInfo.confidenceDropCount++;
+            continue;
+          }
+
+          tok.id = nextId++;
+          tok._scaffold = true;
+          tok._scaffoldPass = passLabel;
+          tokens.push(tok);
+          markOccupied(px, py);
+          passCount++;
+        }
+      }
+      return passCount;
+    }
+
+    // Pass 1: primary lattice
+    debugInfo.pass1Count = processPass(0, 0, 1);
+
+    // Pass 2: staggered half-offset lattice
+    if (doStagger) {
+      var halfX = (spacing / 2) | 0;
+      var halfY = (spacing / 2) | 0;
+      debugInfo.pass2Count = processPass(halfX, halfY, 2);
+    }
+
+    debugInfo.totalTokens = tokens.length;
+
+    return { tokens: tokens, debugInfo: debugInfo };
+  }
+
   /* ── Main Stage C entry point ── */
 
   /**
@@ -761,6 +956,19 @@
   function stageC_boundaryTokens(surface, evidence, cfg) {
     cfg = cfg || DEFAULT_CONFIG_AC;
     var mode = cfg.tokenSeedingMode || 'global_stride';
+
+    if (mode === 'uniform_scaffold') {
+      var scaffoldResult = _seedUniformScaffold(surface, evidence, cfg);
+      var scaffoldTokens = scaffoldResult.tokens;
+      var scaffoldDebug = scaffoldResult.debugInfo;
+
+      // Attach debug info (non-enumerable so it won't break iteration)
+      scaffoldDebug.mode = 'uniform_scaffold';
+      scaffoldTokens._tileDebugInfo = scaffoldDebug;
+      scaffoldTokens._scaffoldDebugInfo = scaffoldDebug;
+
+      return scaffoldTokens;
+    }
 
     if (mode === 'tile_min_coverage') {
       var result = _seedTileMinCoverage(surface, evidence, cfg);
