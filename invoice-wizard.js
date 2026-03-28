@@ -20791,7 +20791,7 @@ function syncGraphLearningEngineUI(){
   if(isWfg3) wfg3SyncSeedingControls(state.graphLearning.params || null);
 }
 
-/** Read the three WFG3 seeding controls and apply their values to params in-place. */
+/** Read the WFG3 seeding controls and apply their values to params in-place. */
 function wfg3ApplySeedingControls(params){
   var modeEl = document.getElementById('wfg3-seeding-mode');
   var staggerEl = document.getElementById('wfg3-seeding-staggered');
@@ -20799,9 +20799,21 @@ function wfg3ApplySeedingControls(params){
   if(modeEl) params.tokenSeedingMode = modeEl.value;
   if(staggerEl) params.seedStaggeredPass = staggerEl.checked;
   if(refineEl) params.seedRefinementEnabled = refineEl.checked;
+
+  // Scaffold-specific controls (only meaningful when mode = uniform_scaffold)
+  if(params.tokenSeedingMode === 'uniform_scaffold'){
+    var spacingEl = document.getElementById('wfg3-scaffold-spacing');
+    var scaffStaggerEl = document.getElementById('wfg3-scaffold-staggered');
+    var snapEl = document.getElementById('wfg3-scaffold-snap');
+    var gateEl = document.getElementById('wfg3-scaffold-gate');
+    if(spacingEl) params.scaffoldSpacingPx = parseInt(spacingEl.value, 10) || 12;
+    if(scaffStaggerEl) params.scaffoldStaggered = scaffStaggerEl.checked;
+    if(snapEl) params.scaffoldSnapEnabled = snapEl.checked;
+    if(gateEl) params.scaffoldEvidenceGateMin = parseFloat(gateEl.value) || 0.04;
+  }
 }
 
-/** Sync the three WFG3 seeding controls from a params object (or engine defaults). */
+/** Sync the WFG3 seeding controls from a params object (or engine defaults). */
 function wfg3SyncSeedingControls(params){
   var engine = getGraphLearningEngine();
   var src = params || (engine ? engine.DEFAULT_PARAMS : null);
@@ -20812,6 +20824,27 @@ function wfg3SyncSeedingControls(params){
   if(modeEl) modeEl.value = src.tokenSeedingMode || 'tile_min_coverage';
   if(staggerEl) staggerEl.checked = !!src.seedStaggeredPass;
   if(refineEl) refineEl.checked = !!src.seedRefinementEnabled;
+
+  // Scaffold-specific controls
+  var spacingEl = document.getElementById('wfg3-scaffold-spacing');
+  var spacingVal = document.getElementById('wfg3-scaffold-spacing-val');
+  var scaffStaggerEl = document.getElementById('wfg3-scaffold-staggered');
+  var snapEl = document.getElementById('wfg3-scaffold-snap');
+  var gateEl = document.getElementById('wfg3-scaffold-gate');
+  var gateVal = document.getElementById('wfg3-scaffold-gate-val');
+  if(spacingEl){ spacingEl.value = src.scaffoldSpacingPx || 12; if(spacingVal) spacingVal.textContent = spacingEl.value; }
+  if(scaffStaggerEl) scaffStaggerEl.checked = src.scaffoldStaggered !== false;
+  if(snapEl) snapEl.checked = src.scaffoldSnapEnabled !== false;
+  if(gateEl){ gateEl.value = src.scaffoldEvidenceGateMin || 0.04; if(gateVal) gateVal.textContent = parseFloat(gateEl.value).toFixed(2); }
+
+  // Show/hide scaffold controls panel
+  _wfg3ToggleScaffoldControls(src.tokenSeedingMode);
+}
+
+/** Toggle visibility of scaffold-specific controls based on selected mode. */
+function _wfg3ToggleScaffoldControls(mode){
+  var scaffoldPanel = document.getElementById('wfg3-scaffold-controls');
+  if(scaffoldPanel) scaffoldPanel.style.display = (mode === 'uniform_scaffold') ? '' : 'none';
 }
 
 function graphLearningSessionId(){
@@ -23572,6 +23605,21 @@ for(const id of WFG2_SLIDER_IDS){
     el.addEventListener('input', function(){ wfg2UpdateSliderDisplay(id); });
   }
 }
+
+// WFG3 seeding mode dropdown: toggle scaffold controls visibility
+(function(){
+  var modeEl = document.getElementById('wfg3-seeding-mode');
+  if(modeEl) modeEl.addEventListener('change', function(){ _wfg3ToggleScaffoldControls(modeEl.value); });
+
+  // Scaffold slider value display updaters
+  var spacingEl = document.getElementById('wfg3-scaffold-spacing');
+  var spacingVal = document.getElementById('wfg3-scaffold-spacing-val');
+  if(spacingEl && spacingVal) spacingEl.addEventListener('input', function(){ spacingVal.textContent = spacingEl.value; });
+
+  var gateEl = document.getElementById('wfg3-scaffold-gate');
+  var gateVal = document.getElementById('wfg3-scaffold-gate-val');
+  if(gateEl && gateVal) gateEl.addEventListener('input', function(){ gateVal.textContent = parseFloat(gateEl.value).toFixed(2); });
+})();
 
 // Apply sliders button
 if(els.graphLearningApplySlidersBtn){
