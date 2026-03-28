@@ -816,6 +816,9 @@
 
   function _seedUniformScaffold(surface, evidence, cfg) {
     var w = surface.width, h = surface.height;
+    var tileSz = Math.max(8, cfg.seedTileSizePx || 64);
+    var minPer = Math.max(1, cfg.seedMinPerTile || 2);
+    var maxPer = Math.max(minPer, cfg.seedMaxPerTile || 40);
     var spacing = Math.max(4, cfg.scaffoldSpacingPx || 12);
     var doStagger = cfg.scaffoldStaggered !== false;
     var gateMin = cfg.scaffoldEvidenceGateMin || 0.04;
@@ -824,10 +827,19 @@
     var maxTokens = cfg.scaffoldMaxTokens || 25000;
     var minSpacing = cfg.scaffoldMinSpacing || 5;
     var minConf = cfg.tokenMinConfidence;
-    var minSpacing2 = minSpacing * minSpacing;
+    var fallbackMode = cfg.seedFallbackMode || 'grid';
+    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
 
-    // Debug tracking
+    var tilesX = Math.ceil(w / tileSz);
+    var tilesY = Math.ceil(h / tileSz);
+    var tileCount = tilesX * tilesY;
+
+    // Debug tracking (tile-compatible shape)
     var debugInfo = {
+      tileSz: tileSz, tilesX: tilesX, tilesY: tilesY,
+      perTileCounts: new Int32Array(tileCount),
+      fallbackTiles: [],
+      totalEdgeCandidates: 0,
       spacing: spacing,
       staggered: doStagger,
       proposedCount: 0,
@@ -836,12 +848,13 @@
       spacingSuppressedCount: 0,
       capReachedCount: 0,
       confidenceDropCount: 0,
-      pass1Count: 0,
-      pass2Count: 0,
       totalTokens: 0
     };
 
-    // Spatial occupancy grid for minimum spacing enforcement
+    var tokens = [];
+    var nextId = 0;
+
+    // Global occupancy grid for minimum spacing enforcement (across tiles)
     var occCell = Math.max(3, minSpacing);
     var occW = Math.ceil(w / occCell);
     var occH = Math.ceil(h / occCell);
@@ -850,7 +863,6 @@
     function isOccupied(px, py) {
       var gcx = (px / occCell) | 0;
       var gcy = (py / occCell) | 0;
-      // Check 3×3 neighborhood of grid cells
       for (var dy = -1; dy <= 1; dy++) {
         var cy = gcy + dy;
         if (cy < 0 || cy >= occH) continue;
@@ -871,73 +883,136 @@
       }
     }
 
-    var tokens = [];
-    var nextId = 0;
-
     /**
-     * Process one lattice pass.
-     * offsetX, offsetY shift the grid origin for staggered passes.
+     * Run scaffold lattice within one tile.
+     * Returns number of tokens created for this tile.
      */
-    function processPass(offsetX, offsetY, passLabel) {
-      var passCount = 0;
-      for (var gy = offsetY; gy < h; gy += spacing) {
-        for (var gx = offsetX; gx < w; gx += spacing) {
-          if (tokens.length >= maxTokens) {
-            debugInfo.capReachedCount++;
-            return passCount;
-          }
+    function scaffoldTile(tx0, ty0, tx1, ty1, tIdx) {
+      var tileTokensBefore = tokens.length;
 
+      // Pass 1: primary lattice within tile
+      for (var gy = ty0; gy < ty1; gy += spacing) {
+        for (var gx = tx0; gx < tx1; gx += spacing) {
+          if (tokens.length >= maxTokens) { debugInfo.capReachedCount++; break; }
           debugInfo.proposedCount++;
 
           var px = gx, py = gy;
 
-          // A. Light local evidence gating
+          // Light local evidence gating
           var localEv = _localEvidenceAt(px, py, evidence, w, h);
-          if (localEv < gateMin) {
-            debugInfo.gatedOutCount++;
-            continue;
-          }
+          if (localEv < gateMin) { debugInfo.gatedOutCount++; continue; }
 
-          // B. Optional local snap toward stronger evidence peak
+          // Optional local snap toward stronger evidence peak
           if (doSnap) {
             var snapped = _snapToLocalPeak(px, py, evidence, w, h, snapR);
-            px = snapped.x;
-            py = snapped.y;
+            // Clamp snap result to within tile bounds
+            px = Math.max(tx0, Math.min(tx1 - 1, snapped.x));
+            py = Math.max(ty0, Math.min(ty1 - 1, snapped.y));
             if (snapped.snapped) debugInfo.snappedCount++;
           }
 
-          // C. Minimum spacing enforcement (post-snap)
-          if (isOccupied(px, py)) {
-            debugInfo.spacingSuppressedCount++;
-            continue;
-          }
+          // Minimum spacing enforcement
+          if (isOccupied(px, py)) { debugInfo.spacingSuppressedCount++; continue; }
 
-          // D. Construct token using standard _makeToken
+          // Construct token
           var tok = _makeToken(nextId, px, py, surface, evidence, cfg);
-          if (tok.confidence < minConf) {
-            debugInfo.confidenceDropCount++;
-            continue;
-          }
+          if (tok.confidence < minConf) { debugInfo.confidenceDropCount++; continue; }
 
           tok.id = nextId++;
           tok._scaffold = true;
-          tok._scaffoldPass = passLabel;
+          tok._scaffoldPass = 1;
           tokens.push(tok);
           markOccupied(px, py);
-          passCount++;
         }
       }
-      return passCount;
+
+      // Pass 2: staggered half-offset lattice within tile
+      if (doStagger) {
+        var halfX = (spacing / 2) | 0;
+        var halfY = (spacing / 2) | 0;
+        for (var gy2 = ty0 + halfY; gy2 < ty1; gy2 += spacing) {
+          for (var gx2 = tx0 + halfX; gx2 < tx1; gx2 += spacing) {
+            if (tokens.length >= maxTokens) { debugInfo.capReachedCount++; break; }
+            debugInfo.proposedCount++;
+
+            var px2 = gx2, py2 = gy2;
+
+            var localEv2 = _localEvidenceAt(px2, py2, evidence, w, h);
+            if (localEv2 < gateMin) { debugInfo.gatedOutCount++; continue; }
+
+            if (doSnap) {
+              var snapped2 = _snapToLocalPeak(px2, py2, evidence, w, h, snapR);
+              px2 = Math.max(tx0, Math.min(tx1 - 1, snapped2.x));
+              py2 = Math.max(ty0, Math.min(ty1 - 1, snapped2.y));
+              if (snapped2.snapped) debugInfo.snappedCount++;
+            }
+
+            if (isOccupied(px2, py2)) { debugInfo.spacingSuppressedCount++; continue; }
+
+            var tok2 = _makeToken(nextId, px2, py2, surface, evidence, cfg);
+            if (tok2.confidence < minConf) { debugInfo.confidenceDropCount++; continue; }
+
+            tok2.id = nextId++;
+            tok2._scaffold = true;
+            tok2._scaffoldPass = 2;
+            tokens.push(tok2);
+            markOccupied(px2, py2);
+          }
+        }
+      }
+
+      var tileTokenCount = tokens.length - tileTokensBefore;
+
+      // Enforce per-tile max: if scaffold produced too many, trim weakest
+      if (tileTokenCount > maxPer) {
+        // Sort this tile's tokens by confidence ascending, remove weakest
+        var tileSlice = tokens.splice(tileTokensBefore, tileTokenCount);
+        tileSlice.sort(function (a, b) { return b.confidence - a.confidence; });
+        var kept = tileSlice.slice(0, maxPer);
+        for (var ki = 0; ki < kept.length; ki++) tokens.push(kept[ki]);
+        tileTokenCount = kept.length;
+      }
+
+      return tileTokenCount;
     }
 
-    // Pass 1: primary lattice
-    debugInfo.pass1Count = processPass(0, 0, 1);
+    // ── Iterate over tiles ──
+    for (var tyI = 0; tyI < tilesY; tyI++) {
+      for (var txI = 0; txI < tilesX; txI++) {
+        var tIdx = tyI * tilesX + txI;
+        var x0 = txI * tileSz;
+        var y0 = tyI * tileSz;
+        var x1 = Math.min(x0 + tileSz, w);
+        var y1 = Math.min(y0 + tileSz, h);
 
-    // Pass 2: staggered half-offset lattice
-    if (doStagger) {
-      var halfX = (spacing / 2) | 0;
-      var halfY = (spacing / 2) | 0;
-      debugInfo.pass2Count = processPass(halfX, halfY, 2);
+        var tileTokensBefore = tokens.length;
+        var count = scaffoldTile(x0, y0, x1, y1, tIdx);
+
+        // Enforce per-tile minimum: if scaffold produced too few, use fallback
+        if (count < minPer) {
+          debugInfo.fallbackTiles.push(tIdx);
+          var fallbackPts;
+          if (fallbackMode === 'low_gradient') {
+            fallbackPts = _fallbackLowGradient(x0, y0, x1, y1, evidence, w, minPer - count, nmsR);
+          } else {
+            fallbackPts = _fallbackGrid(x0, y0, x1, y1, minPer - count);
+          }
+          for (var fi = 0; fi < fallbackPts.length; fi++) {
+            if (tokens.length >= maxTokens) break;
+            var fpx = fallbackPts[fi].x, fpy = fallbackPts[fi].y;
+            if (isOccupied(fpx, fpy)) continue;
+            var ftok = _makeToken(nextId, fpx, fpy, surface, evidence, cfg);
+            ftok.id = nextId++;
+            ftok._scaffold = true;
+            ftok._fallback = true;
+            tokens.push(ftok);
+            markOccupied(fpx, fpy);
+          }
+          count = tokens.length - tileTokensBefore;
+        }
+
+        debugInfo.perTileCounts[tIdx] = count;
+      }
     }
 
     debugInfo.totalTokens = tokens.length;
