@@ -22975,9 +22975,34 @@ paintGraphLearningOverlay = function(ctx){
     (artf.wfg3_groupCount || 0) + ' grp  |  ' +
     (artf.wfg3_structureEdgeCount || 0) + ' struct  |  ' + backend;
 
+  // Build seed strategy line
+  var prm = gl.params || {};
+  var seedMode = prm.tokenSeedingMode || 'tile_min_coverage';
+  var seedModeLabels = {
+    'tile_min_coverage': 'TileMinCov',
+    'global_stride': 'GlobalStride',
+    'uniform_scaffold': 'UniformScaffold'
+  };
+  var seedInfo = 'seed: ' + (seedModeLabels[seedMode] || seedMode);
+  if(seedMode === 'uniform_scaffold'){
+    seedInfo += '  |  spacing=' + (prm.scaffoldSpacingPx || 12) + 'px';
+    if(prm.scaffoldStaggered) seedInfo += '  |  staggered';
+    if(prm.scaffoldSnapEnabled) seedInfo += '  |  snap';
+    seedInfo += '  |  gate=' + (prm.scaffoldEvidenceGateMin != null ? prm.scaffoldEvidenceGateMin : 0.04);
+  } else {
+    if(prm.seedStaggeredPass) seedInfo += '  |  staggered';
+    if(prm.seedRefinementEnabled) seedInfo += '  |  corridor-refine';
+    if(seedMode === 'tile_min_coverage'){
+      seedInfo += '  |  tile=' + (prm.seedTileSizePx || 64) + 'px';
+      seedInfo += '  |  min=' + (prm.seedMinPerTile || 2) + ' max=' + (prm.seedMaxPerTile || 40);
+    }
+  }
+
   ctx.font = 'bold 13px "IBM Plex Mono", monospace';
   var tw = ctx.measureText(info).width;
-  var bx = 6, by = 6, bw = tw + 20, bh = 28;
+  var sw = ctx.measureText(seedInfo).width;
+  var maxW = Math.max(tw, sw);
+  var bx = 6, by = 6, bw = maxW + 20, bh = 50;
   ctx.fillStyle = 'rgba(0,0,0,0.92)';
   ctx.beginPath();
   _glRoundRectPath(ctx, bx, by, bw, bh, 5);
@@ -22989,6 +23014,9 @@ paintGraphLearningOverlay = function(ctx){
   ctx.stroke();
   ctx.fillStyle = hv ? '#00ff00' : '#4fc3f7';
   ctx.fillText(info, bx + 10, by + 19);
+  ctx.font = '12px "IBM Plex Mono", monospace';
+  ctx.fillStyle = hv ? '#88ff88' : '#90caf9';
+  ctx.fillText(seedInfo, bx + 10, by + 38);
   ctx.restore();
 };
 
