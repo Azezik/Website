@@ -1202,8 +1202,9 @@
                 <select id="wfg3-seeding-mode" style="width:100%;font-size:13px;padding:4px 8px;border-radius:4px;border:1px solid var(--border,#ccc);">
                   <option value="tile_min_coverage">Tile Min Coverage (experimental — recommended)</option>
                   <option value="global_stride">Global Stride (original)</option>
+                  <option value="uniform_scaffold">Uniform Scaffold (experimental — fair spatial sampling)</option>
                 </select>
-                <p class="sub" style="margin:4px 0 0;color:var(--muted);font-size:11px;">Global Stride = sample every Nth edge pixel. Tile Min Coverage = spatially fair, evidence-aware seeding with guaranteed coverage per tile.</p>
+                <p class="sub" style="margin:4px 0 0;color:var(--muted);font-size:11px;">Global Stride = sample every Nth edge pixel. Tile Min Coverage = spatially fair, evidence-aware seeding with guaranteed coverage per tile. Uniform Scaffold = regular lattice with light evidence gating — reduces early suppression of weaker boundaries.</p>
               </div>
               <div style="margin-bottom:10px;">
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -1218,6 +1219,41 @@
                   <span style="font-size:13px;font-weight:600;">Corridor Refinement</span>
                 </label>
                 <p class="sub" style="margin:4px 0 0 22px;color:var(--muted);font-size:11px;">Densify tokens along corridors where adjacent tokens show directional and color-side agreement. Bounded by max density multiplier.</p>
+              </div>
+
+              <!-- Uniform Scaffold controls (shown only when mode = uniform_scaffold) -->
+              <div id="wfg3-scaffold-controls" style="display:none;margin-top:8px;padding:8px;background:var(--surface-alt,#f7f7fa);border-radius:6px;border:1px solid var(--border,#e0e0e0);">
+                <p style="margin:0 0 8px;font-size:12px;font-weight:700;color:var(--fg,#333);">Scaffold Settings</p>
+                <div style="margin-bottom:10px;">
+                  <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+                    <span style="font-size:12px;">Spacing (px)</span>
+                    <span id="wfg3-scaffold-spacing-val" style="font-size:12px;font-variant-numeric:tabular-nums;">12</span>
+                  </label>
+                  <input type="range" id="wfg3-scaffold-spacing" min="6" max="32" step="1" value="12" style="width:100%;" />
+                  <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:10px;">Base lattice spacing between scaffold sample points.</p>
+                </div>
+                <div style="margin-bottom:8px;">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="wfg3-scaffold-staggered" checked />
+                    <span style="font-size:12px;font-weight:600;">Staggered Second Pass</span>
+                  </label>
+                  <p class="sub" style="margin:2px 0 0 22px;color:var(--muted);font-size:10px;">Add a half-offset second lattice pass. Roughly doubles coverage density.</p>
+                </div>
+                <div style="margin-bottom:8px;">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="wfg3-scaffold-snap" checked />
+                    <span style="font-size:12px;font-weight:600;">Snap to Local Peak</span>
+                  </label>
+                  <p class="sub" style="margin:2px 0 0 22px;color:var(--muted);font-size:10px;">Shift each scaffold point toward the strongest nearby evidence peak (within snap radius).</p>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+                    <span style="font-size:12px;">Evidence Gate</span>
+                    <span id="wfg3-scaffold-gate-val" style="font-size:12px;font-variant-numeric:tabular-nums;">0.04</span>
+                  </label>
+                  <input type="range" id="wfg3-scaffold-gate" min="0" max="0.30" step="0.01" value="0.04" style="width:100%;" />
+                  <p class="sub" style="margin:2px 0 0;color:var(--muted);font-size:10px;">Minimum local evidence to accept a scaffold point. Lower = more recall, higher = stricter.</p>
+                </div>
               </div>
             </div>
           </details>
