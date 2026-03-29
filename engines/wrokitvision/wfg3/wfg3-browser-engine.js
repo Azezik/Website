@@ -74,6 +74,10 @@
     graphSideDeltaETol: 25,
     chainMinLength: 2,
     linkScoreThreshold: 0.45,
+    chainExtensionMaxDist: 22,
+    chainExtensionEvidenceMin: 30,
+    chainExtensionDirAlign: 0.65,
+    chainExtensionColorTol: 30,
 
     // Stage D: Pass-2 Bridging
     bridgeEnabled: true,
