@@ -59,10 +59,10 @@
     graphSideDeltaETol:    25,
     chainMinLength:        2,
     linkScoreThreshold:    0.45,
-    chainExtensionMaxDist: 22,
-    chainExtensionEvidenceMin: 30,
-    chainExtensionDirAlign: 0.65,
-    chainExtensionColorTol: 30,
+    chainExtensionMaxDist: 44,
+    chainExtensionEvidenceMin: 60,
+    chainExtensionDirAlign: 1.3,
+    chainExtensionColorTol: 60,
 
     // Stage D: Pass-2 Bridging
     bridgeEnabled:          true,
@@ -745,10 +745,10 @@
    * ================================================================ */
 
   function _extendChainEndpoints(chains, adjacency, tokenById, evidence, cfg, W, H) {
-    var maxExtensionDist = cfg.chainExtensionMaxDist || 22;
-    var evidenceThresh = cfg.chainExtensionEvidenceMin || 30; // edgeWeighted threshold
-    var dirAlignMin = cfg.chainExtensionDirAlign || 0.65; // cos threshold for tangent alignment
-    var colorTolExt = cfg.chainExtensionColorTol || 30;
+    var maxExtensionDist = cfg.chainExtensionMaxDist || 44;
+    var evidenceThresh = cfg.chainExtensionEvidenceMin || 60; // edgeWeighted threshold
+    var dirAlignMin = cfg.chainExtensionDirAlign || 1.3; // cos threshold for tangent alignment
+    var colorTolExt = cfg.chainExtensionColorTol || 60;
 
     for (var ci = 0; ci < chains.length; ci++) {
       var chain = chains[ci];
