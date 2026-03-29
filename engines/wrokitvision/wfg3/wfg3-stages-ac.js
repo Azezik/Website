@@ -96,6 +96,11 @@
     tokenSideSamplePx:        3,     // pixels offset along normal for side LAB sampling
     tokenConfidenceDeltaEMax: 40.0,  // deltaE at which confidence = 1.0
     tokenMinConfidence:       0.05,  // discard tokens below this confidence
+    phase1RelaxedTokenRetention: false, // keep weak tokens for Stage D in relaxed mode
+    phase1StrictConfidenceDrop:  true,  // if true, preserve legacy hard confidence drops
+    phase1NmsRadiusScale:        1.0,   // scales NMS/suppression radius
+    phase1SpacingScale:          1.0,   // scales scaffold min spacing
+    phase1MaxTokensScale:        1.0,   // scales scaffold max token cap
 
     // Stage C: Tile-based seeding (experimental)
     tokenSeedingMode:         'global_stride', // 'global_stride' | 'tile_min_coverage'
@@ -381,6 +386,16 @@
     return 0.5 * ew + 0.3 * gm + 0.2 * ld;
   }
 
+  function _phase1KeepWeakToken(cfg) {
+    return cfg.phase1RelaxedTokenRetention === true && cfg.phase1StrictConfidenceDrop !== true;
+  }
+
+  function _scaledPositive(value, scale, minValue) {
+    var s = (typeof scale === 'number' && isFinite(scale) && scale > 0) ? scale : 1.0;
+    var out = Math.round(value * s);
+    return Math.max(minValue, out);
+  }
+
   /* ── NMS: suppress nearby candidates within radius (by descending score) ── */
 
   function _nmsFilter(candidates, radius) {
@@ -445,6 +460,7 @@
     var edge = evidence.edgeBinary;
     var step = Math.max(1, cfg.tokenStep);
     var minConf = cfg.tokenMinConfidence;
+    var keepWeak = _phase1KeepWeakToken(cfg);
 
     var positions = [];
     for (var y = 0; y < h; y++) {
@@ -460,7 +476,10 @@
       var px = packed & 0xFFFF;
       var py = packed >>> 16;
       var tok = _makeToken(nextId, px, py, surface, evidence, cfg);
-      if (tok.confidence < minConf) continue;
+      if (tok.confidence < minConf) {
+        if (!keepWeak) continue;
+        tok._weakConfidence = true;
+      }
       tok.id = nextId++;
       tokens.push(tok);
     }
@@ -476,9 +495,10 @@
     var minPer = Math.max(1, cfg.seedMinPerTile || 2);
     var maxPer = Math.max(minPer, cfg.seedMaxPerTile || 40);
     var extraScale = Math.max(1.0, cfg.seedExtraScale || 1.5);
-    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
+    var nmsR = _scaledPositive(cfg.seedNmsRadiusPx || 3, cfg.phase1NmsRadiusScale || 1.0, 1);
     var fallbackMode = cfg.seedFallbackMode || 'grid';
     var minConf = cfg.tokenMinConfidence;
+    var keepWeak = _phase1KeepWeakToken(cfg);
 
     var tilesX = Math.ceil(w / tileSz);
     var tilesY = Math.ceil(h / tileSz);
@@ -557,10 +577,12 @@
 
           for (var si2 = 0; si2 < selected.length; si2++) {
             var tok = _makeToken(nextId, selected[si2].x, selected[si2].y, surface, evidence, cfg);
-            if (tok.confidence >= minConf) {
-              tok.id = nextId++;
-              tokens.push(tok);
+            if (tok.confidence < minConf) {
+              if (!keepWeak) continue;
+              tok._weakConfidence = true;
             }
+            tok.id = nextId++;
+            tokens.push(tok);
           }
           debugInfo.perTileCounts[tIdx] = selected.length;
         } else {
@@ -590,11 +612,13 @@
             for (var sfi = 0; sfi < softSelected.length; sfi++) {
               var stok = _makeToken(nextId, softSelected[sfi].x, softSelected[sfi].y,
                                     surface, evidence, cfg);
-              if (stok.confidence >= minConf) {
-                stok.id = nextId++;
-                stok._softEdge = true;
-                tokens.push(stok);
+              if (stok.confidence < minConf) {
+                if (!keepWeak) continue;
+                stok._weakConfidence = true;
               }
+              stok.id = nextId++;
+              stok._softEdge = true;
+              tokens.push(stok);
             }
             debugInfo.perTileCounts[tIdx] = softSelected.length;
           } else {
@@ -633,8 +657,9 @@
     var half = tileSz >> 1;
     var minPer = Math.max(1, ((cfg.seedMinPerTile || 2) >> 1) || 1);
     var maxPer = Math.max(minPer, ((cfg.seedMaxPerTile || 40) >> 1) || 1);
-    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
+    var nmsR = _scaledPositive(cfg.seedNmsRadiusPx || 3, cfg.phase1NmsRadiusScale || 1.0, 1);
     var minConf = cfg.tokenMinConfidence;
+    var keepWeak = _phase1KeepWeakToken(cfg);
     var nmsR2 = nmsR * nmsR;
 
     // Build spatial set of existing positions for dedup
@@ -696,12 +721,14 @@
         if (tooClose) continue;
 
         var tok = _makeToken(nextId, sx, sy, surface, evidence, cfg);
-        if (tok.confidence >= minConf) {
-          tok.id = nextId++;
-          tok._staggered = true;
-          newTokens.push(tok);
-          posSet[pk] = true;
+        if (tok.confidence < minConf) {
+          if (!keepWeak) continue;
+          tok._weakConfidence = true;
         }
+        tok.id = nextId++;
+        tok._staggered = true;
+        newTokens.push(tok);
+        posSet[pk] = true;
       }
     }
     return newTokens;
@@ -860,11 +887,18 @@
     var gateMin = cfg.scaffoldEvidenceGateMin || 0.04;
     var snapR = Math.max(0, cfg.scaffoldSnapRadius || 4);
     var doSnap = cfg.scaffoldSnapEnabled !== false && snapR > 0;
-    var maxTokens = cfg.scaffoldMaxTokens || 25000;
-    var minSpacing = cfg.scaffoldMinSpacing || 5;
+    var maxTokens = _scaledPositive(cfg.scaffoldMaxTokens || 25000, cfg.phase1MaxTokensScale || 1.0, 1000);
+    var minSpacing = _scaledPositive(cfg.scaffoldMinSpacing || 5, cfg.phase1SpacingScale || 1.0, 1);
     var minConf = cfg.tokenMinConfidence;
     var fallbackMode = cfg.seedFallbackMode || 'grid';
-    var nmsR = Math.max(1, cfg.seedNmsRadiusPx || 3);
+    var nmsR = _scaledPositive(cfg.seedNmsRadiusPx || 3, cfg.phase1NmsRadiusScale || 1.0, 1);
+    var keepWeak = _phase1KeepWeakToken(cfg);
+    var relaxedMode = cfg.phase1RelaxedTokenRetention === true;
+
+    if (relaxedMode) {
+      maxPer = Math.max(maxPer, Math.round(maxPer * 1.5));
+      gateMin = Math.max(0, gateMin * 0.6);
+    }
 
     var tilesX = Math.ceil(w / tileSz);
     var tilesY = Math.ceil(h / tileSz);
@@ -933,10 +967,14 @@
           debugInfo.proposedCount++;
 
           var px = gx, py = gy;
+          var weakEvidence = false;
 
           // Light local evidence gating
           var localEv = _localEvidenceAt(px, py, evidence, w, h);
-          if (localEv < gateMin) { debugInfo.gatedOutCount++; continue; }
+          if (localEv < gateMin) {
+            if (!keepWeak) { debugInfo.gatedOutCount++; continue; }
+            weakEvidence = true;
+          }
 
           // Optional local snap toward stronger evidence peak
           if (doSnap) {
@@ -952,7 +990,11 @@
 
           // Construct token
           var tok = _makeToken(nextId, px, py, surface, evidence, cfg);
-          if (tok.confidence < minConf) { debugInfo.confidenceDropCount++; continue; }
+          if (tok.confidence < minConf) {
+            if (!keepWeak) { debugInfo.confidenceDropCount++; continue; }
+            tok._weakConfidence = true;
+          }
+          if (weakEvidence) tok._weakEvidence = true;
 
           tok.id = nextId++;
           tok._scaffold = true;
@@ -972,9 +1014,13 @@
             debugInfo.proposedCount++;
 
             var px2 = gx2, py2 = gy2;
+            var weakEvidence2 = false;
 
             var localEv2 = _localEvidenceAt(px2, py2, evidence, w, h);
-            if (localEv2 < gateMin) { debugInfo.gatedOutCount++; continue; }
+            if (localEv2 < gateMin) {
+              if (!keepWeak) { debugInfo.gatedOutCount++; continue; }
+              weakEvidence2 = true;
+            }
 
             if (doSnap) {
               var snapped2 = _snapToLocalPeak(px2, py2, evidence, w, h, snapR);
@@ -986,7 +1032,11 @@
             if (isOccupied(px2, py2)) { debugInfo.spacingSuppressedCount++; continue; }
 
             var tok2 = _makeToken(nextId, px2, py2, surface, evidence, cfg);
-            if (tok2.confidence < minConf) { debugInfo.confidenceDropCount++; continue; }
+            if (tok2.confidence < minConf) {
+              if (!keepWeak) { debugInfo.confidenceDropCount++; continue; }
+              tok2._weakConfidence = true;
+            }
+            if (weakEvidence2) tok2._weakEvidence = true;
 
             tok2.id = nextId++;
             tok2._scaffold = true;

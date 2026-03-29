@@ -46,6 +46,11 @@
     tokenSideSamplePx: 3,
     tokenConfidenceDeltaEMax: 40.0,
     tokenMinConfidence: 0.05,
+    phase1RelaxedTokenRetention: true,
+    phase1StrictConfidenceDrop: false,
+    phase1NmsRadiusScale: 0.8,
+    phase1SpacingScale: 0.8,
+    phase1MaxTokensScale: 1.5,
 
     // Stage C: Tile-based seeding (experimental)
     tokenSeedingMode: 'tile_min_coverage',
@@ -82,6 +87,9 @@
     bridgeDirAgreementMin: 0.50,
     bridgeSideDeltaETol: 30,
     bridgeStructuralBonus: 0.15,
+    phase1WeakTokenPruneMinSupport: 2,
+    phase1PruneTinyComponents: true,
+    phase1TinyComponentSize: 1,
 
     // Stage E
     watershedFgFraction: 0.25,
