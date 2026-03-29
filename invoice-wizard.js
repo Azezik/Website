@@ -22736,6 +22736,25 @@ paintGraphLearningOverlay = function(ctx){
     ctx.putImageData(cmImg, 0, 0);
   }
 
+  // ── Layer 9b: Bridge edges (Stage D Pass 2) — dotted cyan lines ──
+  if(flags.wfg3Chains && artf.wfg3_bridgeEdgeList && artf.wfg3_bridgeEdgeList.length > 0){
+    ctx.save();
+    ctx.strokeStyle = hv ? 'rgba(0,255,255,0.9)' : 'rgba(0,220,220,0.7)';
+    ctx.lineWidth = hv ? 3 : 1.5;
+    ctx.setLineDash(hv ? [6, 4] : [3, 2]);
+    ctx.lineCap = 'round';
+    var bEdges = artf.wfg3_bridgeEdgeList;
+    for(var bei = 0; bei < bEdges.length; bei++){
+      var be = bEdges[bei];
+      ctx.beginPath();
+      ctx.moveTo(be.fromX, be.fromY);
+      ctx.lineTo(be.toX, be.toY);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   // ── Layer 4: Boundary tokens — large cross markers with dark halo ──
   if(flags.wfg3Tokens && tokens.length > 0){
     var stride = Math.max(1, Math.round(tokens.length / 800));
