@@ -564,23 +564,59 @@
           }
           debugInfo.perTileCounts[tIdx] = selected.length;
         } else {
-          // Fallback: tile has no edge candidates
-          debugInfo.fallbackTiles.push(tIdx);
+          // Soft-edge fallback: check edgeWeighted for partial/soft edges
+          // that Canny missed but gradient still supports
+          var softCandidates = [];
+          var edgeW = evidence.edgeWeighted;
+          var softThresh = 40; // ~15% of 255 — catches moderate gradient
+          for (var spy = y0; spy < y1; spy++) {
+            var sRowOff = spy * w;
+            for (var spx = x0; spx < x1; spx++) {
+              if (edgeW[sRowOff + spx] >= softThresh) {
+                softCandidates.push({
+                  x: spx, y: spy,
+                  score: _evidenceScore(spx, spy, evidence, w)
+                });
+              }
+            }
+          }
 
-          var fallbackPts;
-          if (fallbackMode === 'low_gradient') {
-            fallbackPts = _fallbackLowGradient(x0, y0, x1, y1, evidence, w, minPer, nmsR);
+          if (softCandidates.length > 0) {
+            var softFiltered = _nmsFilter(softCandidates, nmsR);
+            var softBudget = Math.min(maxPer, Math.max(minPer, softFiltered.length));
+            var softSelected = softFiltered.length > softBudget
+              ? softFiltered.slice(0, softBudget) : softFiltered;
+
+            for (var sfi = 0; sfi < softSelected.length; sfi++) {
+              var stok = _makeToken(nextId, softSelected[sfi].x, softSelected[sfi].y,
+                                    surface, evidence, cfg);
+              if (stok.confidence >= minConf) {
+                stok.id = nextId++;
+                stok._softEdge = true;
+                tokens.push(stok);
+              }
+            }
+            debugInfo.perTileCounts[tIdx] = softSelected.length;
           } else {
-            fallbackPts = _fallbackGrid(x0, y0, x1, y1, minPer);
-          }
+            // Hard fallback: tile has no edge or soft-edge candidates
+            debugInfo.fallbackTiles.push(tIdx);
 
-          for (var fi = 0; fi < fallbackPts.length; fi++) {
-            var ftok = _makeToken(nextId, fallbackPts[fi].x, fallbackPts[fi].y, surface, evidence, cfg);
-            ftok.id = nextId++;
-            ftok._fallback = true; // flag for debug
-            tokens.push(ftok);
+            var fallbackPts;
+            if (fallbackMode === 'low_gradient') {
+              fallbackPts = _fallbackLowGradient(x0, y0, x1, y1, evidence, w, minPer, nmsR);
+            } else {
+              fallbackPts = _fallbackGrid(x0, y0, x1, y1, minPer);
+            }
+
+            for (var fi = 0; fi < fallbackPts.length; fi++) {
+              var ftok = _makeToken(nextId, fallbackPts[fi].x, fallbackPts[fi].y,
+                                    surface, evidence, cfg);
+              ftok.id = nextId++;
+              ftok._fallback = true;
+              tokens.push(ftok);
+            }
+            debugInfo.perTileCounts[tIdx] = fallbackPts.length;
           }
-          debugInfo.perTileCounts[tIdx] = fallbackPts.length;
         }
       }
     }

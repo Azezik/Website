@@ -34,9 +34,9 @@
     bilateralSigmaS: 35,
 
     // Stage B
-    cannyLow: 60,
-    cannyHigh: 160,
-    labDeltaThreshold: 12.0,
+    cannyLow: 40,
+    cannyHigh: 140,
+    labDeltaThreshold: 8.0,
     morphRadius: 1,
     edgeWeightCanny: 0.7,
     edgeWeightGradient: 0.3,

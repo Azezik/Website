@@ -154,11 +154,19 @@
             // Color score: 1.0 at ΔE=0, 0.0 at ΔE=2*sideTol
             var colorScore = Math.max(0, 1.0 - bestColorDist / (sideTol * 2));
 
-            // Hard floor: reject wildly different colors
-            if (colorScore < 0.05) continue;
+            // Hard floor: reject wildly different colors (unless very close + aligned)
+            if (colorScore < 0.05 && !(dist < 3 && dirScore > 0.85)) continue;
 
-            // Composite: direction and color matter most, distance is a bonus
-            var linkScore = 0.40 * dirScore + 0.35 * colorScore + 0.25 * distScore;
+            // Proximity-adaptive weighting: when tokens are close and well-aligned,
+            // reduce color weight. This handles edges where left/right region colors
+            // change along the boundary (e.g. sign edge near a logo).
+            var dirW = 0.40, colW = 0.35, dstW = 0.25;
+            if (dist < 4 && dirScore > 0.80) {
+              // Strong geometric agreement — trust geometry more, color less
+              dirW = 0.50; colW = 0.20; dstW = 0.30;
+            }
+
+            var linkScore = dirW * dirScore + colW * colorScore + dstW * distScore;
 
             if (linkScore < linkThreshold) continue;
 
