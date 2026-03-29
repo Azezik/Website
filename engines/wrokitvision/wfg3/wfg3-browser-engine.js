@@ -74,6 +74,14 @@
     graphSideDeltaETol: 25,
     chainMinLength: 3,
 
+    // Stage D: Pass-2 Bridging
+    bridgeEnabled: true,
+    bridgeMaxGapPx: 18,
+    bridgeMinEvidenceScore: 0.25,
+    bridgeDirAgreementMin: 0.50,
+    bridgeSideDeltaETol: 30,
+    bridgeStructuralBonus: 0.15,
+
     // Stage E
     watershedFgFraction: 0.25,
     minRegionArea: 24,
@@ -263,6 +271,9 @@
         wfg3_chainCount: boundaryGraph.chains.length,
         wfg3_loopCount: boundaryGraph.loops.length,
         wfg3_chainMask: boundaryGraph.chainMask,
+        wfg3_bridgeEdgeList: boundaryGraph.bridgeEdgeList || [],
+        wfg3_bridgesEvaluated: boundaryGraph.bridgesEvaluated || 0,
+        wfg3_bridgesAccepted: boundaryGraph.bridgesAccepted || 0,
 
         // WFG3-specific Stage E artifacts
         wfg3_labelMap: partition.labelMap,

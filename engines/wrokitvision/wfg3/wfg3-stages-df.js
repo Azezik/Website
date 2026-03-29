@@ -59,6 +59,14 @@
     graphSideDeltaETol:    25,
     chainMinLength:        3,
 
+    // Stage D: Pass-2 Bridging
+    bridgeEnabled:          true,
+    bridgeMaxGapPx:         18,
+    bridgeMinEvidenceScore: 0.25,
+    bridgeDirAgreementMin:  0.50,
+    bridgeSideDeltaETol:    30,
+    bridgeStructuralBonus:  0.15,
+
     // Stage E
     watershedFgFraction:   0.25,
     minRegionArea:         24,
@@ -82,7 +90,6 @@
 
     // Spatial index: bin tokens by grid cell for fast neighbor lookup
     var cellSize = radius + 1;
-    var gridW = Math.ceil(W / cellSize);
     var grid = {};
     for (var ti = 0; ti < tokens.length; ti++) {
       var t = tokens[ti];
@@ -93,7 +100,7 @@
       grid[key].push(t);
     }
 
-    // Build adjacency
+    // Build adjacency (Pass 1: strict local graph)
     var adjacency = {};
     for (var ai = 0; ai < tokens.length; ai++) adjacency[tokens[ai].id] = [];
 
@@ -119,28 +126,10 @@
             if (Math.abs(dot) < angleTolCos) continue;
 
             // Side consistency: left-left and right-right LAB distance
-            var llDist = Math.sqrt(
-              Math.pow(a.leftLab[0] - b.leftLab[0], 2) +
-              Math.pow(a.leftLab[1] - b.leftLab[1], 2) +
-              Math.pow(a.leftLab[2] - b.leftLab[2], 2)
-            );
-            var rrDist = Math.sqrt(
-              Math.pow(a.rightLab[0] - b.rightLab[0], 2) +
-              Math.pow(a.rightLab[1] - b.rightLab[1], 2) +
-              Math.pow(a.rightLab[2] - b.rightLab[2], 2)
-            );
-            // If sides are flipped (boundary approached from opposite direction),
-            // also check left-right and right-left
-            var lrDist = Math.sqrt(
-              Math.pow(a.leftLab[0] - b.rightLab[0], 2) +
-              Math.pow(a.leftLab[1] - b.rightLab[1], 2) +
-              Math.pow(a.leftLab[2] - b.rightLab[2], 2)
-            );
-            var rlDist = Math.sqrt(
-              Math.pow(a.rightLab[0] - b.leftLab[0], 2) +
-              Math.pow(a.rightLab[1] - b.leftLab[1], 2) +
-              Math.pow(a.rightLab[2] - b.leftLab[2], 2)
-            );
+            var llDist = _labDist(a.leftLab, b.leftLab);
+            var rrDist = _labDist(a.rightLab, b.rightLab);
+            var lrDist = _labDist(a.leftLab, b.rightLab);
+            var rlDist = _labDist(a.rightLab, b.leftLab);
             var sameOK = llDist <= sideTol && rrDist <= sideTol;
             var flipOK = lrDist <= sideTol && rlDist <= sideTol;
             if (!sameOK && !flipOK) continue;
@@ -213,13 +202,109 @@
       if (isLoop) loops.push({ ids: ordered });
     }
 
-    // Build chain mask for use by Stage E
+    /* ================================================================
+     *  Pass 2: Bridge Candidates
+     *  Scan chain endpoints for pairings across larger gaps.
+     * ================================================================ */
+
+    var bridgeEdgeList = [];
+    var bridgesEvaluated = 0;
+    var bridgesAccepted = 0;
+
+    if (cfg.bridgeEnabled && chains.length > 1) {
+      var bridgeResult = _bridgePass(
+        chains, loops, adjacency, tokenById, evidence, cfg, W, H
+      );
+      bridgeEdgeList = bridgeResult.bridgeEdgeList;
+      bridgesEvaluated = bridgeResult.bridgesEvaluated;
+      bridgesAccepted = bridgeResult.bridgesAccepted;
+
+      // Re-discover components after bridging to merge chains
+      if (bridgesAccepted > 0) {
+        visited = {};
+        components = [];
+        for (var vi2 = 0; vi2 < tokens.length; vi2++) {
+          var tid2 = tokens[vi2].id;
+          if (visited[tid2]) continue;
+          var comp3 = [];
+          var queue2 = [tid2];
+          visited[tid2] = true;
+          while (queue2.length > 0) {
+            var cur2 = queue2.shift();
+            comp3.push(cur2);
+            var neis2 = adjacency[cur2];
+            for (var ni2 = 0; ni2 < neis2.length; ni2++) {
+              if (!visited[neis2[ni2]]) {
+                visited[neis2[ni2]] = true;
+                queue2.push(neis2[ni2]);
+              }
+            }
+          }
+          if (comp3.length >= cfg.chainMinLength) {
+            components.push(comp3);
+          }
+        }
+
+        // Re-order and re-detect loops on merged chains
+        chains = [];
+        loops = [];
+        for (var ki2 = 0; ki2 < components.length; ki2++) {
+          var comp4 = components[ki2];
+          var ordered2 = _orderChain(comp4, adjacency, tokenById);
+          var isLoop2 = false;
+          if (ordered2.length >= 6) {
+            var first2 = ordered2[0], last2 = ordered2[ordered2.length - 1];
+            if (adjacency[first2].indexOf(last2) >= 0) {
+              var allDeg2b = true;
+              for (var li2 = 0; li2 < ordered2.length; li2++) {
+                var deg2 = 0;
+                var tokNeis2 = adjacency[ordered2[li2]];
+                for (var lj2 = 0; lj2 < tokNeis2.length; lj2++) {
+                  if (comp4.indexOf(tokNeis2[lj2]) >= 0) deg2++;
+                }
+                if (deg2 < 2) { allDeg2b = false; break; }
+              }
+              isLoop2 = allDeg2b;
+            }
+          }
+          chains.push({ ids: ordered2, ordered: true });
+          if (isLoop2) loops.push({ ids: ordered2 });
+        }
+      }
+    }
+
+    /* ================================================================
+     *  Rasterized Chain Mask (Bresenham line drawing)
+     *  Replaces the old isolated-dots mask with actual line segments.
+     * ================================================================ */
+
     var chainMask = new Uint8Array(W * H);
     for (var mi = 0; mi < chains.length; mi++) {
       var ch = chains[mi].ids;
       for (var mj = 0; mj < ch.length; mj++) {
         var mt = tokenById[ch[mj]];
-        if (mt) chainMask[mt.y * W + mt.x] = 255;
+        if (!mt) continue;
+        // Mark the token pixel itself
+        chainMask[mt.y * W + mt.x] = 255;
+        // Draw a line segment to the next token in the ordered chain
+        if (mj + 1 < ch.length) {
+          var mt2 = tokenById[ch[mj + 1]];
+          if (mt2) _bresenhamLine(chainMask, W, H, mt.x, mt.y, mt2.x, mt2.y);
+        }
+      }
+      // If this chain is a loop, also connect last to first
+      if (ch.length >= 6) {
+        var loopFirst = tokenById[ch[0]];
+        var loopLast = tokenById[ch[ch.length - 1]];
+        if (loopFirst && loopLast) {
+          var loopIdx = -1;
+          for (var lci = 0; lci < loops.length; lci++) {
+            if (loops[lci].ids === ch) { loopIdx = lci; break; }
+          }
+          if (loopIdx >= 0) {
+            _bresenhamLine(chainMask, W, H, loopLast.x, loopLast.y, loopFirst.x, loopFirst.y);
+          }
+        }
       }
     }
 
@@ -228,7 +313,218 @@
       adjacency: adjacency,
       chains: chains,
       loops: loops,
-      chainMask: chainMask
+      chainMask: chainMask,
+      bridgeEdgeList: bridgeEdgeList,
+      bridgesEvaluated: bridgesEvaluated,
+      bridgesAccepted: bridgesAccepted
+    };
+  }
+
+  /* ── LAB distance helper ── */
+
+  function _labDist(lab1, lab2) {
+    var dL = lab1[0] - lab2[0];
+    var da = lab1[1] - lab2[1];
+    var db = lab1[2] - lab2[2];
+    return Math.sqrt(dL * dL + da * da + db * db);
+  }
+
+  /* ── Bresenham integer line rasterizer ── */
+
+  function _bresenhamLine(mask, W, H, x0, y0, x1, y1) {
+    x0 = x0 | 0; y0 = y0 | 0; x1 = x1 | 0; y1 = y1 | 0;
+    var dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+    var sx = x0 < x1 ? 1 : -1;
+    var sy = y0 < y1 ? 1 : -1;
+    var err = dx - dy;
+    while (true) {
+      if (x0 >= 0 && x0 < W && y0 >= 0 && y0 < H) {
+        mask[y0 * W + x0] = 255;
+      }
+      if (x0 === x1 && y0 === y1) break;
+      var e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; x0 += sx; }
+      if (e2 < dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  /* ================================================================
+   *  Pass 2: Bridge candidate evaluation and acceptance
+   * ================================================================ */
+
+  function _bridgePass(chains, loops, adjacency, tokenById, evidence, cfg, W, H) {
+    var maxGap = cfg.bridgeMaxGapPx;
+    var minEvidence = cfg.bridgeMinEvidenceScore;
+    var dirMin = cfg.bridgeDirAgreementMin;
+    var bridgeSideTol = cfg.bridgeSideDeltaETol;
+    var structBonus = cfg.bridgeStructuralBonus;
+    var edgeW = evidence.edgeWeighted;
+    var gradMag = evidence.gradMag;
+
+    // Identify chain endpoints (first/last token in each non-loop chain)
+    var loopSet = {};
+    for (var lsi = 0; lsi < loops.length; lsi++) {
+      var loopIds = loops[lsi].ids;
+      for (var lsj = 0; lsj < loopIds.length; lsj++) loopSet[loopIds[lsj]] = true;
+    }
+
+    var endpoints = []; // { token, chainIdx, isFirst }
+    for (var ei = 0; ei < chains.length; ei++) {
+      var ch = chains[ei].ids;
+      if (ch.length < 2) continue;
+      var firstId = ch[0], lastId = ch[ch.length - 1];
+      // Skip endpoints that are part of loops (already closed)
+      if (loopSet[firstId] && loopSet[lastId]) continue;
+      var firstTok = tokenById[firstId];
+      var lastTok = tokenById[lastId];
+      if (firstTok) endpoints.push({ token: firstTok, chainIdx: ei, isFirst: true });
+      if (lastTok) endpoints.push({ token: lastTok, chainIdx: ei, isFirst: false });
+    }
+
+    // Build spatial index for endpoints using bridgeMaxGapPx cells
+    var epCellSize = maxGap + 1;
+    var epGrid = {};
+    for (var gi = 0; gi < endpoints.length; gi++) {
+      var ep = endpoints[gi];
+      var egx = (ep.token.x / epCellSize) | 0;
+      var egy = (ep.token.y / epCellSize) | 0;
+      var epKey = egx + ',' + egy;
+      if (!epGrid[epKey]) epGrid[epKey] = [];
+      epGrid[epKey].push(ep);
+    }
+
+    // Normalize gradMag for corridor evidence scoring
+    var maxGrad = 0;
+    var N = W * H;
+    for (var gmi = 0; gmi < N; gmi++) {
+      if (gradMag[gmi] > maxGrad) maxGrad = gradMag[gmi];
+    }
+    var gradNorm = maxGrad > 0 ? 1.0 / maxGrad : 0;
+
+    var bridgesEvaluated = 0;
+    var bridgesAccepted = 0;
+    var bridgeEdgeList = [];
+
+    // Evaluate each endpoint pair
+    for (var pi = 0; pi < endpoints.length; pi++) {
+      var epA = endpoints[pi];
+      var tokA = epA.token;
+      var agx = (tokA.x / epCellSize) | 0;
+      var agy = (tokA.y / epCellSize) | 0;
+
+      for (var edy = -1; edy <= 1; edy++) {
+        for (var edx = -1; edx <= 1; edx++) {
+          var epNk = (agx + edx) + ',' + (agy + edy);
+          var epCell = epGrid[epNk];
+          if (!epCell) continue;
+          for (var ej = 0; ej < epCell.length; ej++) {
+            var epB = epCell[ej];
+            if (epB.chainIdx <= epA.chainIdx) continue; // avoid duplicates, no self-bridges
+            var tokB = epB.token;
+
+            var gdx = tokB.x - tokA.x, gdy = tokB.y - tokA.y;
+            var gap = Math.sqrt(gdx * gdx + gdy * gdy);
+            if (gap < 2 || gap > maxGap) continue;
+
+            bridgesEvaluated++;
+
+            // ── Gate 1: Directional Agreement ──
+            // The tangents at both endpoints should roughly align with
+            // the vector connecting them (boundary continues through gap).
+            var invGap = 1.0 / gap;
+            var gapDirX = gdx * invGap, gapDirY = gdy * invGap;
+
+            // For endpoint A, if it's the last token its tangent points
+            // "outward" along the chain, so dot with gap direction should
+            // be positive. If it's the first token, tangent points backward.
+            var dotA = tokA.tangentX * gapDirX + tokA.tangentY * gapDirY;
+            if (!epA.isFirst) dotA = -dotA; // last endpoint: tangent aims away from chain end
+            // Actually: for the first token, tangent points from first->second,
+            // which is INTO the chain, so for bridging outward we negate.
+            dotA = epA.isFirst ? -dotA : dotA;
+
+            var dotB = tokB.tangentX * gapDirX + tokB.tangentY * gapDirY;
+            dotB = epB.isFirst ? dotB : -dotB;
+
+            // Also check tangent-tangent alignment (both tangents roughly parallel)
+            var tangentDot = Math.abs(tokA.tangentX * tokB.tangentX + tokA.tangentY * tokB.tangentY);
+
+            // Use the weaker of endpoint-to-gap and tangent-tangent as the direction score
+            var dirScore = Math.min(Math.max(dotA, 0), Math.max(dotB, 0));
+            dirScore = Math.min(dirScore, tangentDot);
+            if (dirScore < dirMin) continue;
+
+            // ── Gate 2: Sided Color Consistency (with flip support) ──
+            var llD = _labDist(tokA.leftLab, tokB.leftLab);
+            var rrD = _labDist(tokA.rightLab, tokB.rightLab);
+            var lrD = _labDist(tokA.leftLab, tokB.rightLab);
+            var rlD = _labDist(tokA.rightLab, tokB.leftLab);
+            var sameOK = llD <= bridgeSideTol && rrD <= bridgeSideTol;
+            var flipOK = lrD <= bridgeSideTol && rlD <= bridgeSideTol;
+            if (!sameOK && !flipOK) continue;
+
+            // ── Gate 3: Corridor Evidence ──
+            // Sample pixels between endpoints using edgeWeighted and gradMag.
+            // Evidence score = mean of (edgeWeighted + normalized gradMag) along path.
+            var steps = Math.max(Math.ceil(gap), 2);
+            var evidenceSum = 0;
+            for (var si = 0; si <= steps; si++) {
+              var frac = si / steps;
+              var sx = Math.round(tokA.x + gdx * frac);
+              var sy = Math.round(tokA.y + gdy * frac);
+              sx = sx < 0 ? 0 : sx >= W ? W - 1 : sx;
+              sy = sy < 0 ? 0 : sy >= H ? H - 1 : sy;
+              var sIdx = sy * W + sx;
+              var eVal = edgeW[sIdx] / 255.0; // edgeWeighted is Uint8 0-255
+              var gVal = gradMag[sIdx] * gradNorm;
+              evidenceSum += (eVal * 0.6 + gVal * 0.4);
+            }
+            var evidenceScore = evidenceSum / (steps + 1);
+            if (evidenceScore < minEvidence) continue;
+
+            // ── Gate 4: Structural Weighting (NODEGROUP bonus) ──
+            // Prioritize bridges that help close a perimeter or form convex shapes.
+            // Heuristic: if connecting these chains would form a larger shape that
+            // returns near its starting point, give a bonus.
+            var combinedScore = evidenceScore + dirScore * 0.3;
+
+            // Convexity / closure bonus: check if both chain endpoints
+            // point roughly toward each other (attempting to close a shape).
+            // The higher the dotA and dotB, the more "closing" this bridge is.
+            var closureFactor = (Math.max(dotA, 0) + Math.max(dotB, 0)) * 0.5;
+            if (closureFactor > 0.5) {
+              combinedScore += structBonus;
+            }
+
+            // Prefer shorter gaps (less speculative)
+            var gapPenalty = gap / maxGap * 0.1;
+            combinedScore -= gapPenalty;
+
+            if (combinedScore < minEvidence) continue;
+
+            // ── Accept bridge ──
+            bridgesAccepted++;
+            adjacency[tokA.id].push(tokB.id);
+            adjacency[tokB.id].push(tokA.id);
+            bridgeEdgeList.push({
+              from: tokA.id,
+              to: tokB.id,
+              fromX: tokA.x, fromY: tokA.y,
+              toX: tokB.x, toY: tokB.y,
+              gap: gap,
+              dirScore: dirScore,
+              evidenceScore: evidenceScore,
+              combinedScore: combinedScore
+            });
+          }
+        }
+      }
+    }
+
+    return {
+      bridgeEdgeList: bridgeEdgeList,
+      bridgesEvaluated: bridgesEvaluated,
+      bridgesAccepted: bridgesAccepted
     };
   }
 
