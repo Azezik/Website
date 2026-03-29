@@ -53,10 +53,10 @@
     seedMinPerTile: 2,
     seedMaxPerTile: 40,
     seedExtraScale: 1.5,
-    seedStaggeredPass: false,
+    seedStaggeredPass: true,
     seedFallbackMode: 'grid',
     seedNmsRadiusPx: 3,
-    seedRefinementEnabled: false,
+    seedRefinementEnabled: true,
     seedRefinementMaxDensity: 2.0,
 
     // Stage C: Uniform scaffold seeding (experimental)
@@ -69,10 +69,11 @@
     scaffoldMinSpacing: 5,
 
     // Stage D
-    graphNeighborRadius: 4,
-    graphOrientationTolDeg: 35,
+    graphNeighborRadius: 7,
+    graphOrientationTolDeg: 45,
     graphSideDeltaETol: 25,
-    chainMinLength: 3,
+    chainMinLength: 2,
+    linkScoreThreshold: 0.45,
 
     // Stage D: Pass-2 Bridging
     bridgeEnabled: true,

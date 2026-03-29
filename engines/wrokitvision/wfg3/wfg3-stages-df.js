@@ -54,10 +54,11 @@
 
   var DEFAULT_CONFIG_DF = Object.freeze({
     // Stage D
-    graphNeighborRadius:   4,
-    graphOrientationTolDeg: 35,
+    graphNeighborRadius:   7,
+    graphOrientationTolDeg: 45,
     graphSideDeltaETol:    25,
-    chainMinLength:        3,
+    chainMinLength:        2,
+    linkScoreThreshold:    0.45,
 
     // Stage D: Pass-2 Bridging
     bridgeEnabled:          true,
@@ -85,8 +86,10 @@
     cfg = cfg || DEFAULT_CONFIG_DF;
     var W = evidence.width, H = evidence.height;
     var radius = cfg.graphNeighborRadius;
-    var angleTolCos = Math.cos(cfg.graphOrientationTolDeg * Math.PI / 180);
+    var angleTolRad = cfg.graphOrientationTolDeg * Math.PI / 180;
+    var angleTolCos = Math.cos(angleTolRad);
     var sideTol = cfg.graphSideDeltaETol;
+    var linkThreshold = cfg.linkScoreThreshold != null ? cfg.linkScoreThreshold : 0.45;
 
     // Spatial index: bin tokens by grid cell for fast neighbor lookup
     var cellSize = radius + 1;
@@ -100,7 +103,7 @@
       grid[key].push(t);
     }
 
-    // Build adjacency (Pass 1: strict local graph)
+    // Build adjacency (Pass 1: composite-scored local graph)
     var adjacency = {};
     for (var ai = 0; ai < tokens.length; ai++) adjacency[tokens[ai].id] = [];
 
@@ -119,20 +122,45 @@
             if (b.id <= a.id) continue; // undirected, avoid duplicates
             var ddx = b.x - a.x, ddy = b.y - a.y;
             if (Math.abs(ddx) > radius || Math.abs(ddy) > radius) continue;
-            if (ddx * ddx + ddy * ddy > radius * radius) continue;
+            var dist2 = ddx * ddx + ddy * ddy;
+            if (dist2 > radius * radius) continue;
 
-            // Orientation consistency: tangent dot product
+            // ── Composite link scoring ──
+            // Instead of hard AND-gates, compute a weighted score where
+            // strength in one dimension can compensate for weakness in another.
+
+            // Distance score: 1.0 at dist=0, 0.0 at dist=radius
+            var dist = Math.sqrt(dist2);
+            var distScore = 1.0 - dist / radius;
+
+            // Direction score: |dot(tangentA, tangentB)|, remapped to [0,1]
+            // where 1.0 = perfectly aligned, 0.0 = perpendicular
             var dot = a.tangentX * b.tangentX + a.tangentY * b.tangentY;
-            if (Math.abs(dot) < angleTolCos) continue;
+            var dirScore = Math.abs(dot);
 
-            // Side consistency: left-left and right-right LAB distance
+            // Hard floor: reject truly perpendicular tangents (>80°)
+            // This prevents linking across T-junctions or unrelated edges
+            if (dirScore < 0.17) continue; // cos(80°) ≈ 0.17
+
+            // Side color score: best of same-orientation or flipped
             var llDist = _labDist(a.leftLab, b.leftLab);
             var rrDist = _labDist(a.rightLab, b.rightLab);
             var lrDist = _labDist(a.leftLab, b.rightLab);
             var rlDist = _labDist(a.rightLab, b.leftLab);
-            var sameOK = llDist <= sideTol && rrDist <= sideTol;
-            var flipOK = lrDist <= sideTol && rlDist <= sideTol;
-            if (!sameOK && !flipOK) continue;
+            var sameDist = (llDist + rrDist) * 0.5;
+            var flipDist = (lrDist + rlDist) * 0.5;
+            var bestColorDist = Math.min(sameDist, flipDist);
+
+            // Color score: 1.0 at ΔE=0, 0.0 at ΔE=2*sideTol
+            var colorScore = Math.max(0, 1.0 - bestColorDist / (sideTol * 2));
+
+            // Hard floor: reject wildly different colors
+            if (colorScore < 0.05) continue;
+
+            // Composite: direction and color matter most, distance is a bonus
+            var linkScore = 0.40 * dirScore + 0.35 * colorScore + 0.25 * distScore;
+
+            if (linkScore < linkThreshold) continue;
 
             adjacency[a.id].push(b.id);
             adjacency[b.id].push(a.id);
