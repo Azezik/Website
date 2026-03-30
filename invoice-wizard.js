@@ -20932,8 +20932,8 @@ function getGraphLearningLayerFlags(){
     debug: !!els.graphLearningShowDebug?.checked,
     colorEvidence: !!(document.getElementById('graph-learning-show-color-evidence') || {}).checked,
     closureEvidence: !!(document.getElementById('graph-learning-show-closure-evidence') || {}).checked,
-    partition: !!(document.getElementById('graph-learning-show-partition') || {}).checked,
-    sharedBoundaries: !!(document.getElementById('graph-learning-show-shared-boundaries') || {}).checked,
+    partition: !!(document.getElementById('graph-learning-show-wfg2-partition') || {}).checked,
+    sharedBoundaries: !!(document.getElementById('graph-learning-show-wfg2-shared-boundaries') || {}).checked,
     regionOrder: !!(document.getElementById('graph-learning-show-region-order') || {}).checked,
     confidence: !!(document.getElementById('graph-learning-show-confidence') || {}).checked,
     colorPartition: !!(document.getElementById('graph-learning-show-color-partition') || {}).checked,
@@ -20948,7 +20948,9 @@ function getGraphLearningLayerFlags(){
     wfg3EdgeBinary: isWfg3 ? !!els.graphLearningShowWfg3EdgeBinary?.checked : false,
     wfg3PartitionOverlay: isWfg3 ? !!els.graphLearningShowWfg3Partition?.checked : false,
     wfg3SharedBoundaries: isWfg3 ? !!els.graphLearningShowWfg3SharedBoundaries?.checked : false,
-    wfg3TokenConfidenceHeatmap: isWfg3 ? !!els.graphLearningShowDebug?.checked : false
+    wfg3TokenConfidenceHeatmap: isWfg3 ? !!(document.getElementById('graph-learning-show-wfg3-debug') || {}).checked : false,
+    wfg3ColorEvidence: isWfg3 ? !!(document.getElementById('graph-learning-show-wfg3-color-evidence') || {}).checked : false,
+    wfg3ClosureEvidence: isWfg3 ? !!(document.getElementById('graph-learning-show-wfg3-closure-evidence') || {}).checked : false
   };
 }
 
@@ -21919,8 +21921,8 @@ graphLearningUpdateTrainingBar();
  document.getElementById('graph-learning-show-compiled'),
  document.getElementById('graph-learning-show-color-evidence'),
  document.getElementById('graph-learning-show-closure-evidence'),
- document.getElementById('graph-learning-show-partition'),
- document.getElementById('graph-learning-show-shared-boundaries'),
+ document.getElementById('graph-learning-show-wfg2-partition'),
+ document.getElementById('graph-learning-show-wfg2-shared-boundaries'),
  document.getElementById('graph-learning-show-region-order'),
  document.getElementById('graph-learning-show-confidence'),
  document.getElementById('graph-learning-show-color-partition'),
@@ -21934,7 +21936,10 @@ graphLearningUpdateTrainingBar();
  document.getElementById('graph-learning-show-wfg3-partition'),
  document.getElementById('graph-learning-show-wfg3-group-boundaries'),
  document.getElementById('graph-learning-show-wfg3-shared-boundaries'),
- document.getElementById('graph-learning-show-wfg3-edge-binary')
+ document.getElementById('graph-learning-show-wfg3-edge-binary'),
+ document.getElementById('graph-learning-show-wfg3-color-evidence'),
+ document.getElementById('graph-learning-show-wfg3-closure-evidence'),
+ document.getElementById('graph-learning-show-wfg3-debug')
 ].forEach(function(el){
   if(!el) return;
   el.addEventListener('change', function(){ renderGraphLearningViewer(); });
@@ -22619,7 +22624,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 2: LAB delta heatmap ──
-  if(flags.colorEvidence && artf.wfg3_labDelta){
+  if(flags.wfg3ColorEvidence && artf.wfg3_labDelta){
     var labD = artf.wfg3_labDelta;
     var maxD = 0;
     for(var li = 0; li < N; li++) if(labD[li] > maxD) maxD = labD[li];
@@ -22639,7 +22644,7 @@ paintGraphLearningOverlay = function(ctx){
   }
 
   // ── Layer 3: Gradient magnitude ──
-  if(flags.closureEvidence && artf.wfg3_gradMag){
+  if(flags.wfg3ClosureEvidence && artf.wfg3_gradMag){
     var gm = artf.wfg3_gradMag;
     var maxG = 0;
     for(var gi = 0; gi < N; gi++) if(gm[gi] > maxG) maxG = gm[gi];
