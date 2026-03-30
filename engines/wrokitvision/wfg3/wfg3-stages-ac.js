@@ -747,7 +747,9 @@
     if (maxNew <= 0) return [];
 
     // Build spatial grid for fast neighbor lookup
-    var cell = Math.max(4, nmsR * 2);
+    // Cell size must cover the search radius so ±1 cell scan finds all neighbors.
+    var radius = (cfg.graphNeighborRadius || 4) * 2.5;
+    var cell = Math.max(4, Math.ceil(radius));
     var grid = {};
     for (var gi = 0; gi < tokens.length; gi++) {
       var gk = ((tokens[gi].x / cell) | 0) + ',' + ((tokens[gi].y / cell) | 0);
@@ -755,9 +757,8 @@
       grid[gk].push(tokens[gi]);
     }
 
-    var radius = (cfg.graphNeighborRadius || 4) * 2.5;
-    var cosTol = Math.cos(25 * Math.PI / 180); // tighter than Stage D default
-    var sideTol = 15.0;
+    var cosTol = Math.cos(30 * Math.PI / 180); // slightly relaxed for densification
+    var sideTol = 20.0;
 
     var newTokens = [];
     var nextId = 0;
@@ -788,7 +789,8 @@
             if (dist > radius || dist < 1) continue;
             var dot = Math.abs(t.tangentX * n.tangentX + t.tangentY * n.tangentY);
             if (dot < cosTol) continue;
-            // Side agreement
+            // Side agreement — check both same-orientation and flipped
+            // (normals can point opposite along the same edge)
             var ll = Math.sqrt(
               Math.pow(t.leftLab[0] - n.leftLab[0], 2) +
               Math.pow(t.leftLab[1] - n.leftLab[1], 2) +
@@ -797,12 +799,24 @@
               Math.pow(t.rightLab[0] - n.rightLab[0], 2) +
               Math.pow(t.rightLab[1] - n.rightLab[1], 2) +
               Math.pow(t.rightLab[2] - n.rightLab[2], 2));
-            if (ll <= sideTol && rr <= sideTol) corridorNeis.push(n);
+            var lr = Math.sqrt(
+              Math.pow(t.leftLab[0] - n.rightLab[0], 2) +
+              Math.pow(t.leftLab[1] - n.rightLab[1], 2) +
+              Math.pow(t.leftLab[2] - n.rightLab[2], 2));
+            var rl = Math.sqrt(
+              Math.pow(t.rightLab[0] - n.leftLab[0], 2) +
+              Math.pow(t.rightLab[1] - n.leftLab[1], 2) +
+              Math.pow(t.rightLab[2] - n.leftLab[2], 2));
+            var sameDist = (ll + rr) * 0.5;
+            var flipDist = (lr + rl) * 0.5;
+            var bestColorDist = Math.min(sameDist, flipDist);
+            if (bestColorDist <= sideTol) corridorNeis.push(n);
           }
         }
       }
 
-      if (corridorNeis.length < 2) continue;
+      // Allow densification with just 1 corridor neighbor (not only 2+)
+      if (corridorNeis.length < 1) continue;
 
       // Densify: place midpoints to first 2 corridor neighbors
       for (var cn = 0; cn < Math.min(2, corridorNeis.length); cn++) {
