@@ -451,10 +451,14 @@
 
   /**
    * Structural outlier pruning (token-native).
-   * Removes tokens that are structurally inconsistent with their neighbors:
-   *   - directional outliers: tangent deviates from neighbor average
-   *   - color outliers: side colors mismatch neighbors
-   *   - isolated outliers: too few neighbors to confirm structural role
+   *
+   * Two-pass approach:
+   *   Pass A — Adjacency-based: tokens with few neighbors that also
+   *            mismatch structurally (direction or color) are removed.
+   *   Pass B — Chain-internal: within each ordered chain, tokens that
+   *            create spatial zigzags or tangent breaks relative to their
+   *            local chain neighborhood are removed.
+   *
    * Confidence is NOT used as a gate. Only structural fit matters.
    */
   function _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg) {
@@ -466,63 +470,81 @@
     var removed = {};
     var prunedCount = 0;
 
+    // ── Pass A: adjacency-based structural mismatch ──
     for (var i = 0; i < tokens.length; i++) {
       var t = tokens[i];
       var neis = adjacency[t.id] || [];
-      if (neis.length >= minSupport) continue; // well-supported
+      if (neis.length >= minSupport) continue;
 
-      // Structurally isolated token — check if it fits its few neighbors
       if (neis.length === 0) {
         removed[t.id] = true;
         continue;
       }
 
-      // Compute average tangent direction and color distance to neighbors
-      var avgTx = 0, avgTy = 0;
-      var avgColorDist = 0;
-      var nCount = 0;
-      for (var ni = 0; ni < neis.length; ni++) {
-        var nb = tokenById[neis[ni]];
-        if (!nb) continue;
-        // Align neighbor tangent sign to match (tangents can be ±)
-        var dot = t.tangentX * nb.tangentX + t.tangentY * nb.tangentY;
-        if (dot >= 0) {
-          avgTx += nb.tangentX; avgTy += nb.tangentY;
-        } else {
-          avgTx -= nb.tangentX; avgTy -= nb.tangentY;
-        }
-        var llD = _labDist(t.leftLab, nb.leftLab);
-        var rrD = _labDist(t.rightLab, nb.rightLab);
-        var lrD = _labDist(t.leftLab, nb.rightLab);
-        var rlD = _labDist(t.rightLab, nb.leftLab);
-        avgColorDist += Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
-        nCount++;
-      }
-      if (nCount === 0) { removed[t.id] = true; continue; }
-
-      avgTx /= nCount; avgTy /= nCount;
-      avgColorDist /= nCount;
-
-      // Direction deviation: 1 - |dot(token_tangent, avg_neighbor_tangent)|
-      var avgMag = Math.sqrt(avgTx * avgTx + avgTy * avgTy);
-      var dirDev = 1.0;
-      if (avgMag > 0.01) {
-        dirDev = 1.0 - Math.abs((t.tangentX * avgTx + t.tangentY * avgTy) / avgMag);
-      }
-
-      // Reject if structurally mismatched on direction OR color
-      if (dirDev > dirDevMax || avgColorDist > colorDevMax) {
+      var fit = _tokenNeighborFit(t, neis, tokenById);
+      if (fit.dirDev > dirDevMax || fit.colorDev > colorDevMax) {
         removed[t.id] = true;
       }
     }
 
-    // Prune tiny components where all members are structurally weak
+    // ── Pass B: chain-internal trend outlier detection ──
+    // Walk each ordered chain and flag tokens that create spatial
+    // zigzags — where the direction to the token deviates sharply
+    // from the smooth trend formed by its chain neighbors.
+    var compsForScan = _componentsFromAdjacency(tokens, adjacency, 3);
+    for (var sci = 0; sci < compsForScan.length; sci++) {
+      var scanComp = compsForScan[sci];
+      var scanOrdered = _orderChain(scanComp, adjacency, tokenById);
+      if (scanOrdered.length < 4) continue;
+
+      for (var sj = 1; sj < scanOrdered.length - 1; sj++) {
+        var prevTok = tokenById[scanOrdered[sj - 1]];
+        var curTok  = tokenById[scanOrdered[sj]];
+        var nextTok = tokenById[scanOrdered[sj + 1]];
+        if (!prevTok || !curTok || !nextTok) continue;
+        if (removed[curTok.id]) continue;
+
+        // Direction from prev→cur and cur→next
+        var d1x = curTok.x - prevTok.x, d1y = curTok.y - prevTok.y;
+        var d2x = nextTok.x - curTok.x, d2y = nextTok.y - curTok.y;
+        var m1 = Math.sqrt(d1x * d1x + d1y * d1y);
+        var m2 = Math.sqrt(d2x * d2x + d2y * d2y);
+        if (m1 < 0.5 || m2 < 0.5) continue;
+
+        // Spatial zigzag: the angle between consecutive segments.
+        // On a smooth boundary, consecutive segments are roughly collinear.
+        // A sharp reversal (negative dot) indicates a zigzag.
+        var segDot = (d1x * d2x + d1y * d2y) / (m1 * m2);
+        if (segDot < -0.3) {
+          // Sharp spatial reversal — this token is a zigzag outlier.
+          // But only prune if it also fails tangent consistency.
+          var fitC = _tokenNeighborFit(curTok, adjacency[curTok.id] || [], tokenById);
+          if (fitC.dirDev > dirDevMax * 0.8) {
+            removed[curTok.id] = true;
+          }
+        }
+
+        // Also check: token tangent deviates from the local chain trend
+        // (prev→next direction), which catches off-trend tokens that happen
+        // to be spatially in-line but oriented wrong.
+        var trendX = nextTok.x - prevTok.x, trendY = nextTok.y - prevTok.y;
+        var trendMag = Math.sqrt(trendX * trendX + trendY * trendY);
+        if (trendMag > 0.5) {
+          var trendDot = Math.abs(curTok.tangentX * trendX + curTok.tangentY * trendY) / trendMag;
+          // trendDot < 0.3 means tangent is nearly perpendicular to local flow
+          if (trendDot < 0.25) {
+            removed[curTok.id] = true;
+          }
+        }
+      }
+    }
+
+    // ── Prune tiny components where all members lack structural support ──
     if (pruneTiny) {
       var comps = _componentsFromAdjacency(tokens, adjacency, 1);
       for (var ci = 0; ci < comps.length; ci++) {
         var comp = comps[ci];
         if (comp.length > tinyMax) continue;
-        // Tiny component: check if any member has strong structural support
         var allWeak = true;
         for (var cj = 0; cj < comp.length; cj++) {
           var neiCount = (adjacency[comp[cj]] || []).length;
@@ -534,6 +556,7 @@
       }
     }
 
+    // ── Remove flagged tokens from adjacency ──
     for (var rid in removed) {
       var id = +rid;
       if (!adjacency[id]) continue;
@@ -551,6 +574,35 @@
     }
 
     return { prunedCount: prunedCount };
+  }
+
+  /**
+   * Compute structural fit of a token relative to its neighbors.
+   * Returns { dirDev: 0..1, colorDev: ΔE }.
+   */
+  function _tokenNeighborFit(tok, neis, tokenById) {
+    var avgTx = 0, avgTy = 0, avgColorDist = 0, nCount = 0;
+    for (var ni = 0; ni < neis.length; ni++) {
+      var nb = tokenById[neis[ni]];
+      if (!nb) continue;
+      var dot = tok.tangentX * nb.tangentX + tok.tangentY * nb.tangentY;
+      if (dot >= 0) { avgTx += nb.tangentX; avgTy += nb.tangentY; }
+      else { avgTx -= nb.tangentX; avgTy -= nb.tangentY; }
+      var llD = _labDist(tok.leftLab, nb.leftLab);
+      var rrD = _labDist(tok.rightLab, nb.rightLab);
+      var lrD = _labDist(tok.leftLab, nb.rightLab);
+      var rlD = _labDist(tok.rightLab, nb.leftLab);
+      avgColorDist += Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+      nCount++;
+    }
+    if (nCount === 0) return { dirDev: 1.0, colorDev: 999 };
+    avgTx /= nCount; avgTy /= nCount; avgColorDist /= nCount;
+    var avgMag = Math.sqrt(avgTx * avgTx + avgTy * avgTy);
+    var dirDev = 1.0;
+    if (avgMag > 0.01) {
+      dirDev = 1.0 - Math.abs((tok.tangentX * avgTx + tok.tangentY * avgTy) / avgMag);
+    }
+    return { dirDev: dirDev, colorDev: avgColorDist };
   }
 
   /* ── Bresenham integer line rasterizer ── */
@@ -870,8 +922,11 @@
     var dirX = dir[0], dirY = dir[1];
     var perpX = -dirY, perpY = dirX;
 
-    // Track the original chain trend for drift detection
-    var origDirX = dirX, origDirY = dirY;
+    // Track a rolling baseline for drift detection (updated periodically)
+    // This allows smooth curves to extend while still catching wandering.
+    var baseDirX = dirX, baseDirY = dirY;
+    var stepsSinceBaseUpdate = 0;
+    var baseUpdateInterval = 3; // re-anchor baseline every N extensions
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
@@ -882,7 +937,6 @@
 
     var extensionCount = 0;
     var maxExtensions = 15;
-    var noTokenStreak = 0; // consecutive scan steps without finding a token
 
     while (extensionCount < maxExtensions) {
       extensionCount++;
@@ -960,13 +1014,14 @@
       var nearest = candidates[0];
       var nearTok = nearest.tok;
 
-      // Drift detection: check if adding this token causes the chain
-      // direction to deviate too far from the original trend.
-      // This detects when extension is wandering rather than following structure.
+      // Drift detection: compare the step direction against a rolling
+      // baseline. The baseline re-anchors every few steps, so smooth
+      // curves accumulate drift gradually rather than terminating early.
+      // A sudden step that deviates too far from the recent trend stops extension.
       var newDir = _computeDirectionTo(endTok, nearTok);
       if (newDir) {
-        var driftFromOrig = 1.0 - Math.abs(newDir[0] * origDirX + newDir[1] * origDirY);
-        if (driftFromOrig > maxDirDrift) break; // extension is drifting, stop
+        var driftFromBase = 1.0 - Math.abs(newDir[0] * baseDirX + newDir[1] * baseDirY);
+        if (driftFromBase > maxDirDrift) break; // step deviates from recent trend, stop
       }
 
       // Link it
@@ -999,6 +1054,14 @@
       if (updatedDir) {
         dirX = updatedDir[0]; dirY = updatedDir[1];
         perpX = -dirY; perpY = dirX;
+      }
+
+      // Periodically re-anchor the drift baseline so smooth curves
+      // can accumulate gradual direction change without terminating.
+      stepsSinceBaseUpdate++;
+      if (stepsSinceBaseUpdate >= baseUpdateInterval) {
+        baseDirX = dirX; baseDirY = dirY;
+        stepsSinceBaseUpdate = 0;
       }
     }
   }
