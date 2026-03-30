@@ -61,11 +61,11 @@
     linkScoreThreshold:    0.32,
     chainExtensionMaxDist: 40,
     chainExtensionDirAlign: 0.50,
-    chainExtensionColorTol: 40,
+    chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
     chainExtensionMaxDirDrift: 0.40,
 
-    // Stage D: Pass-2 Bridging (token-native)
+    // Stage D: Pass-2 Bridging (token-native, geometry-first)
     bridgeEnabled:          true,
     bridgeMaxGapPx:         18,
     bridgeDirAgreementMin:  0.50,
@@ -75,7 +75,6 @@
     // Stage D: Structural outlier pruning
     outlierPruneEnabled:    true,
     outlierDirDeviationMax: 0.35,
-    outlierColorDeviationMax: 50,
     outlierMinNeighborSupport: 2,
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
@@ -140,26 +139,23 @@
             var dist2 = ddx * ddx + ddy * ddy;
             if (dist2 > radius * radius) continue;
 
-            // ── Composite link scoring ──
-            // Instead of hard AND-gates, compute a weighted score where
-            // strength in one dimension can compensate for weakness in another.
+            // ── Geometry-first composite link scoring ──
+            // Geometry (direction + distance) is the dominant signal.
+            // Side color is a weak tiebreaker — it cannot veto a link.
 
-            // Distance score: soft falloff — stays high for close tokens,
-            // drops gently. 1.0 at dist=0, ~0.5 at dist=radius/2, 0.0 at radius.
             var dist = Math.sqrt(dist2);
             var distRatio = dist / radius;
             var distScore = 1.0 - distRatio * distRatio; // quadratic falloff
 
-            // Direction score: |dot(tangentA, tangentB)|, remapped to [0,1]
-            // where 1.0 = perfectly aligned, 0.0 = perpendicular
+            // Direction score: |dot(tangentA, tangentB)|
             var dot = a.tangentX * b.tangentX + a.tangentY * b.tangentY;
             var dirScore = Math.abs(dot);
 
             // Hard floor: reject truly perpendicular tangents (>80°)
-            // This prevents linking across T-junctions or unrelated edges
             if (dirScore < 0.17) continue; // cos(80°) ≈ 0.17
 
-            // Side color score: best of same-orientation or flipped
+            // Side color score: weak tiebreaker only, no hard rejection.
+            // Best of same-orientation or flipped pairing.
             var llDist = _labDist(a.leftLab, b.leftLab);
             var rrDist = _labDist(a.rightLab, b.rightLab);
             var lrDist = _labDist(a.leftLab, b.rightLab);
@@ -167,23 +163,10 @@
             var sameDist = (llDist + rrDist) * 0.5;
             var flipDist = (lrDist + rlDist) * 0.5;
             var bestColorDist = Math.min(sameDist, flipDist);
-
-            // Color score: 1.0 at ΔE=0, 0.0 at ΔE=2*sideTol
             var colorScore = Math.max(0, 1.0 - bestColorDist / (sideTol * 2));
 
-            // Hard floor: reject wildly different colors (unless very close + aligned)
-            if (colorScore < 0.05 && !(dist < 3 && dirScore > 0.85)) continue;
-
-            // Proximity-adaptive weighting: when tokens are close and well-aligned,
-            // reduce color weight. This handles edges where left/right region colors
-            // change along the boundary (e.g. sign edge near a logo).
-            var dirW = 0.40, colW = 0.35, dstW = 0.25;
-            if (dist < 4 && dirScore > 0.80) {
-              // Strong geometric agreement — trust geometry more, color less
-              dirW = 0.50; colW = 0.20; dstW = 0.30;
-            }
-
-            var linkScore = dirW * dirScore + colW * colorScore + dstW * distScore;
+            // Geometry-dominant weighting: direction 50%, distance 40%, color 10%
+            var linkScore = 0.50 * dirScore + 0.40 * distScore + 0.10 * colorScore;
 
             if (linkScore < linkThreshold) continue;
 
@@ -463,7 +446,6 @@
    */
   function _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg) {
     var dirDevMax = cfg.outlierDirDeviationMax != null ? cfg.outlierDirDeviationMax : 0.35;
-    var colorDevMax = cfg.outlierColorDeviationMax != null ? cfg.outlierColorDeviationMax : 50;
     var minSupport = Math.max(1, cfg.outlierMinNeighborSupport || 2);
     var pruneTiny = cfg.outlierPruneTinyComponents !== false;
     var tinyMax = Math.max(0, cfg.outlierTinyComponentSize || 1);
@@ -482,7 +464,7 @@
       }
 
       var fit = _tokenNeighborFit(t, neis, tokenById);
-      if (fit.dirDev > dirDevMax || fit.colorDev > colorDevMax) {
+      if (fit.dirDev > dirDevMax) {
         removed[t.id] = true;
       }
     }
@@ -723,29 +705,24 @@
             dirScore = Math.min(dirScore, tangentDot);
             if (dirScore < dirMin) continue;
 
-            // ── Check 2: Sided Color Consistency ──
-            var llD = _labDist(tokA.leftLab, tokB.leftLab);
-            var rrD = _labDist(tokA.rightLab, tokB.rightLab);
-            var lrD = _labDist(tokA.leftLab, tokB.rightLab);
-            var rlD = _labDist(tokA.rightLab, tokB.leftLab);
-            var sameDist = (llD + rrD) * 0.5;
-            var flipDist = (lrD + rlD) * 0.5;
-            var bestColorDist = Math.min(sameDist, flipDist);
-            if (bestColorDist > bridgeSideTol) continue;
-
-            // ── Check 3: Chain-end trend alignment (curve continuity) ──
-            // The gap direction should be compatible with the directional
-            // trend at each chain's endpoint (not just the single tangent).
+            // ── Check 2: Chain-end trend alignment (curve continuity) ──
             var trendDotA = epA.trendX * gapDirX + epA.trendY * gapDirY;
             var trendDotB = epB.trendX * (-gapDirX) + epB.trendY * (-gapDirY);
             var trendScore = Math.min(Math.max(trendDotA, 0), Math.max(trendDotB, 0));
 
-            // ── Composite score (token-native) ──
+            // ── Composite score (geometry-first) ──
+            // Color is a weak tiebreaker — no hard rejection.
+            var llD = _labDist(tokA.leftLab, tokB.leftLab);
+            var rrD = _labDist(tokA.rightLab, tokB.rightLab);
+            var lrD = _labDist(tokA.leftLab, tokB.rightLab);
+            var rlD = _labDist(tokA.rightLab, tokB.leftLab);
+            var bestColorDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
             var colorScore = Math.max(0, 1.0 - bestColorDist / (bridgeSideTol * 2));
-            var gapScore = 1.0 - (gap / maxGap); // shorter gaps preferred
+            var gapScore = 1.0 - (gap / maxGap);
 
-            var combinedScore = dirScore * 0.35 + trendScore * 0.25 +
-                                colorScore * 0.20 + gapScore * 0.20;
+            // Geometry-dominant: direction 40%, trend 30%, gap 20%, color 10%
+            var combinedScore = dirScore * 0.40 + trendScore * 0.30 +
+                                gapScore * 0.20 + colorScore * 0.10;
 
             if (combinedScore < minCombined) continue;
 
@@ -976,18 +953,19 @@
               var bestDirScore = Math.max(tokDirDot, tokEndDot);
               if (bestDirScore < dirMin) continue;
 
-              // Sided color compatibility
+              // Sided color compatibility — soft factor, no hard veto.
               var llD = _labDist(endTok.leftLab, cand.leftLab);
               var rrD = _labDist(endTok.rightLab, cand.rightLab);
               var lrD = _labDist(endTok.leftLab, cand.rightLab);
               var rlD = _labDist(endTok.rightLab, cand.leftLab);
               var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
-              if (cDist > colorTol) continue;
+              var extColorScore = Math.max(0, 1.0 - cDist / colorTol);
 
-              // Score: direction fit + proximity + on-axis preference
-              var score = bestDirScore * 0.4 +
-                          (1.0 - along / maxDist) * 0.35 +
-                          (1.0 - across / corridorHW) * 0.25;
+              // Score: geometry-dominant. Color is a weak tiebreaker.
+              var score = bestDirScore * 0.40 +
+                          (1.0 - along / maxDist) * 0.30 +
+                          (1.0 - across / corridorHW) * 0.20 +
+                          extColorScore * 0.10;
 
               candidates.push({ tok: cand, score: score, along: along });
             }

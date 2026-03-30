@@ -73,7 +73,7 @@
     scaffoldMaxTokens: 25000,
     scaffoldMinSpacing: 5,
 
-    // Stage D (token-native)
+    // Stage D (token-native, geometry-first)
     graphNeighborRadius: 7,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol: 25,
@@ -81,21 +81,20 @@
     linkScoreThreshold: 0.32,
     chainExtensionMaxDist: 40,
     chainExtensionDirAlign: 0.50,
-    chainExtensionColorTol: 40,
+    chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
     chainExtensionMaxDirDrift: 0.40,
 
-    // Stage D: Pass-2 Bridging (token-native)
+    // Stage D: Pass-2 Bridging (geometry-first)
     bridgeEnabled: true,
     bridgeMaxGapPx: 18,
     bridgeDirAgreementMin: 0.50,
     bridgeSideDeltaETol: 30,
     bridgeMinCombinedScore: 0.30,
 
-    // Stage D: Structural outlier pruning
+    // Stage D: Structural outlier pruning (geometry-only)
     outlierPruneEnabled: true,
     outlierDirDeviationMax: 0.35,
-    outlierColorDeviationMax: 50,
     outlierMinNeighborSupport: 2,
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
