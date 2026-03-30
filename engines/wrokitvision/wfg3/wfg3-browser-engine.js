@@ -73,27 +73,32 @@
     scaffoldMaxTokens: 25000,
     scaffoldMinSpacing: 5,
 
-    // Stage D
+    // Stage D (token-native)
     graphNeighborRadius: 7,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol: 25,
     chainMinLength: 2,
     linkScoreThreshold: 0.32,
     chainExtensionMaxDist: 40,
-    chainExtensionEvidenceMin: 20,
     chainExtensionDirAlign: 0.50,
     chainExtensionColorTol: 40,
+    chainExtensionTrendWindow: 4,
+    chainExtensionMaxDirDrift: 0.40,
 
-    // Stage D: Pass-2 Bridging
+    // Stage D: Pass-2 Bridging (token-native)
     bridgeEnabled: true,
     bridgeMaxGapPx: 18,
-    bridgeMinEvidenceScore: 0.25,
     bridgeDirAgreementMin: 0.50,
     bridgeSideDeltaETol: 30,
-    bridgeStructuralBonus: 0.15,
-    phase1WeakTokenPruneMinSupport: 2,
-    phase1PruneTinyComponents: true,
-    phase1TinyComponentSize: 1,
+    bridgeMinCombinedScore: 0.30,
+
+    // Stage D: Structural outlier pruning
+    outlierPruneEnabled: true,
+    outlierDirDeviationMax: 0.35,
+    outlierColorDeviationMax: 50,
+    outlierMinNeighborSupport: 2,
+    outlierPruneTinyComponents: true,
+    outlierTinyComponentSize: 1,
 
     // Stage E
     watershedFgFraction: 0.25,
@@ -156,7 +161,10 @@
     var tokens = Stages.stageC(normalizedSurface, evidence, cfgAC);
 
     // Run Stage D: Boundary Graph Assembly
-    var boundaryGraph = Stages.stageD(tokens, evidence, cfgDF);
+    // Stage D operates on tokens only — no evidence access.
+    // Pass image dimensions via config for chain mask rasterization.
+    cfgDF = Object.assign({}, cfgDF, { imageWidth: w, imageHeight: h });
+    var boundaryGraph = Stages.stageD(tokens, cfgDF);
 
     // Run Stage E: Region Partition (boundary-graph-informed watershed)
     var partition = Stages.stageE(normalizedSurface, evidence, boundaryGraph, cfgDF);
