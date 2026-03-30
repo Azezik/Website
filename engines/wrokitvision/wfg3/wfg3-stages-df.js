@@ -71,6 +71,10 @@
     bridgeDirAgreementMin:  0.50,
     bridgeSideDeltaETol:    30,
     bridgeStructuralBonus:  0.15,
+    phase1RelaxedTokenRetention: false,
+    phase1WeakTokenPruneMinSupport: 2,
+    phase1PruneTinyComponents: true,
+    phase1TinyComponentSize: 1,
 
     // Stage E
     watershedFgFraction:   0.25,
@@ -323,6 +327,24 @@
       }
     }
 
+    // Phase 1: downstream structural cleanup of weak tokens.
+    // Keep weak tokens when they are structurally supported; prune only clear outliers.
+    if (cfg.phase1RelaxedTokenRetention === true) {
+      var cleanup = _phase1PruneWeakByStructure(tokens, adjacency, tokenById, cfg);
+      if (cleanup.prunedCount > 0) {
+        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+        chains = [];
+        loops = [];
+        for (var ck = 0; ck < components.length; ck++) {
+          var compX = components[ck];
+          var orderedX = _orderChain(compX, adjacency, tokenById);
+          var loopX = _isLoopChain(orderedX, adjacency, compX);
+          chains.push({ ids: orderedX, ordered: true });
+          if (loopX) loops.push({ ids: orderedX });
+        }
+      }
+    }
+
     /* ================================================================
      *  Rasterized Chain Mask (Bresenham line drawing)
      *  Replaces the old isolated-dots mask with actual line segments.
@@ -377,6 +399,101 @@
     var da = lab1[1] - lab2[1];
     var db = lab1[2] - lab2[2];
     return Math.sqrt(dL * dL + da * da + db * db);
+  }
+
+  function _componentsFromAdjacency(tokens, adjacency, minLen) {
+    var visited = {};
+    var components = [];
+    for (var vi = 0; vi < tokens.length; vi++) {
+      var tid = tokens[vi].id;
+      if (visited[tid] || !adjacency[tid]) continue;
+      var comp = [];
+      var queue = [tid];
+      visited[tid] = true;
+      while (queue.length > 0) {
+        var cur = queue.shift();
+        comp.push(cur);
+        var neis = adjacency[cur] || [];
+        for (var ni = 0; ni < neis.length; ni++) {
+          var nid = neis[ni];
+          if (!visited[nid]) {
+            visited[nid] = true;
+            queue.push(nid);
+          }
+        }
+      }
+      if (comp.length >= minLen) components.push(comp);
+    }
+    return components;
+  }
+
+  function _isLoopChain(ordered, adjacency, componentIds) {
+    if (!ordered || ordered.length < 6) return false;
+    var first = ordered[0], last = ordered[ordered.length - 1];
+    if (!adjacency[first] || adjacency[first].indexOf(last) < 0) return false;
+    for (var i = 0; i < ordered.length; i++) {
+      var deg = 0;
+      var neis = adjacency[ordered[i]] || [];
+      for (var j = 0; j < neis.length; j++) {
+        if (componentIds.indexOf(neis[j]) >= 0) deg++;
+      }
+      if (deg < 2) return false;
+    }
+    return true;
+  }
+
+  function _phase1PruneWeakByStructure(tokens, adjacency, tokenById, cfg) {
+    var minSupport = Math.max(1, cfg.phase1WeakTokenPruneMinSupport || 2);
+    var pruneTiny = cfg.phase1PruneTinyComponents !== false;
+    var tinyMax = Math.max(0, cfg.phase1TinyComponentSize || 1);
+    var removed = {};
+    var prunedCount = 0;
+
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      var isWeak = !!(t._weakConfidence || t._weakEvidence);
+      if (!isWeak) continue;
+      var neis = adjacency[t.id] || [];
+      if (neis.length >= minSupport) continue;
+      removed[t.id] = true;
+    }
+
+    if (pruneTiny) {
+      var comps = _componentsFromAdjacency(tokens, adjacency, 1);
+      for (var ci = 0; ci < comps.length; ci++) {
+        var comp = comps[ci];
+        if (comp.length > tinyMax) continue;
+        var canRemove = true;
+        for (var cj = 0; cj < comp.length; cj++) {
+          var tok = tokenById[comp[cj]];
+          if (!tok || !(tok._weakConfidence || tok._weakEvidence)) {
+            canRemove = false;
+            break;
+          }
+        }
+        if (canRemove) {
+          for (var cr = 0; cr < comp.length; cr++) removed[comp[cr]] = true;
+        }
+      }
+    }
+
+    for (var rid in removed) {
+      var id = +rid;
+      if (!adjacency[id]) continue;
+      var nbrs = adjacency[id];
+      for (var n = 0; n < nbrs.length; n++) {
+        var nid = nbrs[n];
+        var list = adjacency[nid];
+        if (!list) continue;
+        var nextList = [];
+        for (var li = 0; li < list.length; li++) if (list[li] !== id) nextList.push(list[li]);
+        adjacency[nid] = nextList;
+      }
+      adjacency[id] = [];
+      prunedCount++;
+    }
+
+    return { prunedCount: prunedCount };
   }
 
   /* ── Bresenham integer line rasterizer ── */
