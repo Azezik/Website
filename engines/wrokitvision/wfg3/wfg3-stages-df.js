@@ -54,7 +54,10 @@
 
   var DEFAULT_CONFIG_DF = Object.freeze({
     // Stage D
-    graphNeighborRadius:   7,
+    graphNeighborRadius:     9,
+    graphForwardRadius:      16,
+    graphForwardDirMin:      0.70,
+    graphForwardLateralMax:  4,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol:    25,
     chainMinLength:        2,
@@ -102,11 +105,17 @@
       if (tokens[di].y >= H) H = tokens[di].y + 1;
     }
     var radius = cfg.graphNeighborRadius;
+    var fwdRadius = cfg.graphForwardRadius || 16;
+    var fwdDirMin = cfg.graphForwardDirMin || 0.70;
+    var fwdLatMax = cfg.graphForwardLateralMax || 4;
     var sideTol = cfg.graphSideDeltaETol;
     var linkThreshold = cfg.linkScoreThreshold != null ? cfg.linkScoreThreshold : 0.45;
 
-    // Spatial index: bin tokens by grid cell for fast neighbor lookup
-    var cellSize = radius + 1;
+    // Spatial index: cell size set so a ±1 cell scan (3x3) covers fwdRadius.
+    // A token at position p in cell C can reach any token in cells C ± 1.
+    // Worst case: token at cell boundary (0) → farthest point in neighbor cell
+    // is cellSize * 2. So cellSize must be >= fwdRadius to guarantee coverage.
+    var cellSize = fwdRadius + 1;
     var grid = {};
     for (var ti = 0; ti < tokens.length; ti++) {
       var t = tokens[ti];
@@ -117,7 +126,15 @@
       grid[key].push(t);
     }
 
-    // Build adjacency (Pass 1: composite-scored local graph)
+    // Build adjacency (Pass 1: geometry-first with directional forward reach)
+    //
+    // Two acceptance zones per token pair:
+    //   Zone 1 (base):    dist <= radius — standard omnidirectional check
+    //   Zone 2 (forward): dist <= fwdRadius — requires strong tangent alignment
+    //                      and small lateral offset (elliptical reach along tangent)
+    //
+    // This lets tokens 8-16px apart along a boundary connect when
+    // geometrically consistent, without linking across parallel edges.
     var adjacency = {};
     for (var ai = 0; ai < tokens.length; ai++) adjacency[tokens[ai].id] = [];
 
@@ -135,17 +152,13 @@
             var b = cell[ci];
             if (b.id <= a.id) continue; // undirected, avoid duplicates
             var ddx = b.x - a.x, ddy = b.y - a.y;
-            if (Math.abs(ddx) > radius || Math.abs(ddy) > radius) continue;
             var dist2 = ddx * ddx + ddy * ddy;
-            if (dist2 > radius * radius) continue;
 
-            // ── Geometry-first composite link scoring ──
-            // Geometry (direction + distance) is the dominant signal.
-            // Side color is a weak tiebreaker — it cannot veto a link.
+            // Quick reject: beyond even the extended forward radius
+            if (dist2 > fwdRadius * fwdRadius) continue;
 
             var dist = Math.sqrt(dist2);
-            var distRatio = dist / radius;
-            var distScore = 1.0 - distRatio * distRatio; // quadratic falloff
+            var inBaseRadius = dist <= radius;
 
             // Direction score: |dot(tangentA, tangentB)|
             var dot = a.tangentX * b.tangentX + a.tangentY * b.tangentY;
@@ -154,8 +167,52 @@
             // Hard floor: reject truly perpendicular tangents (>80°)
             if (dirScore < 0.17) continue; // cos(80°) ≈ 0.17
 
-            // Side color score: weak tiebreaker only, no hard rejection.
-            // Best of same-orientation or flipped pairing.
+            if (!inBaseRadius) {
+              // ── Zone 2: directionally-biased forward reach ──
+              // Only accept if both tangents are well-aligned and the
+              // connection vector runs along the tangent direction (not across).
+              if (dirScore < fwdDirMin) continue;
+
+              // Decompose the connection vector into along-tangent and
+              // across-tangent components using the average tangent direction.
+              // Use the average of both tangents (sign-aligned) as the axis.
+              var avgTx, avgTy;
+              if (dot >= 0) {
+                avgTx = a.tangentX + b.tangentX;
+                avgTy = a.tangentY + b.tangentY;
+              } else {
+                avgTx = a.tangentX - b.tangentX;
+                avgTy = a.tangentY - b.tangentY;
+              }
+              var avgMag = Math.sqrt(avgTx * avgTx + avgTy * avgTy);
+              if (avgMag < 0.01) continue;
+              avgTx /= avgMag; avgTy /= avgMag;
+
+              // Project connection vector onto the average tangent
+              var alongDist = Math.abs(ddx * avgTx + ddy * avgTy);
+              var lateralDist = Math.abs(ddx * (-avgTy) + ddy * avgTx);
+
+              // Reject if lateral offset is too large (prevents cross-edge links)
+              if (lateralDist > fwdLatMax) continue;
+
+              // Also check that the connection vector aligns with tangents.
+              // This catches cases where tangents are parallel but the token
+              // pair is side-by-side rather than along the boundary.
+              var connMag = dist; // already computed
+              var connDotA = Math.abs(a.tangentX * ddx + a.tangentY * ddy) / connMag;
+              var connDotB = Math.abs(b.tangentX * ddx + b.tangentY * ddy) / connMag;
+              var connAlign = Math.min(connDotA, connDotB);
+              if (connAlign < 0.50) continue;
+            }
+
+            // ── Scoring ──
+            // Use the effective radius for distance normalization:
+            // base radius for Zone 1, forward radius for Zone 2.
+            var effectiveRadius = inBaseRadius ? radius : fwdRadius;
+            var distRatio = dist / effectiveRadius;
+            var distScore = 1.0 - distRatio * distRatio;
+
+            // Side color score: weak tiebreaker only.
             var llDist = _labDist(a.leftLab, b.leftLab);
             var rrDist = _labDist(a.rightLab, b.rightLab);
             var lrDist = _labDist(a.leftLab, b.rightLab);
@@ -918,9 +975,11 @@
     while (extensionCount < maxExtensions) {
       extensionCount++;
 
-      // Search for candidate tokens ahead of the endpoint
+      // Search for candidate tokens ahead of the endpoint.
+      // Use the full maxDist as search horizon — directional alignment
+      // and drift detection prevent false positives, not distance caps.
       var candidates = [];
-      var searchRadius = Math.min(maxDist, corridorHW * 3);
+      var searchRadius = maxDist;
 
       // Scan along the direction and collect candidates from spatial grid
       for (var si = 1; si <= searchRadius; si += extCellSize * 0.5) {
