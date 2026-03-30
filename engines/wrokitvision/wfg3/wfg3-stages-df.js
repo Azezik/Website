@@ -60,21 +60,25 @@
     chainMinLength:        2,
     linkScoreThreshold:    0.32,
     chainExtensionMaxDist: 40,
-    chainExtensionEvidenceMin: 20,
     chainExtensionDirAlign: 0.50,
     chainExtensionColorTol: 40,
+    chainExtensionTrendWindow: 4,
+    chainExtensionMaxDirDrift: 0.40,
 
-    // Stage D: Pass-2 Bridging
+    // Stage D: Pass-2 Bridging (token-native)
     bridgeEnabled:          true,
     bridgeMaxGapPx:         18,
-    bridgeMinEvidenceScore: 0.25,
     bridgeDirAgreementMin:  0.50,
     bridgeSideDeltaETol:    30,
-    bridgeStructuralBonus:  0.15,
-    phase1RelaxedTokenRetention: false,
-    phase1WeakTokenPruneMinSupport: 2,
-    phase1PruneTinyComponents: true,
-    phase1TinyComponentSize: 1,
+    bridgeMinCombinedScore: 0.30,
+
+    // Stage D: Structural outlier pruning
+    outlierPruneEnabled:    true,
+    outlierDirDeviationMax: 0.35,
+    outlierColorDeviationMax: 50,
+    outlierMinNeighborSupport: 2,
+    outlierPruneTinyComponents: true,
+    outlierTinyComponentSize: 1,
 
     // Stage E
     watershedFgFraction:   0.25,
@@ -90,12 +94,15 @@
    *  Stage D: Boundary Graph Assembly
    * ================================================================== */
 
-  function stageD_boundaryGraph(tokens, evidence, cfg) {
+  function stageD_boundaryGraph(tokens, cfg) {
     cfg = cfg || DEFAULT_CONFIG_DF;
-    var W = evidence.width, H = evidence.height;
+    // Derive image dimensions from token positions (needed only for chain mask rasterization)
+    var W = cfg.imageWidth || 0, H = cfg.imageHeight || 0;
+    for (var di = 0; di < tokens.length; di++) {
+      if (tokens[di].x >= W) W = tokens[di].x + 1;
+      if (tokens[di].y >= H) H = tokens[di].y + 1;
+    }
     var radius = cfg.graphNeighborRadius;
-    var angleTolRad = cfg.graphOrientationTolDeg * Math.PI / 180;
-    var angleTolCos = Math.cos(angleTolRad);
     var sideTol = cfg.graphSideDeltaETol;
     var linkThreshold = cfg.linkScoreThreshold != null ? cfg.linkScoreThreshold : 0.45;
 
@@ -249,12 +256,12 @@
     }
 
     /* ================================================================
-     *  Pass 1b: Chain Endpoint Continuation
-     *  Extend chains by detecting when structure continues beyond radius.
-     *  Uses chain direction + evidence to distinguish real breaks from gaps.
+     *  Pass 1b: Chain Endpoint Continuation (token-native)
+     *  Extend chains by finding compatible unlinked tokens along the
+     *  chain's directional trend. No image evidence is consulted.
      * ================================================================ */
 
-    _extendChainEndpoints(chains, adjacency, tokenById, evidence, cfg, W, H);
+    _extendChainEndpoints(chains, adjacency, tokenById, cfg);
 
     /* ================================================================
      *  Pass 2: Bridge Candidates
@@ -267,7 +274,7 @@
 
     if (cfg.bridgeEnabled && chains.length > 1) {
       var bridgeResult = _bridgePass(
-        chains, loops, adjacency, tokenById, evidence, cfg, W, H
+        chains, loops, adjacency, tokenById, cfg
       );
       bridgeEdgeList = bridgeResult.bridgeEdgeList;
       bridgesEvaluated = bridgeResult.bridgesEvaluated;
@@ -327,10 +334,10 @@
       }
     }
 
-    // Phase 1: downstream structural cleanup of weak tokens.
-    // Keep weak tokens when they are structurally supported; prune only clear outliers.
-    if (cfg.phase1RelaxedTokenRetention === true) {
-      var cleanup = _phase1PruneWeakByStructure(tokens, adjacency, tokenById, cfg);
+    // Structural outlier pruning: remove tokens that mismatch their
+    // neighbors structurally (direction, color), regardless of confidence.
+    if (cfg.outlierPruneEnabled !== false) {
+      var cleanup = _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg);
       if (cleanup.prunedCount > 0) {
         components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
         chains = [];
@@ -442,36 +449,86 @@
     return true;
   }
 
-  function _phase1PruneWeakByStructure(tokens, adjacency, tokenById, cfg) {
-    var minSupport = Math.max(1, cfg.phase1WeakTokenPruneMinSupport || 2);
-    var pruneTiny = cfg.phase1PruneTinyComponents !== false;
-    var tinyMax = Math.max(0, cfg.phase1TinyComponentSize || 1);
+  /**
+   * Structural outlier pruning (token-native).
+   * Removes tokens that are structurally inconsistent with their neighbors:
+   *   - directional outliers: tangent deviates from neighbor average
+   *   - color outliers: side colors mismatch neighbors
+   *   - isolated outliers: too few neighbors to confirm structural role
+   * Confidence is NOT used as a gate. Only structural fit matters.
+   */
+  function _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg) {
+    var dirDevMax = cfg.outlierDirDeviationMax != null ? cfg.outlierDirDeviationMax : 0.35;
+    var colorDevMax = cfg.outlierColorDeviationMax != null ? cfg.outlierColorDeviationMax : 50;
+    var minSupport = Math.max(1, cfg.outlierMinNeighborSupport || 2);
+    var pruneTiny = cfg.outlierPruneTinyComponents !== false;
+    var tinyMax = Math.max(0, cfg.outlierTinyComponentSize || 1);
     var removed = {};
     var prunedCount = 0;
 
     for (var i = 0; i < tokens.length; i++) {
       var t = tokens[i];
-      var isWeak = !!(t._weakConfidence || t._weakEvidence);
-      if (!isWeak) continue;
       var neis = adjacency[t.id] || [];
-      if (neis.length >= minSupport) continue;
-      removed[t.id] = true;
+      if (neis.length >= minSupport) continue; // well-supported
+
+      // Structurally isolated token — check if it fits its few neighbors
+      if (neis.length === 0) {
+        removed[t.id] = true;
+        continue;
+      }
+
+      // Compute average tangent direction and color distance to neighbors
+      var avgTx = 0, avgTy = 0;
+      var avgColorDist = 0;
+      var nCount = 0;
+      for (var ni = 0; ni < neis.length; ni++) {
+        var nb = tokenById[neis[ni]];
+        if (!nb) continue;
+        // Align neighbor tangent sign to match (tangents can be ±)
+        var dot = t.tangentX * nb.tangentX + t.tangentY * nb.tangentY;
+        if (dot >= 0) {
+          avgTx += nb.tangentX; avgTy += nb.tangentY;
+        } else {
+          avgTx -= nb.tangentX; avgTy -= nb.tangentY;
+        }
+        var llD = _labDist(t.leftLab, nb.leftLab);
+        var rrD = _labDist(t.rightLab, nb.rightLab);
+        var lrD = _labDist(t.leftLab, nb.rightLab);
+        var rlD = _labDist(t.rightLab, nb.leftLab);
+        avgColorDist += Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+        nCount++;
+      }
+      if (nCount === 0) { removed[t.id] = true; continue; }
+
+      avgTx /= nCount; avgTy /= nCount;
+      avgColorDist /= nCount;
+
+      // Direction deviation: 1 - |dot(token_tangent, avg_neighbor_tangent)|
+      var avgMag = Math.sqrt(avgTx * avgTx + avgTy * avgTy);
+      var dirDev = 1.0;
+      if (avgMag > 0.01) {
+        dirDev = 1.0 - Math.abs((t.tangentX * avgTx + t.tangentY * avgTy) / avgMag);
+      }
+
+      // Reject if structurally mismatched on direction OR color
+      if (dirDev > dirDevMax || avgColorDist > colorDevMax) {
+        removed[t.id] = true;
+      }
     }
 
+    // Prune tiny components where all members are structurally weak
     if (pruneTiny) {
       var comps = _componentsFromAdjacency(tokens, adjacency, 1);
       for (var ci = 0; ci < comps.length; ci++) {
         var comp = comps[ci];
         if (comp.length > tinyMax) continue;
-        var canRemove = true;
+        // Tiny component: check if any member has strong structural support
+        var allWeak = true;
         for (var cj = 0; cj < comp.length; cj++) {
-          var tok = tokenById[comp[cj]];
-          if (!tok || !(tok._weakConfidence || tok._weakEvidence)) {
-            canRemove = false;
-            break;
-          }
+          var neiCount = (adjacency[comp[cj]] || []).length;
+          if (neiCount >= minSupport) { allWeak = false; break; }
         }
-        if (canRemove) {
+        if (allWeak) {
           for (var cr = 0; cr < comp.length; cr++) removed[comp[cr]] = true;
         }
       }
@@ -516,17 +573,20 @@
   }
 
   /* ================================================================
-   *  Pass 2: Bridge candidate evaluation and acceptance
+   *  Pass 2: Token-native bridge evaluation
+   *  Bridges are justified purely from token-to-token continuity:
+   *    - directional compatibility (tangent alignment + gap alignment)
+   *    - sided color consistency
+   *    - gap distance plausibility
+   *    - curve continuity (chain-end trend vs gap direction)
+   *  No image evidence maps are consulted.
    * ================================================================ */
 
-  function _bridgePass(chains, loops, adjacency, tokenById, evidence, cfg, W, H) {
+  function _bridgePass(chains, loops, adjacency, tokenById, cfg) {
     var maxGap = cfg.bridgeMaxGapPx;
-    var minEvidence = cfg.bridgeMinEvidenceScore;
     var dirMin = cfg.bridgeDirAgreementMin;
     var bridgeSideTol = cfg.bridgeSideDeltaETol;
-    var structBonus = cfg.bridgeStructuralBonus;
-    var edgeW = evidence.edgeWeighted;
-    var gradMag = evidence.gradMag;
+    var minCombined = cfg.bridgeMinCombinedScore != null ? cfg.bridgeMinCombinedScore : 0.30;
 
     // Identify chain endpoints (first/last token in each non-loop chain)
     var loopSet = {};
@@ -535,20 +595,29 @@
       for (var lsj = 0; lsj < loopIds.length; lsj++) loopSet[loopIds[lsj]] = true;
     }
 
-    var endpoints = []; // { token, chainIdx, isFirst }
+    // For each endpoint, also compute the chain-end trend direction
+    // from the last few tokens, for curve-aware bridging.
+    var endpoints = []; // { token, chainIdx, isFirst, trendX, trendY }
     for (var ei = 0; ei < chains.length; ei++) {
       var ch = chains[ei].ids;
       if (ch.length < 2) continue;
       var firstId = ch[0], lastId = ch[ch.length - 1];
-      // Skip endpoints that are part of loops (already closed)
       if (loopSet[firstId] && loopSet[lastId]) continue;
+
       var firstTok = tokenById[firstId];
       var lastTok = tokenById[lastId];
-      if (firstTok) endpoints.push({ token: firstTok, chainIdx: ei, isFirst: true });
-      if (lastTok) endpoints.push({ token: lastTok, chainIdx: ei, isFirst: false });
+
+      if (firstTok) {
+        var ft = _chainEndTrend(ch, true, tokenById);
+        endpoints.push({ token: firstTok, chainIdx: ei, isFirst: true, trendX: ft[0], trendY: ft[1] });
+      }
+      if (lastTok) {
+        var lt = _chainEndTrend(ch, false, tokenById);
+        endpoints.push({ token: lastTok, chainIdx: ei, isFirst: false, trendX: lt[0], trendY: lt[1] });
+      }
     }
 
-    // Build spatial index for endpoints using bridgeMaxGapPx cells
+    // Build spatial index for endpoints
     var epCellSize = maxGap + 1;
     var epGrid = {};
     for (var gi = 0; gi < endpoints.length; gi++) {
@@ -560,19 +629,10 @@
       epGrid[epKey].push(ep);
     }
 
-    // Normalize gradMag for corridor evidence scoring
-    var maxGrad = 0;
-    var N = W * H;
-    for (var gmi = 0; gmi < N; gmi++) {
-      if (gradMag[gmi] > maxGrad) maxGrad = gradMag[gmi];
-    }
-    var gradNorm = maxGrad > 0 ? 1.0 / maxGrad : 0;
-
     var bridgesEvaluated = 0;
     var bridgesAccepted = 0;
     var bridgeEdgeList = [];
 
-    // Evaluate each endpoint pair
     for (var pi = 0; pi < endpoints.length; pi++) {
       var epA = endpoints[pi];
       var tokA = epA.token;
@@ -586,7 +646,7 @@
           if (!epCell) continue;
           for (var ej = 0; ej < epCell.length; ej++) {
             var epB = epCell[ej];
-            if (epB.chainIdx <= epA.chainIdx) continue; // avoid duplicates, no self-bridges
+            if (epB.chainIdx <= epA.chainIdx) continue;
             var tokB = epB.token;
 
             var gdx = tokB.x - tokA.x, gdy = tokB.y - tokA.y;
@@ -595,79 +655,47 @@
 
             bridgesEvaluated++;
 
-            // ── Gate 1: Directional Agreement ──
-            // The tangents at both endpoints should roughly align with
-            // the vector connecting them (boundary continues through gap).
+            // ── Check 1: Directional Agreement (token tangents vs gap vector) ──
             var invGap = 1.0 / gap;
             var gapDirX = gdx * invGap, gapDirY = gdy * invGap;
 
-            // For endpoint A, if it's the last token its tangent points
-            // "outward" along the chain, so dot with gap direction should
-            // be positive. If it's the first token, tangent points backward.
             var dotA = tokA.tangentX * gapDirX + tokA.tangentY * gapDirY;
-            if (!epA.isFirst) dotA = -dotA; // last endpoint: tangent aims away from chain end
-            // Actually: for the first token, tangent points from first->second,
-            // which is INTO the chain, so for bridging outward we negate.
             dotA = epA.isFirst ? -dotA : dotA;
 
             var dotB = tokB.tangentX * gapDirX + tokB.tangentY * gapDirY;
             dotB = epB.isFirst ? dotB : -dotB;
 
-            // Also check tangent-tangent alignment (both tangents roughly parallel)
             var tangentDot = Math.abs(tokA.tangentX * tokB.tangentX + tokA.tangentY * tokB.tangentY);
 
-            // Use the weaker of endpoint-to-gap and tangent-tangent as the direction score
             var dirScore = Math.min(Math.max(dotA, 0), Math.max(dotB, 0));
             dirScore = Math.min(dirScore, tangentDot);
             if (dirScore < dirMin) continue;
 
-            // ── Gate 2: Sided Color Consistency (with flip support) ──
+            // ── Check 2: Sided Color Consistency ──
             var llD = _labDist(tokA.leftLab, tokB.leftLab);
             var rrD = _labDist(tokA.rightLab, tokB.rightLab);
             var lrD = _labDist(tokA.leftLab, tokB.rightLab);
             var rlD = _labDist(tokA.rightLab, tokB.leftLab);
-            var sameOK = llD <= bridgeSideTol && rrD <= bridgeSideTol;
-            var flipOK = lrD <= bridgeSideTol && rlD <= bridgeSideTol;
-            if (!sameOK && !flipOK) continue;
+            var sameDist = (llD + rrD) * 0.5;
+            var flipDist = (lrD + rlD) * 0.5;
+            var bestColorDist = Math.min(sameDist, flipDist);
+            if (bestColorDist > bridgeSideTol) continue;
 
-            // ── Gate 3: Corridor Evidence ──
-            // Sample pixels between endpoints using edgeWeighted and gradMag.
-            // Evidence score = mean of (edgeWeighted + normalized gradMag) along path.
-            var steps = Math.max(Math.ceil(gap), 2);
-            var evidenceSum = 0;
-            for (var si = 0; si <= steps; si++) {
-              var frac = si / steps;
-              var sx = Math.round(tokA.x + gdx * frac);
-              var sy = Math.round(tokA.y + gdy * frac);
-              sx = sx < 0 ? 0 : sx >= W ? W - 1 : sx;
-              sy = sy < 0 ? 0 : sy >= H ? H - 1 : sy;
-              var sIdx = sy * W + sx;
-              var eVal = edgeW[sIdx] / 255.0; // edgeWeighted is Uint8 0-255
-              var gVal = gradMag[sIdx] * gradNorm;
-              evidenceSum += (eVal * 0.6 + gVal * 0.4);
-            }
-            var evidenceScore = evidenceSum / (steps + 1);
-            if (evidenceScore < minEvidence) continue;
+            // ── Check 3: Chain-end trend alignment (curve continuity) ──
+            // The gap direction should be compatible with the directional
+            // trend at each chain's endpoint (not just the single tangent).
+            var trendDotA = epA.trendX * gapDirX + epA.trendY * gapDirY;
+            var trendDotB = epB.trendX * (-gapDirX) + epB.trendY * (-gapDirY);
+            var trendScore = Math.min(Math.max(trendDotA, 0), Math.max(trendDotB, 0));
 
-            // ── Gate 4: Structural Weighting (NODEGROUP bonus) ──
-            // Prioritize bridges that help close a perimeter or form convex shapes.
-            // Heuristic: if connecting these chains would form a larger shape that
-            // returns near its starting point, give a bonus.
-            var combinedScore = evidenceScore + dirScore * 0.3;
+            // ── Composite score (token-native) ──
+            var colorScore = Math.max(0, 1.0 - bestColorDist / (bridgeSideTol * 2));
+            var gapScore = 1.0 - (gap / maxGap); // shorter gaps preferred
 
-            // Convexity / closure bonus: check if both chain endpoints
-            // point roughly toward each other (attempting to close a shape).
-            // The higher the dotA and dotB, the more "closing" this bridge is.
-            var closureFactor = (Math.max(dotA, 0) + Math.max(dotB, 0)) * 0.5;
-            if (closureFactor > 0.5) {
-              combinedScore += structBonus;
-            }
+            var combinedScore = dirScore * 0.35 + trendScore * 0.25 +
+                                colorScore * 0.20 + gapScore * 0.20;
 
-            // Prefer shorter gaps (less speculative)
-            var gapPenalty = gap / maxGap * 0.1;
-            combinedScore -= gapPenalty;
-
-            if (combinedScore < minEvidence) continue;
+            if (combinedScore < minCombined) continue;
 
             // ── Accept bridge ──
             bridgesAccepted++;
@@ -680,7 +708,7 @@
               toX: tokB.x, toY: tokB.y,
               gap: gap,
               dirScore: dirScore,
-              evidenceScore: evidenceScore,
+              trendScore: trendScore,
               combinedScore: combinedScore
             });
           }
@@ -693,6 +721,38 @@
       bridgesEvaluated: bridgesEvaluated,
       bridgesAccepted: bridgesAccepted
     };
+  }
+
+  /**
+   * Compute directional trend at a chain endpoint from the last few tokens.
+   * Returns a unit vector pointing outward from the chain end.
+   */
+  function _chainEndTrend(ids, fromStart, tokenById) {
+    var n = ids.length;
+    var windowSize = Math.min(4, n);
+
+    var endIdx, refIdx;
+    if (fromStart) {
+      endIdx = 0;
+      refIdx = Math.min(windowSize - 1, n - 1);
+    } else {
+      endIdx = n - 1;
+      refIdx = Math.max(n - windowSize, 0);
+    }
+
+    var endTok = tokenById[ids[endIdx]];
+    var refTok = tokenById[ids[refIdx]];
+    if (!endTok || !refTok) return [0, 0];
+
+    var dx = endTok.x - refTok.x;
+    var dy = endTok.y - refTok.y;
+    var mag = Math.sqrt(dx * dx + dy * dy);
+    if (mag < 0.1) {
+      // Fallback to token tangent pointing outward
+      if (fromStart) return [-endTok.tangentX, -endTok.tangentY];
+      return [endTok.tangentX, endTok.tangentY];
+    }
+    return [dx / mag, dy / mag];
   }
 
   /**
@@ -741,25 +801,29 @@
   }
 
   /* ================================================================
-   *  Chain Endpoint Continuation — Corridor-Aware Extension & Merger
+   *  Chain Endpoint Continuation (token-native)
    *
-   *  For each chain endpoint, scan a wide corridor (not a narrow ray)
-   *  along the chain's direction. Collect ALL compatible tokens in
-   *  the corridor and greedily extend. Also detect other chain
-   *  endpoints in the corridor and merge chains when appropriate.
+   *  For each chain endpoint, search for compatible unlinked tokens
+   *  along the chain's directional trend. Extension decisions are
+   *  based entirely on token properties:
+   *    - directional trend from recent chain tokens
+   *    - tangent alignment of candidate
+   *    - sided color compatibility
+   *    - spacing consistency
+   *    - directional drift detection (stop if trend is lost)
    *
-   *  Evidence detection: if edge evidence drops to zero across the
-   *  full corridor width, the structure has genuinely ended.
+   *  No image evidence maps are consulted.
    * ================================================================ */
 
-  function _extendChainEndpoints(chains, adjacency, tokenById, evidence, cfg, W, H) {
+  function _extendChainEndpoints(chains, adjacency, tokenById, cfg) {
     var maxDist = cfg.chainExtensionMaxDist || 40;
-    var evThresh = cfg.chainExtensionEvidenceMin || 20;
     var dirMin = cfg.chainExtensionDirAlign || 0.50;
     var colorTol = cfg.chainExtensionColorTol || 40;
-    var corridorHalfWidth = 8; // px lateral from scan axis
+    var trendWindow = cfg.chainExtensionTrendWindow || 4;
+    var maxDirDrift = cfg.chainExtensionMaxDirDrift || 0.40;
+    var corridorHW = 8; // lateral half-width for candidate search
 
-    // Build spatial grid for fast token lookup during extension
+    // Build spatial grid for fast token lookup
     var extCellSize = 10;
     var extGrid = {};
     for (var tkey in tokenById) {
@@ -769,107 +833,68 @@
       extGrid[egk].push(tok);
     }
 
-    // Track which tokens are already in a chain (for merging detection)
+    // Track which tokens are already in a chain
     var tokenToChain = {};
     for (var ci2 = 0; ci2 < chains.length; ci2++) {
       var cids = chains[ci2].ids;
       for (var cj = 0; cj < cids.length; cj++) tokenToChain[cids[cj]] = ci2;
     }
 
-    // Process each chain's endpoints
     for (var ci = 0; ci < chains.length; ci++) {
       var chain = chains[ci];
       var ids = chain.ids;
       if (ids.length < 2) continue;
 
-      // Extend from tail end (more common extension direction)
-      _corridorExtend(ids, false, tokenById, adjacency, evidence, W, H,
-                      extGrid, extCellSize, tokenToChain, chains, ci,
-                      maxDist, evThresh, dirMin, colorTol, corridorHalfWidth);
-      // Extend from head end
-      _corridorExtend(ids, true, tokenById, adjacency, evidence, W, H,
-                      extGrid, extCellSize, tokenToChain, chains, ci,
-                      maxDist, evThresh, dirMin, colorTol, corridorHalfWidth);
+      _tokenExtend(ids, false, tokenById, adjacency,
+                   extGrid, extCellSize, tokenToChain, chains, ci,
+                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift);
+      _tokenExtend(ids, true, tokenById, adjacency,
+                   extGrid, extCellSize, tokenToChain, chains, ci,
+                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift);
     }
   }
 
-  function _corridorExtend(ids, fromStart, tokenById, adjacency, evidence, W, H,
-                           extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
-                           maxDist, evThresh, dirMin, colorTol, corridorHW) {
+  /**
+   * Token-native chain extension from one endpoint.
+   * Greedily adds the nearest compatible token, tracking directional
+   * drift to stop when the chain trend is no longer coherent.
+   */
+  function _tokenExtend(ids, fromStart, tokenById, adjacency,
+                        extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
+                        maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift) {
     if (ids.length < 2) return;
 
-    // Compute direction from last 3 tokens (more stable than 2)
-    var endIdx, d1Idx, d2Idx;
-    if (fromStart) {
-      endIdx = 0; d1Idx = 1; d2Idx = Math.min(2, ids.length - 1);
-    } else {
-      endIdx = ids.length - 1; d1Idx = ids.length - 2;
-      d2Idx = Math.max(ids.length - 3, 0);
-    }
-    var endTok = tokenById[ids[endIdx]];
-    var d1Tok = tokenById[ids[d1Idx]];
-    var d2Tok = tokenById[ids[d2Idx]];
-    if (!endTok || !d1Tok) return;
-
-    // Average direction from endpoint to 2 reference points
-    var dx1 = endTok.x - d1Tok.x, dy1 = endTok.y - d1Tok.y;
-    var dx2 = endTok.x - d2Tok.x, dy2 = endTok.y - d2Tok.y;
-    var mag1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-    var mag2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-    var dirX, dirY;
-    if (mag1 < 0.1 && mag2 < 0.1) return;
-    if (mag2 < 0.1 || d2Idx === d1Idx) {
-      dirX = dx1 / mag1; dirY = dy1 / mag1;
-    } else {
-      // Weighted average: closer reference gets more weight
-      var n1x = dx1 / mag1, n1y = dy1 / mag1;
-      var n2x = dx2 / mag2, n2y = dy2 / mag2;
-      dirX = n1x * 0.7 + n2x * 0.3;
-      dirY = n1y * 0.7 + n2y * 0.3;
-      var dm = Math.sqrt(dirX * dirX + dirY * dirY);
-      if (dm < 0.1) return;
-      dirX /= dm; dirY /= dm;
-    }
-
-    // Perpendicular direction for corridor width
+    // Compute initial chain-end direction from recent tokens
+    var dir = _computeChainEndDirection(ids, fromStart, tokenById, trendWindow);
+    if (!dir) return;
+    var dirX = dir[0], dirY = dir[1];
     var perpX = -dirY, perpY = dirX;
+
+    // Track the original chain trend for drift detection
+    var origDirX = dirX, origDirY = dirY;
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
 
+    var endIdx = fromStart ? 0 : ids.length - 1;
+    var endTok = tokenById[ids[endIdx]];
+    if (!endTok) return;
+
     var extensionCount = 0;
     var maxExtensions = 15;
+    var noTokenStreak = 0; // consecutive scan steps without finding a token
 
     while (extensionCount < maxExtensions) {
       extensionCount++;
 
-      // Collect all candidate tokens in the corridor ahead
+      // Search for candidate tokens ahead of the endpoint
       var candidates = [];
-      var noEvidenceStreak = 0;
+      var searchRadius = Math.min(maxDist, corridorHW * 3);
 
-      for (var si = 1; si <= maxDist; si++) {
+      // Scan along the direction and collect candidates from spatial grid
+      for (var si = 1; si <= searchRadius; si += extCellSize * 0.5) {
         var scanX = endTok.x + dirX * si;
         var scanY = endTok.y + dirY * si;
-
-        // Check evidence across corridor width
-        var corridorEvidence = 0;
-        for (var cw = -corridorHW; cw <= corridorHW; cw += 2) {
-          var ex = Math.round(scanX + perpX * cw);
-          var ey = Math.round(scanY + perpY * cw);
-          if (ex >= 0 && ex < W && ey >= 0 && ey < H) {
-            corridorEvidence = Math.max(corridorEvidence, evidence.edgeWeighted[ey * W + ex]);
-          }
-        }
-
-        if (corridorEvidence < evThresh) {
-          noEvidenceStreak++;
-          // Allow gaps of up to 8px with no evidence, then stop
-          if (noEvidenceStreak > 8) break;
-        } else {
-          noEvidenceStreak = 0;
-        }
-
-        // Search tokens near this scan position using spatial grid
         var sgx = (scanX / extCellSize) | 0;
         var sgy = (scanY / extCellSize) | 0;
         for (var gdy = -1; gdy <= 1; gdy++) {
@@ -881,24 +906,23 @@
               var cand = bucket[bi];
               if (inChain[cand.id]) continue;
 
-              // Project candidate onto corridor axis
+              // Project candidate onto the chain's directional axis
               var relX = cand.x - endTok.x;
               var relY = cand.y - endTok.y;
-              var along = relX * dirX + relY * dirY; // distance along chain dir
-              var across = Math.abs(relX * perpX + relY * perpY); // lateral distance
+              var along = relX * dirX + relY * dirY;
+              var across = Math.abs(relX * perpX + relY * perpY);
 
-              // Must be ahead of endpoint (along > 0) and within corridor width
               if (along < 1 || along > maxDist || across > corridorHW) continue;
 
-              // Tangent alignment with chain direction
+              // Tangent alignment: candidate tangent vs chain direction
               var tokDirDot = Math.abs(cand.tangentX * dirX + cand.tangentY * dirY);
-              // Also check alignment with endpoint tangent (handles curves)
+              // Also check alignment with endpoint tangent (handles gentle curves)
               var tokEndDot = Math.abs(cand.tangentX * endTok.tangentX +
                                        cand.tangentY * endTok.tangentY);
               var bestDirScore = Math.max(tokDirDot, tokEndDot);
               if (bestDirScore < dirMin) continue;
 
-              // Color compatibility (relaxed — trust geometry in corridors)
+              // Sided color compatibility
               var llD = _labDist(endTok.leftLab, cand.leftLab);
               var rrD = _labDist(endTok.rightLab, cand.rightLab);
               var lrD = _labDist(endTok.leftLab, cand.rightLab);
@@ -906,10 +930,10 @@
               var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
               if (cDist > colorTol) continue;
 
-              // Score: prefer close, well-aligned, on-axis candidates
+              // Score: direction fit + proximity + on-axis preference
               var score = bestDirScore * 0.4 +
-                          (1.0 - along / maxDist) * 0.3 +
-                          (1.0 - across / corridorHW) * 0.3;
+                          (1.0 - along / maxDist) * 0.35 +
+                          (1.0 - across / corridorHW) * 0.25;
 
               candidates.push({ tok: cand, score: score, along: along });
             }
@@ -919,21 +943,39 @@
 
       if (candidates.length === 0) break;
 
+      // Deduplicate (same token may be found from multiple scan steps)
+      var seen = {};
+      var uniqueCandidates = [];
+      for (var ui = 0; ui < candidates.length; ui++) {
+        if (!seen[candidates[ui].tok.id]) {
+          seen[candidates[ui].tok.id] = true;
+          uniqueCandidates.push(candidates[ui]);
+        }
+      }
+      candidates = uniqueCandidates;
+
       // Sort by distance along chain direction (take nearest first)
       candidates.sort(function(a, b) { return a.along - b.along; });
 
-      // Take the nearest candidate
       var nearest = candidates[0];
       var nearTok = nearest.tok;
+
+      // Drift detection: check if adding this token causes the chain
+      // direction to deviate too far from the original trend.
+      // This detects when extension is wandering rather than following structure.
+      var newDir = _computeDirectionTo(endTok, nearTok);
+      if (newDir) {
+        var driftFromOrig = 1.0 - Math.abs(newDir[0] * origDirX + newDir[1] * origDirY);
+        if (driftFromOrig > maxDirDrift) break; // extension is drifting, stop
+      }
 
       // Link it
       adjacency[endTok.id].push(nearTok.id);
       adjacency[nearTok.id].push(endTok.id);
 
-      // Check if this token belongs to another chain — if so, merge
+      // Check if this token belongs to another chain — merge if so
       var otherChainIdx = tokenToChain[nearTok.id];
       if (otherChainIdx != null && otherChainIdx !== myChainIdx) {
-        // Merge: add all tokens from the other chain into this one
         var otherIds = allChains[otherChainIdx].ids;
         for (var mi = 0; mi < otherIds.length; mi++) {
           if (!inChain[otherIds[mi]]) {
@@ -942,9 +984,8 @@
             tokenToChain[otherIds[mi]] = myChainIdx;
           }
         }
-        // Mark other chain as absorbed (empty)
         allChains[otherChainIdx].ids = [];
-        break; // stop extending, we just merged
+        break;
       }
 
       // Add to chain
@@ -953,16 +994,55 @@
       tokenToChain[nearTok.id] = myChainIdx;
       endTok = nearTok;
 
-      // Update direction based on new endpoint
-      var newDirX = nearTok.x - tokenById[ids[Math.max(0, ids.length - 3)]].x;
-      var newDirY = nearTok.y - tokenById[ids[Math.max(0, ids.length - 3)]].y;
-      var newDirMag = Math.sqrt(newDirX * newDirX + newDirY * newDirY);
-      if (newDirMag > 0.5) {
-        dirX = newDirX / newDirMag;
-        dirY = newDirMag > 0.5 ? newDirY / newDirMag : dirY;
+      // Update direction from the new chain tail
+      var updatedDir = _computeChainEndDirection(ids, fromStart, tokenById, trendWindow);
+      if (updatedDir) {
+        dirX = updatedDir[0]; dirY = updatedDir[1];
         perpX = -dirY; perpY = dirX;
       }
     }
+  }
+
+  /** Compute outward direction at a chain endpoint from the last N tokens. */
+  function _computeChainEndDirection(ids, fromStart, tokenById, window) {
+    var n = ids.length;
+    var w = Math.min(window || 4, n);
+
+    var endIdx, d1Idx, d2Idx;
+    if (fromStart) {
+      endIdx = 0; d1Idx = 1; d2Idx = Math.min(w - 1, n - 1);
+    } else {
+      endIdx = n - 1; d1Idx = n - 2; d2Idx = Math.max(n - w, 0);
+    }
+    var endTok = tokenById[ids[endIdx]];
+    var d1Tok = tokenById[ids[d1Idx]];
+    var d2Tok = tokenById[ids[d2Idx]];
+    if (!endTok || !d1Tok) return null;
+
+    var dx1 = endTok.x - d1Tok.x, dy1 = endTok.y - d1Tok.y;
+    var dx2 = endTok.x - d2Tok.x, dy2 = endTok.y - d2Tok.y;
+    var mag1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+    var mag2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+
+    if (mag1 < 0.1 && mag2 < 0.1) return null;
+    if (mag2 < 0.1 || d2Idx === d1Idx) {
+      return [dx1 / mag1, dy1 / mag1];
+    }
+    var n1x = dx1 / mag1, n1y = dy1 / mag1;
+    var n2x = dx2 / mag2, n2y = dy2 / mag2;
+    var dirX = n1x * 0.7 + n2x * 0.3;
+    var dirY = n1y * 0.7 + n2y * 0.3;
+    var dm = Math.sqrt(dirX * dirX + dirY * dirY);
+    if (dm < 0.1) return null;
+    return [dirX / dm, dirY / dm];
+  }
+
+  /** Compute unit direction vector from token A to token B. */
+  function _computeDirectionTo(tokA, tokB) {
+    var dx = tokB.x - tokA.x, dy = tokB.y - tokA.y;
+    var mag = Math.sqrt(dx * dx + dy * dy);
+    if (mag < 0.1) return null;
+    return [dx / mag, dy / mag];
   }
 
   /* ==================================================================

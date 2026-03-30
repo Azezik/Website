@@ -124,7 +124,7 @@
     // ── Stage D ──
     log('','');log('=== Stage D: Boundary Graph ===','info');
     var t0=performance.now();
-    var graph=S.stageD(tokens,evidence);
+    var graph=S.stageD(tokens,{imageWidth:W,imageHeight:H});
     var tD=performance.now()-t0;
 
     assert(graph.kind==='wfg3-boundary-graph','graph.kind correct');
