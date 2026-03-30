@@ -74,7 +74,10 @@
     scaffoldMinSpacing: 5,
 
     // Stage D (token-native, geometry-first)
-    graphNeighborRadius: 7,
+    graphNeighborRadius: 9,
+    graphForwardRadius: 16,
+    graphForwardDirMin: 0.70,
+    graphForwardLateralMax: 4,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol: 25,
     chainMinLength: 2,
