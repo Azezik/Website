@@ -58,11 +58,11 @@
     graphOrientationTolDeg: 45,
     graphSideDeltaETol:    25,
     chainMinLength:        2,
-    linkScoreThreshold:    0.45,
-    chainExtensionMaxDist: 22,
-    chainExtensionEvidenceMin: 30,
-    chainExtensionDirAlign: 0.65,
-    chainExtensionColorTol: 30,
+    linkScoreThreshold:    0.32,
+    chainExtensionMaxDist: 40,
+    chainExtensionEvidenceMin: 20,
+    chainExtensionDirAlign: 0.50,
+    chainExtensionColorTol: 40,
 
     // Stage D: Pass-2 Bridging
     bridgeEnabled:          true,
@@ -133,9 +133,11 @@
             // Instead of hard AND-gates, compute a weighted score where
             // strength in one dimension can compensate for weakness in another.
 
-            // Distance score: 1.0 at dist=0, 0.0 at dist=radius
+            // Distance score: soft falloff — stays high for close tokens,
+            // drops gently. 1.0 at dist=0, ~0.5 at dist=radius/2, 0.0 at radius.
             var dist = Math.sqrt(dist2);
-            var distScore = 1.0 - dist / radius;
+            var distRatio = dist / radius;
+            var distScore = 1.0 - distRatio * distRatio; // quadratic falloff
 
             // Direction score: |dot(tangentA, tangentB)|, remapped to [0,1]
             // where 1.0 = perfectly aligned, 0.0 = perpendicular
@@ -622,122 +624,226 @@
   }
 
   /* ================================================================
-   *  Chain Endpoint Continuation Analysis
-   *  Extends chains by scanning beyond the 7px link radius using
-   *  directional memory and evidence detection.
+   *  Chain Endpoint Continuation — Corridor-Aware Extension & Merger
+   *
+   *  For each chain endpoint, scan a wide corridor (not a narrow ray)
+   *  along the chain's direction. Collect ALL compatible tokens in
+   *  the corridor and greedily extend. Also detect other chain
+   *  endpoints in the corridor and merge chains when appropriate.
+   *
+   *  Evidence detection: if edge evidence drops to zero across the
+   *  full corridor width, the structure has genuinely ended.
    * ================================================================ */
 
   function _extendChainEndpoints(chains, adjacency, tokenById, evidence, cfg, W, H) {
-    var maxExtensionDist = cfg.chainExtensionMaxDist || 22;
-    var evidenceThresh = cfg.chainExtensionEvidenceMin || 30; // edgeWeighted threshold
-    var dirAlignMin = cfg.chainExtensionDirAlign || 0.65; // cos threshold for tangent alignment
-    var colorTolExt = cfg.chainExtensionColorTol || 30;
+    var maxDist = cfg.chainExtensionMaxDist || 40;
+    var evThresh = cfg.chainExtensionEvidenceMin || 20;
+    var dirMin = cfg.chainExtensionDirAlign || 0.50;
+    var colorTol = cfg.chainExtensionColorTol || 40;
+    var corridorHalfWidth = 8; // px lateral from scan axis
 
+    // Build spatial grid for fast token lookup during extension
+    var extCellSize = 10;
+    var extGrid = {};
+    for (var tkey in tokenById) {
+      var tok = tokenById[tkey];
+      var egk = ((tok.x / extCellSize) | 0) + ',' + ((tok.y / extCellSize) | 0);
+      if (!extGrid[egk]) extGrid[egk] = [];
+      extGrid[egk].push(tok);
+    }
+
+    // Track which tokens are already in a chain (for merging detection)
+    var tokenToChain = {};
+    for (var ci2 = 0; ci2 < chains.length; ci2++) {
+      var cids = chains[ci2].ids;
+      for (var cj = 0; cj < cids.length; cj++) tokenToChain[cids[cj]] = ci2;
+    }
+
+    // Process each chain's endpoints
     for (var ci = 0; ci < chains.length; ci++) {
       var chain = chains[ci];
       var ids = chain.ids;
       if (ids.length < 2) continue;
 
-      // ── Extend from both ends ──
-      _tryExtendChainEnd(ids, true,  tokenById, adjacency, evidence, W, H,
-                         maxExtensionDist, evidenceThresh, dirAlignMin, colorTolExt);
-      _tryExtendChainEnd(ids, false, tokenById, adjacency, evidence, W, H,
-                         maxExtensionDist, evidenceThresh, dirAlignMin, colorTolExt);
+      // Extend from tail end (more common extension direction)
+      _corridorExtend(ids, false, tokenById, adjacency, evidence, W, H,
+                      extGrid, extCellSize, tokenToChain, chains, ci,
+                      maxDist, evThresh, dirMin, colorTol, corridorHalfWidth);
+      // Extend from head end
+      _corridorExtend(ids, true, tokenById, adjacency, evidence, W, H,
+                      extGrid, extCellSize, tokenToChain, chains, ci,
+                      maxDist, evThresh, dirMin, colorTol, corridorHalfWidth);
     }
   }
 
-  function _tryExtendChainEnd(ids, fromStart, tokenById, adjacency, evidence, W, H,
-                              maxDist, evThresh, dirMin, colorTol) {
-    // fromStart=true: extend from ids[0], fromStart=false: extend from ids[end]
+  function _corridorExtend(ids, fromStart, tokenById, adjacency, evidence, W, H,
+                           extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
+                           maxDist, evThresh, dirMin, colorTol, corridorHW) {
     if (ids.length < 2) return;
-    var dirIdx = fromStart ? 1 : ids.length - 2;
-    var endIdx = fromStart ? 0 : ids.length - 1;
+
+    // Compute direction from last 3 tokens (more stable than 2)
+    var endIdx, d1Idx, d2Idx;
+    if (fromStart) {
+      endIdx = 0; d1Idx = 1; d2Idx = Math.min(2, ids.length - 1);
+    } else {
+      endIdx = ids.length - 1; d1Idx = ids.length - 2;
+      d2Idx = Math.max(ids.length - 3, 0);
+    }
     var endTok = tokenById[ids[endIdx]];
-    var refTok = tokenById[ids[dirIdx]];
+    var d1Tok = tokenById[ids[d1Idx]];
+    var d2Tok = tokenById[ids[d2Idx]];
+    if (!endTok || !d1Tok) return;
 
-    // Compute chain direction: vector from reference to endpoint
-    var dirX = endTok.x - refTok.x;
-    var dirY = endTok.y - refTok.y;
-    var dirMag = Math.sqrt(dirX * dirX + dirY * dirY);
-    if (dirMag < 0.1) return;
-    dirX /= dirMag; dirY /= dirMag;
+    // Average direction from endpoint to 2 reference points
+    var dx1 = endTok.x - d1Tok.x, dy1 = endTok.y - d1Tok.y;
+    var dx2 = endTok.x - d2Tok.x, dy2 = endTok.y - d2Tok.y;
+    var mag1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+    var mag2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+    var dirX, dirY;
+    if (mag1 < 0.1 && mag2 < 0.1) return;
+    if (mag2 < 0.1 || d2Idx === d1Idx) {
+      dirX = dx1 / mag1; dirY = dy1 / mag1;
+    } else {
+      // Weighted average: closer reference gets more weight
+      var n1x = dx1 / mag1, n1y = dy1 / mag1;
+      var n2x = dx2 / mag2, n2y = dy2 / mag2;
+      dirX = n1x * 0.7 + n2x * 0.3;
+      dirY = n1y * 0.7 + n2y * 0.3;
+      var dm = Math.sqrt(dirX * dirX + dirY * dirY);
+      if (dm < 0.1) return;
+      dirX /= dm; dirY /= dm;
+    }
 
-    // Collect all unvisited tokens for efficient lookup
-    var visited = {};
-    for (var vi = 0; vi < ids.length; vi++) visited[ids[vi]] = true;
-    var allTokenIds = [];
-    for (var tkey in tokenById) allTokenIds.push(tkey);
+    // Perpendicular direction for corridor width
+    var perpX = -dirY, perpY = dirX;
 
-    var extended = true;
+    var inChain = {};
+    for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
+
     var extensionCount = 0;
-    while (extended && extensionCount < 8) {
-      extended = false;
+    var maxExtensions = 15;
+
+    while (extensionCount < maxExtensions) {
       extensionCount++;
 
-      // Scan forward along the chain direction
+      // Collect all candidate tokens in the corridor ahead
+      var candidates = [];
+      var noEvidenceStreak = 0;
+
       for (var si = 1; si <= maxDist; si++) {
         var scanX = endTok.x + dirX * si;
         var scanY = endTok.y + dirY * si;
 
-        // Sample nearby pixels for evidence
-        var localEvidence = 0;
-        for (var dy = -2; dy <= 2; dy++) {
-          for (var dx = -2; dx <= 2; dx++) {
-            var px = Math.round(scanX + dx);
-            var py = Math.round(scanY + dy);
-            if (px >= 0 && px < W && py >= 0 && py < H) {
-              var eIdx = py * W + px;
-              localEvidence = Math.max(localEvidence, evidence.edgeWeighted[eIdx]);
+        // Check evidence across corridor width
+        var corridorEvidence = 0;
+        for (var cw = -corridorHW; cw <= corridorHW; cw += 2) {
+          var ex = Math.round(scanX + perpX * cw);
+          var ey = Math.round(scanY + perpY * cw);
+          if (ex >= 0 && ex < W && ey >= 0 && ey < H) {
+            corridorEvidence = Math.max(corridorEvidence, evidence.edgeWeighted[ey * W + ex]);
+          }
+        }
+
+        if (corridorEvidence < evThresh) {
+          noEvidenceStreak++;
+          // Allow gaps of up to 8px with no evidence, then stop
+          if (noEvidenceStreak > 8) break;
+        } else {
+          noEvidenceStreak = 0;
+        }
+
+        // Search tokens near this scan position using spatial grid
+        var sgx = (scanX / extCellSize) | 0;
+        var sgy = (scanY / extCellSize) | 0;
+        for (var gdy = -1; gdy <= 1; gdy++) {
+          for (var gdx = -1; gdx <= 1; gdx++) {
+            var gk = (sgx + gdx) + ',' + (sgy + gdy);
+            var bucket = extGrid[gk];
+            if (!bucket) continue;
+            for (var bi = 0; bi < bucket.length; bi++) {
+              var cand = bucket[bi];
+              if (inChain[cand.id]) continue;
+
+              // Project candidate onto corridor axis
+              var relX = cand.x - endTok.x;
+              var relY = cand.y - endTok.y;
+              var along = relX * dirX + relY * dirY; // distance along chain dir
+              var across = Math.abs(relX * perpX + relY * perpY); // lateral distance
+
+              // Must be ahead of endpoint (along > 0) and within corridor width
+              if (along < 1 || along > maxDist || across > corridorHW) continue;
+
+              // Tangent alignment with chain direction
+              var tokDirDot = Math.abs(cand.tangentX * dirX + cand.tangentY * dirY);
+              // Also check alignment with endpoint tangent (handles curves)
+              var tokEndDot = Math.abs(cand.tangentX * endTok.tangentX +
+                                       cand.tangentY * endTok.tangentY);
+              var bestDirScore = Math.max(tokDirDot, tokEndDot);
+              if (bestDirScore < dirMin) continue;
+
+              // Color compatibility (relaxed — trust geometry in corridors)
+              var llD = _labDist(endTok.leftLab, cand.leftLab);
+              var rrD = _labDist(endTok.rightLab, cand.rightLab);
+              var lrD = _labDist(endTok.leftLab, cand.rightLab);
+              var rlD = _labDist(endTok.rightLab, cand.leftLab);
+              var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+              if (cDist > colorTol) continue;
+
+              // Score: prefer close, well-aligned, on-axis candidates
+              var score = bestDirScore * 0.4 +
+                          (1.0 - along / maxDist) * 0.3 +
+                          (1.0 - across / corridorHW) * 0.3;
+
+              candidates.push({ tok: cand, score: score, along: along });
             }
           }
         }
+      }
 
-        // If evidence drops to near-zero, chain likely ends here
-        if (localEvidence < evThresh && si > 5) break;
+      if (candidates.length === 0) break;
 
-        // Look for unvisited tokens near this scan position
-        var bestCand = null;
-        var bestScore = 0;
-        for (var ti = 0; ti < allTokenIds.length; ti++) {
-          var tokId = allTokenIds[ti];
-          if (visited[tokId]) continue;
-          var tok = tokenById[tokId];
+      // Sort by distance along chain direction (take nearest first)
+      candidates.sort(function(a, b) { return a.along - b.along; });
 
-          var dx2 = tok.x - scanX;
-          var dy2 = tok.y - scanY;
-          var d2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-          if (d2 > 6) continue; // within 6px of scan position
+      // Take the nearest candidate
+      var nearest = candidates[0];
+      var nearTok = nearest.tok;
 
-          // Direction score: how aligned is this token's tangent with chain direction
-          var tokDir = Math.abs(tok.tangentX * dirX + tok.tangentY * dirY);
-          if (tokDir < dirMin) continue;
+      // Link it
+      adjacency[endTok.id].push(nearTok.id);
+      adjacency[nearTok.id].push(endTok.id);
 
-          // Color score: compatible with chain endpoint
-          var llD = _labDist(endTok.leftLab, tok.leftLab);
-          var rrD = _labDist(endTok.rightLab, tok.rightLab);
-          var lrD = _labDist(endTok.leftLab, tok.rightLab);
-          var rlD = _labDist(endTok.rightLab, tok.leftLab);
-          var colorDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
-          if (colorDist > colorTol) continue;
-
-          // Candidate score: distance proximity + directional strength
-          var candScore = (1.0 - d2 / 6) * 0.5 + tokDir * 0.5;
-          if (candScore > bestScore) {
-            bestScore = candScore;
-            bestCand = tok;
+      // Check if this token belongs to another chain — if so, merge
+      var otherChainIdx = tokenToChain[nearTok.id];
+      if (otherChainIdx != null && otherChainIdx !== myChainIdx) {
+        // Merge: add all tokens from the other chain into this one
+        var otherIds = allChains[otherChainIdx].ids;
+        for (var mi = 0; mi < otherIds.length; mi++) {
+          if (!inChain[otherIds[mi]]) {
+            ids.push(otherIds[mi]);
+            inChain[otherIds[mi]] = true;
+            tokenToChain[otherIds[mi]] = myChainIdx;
           }
         }
+        // Mark other chain as absorbed (empty)
+        allChains[otherChainIdx].ids = [];
+        break; // stop extending, we just merged
+      }
 
-        if (bestCand) {
-          // Link the candidate and continue extending
-          adjacency[endTok.id].push(bestCand.id);
-          adjacency[bestCand.id].push(endTok.id);
-          ids.push(bestCand.id);
-          visited[bestCand.id] = true;
-          endTok = bestCand;
-          extended = true;
-          break; // found a candidate, continue scanning from new end
-        }
+      // Add to chain
+      ids.push(nearTok.id);
+      inChain[nearTok.id] = true;
+      tokenToChain[nearTok.id] = myChainIdx;
+      endTok = nearTok;
+
+      // Update direction based on new endpoint
+      var newDirX = nearTok.x - tokenById[ids[Math.max(0, ids.length - 3)]].x;
+      var newDirY = nearTok.y - tokenById[ids[Math.max(0, ids.length - 3)]].y;
+      var newDirMag = Math.sqrt(newDirX * newDirX + newDirY * newDirY);
+      if (newDirMag > 0.5) {
+        dirX = newDirX / newDirMag;
+        dirY = newDirMag > 0.5 ? newDirY / newDirMag : dirY;
+        perpX = -dirY; perpY = dirX;
       }
     }
   }
