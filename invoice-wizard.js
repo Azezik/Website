@@ -22760,23 +22760,51 @@ paintGraphLearningOverlay = function(ctx){
     ctx.restore();
   }
 
-  // ── Layer 4: Boundary tokens — large cross markers with dark halo ──
+  // ── Layer 4: Boundary tokens — spatially balanced subset, reduced glyph size ──
+  // Selection: spatial grid ensures even coverage across the image regardless of
+  // token array order. The underlying token array is NOT modified.
+  // Rendering mode is one of:
+  //   "all (N)"                    — every token drawn
+  //   "balanced M/N"               — one best-confidence token per grid cell
+  var _tokenRenderMode = '';
   if(flags.wfg3Tokens && tokens.length > 0){
-    var stride = Math.max(1, Math.round(tokens.length / 800));
-    var armLen = hv ? 14 : 6;    // half-length of tangent arm
-    var normLen = hv ? 12 : 5;   // length of normal arm
-    var haloW = hv ? 7 : 2;      // dark outline width
-    var tangentW = hv ? 4 : 1.5;
-    var normalW = hv ? 4.5 : 2;
-    var antiW = hv ? 3 : 1;
-    var dotR = hv ? 4 : 1.5;     // arrowhead dot radius
-    var centerR = hv ? 3 : 0;    // center cross marker radius
+    var DISPLAY_LIMIT = 800;
+    var displayTokens;
+    if(tokens.length <= DISPLAY_LIMIT){
+      displayTokens = tokens;
+      _tokenRenderMode = 'all (' + tokens.length + ')';
+    } else {
+      // Partition image into ~DISPLAY_LIMIT cells; pick highest-confidence token per cell.
+      var tcols = Math.max(1, Math.round(Math.sqrt(DISPLAY_LIMIT * W / (H || 1))));
+      var trows = Math.max(1, Math.round(DISPLAY_LIMIT / tcols));
+      var tcellW = W / tcols, tcellH = H / trows;
+      var tgrid = new Array(tcols * trows).fill(null);
+      for(var si = 0; si < tokens.length; si++){
+        var st = tokens[si];
+        var sc = Math.min(Math.floor(st.x / tcellW), tcols - 1);
+        var sr = Math.min(Math.floor(st.y / tcellH), trows - 1);
+        var sk = sr * tcols + sc;
+        if(!tgrid[sk] || st.confidence > tgrid[sk].confidence) tgrid[sk] = st;
+      }
+      displayTokens = tgrid.filter(Boolean);
+      _tokenRenderMode = 'balanced ' + displayTokens.length + '/' + tokens.length;
+    }
+
+    // Glyph dimensions ~25% smaller than original high-vis values
+    var armLen = 10;   // tangent half-length (was 14)
+    var normLen = 9;   // normal arm length (was 12)
+    var haloW = 5;     // dark outline width (was 7)
+    var tangentW = 3;  // (was 4)
+    var normalW = 3.5; // (was 4.5)
+    var antiW = 2;     // (was 3)
+    var dotR = 3;      // arrowhead dot radius (was 4)
+    var centerR = 2;   // center marker radius (was 3)
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    for(var ti = 0; ti < tokens.length; ti += stride){
-      var tok = tokens[ti];
+    for(var ti = 0; ti < displayTokens.length; ti++){
+      var tok = displayTokens[ti];
       var alpha = hv ? 1.0 : (0.35 + tok.confidence * 0.65);
 
       var tx0 = tok.x - tok.tangentX * armLen;
@@ -22788,7 +22816,7 @@ paintGraphLearningOverlay = function(ctx){
       var anxEnd = tok.x - tok.normalX * normLen * 0.5;
       var anyEnd = tok.y - tok.normalY * normLen * 0.5;
 
-      // ─ Dark halo pass (draw all lines fat and black first) ─
+      // ─ Dark halo pass ─
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
 
       ctx.lineWidth = tangentW + haloW;
@@ -22805,7 +22833,7 @@ paintGraphLearningOverlay = function(ctx){
       ctx.lineWidth = tangentW;
       ctx.beginPath(); ctx.moveTo(tx0, ty0); ctx.lineTo(tx1, ty1); ctx.stroke();
 
-      // ─ Color pass: normal (electric green → left side) ─
+      // ─ Color pass: normal (electric green) ─
       ctx.strokeStyle = 'rgba(0,255,0,' + alpha.toFixed(2) + ')';
       ctx.lineWidth = normalW;
       ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(nxEnd, nyEnd); ctx.stroke();
@@ -22816,13 +22844,13 @@ paintGraphLearningOverlay = function(ctx){
       ctx.fillStyle = 'rgba(0,255,0,' + alpha.toFixed(2) + ')';
       ctx.beginPath(); ctx.arc(nxEnd, nyEnd, dotR, 0, 6.283); ctx.fill();
 
-      // ─ Color pass: anti-normal (bright red → right side) ─
+      // ─ Color pass: anti-normal (bright red) ─
       ctx.strokeStyle = 'rgba(255,0,0,' + alpha.toFixed(2) + ')';
       ctx.lineWidth = antiW;
       ctx.beginPath(); ctx.moveTo(tok.x, tok.y); ctx.lineTo(anxEnd, anyEnd); ctx.stroke();
 
-      // ─ Center crosshair marker (high-vis only) ─
-      if(hv && centerR > 0){
+      // ─ Center crosshair marker ─
+      if(centerR > 0){
         ctx.fillStyle = 'rgba(0,0,0,0.9)';
         ctx.beginPath(); ctx.arc(tok.x, tok.y, centerR + 1.5, 0, 6.283); ctx.fill();
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
@@ -23040,7 +23068,7 @@ paintGraphLearningOverlay = function(ctx){
   ctx.fillText(info, bx + 10, by + 19);
   ctx.font = '12px "IBM Plex Mono", monospace';
   ctx.fillStyle = hv ? '#88ff88' : '#90caf9';
-  ctx.fillText(seedInfo, bx + 10, by + 38);
+  ctx.fillText(seedInfo + (_tokenRenderMode ? '  |  tok: ' + _tokenRenderMode : ''), bx + 10, by + 38);
   ctx.restore();
 };
 
