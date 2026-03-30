@@ -74,7 +74,7 @@
     scaffoldMinSpacing: 5,
 
     // Stage D
-    graphNeighborRadius: 7,
+    graphNeighborRadius: 12,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol: 25,
     chainMinLength: 2,

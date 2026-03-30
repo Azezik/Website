@@ -54,7 +54,7 @@
 
   var DEFAULT_CONFIG_DF = Object.freeze({
     // Stage D
-    graphNeighborRadius:   7,
+    graphNeighborRadius:   12,
     graphOrientationTolDeg: 45,
     graphSideDeltaETol:    25,
     chainMinLength:        2,
