@@ -307,6 +307,16 @@
 
       chains.push({ ids: ordered, ordered: true });
       if (isLoop) loops.push({ ids: ordered });
+
+      // Recover residual tokens that _orderChain dropped from this component.
+      // These are valid graph structure that would otherwise be silently lost.
+      var residuals = _recoverResidualChains(comp2, ordered, adjacency, tokenById, cfg.chainMinLength);
+      for (var rsi = 0; rsi < residuals.length; rsi++) {
+        var resOrdered = residuals[rsi];
+        chains.push({ ids: resOrdered, ordered: true });
+        var resLoop = _isLoopChain(resOrdered, adjacency, comp2);
+        if (resLoop) loops.push({ ids: resOrdered });
+      }
     }
 
     /* ================================================================
@@ -384,6 +394,15 @@
           }
           chains.push({ ids: ordered2, ordered: true });
           if (isLoop2) loops.push({ ids: ordered2 });
+
+          // Recover residual tokens after bridge re-ordering
+          var bridgeResiduals = _recoverResidualChains(comp4, ordered2, adjacency, tokenById, cfg.chainMinLength);
+          for (var bri = 0; bri < bridgeResiduals.length; bri++) {
+            var brOrdered = bridgeResiduals[bri];
+            chains.push({ ids: brOrdered, ordered: true });
+            var brLoop = _isLoopChain(brOrdered, adjacency, comp4);
+            if (brLoop) loops.push({ ids: brOrdered });
+          }
         }
       }
     }
@@ -402,6 +421,15 @@
           var loopX = _isLoopChain(orderedX, adjacency, compX);
           chains.push({ ids: orderedX, ordered: true });
           if (loopX) loops.push({ ids: orderedX });
+
+          // Recover residual tokens after post-prune re-ordering
+          var pruneResiduals = _recoverResidualChains(compX, orderedX, adjacency, tokenById, cfg.chainMinLength);
+          for (var pri = 0; pri < pruneResiduals.length; pri++) {
+            var prOrdered = pruneResiduals[pri];
+            chains.push({ ids: prOrdered, ordered: true });
+            var prLoop = _isLoopChain(prOrdered, adjacency, compX);
+            if (prLoop) loops.push({ ids: prOrdered });
+          }
         }
       }
     }
@@ -524,6 +552,10 @@
     var prunedCount = 0;
 
     // ── Pass A: adjacency-based structural mismatch ──
+    // Degree-1 tokens are often valid chain endpoints (especially after
+    // residual recovery). Use a more lenient threshold for them so that
+    // endpoints with reasonable alignment survive. Only tokens that are
+    // truly misaligned get pruned.
     for (var i = 0; i < tokens.length; i++) {
       var t = tokens[i];
       var neis = adjacency[t.id] || [];
@@ -535,7 +567,10 @@
       }
 
       var fit = _tokenNeighborFit(t, neis, tokenById);
-      if (fit.dirDev > dirDevMax) {
+      // Degree-1 tokens get 50% more lenient threshold — they are often
+      // valid chain endpoints, not outliers
+      var effectiveDevMax = neis.length === 1 ? dirDevMax * 1.5 : dirDevMax;
+      if (fit.dirDev > effectiveDevMax) {
         removed[t.id] = true;
       }
     }
@@ -863,18 +898,57 @@
     var inComp = {};
     for (var i = 0; i < compIds.length; i++) inComp[compIds[i]] = true;
 
-    // Find endpoint (degree 1 within component) or use first
+    // Compute component centroid for better start selection
+    var cx = 0, cy = 0, cCount = 0;
+    for (var ci = 0; ci < compIds.length; ci++) {
+      var ct = tokenById[compIds[ci]];
+      if (ct) { cx += ct.x; cy += ct.y; cCount++; }
+    }
+    if (cCount > 0) { cx /= cCount; cy /= cCount; }
+
+    // Find the degree-1 node (endpoint) farthest from centroid.
+    // This picks a true extremum rather than an arbitrary first match,
+    // leading to longer walks through the component.
     var start = compIds[0];
+    var bestEndDist2 = -1;
+    var hasEndpoint = false;
     for (var j = 0; j < compIds.length; j++) {
       var deg = 0;
       var neis = adjacency[compIds[j]];
       for (var k = 0; k < neis.length; k++) {
         if (inComp[neis[k]]) deg++;
       }
-      if (deg === 1) { start = compIds[j]; break; }
+      if (deg === 1) {
+        var et = tokenById[compIds[j]];
+        if (et) {
+          var edx = et.x - cx, edy = et.y - cy;
+          var ed2 = edx * edx + edy * edy;
+          if (ed2 > bestEndDist2) {
+            bestEndDist2 = ed2;
+            start = compIds[j];
+            hasEndpoint = true;
+          }
+        }
+      }
     }
 
-    // Greedy walk: always pick the nearest unvisited neighbor
+    // If no degree-1 node (pure cycle), pick node farthest from centroid
+    if (!hasEndpoint) {
+      var bestCycleDist2 = -1;
+      for (var jc = 0; jc < compIds.length; jc++) {
+        var jt = tokenById[compIds[jc]];
+        if (jt) {
+          var jdx = jt.x - cx, jdy = jt.y - cy;
+          var jd2 = jdx * jdx + jdy * jdy;
+          if (jd2 > bestCycleDist2) {
+            bestCycleDist2 = jd2;
+            start = compIds[jc];
+          }
+        }
+      }
+    }
+
+    // Forward greedy walk from start: always pick nearest unvisited neighbor
     var ordered = [start];
     var used = {};
     used[start] = true;
@@ -892,12 +966,99 @@
                 (nt.y - lastTok.y) * (nt.y - lastTok.y);
         if (d < bestDist) { bestDist = d; best = nid; }
       }
-      if (best < 0) break; // disconnected fragment
+      if (best < 0) break; // no unvisited neighbor reachable
       ordered.push(best);
       used[best] = true;
     }
 
+    // Backward walk: extend from the start node in the opposite direction.
+    // This recovers the other branch when start was at a junction or when
+    // a better path exists behind the chosen start point.
+    if (ordered.length < compIds.length) {
+      var backward = [];
+      var bwCur = ordered[0];
+      while (ordered.length + backward.length < compIds.length) {
+        var bwTok = tokenById[bwCur];
+        var bwBest = -1, bwBestDist = Infinity;
+        var bwNeis = adjacency[bwCur];
+        for (var bn = 0; bn < bwNeis.length; bn++) {
+          var bnid = bwNeis[bn];
+          if (!inComp[bnid] || used[bnid]) continue;
+          var bnt = tokenById[bnid];
+          var bd = (bnt.x - bwTok.x) * (bnt.x - bwTok.x) +
+                   (bnt.y - bwTok.y) * (bnt.y - bwTok.y);
+          if (bd < bwBestDist) { bwBestDist = bd; bwBest = bnid; }
+        }
+        if (bwBest < 0) break;
+        backward.push(bwBest);
+        used[bwBest] = true;
+        bwCur = bwBest;
+      }
+      if (backward.length > 0) {
+        backward.reverse();
+        ordered = backward.concat(ordered);
+      }
+    }
+
     return ordered;
+  }
+
+  /**
+   * Recover residual tokens dropped by _orderChain.
+   *
+   * After ordering a component, some tokens may not appear in the ordered
+   * chain (due to branching, dense clusters, or greedy walk dead-ends).
+   * This function collects those dropped tokens, finds sub-components
+   * among them using existing adjacency, orders each sub-component,
+   * and returns them as separate chain arrays.
+   *
+   * This prevents obvious graph structure from being silently lost
+   * during component-to-chain conversion.
+   */
+  function _recoverResidualChains(compIds, orderedIds, adjacency, tokenById, minLen) {
+    if (orderedIds.length >= compIds.length) return []; // nothing dropped
+
+    var inOrdered = {};
+    for (var i = 0; i < orderedIds.length; i++) inOrdered[orderedIds[i]] = true;
+
+    // Collect dropped tokens into a set for O(1) lookup
+    var residualSet = {};
+    var residual = [];
+    for (var ri = 0; ri < compIds.length; ri++) {
+      if (!inOrdered[compIds[ri]]) {
+        residual.push(compIds[ri]);
+        residualSet[compIds[ri]] = true;
+      }
+    }
+    if (residual.length < minLen) return [];
+
+    // Find sub-components within residual tokens via existing adjacency
+    var visited = {};
+    var subChains = [];
+    for (var si = 0; si < residual.length; si++) {
+      var tid = residual[si];
+      if (visited[tid]) continue;
+      var comp = [];
+      var queue = [tid];
+      visited[tid] = true;
+      while (queue.length > 0) {
+        var cur = queue.shift();
+        comp.push(cur);
+        var neis = adjacency[cur] || [];
+        for (var ni = 0; ni < neis.length; ni++) {
+          var nid = neis[ni];
+          if (!visited[nid] && residualSet[nid]) {
+            visited[nid] = true;
+            queue.push(nid);
+          }
+        }
+      }
+      if (comp.length >= minLen) {
+        var ordered = _orderChain(comp, adjacency, tokenById);
+        subChains.push(ordered);
+      }
+    }
+    return subChains;
   }
 
   /* ================================================================
