@@ -76,6 +76,12 @@
     microchainSupportDecay:     0.85, // per-step decay of accumulated support (momentum)
     microchainSupportFloor:     0.15, // accumulated support below this = no relief
 
+    // Lookahead: short-horizon continuation probe (2-4 steps ahead)
+    lookaheadEnabled:           true,
+    lookaheadMaxDepth:          4,    // max probe steps beyond candidate
+    lookaheadScoreWeight:       0.25, // weight of lookahead score in candidate ranking
+    lookaheadDriftRescueDepth:  2,    // min future steps to rescue a borderline drift step
+
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
     bridgeEnabled:          true,
     bridgeMaxGapPx:         18,
@@ -930,6 +936,17 @@
       };
     }
 
+    // Lookahead configuration
+    var lookaheadCfg = null;
+    if (cfg.lookaheadEnabled !== false) {
+      lookaheadCfg = {
+        enabled:          true,
+        maxDepth:         cfg.lookaheadMaxDepth || 4,
+        scoreWeight:      cfg.lookaheadScoreWeight != null ? cfg.lookaheadScoreWeight : 0.25,
+        driftRescueDepth: cfg.lookaheadDriftRescueDepth || 2
+      };
+    }
+
     // Build spatial grid for fast token lookup
     var extCellSize = 10;
     var extGrid = {};
@@ -955,11 +972,11 @@
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg);
+                   microchainCfg, lookaheadCfg);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg);
+                   microchainCfg, lookaheadCfg);
     }
   }
 
@@ -984,7 +1001,7 @@
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
                         maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                        microchainCfg) {
+                        microchainCfg, lookaheadCfg) {
     if (ids.length < 2) return;
 
     // Compute initial chain-end direction from recent tokens
@@ -1009,6 +1026,12 @@
     var mcSupportDecay = mcEnabled ? microchainCfg.supportDecay : 0;
     var mcSupportFloor = mcEnabled ? microchainCfg.supportFloor : 0;
     var accumulatedSupport = 0; // 0..1, builds over steps
+
+    // Lookahead state
+    var laEnabled = lookaheadCfg && lookaheadCfg.enabled;
+    var laMaxDepth = laEnabled ? lookaheadCfg.maxDepth : 0;
+    var laScoreWeight = laEnabled ? lookaheadCfg.scoreWeight : 0;
+    var laDriftRescueDepth = laEnabled ? lookaheadCfg.driftRescueDepth : 0;
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
@@ -1099,59 +1122,113 @@
        * directionally agree with the chain's continuation trend.
        * This "microchain support" represents the density of local
        * strict evidence reinforcing the same boundary direction.
-       *
-       * Effects:
-       * 1. Candidate selection: prefer best-scoring coherent candidate
-       *    over raw nearest, so the chain follows the reinforced trend
-       * 2. Drift resilience: accumulated microchain support relaxes the
-       *    drift gate proportionally — strong local agreement lets a
-       *    single slightly-off step survive
-       * 3. Graceful decay: support decays each step, so chains that lose
-       *    local reinforcement gradually become fragile and eventually die
        */
       var mcActive = mcEnabled && candidates.length >= mcMinCandidates;
-      var stepSupport = 0; // this step's instantaneous microchain support
-      var selectedCandidate;
+      var stepSupport = 0;
 
       if (mcActive) {
         var mc = _microchainSupport(candidates, dirX, dirY, mcCoherenceThresh);
         stepSupport = mc.support;
-
-        // Update accumulated support: blend current step with momentum.
-        // Decay pulls it toward zero when support weakens;
-        // strong steps push it up.
         accumulatedSupport = accumulatedSupport * mcSupportDecay + stepSupport * (1.0 - mcSupportDecay);
-
-        // Select candidate: if coherent cluster found a best candidate,
-        // use it (best score among directionally coherent population).
-        // Otherwise fall back to nearest.
-        if (mc.bestCandidate) {
-          selectedCandidate = mc.bestCandidate;
-        } else {
-          candidates.sort(function(a, b) { return a.along - b.along; });
-          selectedCandidate = candidates[0];
-        }
       } else {
-        // Not enough candidates for microchaining — original behavior:
-        // sort by distance, take nearest.
-        // Accumulated support decays toward zero.
         accumulatedSupport = accumulatedSupport * mcSupportDecay;
+      }
+
+      /* ── Lookahead: short-horizon continuation probe ──
+       *
+       * For each candidate, simulate a short greedy continuation from
+       * that candidate to see how many strict-valid steps exist beyond it.
+       * This "future depth" reveals whether a candidate opens into a
+       * coherent continuation or immediately dead-ends.
+       *
+       * Two effects:
+       * 1. Candidate ranking: a candidate's final score is blended with
+       *    its lookahead score, so candidates with deeper valid futures
+       *    are preferred over shallow dead-ends.
+       * 2. Drift rescue: if the best candidate would normally fail the
+       *    drift gate, but its lookahead shows ≥ driftRescueDepth valid
+       *    future steps, the chain is allowed to continue. This is the
+       *    key mechanism that prevents premature mid-boundary death:
+       *    a slightly awkward immediate step is tolerated when the short
+       *    horizon clearly confirms the boundary continues.
+       */
+      var selectedCandidate;
+      var selectedLookahead = null; // { depth, score } of selected candidate
+
+      if (laEnabled && candidates.length > 0) {
+        // Score each candidate with lookahead-augmented ranking.
+        // To keep cost bounded, only probe the top candidates (by base score).
+        candidates.sort(function(a, b) { return b.score - a.score; });
+        var probeLimit = Math.min(candidates.length, 5); // probe top 5 at most
+
+        var bestAugScore = -1;
+        var bestAugIdx = 0;
+        var bestAugLA = null;
+
+        for (var pi = 0; pi < probeLimit; pi++) {
+          var probeCand = candidates[pi];
+          var probeTok = probeCand.tok;
+
+          // Compute probe direction: blend chain direction with step direction
+          // so the probe follows the trajectory this candidate would establish
+          var stepDx = probeTok.x - endTok.x;
+          var stepDy = probeTok.y - endTok.y;
+          var stepMag = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
+          var pDirX = dirX, pDirY = dirY;
+          if (stepMag > 0.1) {
+            pDirX = (stepDx / stepMag) * 0.6 + dirX * 0.4;
+            pDirY = (stepDy / stepMag) * 0.6 + dirY * 0.4;
+            var pMag = Math.sqrt(pDirX * pDirX + pDirY * pDirY);
+            if (pMag > 0.1) { pDirX /= pMag; pDirY /= pMag; }
+            else { pDirX = dirX; pDirY = dirY; }
+          }
+
+          var la = _lookaheadProbe(probeTok, pDirX, pDirY,
+                                   extGrid, extCellSize, inChain, tokenById,
+                                   maxDist, dirMin, colorTol, corridorHW, laMaxDepth);
+
+          // Augmented score: base score + lookahead bonus
+          // The lookahead score (0..1) is weighted by laScoreWeight.
+          var augScore = probeCand.score * (1.0 - laScoreWeight) + la.score * laScoreWeight;
+
+          if (augScore > bestAugScore) {
+            bestAugScore = augScore;
+            bestAugIdx = pi;
+            bestAugLA = la;
+          }
+        }
+
+        selectedCandidate = candidates[bestAugIdx];
+        selectedLookahead = bestAugLA;
+      } else if (mcActive && mc.bestCandidate) {
+        // Microchaining without lookahead: use coherent population best
+        selectedCandidate = mc.bestCandidate;
+      } else {
+        // Fallback: sort by distance, take nearest
         candidates.sort(function(a, b) { return a.along - b.along; });
         selectedCandidate = candidates[0];
       }
 
       var nearTok = selectedCandidate.tok;
 
-      // Drift detection: compare the step direction against a rolling
-      // baseline. The baseline re-anchors every few steps, so smooth
-      // curves accumulate drift gradually rather than terminating early.
-      //
-      // MICROCHAINING DRIFT RELIEF: When accumulated support is above
-      // the floor, the effective drift threshold is widened proportionally.
-      // This means a chain with strong ongoing local reinforcement can
-      // survive a slightly-awkward single step that would otherwise kill it.
-      // The relief is bounded: even maximal support only relaxes drift by
-      // mcDriftRelief fraction, so truly divergent steps still terminate.
+      /* ── Drift detection with lookahead rescue ──
+       *
+       * The drift gate compares the step direction against the rolling
+       * baseline. Microchaining can widen the threshold when accumulated
+       * support is strong.
+       *
+       * LOOKAHEAD RESCUE: If the immediate step exceeds the drift threshold
+       * but the lookahead probe found ≥ driftRescueDepth valid continuation
+       * steps beyond this candidate, the chain is NOT terminated. This is
+       * the critical behavioral change: a slightly awkward step that opens
+       * into a clearly valid short-horizon future is treated as part of a
+       * gentle curve rather than a termination event.
+       *
+       * Safeguard: rescue only applies within a bounded overshoot zone
+       * (up to 2x the drift threshold). Truly divergent steps still kill
+       * the chain even with a valid future — they indicate a fork or
+       * cross-boundary jump, not a gentle curve.
+       */
       var newDir = _computeDirectionTo(endTok, nearTok);
       if (newDir) {
         var driftFromBase = 1.0 - Math.abs(newDir[0] * baseDirX + newDir[1] * baseDirY);
@@ -1159,13 +1236,22 @@
         // Compute effective drift threshold with microchain relief
         var effectiveDriftMax = maxDirDrift;
         if (mcEnabled && accumulatedSupport > mcSupportFloor) {
-          // Relief scales linearly with accumulated support above floor.
-          // At full support (1.0), drift threshold widens by mcDriftRelief * maxDirDrift.
           var reliefFactor = (accumulatedSupport - mcSupportFloor) / (1.0 - mcSupportFloor);
           effectiveDriftMax = maxDirDrift * (1.0 + mcDriftRelief * reliefFactor);
         }
 
-        if (driftFromBase > effectiveDriftMax) break;
+        if (driftFromBase > effectiveDriftMax) {
+          // Immediate step exceeds drift threshold — check for lookahead rescue
+          var rescued = false;
+          if (laEnabled && selectedLookahead && selectedLookahead.depth >= laDriftRescueDepth) {
+            // Only rescue within a bounded overshoot zone (up to 2x threshold).
+            // Beyond that, the step is too divergent regardless of future.
+            if (driftFromBase <= effectiveDriftMax * 2.0) {
+              rescued = true;
+            }
+          }
+          if (!rescued) break;
+        }
       }
 
       // Link it
@@ -1242,6 +1328,133 @@
     var dm = Math.sqrt(dirX * dirX + dirY * dirY);
     if (dm < 0.1) return null;
     return [dirX / dm, dirY / dm];
+  }
+
+  /**
+   * Lookahead probe: simulate a short greedy continuation from a candidate
+   * token to see if a coherent future path exists beyond it.
+   *
+   * This is a READ-ONLY probe — no links are committed, no state is mutated.
+   * Each probe step applies the same strict validity filters used by the
+   * real extension loop (distance, corridor, tangent alignment, color).
+   *
+   * Returns:
+   *   depth:    number of valid continuation steps found (0..maxDepth)
+   *   score:    0..1, depth/maxDepth weighted by average step quality
+   *
+   * The probe is greedy (best-scoring candidate at each step) and bounded.
+   * It does NOT branch or backtrack — this is intentionally cheap.
+   *
+   * @param {Object} startTok    - the candidate token to probe from
+   * @param {number} probeDirX   - initial probe direction X (unit)
+   * @param {number} probeDirY   - initial probe direction Y (unit)
+   * @param {Object} extGrid     - spatial grid for token lookup
+   * @param {number} extCellSize - grid cell size
+   * @param {Object} inChain     - set of token IDs already in the chain
+   * @param {Object} tokenById   - token lookup
+   * @param {number} maxDist     - max step distance
+   * @param {number} dirMin      - min tangent alignment
+   * @param {number} colorTol    - color tolerance
+   * @param {number} corridorHW  - lateral half-width
+   * @param {number} maxDepth    - max probe steps
+   */
+  function _lookaheadProbe(startTok, probeDirX, probeDirY,
+                           extGrid, extCellSize, inChain, tokenById,
+                           maxDist, dirMin, colorTol, corridorHW, maxDepth) {
+    var depth = 0;
+    var totalQuality = 0;
+    var curTok = startTok;
+    var curDirX = probeDirX, curDirY = probeDirY;
+    var probeUsed = {}; // tokens consumed by this probe (not really in chain)
+    probeUsed[startTok.id] = true;
+
+    for (var step = 0; step < maxDepth; step++) {
+      var perpX = -curDirY, perpY = curDirX;
+
+      // Gather strict-valid candidates from curTok in curDir
+      // (same filters as the real extension loop)
+      var bestScore = -1;
+      var bestTok = null;
+      var bestAlong = 0;
+
+      for (var si = 1; si <= maxDist; si += extCellSize * 0.5) {
+        var scanX = curTok.x + curDirX * si;
+        var scanY = curTok.y + curDirY * si;
+        var sgx = (scanX / extCellSize) | 0;
+        var sgy = (scanY / extCellSize) | 0;
+        for (var gdy = -1; gdy <= 1; gdy++) {
+          for (var gdx = -1; gdx <= 1; gdx++) {
+            var gk = (sgx + gdx) + ',' + (sgy + gdy);
+            var bucket = extGrid[gk];
+            if (!bucket) continue;
+            for (var bi = 0; bi < bucket.length; bi++) {
+              var cand = bucket[bi];
+              if (inChain[cand.id] || probeUsed[cand.id]) continue;
+
+              var relX = cand.x - curTok.x;
+              var relY = cand.y - curTok.y;
+              var along = relX * curDirX + relY * curDirY;
+              var across = Math.abs(relX * perpX + relY * perpY);
+
+              if (along < 1 || along > maxDist || across > corridorHW) continue;
+
+              var tokDirDot = Math.abs(cand.tangentX * curDirX + cand.tangentY * curDirY);
+              var tokEndDot = Math.abs(cand.tangentX * curTok.tangentX +
+                                       cand.tangentY * curTok.tangentY);
+              var dirScore = Math.max(tokDirDot, tokEndDot);
+              if (dirScore < dirMin) continue;
+
+              var llD = _labDist(curTok.leftLab, cand.leftLab);
+              var rrD = _labDist(curTok.rightLab, cand.rightLab);
+              var lrD = _labDist(curTok.leftLab, cand.rightLab);
+              var rlD = _labDist(curTok.rightLab, cand.leftLab);
+              var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+              var colorScore = Math.max(0, 1.0 - cDist / colorTol);
+
+              var score = dirScore * 0.40 +
+                          (1.0 - along / maxDist) * 0.30 +
+                          (1.0 - across / corridorHW) * 0.20 +
+                          colorScore * 0.10;
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestTok = cand;
+                bestAlong = along;
+              }
+            }
+          }
+        }
+      }
+
+      if (!bestTok) break; // no valid continuation at this depth
+
+      // Valid step found — advance the probe
+      depth++;
+      totalQuality += bestScore;
+      probeUsed[bestTok.id] = true;
+
+      // Update probe direction toward the new token (allows curve following)
+      var stepDx = bestTok.x - curTok.x;
+      var stepDy = bestTok.y - curTok.y;
+      var stepMag = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
+      if (stepMag > 0.1) {
+        // Blend: 60% step direction + 40% previous direction (smooth curve tracking)
+        var blendX = (stepDx / stepMag) * 0.6 + curDirX * 0.4;
+        var blendY = (stepDy / stepMag) * 0.6 + curDirY * 0.4;
+        var blendMag = Math.sqrt(blendX * blendX + blendY * blendY);
+        if (blendMag > 0.1) {
+          curDirX = blendX / blendMag;
+          curDirY = blendY / blendMag;
+        }
+      }
+
+      curTok = bestTok;
+    }
+
+    return {
+      depth: depth,
+      score: maxDepth > 0 ? (depth / maxDepth) * (depth > 0 ? totalQuality / depth : 0) : 0
+    };
   }
 
   /**
