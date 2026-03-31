@@ -68,6 +68,14 @@
     chainExtensionTrendWindow: 4,
     chainExtensionMaxDirDrift: 0.40,
 
+    // Microchaining: use local strict-link populations to reinforce continuation
+    microchainEnabled:          true,
+    microchainMinCandidates:    3,    // min candidates to activate microchain logic
+    microchainCoherenceThresh:  0.50, // min dot product for candidates to be "coherent"
+    microchainDriftRelief:      0.50, // how much microchain support can soften drift gate (0..1)
+    microchainSupportDecay:     0.85, // per-step decay of accumulated support (momentum)
+    microchainSupportFloor:     0.15, // accumulated support below this = no relief
+
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
     bridgeEnabled:          true,
     bridgeMaxGapPx:         18,
@@ -909,6 +917,19 @@
     var maxDirDrift = cfg.chainExtensionMaxDirDrift || 0.40;
     var corridorHW = 8; // lateral half-width for candidate search
 
+    // Microchaining configuration
+    var microchainCfg = null;
+    if (cfg.microchainEnabled !== false) {
+      microchainCfg = {
+        enabled:          true,
+        minCandidates:    cfg.microchainMinCandidates || 3,
+        coherenceThresh:  cfg.microchainCoherenceThresh != null ? cfg.microchainCoherenceThresh : 0.50,
+        driftRelief:      cfg.microchainDriftRelief != null ? cfg.microchainDriftRelief : 0.50,
+        supportDecay:     cfg.microchainSupportDecay != null ? cfg.microchainSupportDecay : 0.85,
+        supportFloor:     cfg.microchainSupportFloor != null ? cfg.microchainSupportFloor : 0.15
+      };
+    }
+
     // Build spatial grid for fast token lookup
     var extCellSize = 10;
     var extGrid = {};
@@ -933,21 +954,37 @@
 
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
-                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift);
+                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                   microchainCfg);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
-                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift);
+                   maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                   microchainCfg);
     }
   }
 
   /**
    * Token-native chain extension from one endpoint.
-   * Greedily adds the nearest compatible token, tracking directional
-   * drift to stop when the chain trend is no longer coherent.
+   *
+   * MICROCHAINING: Rather than committing to the single nearest candidate
+   * in isolation, the extension now considers the local population of
+   * strict-valid candidates as reinforcing evidence. When many candidates
+   * directionally agree (a "microchain cluster"), that population support:
+   *   1) Selects the best-scoring coherent candidate (not just nearest)
+   *   2) Builds accumulated support momentum that makes the drift gate
+   *      more resilient — a single slightly-awkward step won't kill a
+   *      chain that has strong ongoing local reinforcement
+   *   3) Allows support to decay gracefully so chains die only when
+   *      strict local reinforcement truly collapses
+   *
+   * Strict validity is unchanged: every candidate still passes the same
+   * distance, tangent, corridor, and color filters. Microchaining only
+   * changes how much of that strict evidence participates in the decision.
    */
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
-                        maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift) {
+                        maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                        microchainCfg) {
     if (ids.length < 2) return;
 
     // Compute initial chain-end direction from recent tokens
@@ -961,6 +998,17 @@
     var baseDirX = dirX, baseDirY = dirY;
     var stepsSinceBaseUpdate = 0;
     var baseUpdateInterval = 3; // re-anchor baseline every N extensions
+
+    // Microchaining state: accumulated support momentum.
+    // Starts at 0 (no history); builds as coherent populations are found;
+    // decays each step so that weakening evidence gradually reduces relief.
+    var mcEnabled = microchainCfg && microchainCfg.enabled;
+    var mcMinCandidates = mcEnabled ? microchainCfg.minCandidates : 0;
+    var mcCoherenceThresh = mcEnabled ? microchainCfg.coherenceThresh : 0;
+    var mcDriftRelief = mcEnabled ? microchainCfg.driftRelief : 0;
+    var mcSupportDecay = mcEnabled ? microchainCfg.supportDecay : 0;
+    var mcSupportFloor = mcEnabled ? microchainCfg.supportFloor : 0;
+    var accumulatedSupport = 0; // 0..1, builds over steps
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
@@ -1045,20 +1093,79 @@
       }
       candidates = uniqueCandidates;
 
-      // Sort by distance along chain direction (take nearest first)
-      candidates.sort(function(a, b) { return a.along - b.along; });
+      /* ── Microchaining: local strict-link population analysis ──
+       *
+       * When enough strict-valid candidates exist, measure how many
+       * directionally agree with the chain's continuation trend.
+       * This "microchain support" represents the density of local
+       * strict evidence reinforcing the same boundary direction.
+       *
+       * Effects:
+       * 1. Candidate selection: prefer best-scoring coherent candidate
+       *    over raw nearest, so the chain follows the reinforced trend
+       * 2. Drift resilience: accumulated microchain support relaxes the
+       *    drift gate proportionally — strong local agreement lets a
+       *    single slightly-off step survive
+       * 3. Graceful decay: support decays each step, so chains that lose
+       *    local reinforcement gradually become fragile and eventually die
+       */
+      var mcActive = mcEnabled && candidates.length >= mcMinCandidates;
+      var stepSupport = 0; // this step's instantaneous microchain support
+      var selectedCandidate;
 
-      var nearest = candidates[0];
-      var nearTok = nearest.tok;
+      if (mcActive) {
+        var mc = _microchainSupport(candidates, dirX, dirY, mcCoherenceThresh);
+        stepSupport = mc.support;
+
+        // Update accumulated support: blend current step with momentum.
+        // Decay pulls it toward zero when support weakens;
+        // strong steps push it up.
+        accumulatedSupport = accumulatedSupport * mcSupportDecay + stepSupport * (1.0 - mcSupportDecay);
+
+        // Select candidate: if coherent cluster found a best candidate,
+        // use it (best score among directionally coherent population).
+        // Otherwise fall back to nearest.
+        if (mc.bestCandidate) {
+          selectedCandidate = mc.bestCandidate;
+        } else {
+          candidates.sort(function(a, b) { return a.along - b.along; });
+          selectedCandidate = candidates[0];
+        }
+      } else {
+        // Not enough candidates for microchaining — original behavior:
+        // sort by distance, take nearest.
+        // Accumulated support decays toward zero.
+        accumulatedSupport = accumulatedSupport * mcSupportDecay;
+        candidates.sort(function(a, b) { return a.along - b.along; });
+        selectedCandidate = candidates[0];
+      }
+
+      var nearTok = selectedCandidate.tok;
 
       // Drift detection: compare the step direction against a rolling
       // baseline. The baseline re-anchors every few steps, so smooth
       // curves accumulate drift gradually rather than terminating early.
-      // A sudden step that deviates too far from the recent trend stops extension.
+      //
+      // MICROCHAINING DRIFT RELIEF: When accumulated support is above
+      // the floor, the effective drift threshold is widened proportionally.
+      // This means a chain with strong ongoing local reinforcement can
+      // survive a slightly-awkward single step that would otherwise kill it.
+      // The relief is bounded: even maximal support only relaxes drift by
+      // mcDriftRelief fraction, so truly divergent steps still terminate.
       var newDir = _computeDirectionTo(endTok, nearTok);
       if (newDir) {
         var driftFromBase = 1.0 - Math.abs(newDir[0] * baseDirX + newDir[1] * baseDirY);
-        if (driftFromBase > maxDirDrift) break; // step deviates from recent trend, stop
+
+        // Compute effective drift threshold with microchain relief
+        var effectiveDriftMax = maxDirDrift;
+        if (mcEnabled && accumulatedSupport > mcSupportFloor) {
+          // Relief scales linearly with accumulated support above floor.
+          // At full support (1.0), drift threshold widens by mcDriftRelief * maxDirDrift.
+          var reliefFactor = (accumulatedSupport - mcSupportFloor) / (1.0 - mcSupportFloor);
+          effectiveDriftMax = maxDirDrift * (1.0 + mcDriftRelief * reliefFactor);
+        }
+
+        if (driftFromBase > effectiveDriftMax) break;
       }
 
       // Link it
@@ -1135,6 +1242,77 @@
     var dm = Math.sqrt(dirX * dirX + dirY * dirY);
     if (dm < 0.1) return null;
     return [dirX / dm, dirY / dm];
+  }
+
+  /**
+   * Microchain support: analyze a population of strict-valid candidates
+   * for directionally coherent reinforcement.
+   *
+   * Given the current chain direction and a set of already-filtered
+   * (strict-valid) candidates, compute how much local evidence
+   * coherently supports continuation in that direction.
+   *
+   * Returns:
+   *   support:   0..1  (fraction of candidates that coherently agree)
+   *   density:   number of coherent candidates
+   *   bestCandidate: the highest-scoring candidate from the coherent set
+   *                  (null if no coherent cluster found)
+   *
+   * This does NOT loosen validity — candidates were already strict-filtered.
+   * It measures how much of the local strict population reinforces the
+   * same continuation trend.
+   */
+  function _microchainSupport(candidates, dirX, dirY, coherenceThresh) {
+    if (candidates.length === 0) {
+      return { support: 0, density: 0, bestCandidate: null };
+    }
+    if (candidates.length === 1) {
+      return { support: 0, density: 1, bestCandidate: candidates[0] };
+    }
+
+    // For each candidate, compute its step direction from the endpoint
+    // (already implicit in the along/across projection, but we need
+    // the direction relative to chain direction for coherence testing).
+    //
+    // A candidate is "coherent" if its implied continuation direction
+    // aligns with the overall chain direction above coherenceThresh.
+    // We use the candidate's tangent alignment with chain direction
+    // as a proxy — candidates that passed strict filtering already have
+    // tangent alignment, but coherence measures how much they agree
+    // with the *chain's* continuation trend specifically.
+
+    var coherentCount = 0;
+    var bestScore = -1;
+    var bestCand = null;
+
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var tok = c.tok;
+
+      // Candidate tangent alignment with chain direction
+      // (using absolute dot because tangent is orientation-agnostic)
+      var tangentCoherence = Math.abs(tok.tangentX * dirX + tok.tangentY * dirY);
+
+      if (tangentCoherence >= coherenceThresh) {
+        coherentCount++;
+        if (c.score > bestScore) {
+          bestScore = c.score;
+          bestCand = c;
+        }
+      }
+    }
+
+    // Support = fraction of total candidates that are directionally coherent
+    // This measures how "reinforced" the continuation direction is.
+    // High support = many strict links agree on continuation.
+    // Low support = isolated or ambiguous evidence.
+    var support = coherentCount / candidates.length;
+
+    return {
+      support: support,
+      density: coherentCount,
+      bestCandidate: bestCand
+    };
   }
 
   /** Compute unit direction vector from token A to token B. */
