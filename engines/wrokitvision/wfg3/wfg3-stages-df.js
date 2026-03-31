@@ -98,6 +98,37 @@
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
 
+    // Stage D: Multi-token XY trend reasoning
+    // When recent chain tokens clearly form a coherent linear/curved arrangement
+    // in XY space, blend that PCA-derived direction into the extension direction.
+    // This makes extension less brittle when individual token tangents are noisy.
+    xyTrendEnabled:          true,
+    xyTrendWindowSize:       10,   // tokens used for XY trend PCA fit
+    xyTrendMinTokens:        4,    // minimum chain tokens needed to activate
+    xyTrendBlendWeight:      0.30, // max blend weight of XY trend (0 = off, 1 = full)
+    xyTrendConsistencyMin:   0.65, // min R²-like fit quality to use trend at all
+
+    // Stage D: Lookahead upgrade
+    // Depth increase + beam search + density bonus
+    lookaheadBeamWidth:      2,    // how many candidates to try at each probe step
+    lookaheadDensityRadius:  12,   // radius (px) for structural density count bonus
+    lookaheadDensityWeight:  0.10, // max score bonus from nearby structural density
+
+    // Stage D: Closure pass
+    // After extension, detect chains whose endpoints are geometrically close
+    // and link them when the geometry (endpoint trends) supports it.
+    closureEnabled:          true,
+    closureMinChainLen:      6,    // minimum chain token count to attempt closure
+    closureMaxGapPx:         24,   // maximum gap allowed for closure connection
+    closureTrendMin:         0.40, // minimum trend agreement for closure acceptance
+    closureColorTol:         35,   // side-color tolerance for closure acceptance
+
+    // Stage D: Branch anchor recovery
+    // When _recoverResidualChains finds tokens not covered by the primary ordering,
+    // include the primary-chain junction token as an anchor so that T-junction arms
+    // are rooted at the real branch point rather than appearing as floating fragments.
+    branchAnchorEnabled:     true,
+
     // Stage E
     watershedFgFraction:   0.25,
     minRegionArea:         24,
@@ -312,7 +343,7 @@
 
       // Recover residual tokens that _orderChain dropped from this component.
       // These are valid graph structure that would otherwise be silently lost.
-      var residuals = _recoverResidualChains(comp2, ordered, adjacency, tokenById, cfg.chainMinLength);
+      var residuals = _recoverResidualChains(comp2, ordered, adjacency, tokenById, cfg.chainMinLength, cfg.branchAnchorEnabled);
       for (var rsi = 0; rsi < residuals.length; rsi++) {
         var resOrdered = residuals[rsi];
         chains.push({ ids: resOrdered, ordered: true });
@@ -398,12 +429,48 @@
           if (isLoop2) loops.push({ ids: ordered2 });
 
           // Recover residual tokens after bridge re-ordering
-          var bridgeResiduals = _recoverResidualChains(comp4, ordered2, adjacency, tokenById, cfg.chainMinLength);
+          var bridgeResiduals = _recoverResidualChains(comp4, ordered2, adjacency, tokenById, cfg.chainMinLength, cfg.branchAnchorEnabled);
           for (var bri = 0; bri < bridgeResiduals.length; bri++) {
             var brOrdered = bridgeResiduals[bri];
             chains.push({ ids: brOrdered, ordered: true });
             var brLoop = _isLoopChain(brOrdered, adjacency, comp4);
             if (brLoop) loops.push({ ids: brOrdered });
+          }
+        }
+      }
+    }
+
+    /* ================================================================
+     *  Pass 2b: Closure Pass
+     *  Detect chain endpoints that are geometrically close and
+     *  trend-compatible, then link them (self-closure or cross-chain
+     *  rejoin). Runs after extension and bridging so it operates on
+     *  the most complete chain state available.
+     * ================================================================ */
+
+    if (cfg.closureEnabled !== false) {
+      var closureResult = _closurePass(chains, loops, adjacency, tokenById, cfg);
+      if (closureResult.closureCount > 0) {
+        // Rebuild components and chains after closure links are added
+        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+        chains = [];
+        loops = [];
+        for (var cci = 0; cci < components.length; cci++) {
+          var ccomp = components[cci];
+          var ccOrdered = _orderChain(ccomp, adjacency, tokenById);
+          var ccLoop = _isLoopChain(ccOrdered, adjacency, ccomp);
+          chains.push({ ids: ccOrdered, ordered: true });
+          if (ccLoop) loops.push({ ids: ccOrdered });
+          var ccResiduals = _recoverResidualChains(
+            ccomp, ccOrdered, adjacency, tokenById,
+            cfg.chainMinLength, cfg.branchAnchorEnabled
+          );
+          for (var ccri = 0; ccri < ccResiduals.length; ccri++) {
+            var ccResOrdered = ccResiduals[ccri];
+            chains.push({ ids: ccResOrdered, ordered: true });
+            if (_isLoopChain(ccResOrdered, adjacency, ccomp)) {
+              loops.push({ ids: ccResOrdered });
+            }
           }
         }
       }
@@ -425,7 +492,7 @@
           if (loopX) loops.push({ ids: orderedX });
 
           // Recover residual tokens after post-prune re-ordering
-          var pruneResiduals = _recoverResidualChains(compX, orderedX, adjacency, tokenById, cfg.chainMinLength);
+          var pruneResiduals = _recoverResidualChains(compX, orderedX, adjacency, tokenById, cfg.chainMinLength, cfg.branchAnchorEnabled);
           for (var pri = 0; pri < pruneResiduals.length; pri++) {
             var prOrdered = pruneResiduals[pri];
             chains.push({ ids: prOrdered, ordered: true });
@@ -1011,19 +1078,28 @@
    * After ordering a component, some tokens may not appear in the ordered
    * chain (due to branching, dense clusters, or greedy walk dead-ends).
    * This function collects those dropped tokens, finds sub-components
-   * among them using existing adjacency, orders each sub-component,
-   * and returns them as separate chain arrays.
+   * among them, and returns them as separate chain arrays.
    *
-   * This prevents obvious graph structure from being silently lost
-   * during component-to-chain conversion.
+   * BRANCH ANCHOR: For each residual sub-component, we search for a
+   * primary-chain token adjacent to it (a "branch point" / junction).
+   * If found, that anchor token is prepended to the residual ordering so
+   * the recovered arm is explicitly rooted at the T/+-junction rather than
+   * appearing as a disconnected fragment.  The anchor token intentionally
+   * appears in both the primary chain and the recovered arm — this is
+   * correct for branch topology and does not violate the BoundaryGraph
+   * contract (adjacency is the authoritative structure).
+   *
+   * Arms with even a single token are recovered when anchored, so that
+   * shallow T-junctions are not silently lost.
    */
-  function _recoverResidualChains(compIds, orderedIds, adjacency, tokenById, minLen) {
+  function _recoverResidualChains(compIds, orderedIds, adjacency, tokenById, minLen,
+                                  branchAnchorEnabled) {
     if (orderedIds.length >= compIds.length) return []; // nothing dropped
 
     var inOrdered = {};
     for (var i = 0; i < orderedIds.length; i++) inOrdered[orderedIds[i]] = true;
 
-    // Collect dropped tokens into a set for O(1) lookup
+    // Collect dropped tokens
     var residualSet = {};
     var residual = [];
     for (var ri = 0; ri < compIds.length; ri++) {
@@ -1032,7 +1108,7 @@
         residualSet[compIds[ri]] = true;
       }
     }
-    if (residual.length < minLen) return [];
+    if (residual.length === 0) return [];
 
     // Find sub-components within residual tokens via existing adjacency
     var visited = {};
@@ -1040,6 +1116,7 @@
     for (var si = 0; si < residual.length; si++) {
       var tid = residual[si];
       if (visited[tid]) continue;
+
       var comp = [];
       var queue = [tid];
       visited[tid] = true;
@@ -1055,9 +1132,44 @@
           }
         }
       }
-      if (comp.length >= minLen) {
-        var ordered = _orderChain(comp, adjacency, tokenById);
-        subChains.push(ordered);
+
+      // ── Branch anchor search ──
+      // Find the best primary-chain token adjacent to this sub-component.
+      // "Best" = the one with the most connections into the residual arm
+      // (favours genuine junction tokens over incidental neighbours).
+      var anchor = -1;
+      if (branchAnchorEnabled !== false) {
+        var anchorConnCount = 0;
+        for (var ci = 0; ci < comp.length; ci++) {
+          var compNeis = adjacency[comp[ci]] || [];
+          for (var cni = 0; cni < compNeis.length; cni++) {
+            var cnid = compNeis[cni];
+            if (!inOrdered[cnid]) continue;
+            // Count how many comp tokens this ordered neighbour is adjacent to
+            var connCount = 0;
+            var onNeis = adjacency[cnid] || [];
+            for (var oni = 0; oni < onNeis.length; oni++) {
+              if (residualSet[onNeis[oni]]) connCount++;
+            }
+            if (connCount > anchorConnCount) {
+              anchorConnCount = connCount;
+              anchor = cnid;
+            }
+          }
+        }
+      }
+
+      // Determine effective minimum length:
+      // With an anchor the arm contributes one extra token (the junction),
+      // so a 1-token arm + anchor = length-2 ordered chain, which is valid.
+      // Without an anchor, use the caller-supplied minLen.
+      var effectiveMin = (anchor >= 0) ? 1 : minLen;
+
+      if (comp.length >= effectiveMin) {
+        // Build the token set for ordering: include anchor first if present
+        var tokensForOrdering = anchor >= 0 ? [anchor].concat(comp) : comp;
+        var ordered = _orderChain(tokensForOrdering, adjacency, tokenById);
+        if (ordered.length >= 2) subChains.push(ordered);
       }
     }
     return subChains;
@@ -1104,10 +1216,25 @@
     if (cfg.lookaheadEnabled !== false) {
       lookaheadCfg = {
         enabled:            true,
-        maxDepth:           cfg.lookaheadMaxDepth || 4,
+        maxDepth:           cfg.lookaheadMaxDepth || 6,
         scoreWeight:        cfg.lookaheadScoreWeight != null ? cfg.lookaheadScoreWeight : 0.25,
         driftRescueDepth:   cfg.lookaheadDriftRescueDepth || 2,
-        coherenceFraction:  cfg.lookaheadCoherenceFraction != null ? cfg.lookaheadCoherenceFraction : 0.30
+        coherenceFraction:  cfg.lookaheadCoherenceFraction != null ? cfg.lookaheadCoherenceFraction : 0.30,
+        beamWidth:          cfg.lookaheadBeamWidth != null ? cfg.lookaheadBeamWidth : 2,
+        densityRadius:      cfg.lookaheadDensityRadius != null ? cfg.lookaheadDensityRadius : 12,
+        densityWeight:      cfg.lookaheadDensityWeight != null ? cfg.lookaheadDensityWeight : 0.10
+      };
+    }
+
+    // XY trend configuration
+    var xyTrendCfg = null;
+    if (cfg.xyTrendEnabled !== false) {
+      xyTrendCfg = {
+        enabled:         true,
+        windowSize:      cfg.xyTrendWindowSize != null ? cfg.xyTrendWindowSize : 10,
+        minTokens:       cfg.xyTrendMinTokens  != null ? cfg.xyTrendMinTokens  : 4,
+        blendWeight:     cfg.xyTrendBlendWeight != null ? cfg.xyTrendBlendWeight : 0.30,
+        consistencyMin:  cfg.xyTrendConsistencyMin != null ? cfg.xyTrendConsistencyMin : 0.65
       };
     }
 
@@ -1136,11 +1263,11 @@
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg);
+                   microchainCfg, lookaheadCfg, xyTrendCfg);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg);
+                   microchainCfg, lookaheadCfg, xyTrendCfg);
     }
   }
 
@@ -1165,7 +1292,7 @@
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
                         maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                        microchainCfg, lookaheadCfg) {
+                        microchainCfg, lookaheadCfg, xyTrendCfg) {
     if (ids.length < 2) return;
 
     // Compute initial chain-end direction from recent tokens
@@ -1197,6 +1324,16 @@
     var laScoreWeight = laEnabled ? lookaheadCfg.scoreWeight : 0;
     var laDriftRescueDepth = laEnabled ? lookaheadCfg.driftRescueDepth : 0;
     var laCoherenceFraction = laEnabled ? (lookaheadCfg.coherenceFraction || 0.30) : 0;
+    var laBeamWidth = laEnabled ? (lookaheadCfg.beamWidth || 2) : 1;
+    var laDensityRadius = laEnabled ? (lookaheadCfg.densityRadius || 12) : 0;
+    var laDensityWeight = laEnabled ? (lookaheadCfg.densityWeight || 0.10) : 0;
+
+    // XY trend state
+    var xtEnabled = xyTrendCfg && xyTrendCfg.enabled;
+    var xtWindowSize = xtEnabled ? (xyTrendCfg.windowSize || 10) : 0;
+    var xtMinTokens  = xtEnabled ? (xyTrendCfg.minTokens  || 4)  : 0;
+    var xtBlendWeight    = xtEnabled ? (xyTrendCfg.blendWeight    || 0.30) : 0;
+    var xtConsistencyMin = xtEnabled ? (xyTrendCfg.consistencyMin || 0.65) : 0;
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
@@ -1350,7 +1487,8 @@
 
           var la = _lookaheadProbe(probeTok, pDirX, pDirY,
                                    extGrid, extCellSize, inChain, tokenById,
-                                   maxDist, dirMin, colorTol, corridorHW, laMaxDepth);
+                                   maxDist, dirMin, colorTol, corridorHW, laMaxDepth,
+                                   laBeamWidth, laDensityRadius, laDensityWeight);
 
           // Augmented score: base score + lookahead composite.
           // The lookahead composite blends depth/quality with direction
@@ -1458,6 +1596,52 @@
         perpX = -dirY; perpY = dirX;
       }
 
+      // ── XY trend blending ──
+      // When the recent chain tokens form a clearly coherent spatial
+      // arrangement (high PCA explained variance), blend the PCA-derived
+      // direction into the current extension direction. This compensates
+      // for noisy individual token tangents that cause the local direction
+      // estimate to jitter, and helps the chain follow the larger visible
+      // edge/line structure rather than fragmenting at noisy transitions.
+      //
+      // Blend is proportional to consistency above the threshold, so it
+      // fades gracefully as coherence decreases. Local evidence always
+      // dominates: even at max blend, xtBlendWeight caps the influence.
+      if (xtEnabled && ids.length >= xtMinTokens) {
+        var xtWindow = Math.min(xtWindowSize, ids.length);
+        var xtTokens = [];
+        if (fromStart) {
+          for (var xti = 0; xti < xtWindow; xti++) {
+            var xtt = tokenById[ids[xti]]; if (xtt) xtTokens.push(xtt);
+          }
+        } else {
+          for (var xti2 = ids.length - xtWindow; xti2 < ids.length; xti2++) {
+            var xtt2 = tokenById[ids[xti2]]; if (xtt2) xtTokens.push(xtt2);
+          }
+        }
+        if (xtTokens.length >= xtMinTokens) {
+          var xtDir = _computeXYTrendDir(xtTokens);
+          if (xtDir) {
+            var xtConsistency = _xyTrendConsistency(xtTokens, xtDir);
+            if (xtConsistency >= xtConsistencyMin) {
+              // Sign-align the unsigned PCA axis with the current direction
+              var xtSignDot = xtDir[0] * dirX + xtDir[1] * dirY;
+              if (xtSignDot < 0) { xtDir[0] = -xtDir[0]; xtDir[1] = -xtDir[1]; }
+              // Blend amount scales linearly with consistency above threshold
+              var xtBlend = xtBlendWeight *
+                            ((xtConsistency - xtConsistencyMin) / (1.0 - xtConsistencyMin));
+              var xtBX = dirX * (1.0 - xtBlend) + xtDir[0] * xtBlend;
+              var xtBY = dirY * (1.0 - xtBlend) + xtDir[1] * xtBlend;
+              var xtBMag = Math.sqrt(xtBX * xtBX + xtBY * xtBY);
+              if (xtBMag > 0.1) {
+                dirX = xtBX / xtBMag; dirY = xtBY / xtBMag;
+                perpX = -dirY; perpY = dirX;
+              }
+            }
+          }
+        }
+      }
+
       // Periodically re-anchor the drift baseline so smooth curves
       // can accumulate gradual direction change without terminating.
       stepsSinceBaseUpdate++;
@@ -1503,153 +1687,247 @@
   }
 
   /**
-   * Lookahead probe: simulate a short greedy continuation from a candidate
-   * token to see if a coherent future path exists beyond it.
+   * Lookahead probe: simulate a short continuation from a candidate token to
+   * evaluate the quality of the future path beyond it.
    *
    * This is a READ-ONLY probe — no links are committed, no state is mutated.
-   * Each probe step applies the same strict validity filters used by the
-   * real extension loop (distance, corridor, tangent alignment, color).
+   * Each probe step applies the same strict validity filters used by the real
+   * extension loop (distance, corridor, tangent alignment, color).
+   *
+   * BEAM SEARCH: At each step, the probe expands the top `beamWidth` candidates
+   * rather than a single greedy pick. All beams advance in parallel; only the
+   * best-scoring beam path is kept at each level. This makes the probe
+   * significantly better at finding valid futures through ambiguous transitions
+   * where a single greedy step would dead-end.
+   *
+   * DENSITY BONUS: Candidates surrounded by other nearby tokens (not in-chain)
+   * receive a small bonus score. This represents "structural richness ahead" —
+   * leading into a denser token field is generally better than stepping into an
+   * empty region. It gives a positive signal even when the path dead-ends at
+   * the next step but the candidate sits in a meaningful token cluster.
    *
    * Returns:
-   *   depth:    number of valid continuation steps found (0..maxDepth)
-   *   score:    0..1, depth/maxDepth weighted by average step quality
+   *   depth:          valid continuation steps found (0..maxDepth)
+   *   score:          0..1, quality-weighted depth ratio
+   *   coherenceScore: 0..1, direction stability of the probed path
    *
-   * The probe is greedy (best-scoring candidate at each step) and bounded.
-   * It does NOT branch or backtrack — this is intentionally cheap.
-   *
-   * @param {Object} startTok    - the candidate token to probe from
-   * @param {number} probeDirX   - initial probe direction X (unit)
-   * @param {number} probeDirY   - initial probe direction Y (unit)
-   * @param {Object} extGrid     - spatial grid for token lookup
-   * @param {number} extCellSize - grid cell size
-   * @param {Object} inChain     - set of token IDs already in the chain
-   * @param {Object} tokenById   - token lookup
-   * @param {number} maxDist     - max step distance
-   * @param {number} dirMin      - min tangent alignment
-   * @param {number} colorTol    - color tolerance
-   * @param {number} corridorHW  - lateral half-width
-   * @param {number} maxDepth    - max probe steps
+   * @param {Object} startTok      - candidate token to probe from
+   * @param {number} probeDirX/Y   - initial probe direction (unit vector)
+   * @param {Object} extGrid       - spatial grid for token lookup
+   * @param {number} extCellSize   - grid cell size
+   * @param {Object} inChain       - set of token IDs already in the chain
+   * @param {Object} tokenById     - token lookup
+   * @param {number} maxDist       - max step distance
+   * @param {number} dirMin        - min tangent alignment
+   * @param {number} colorTol      - color tolerance
+   * @param {number} corridorHW    - lateral half-width
+   * @param {number} maxDepth      - max probe steps
+   * @param {number} beamWidth     - candidates to try at each step (default 1 = greedy)
+   * @param {number} densityRadius - radius for density count bonus (0 = disabled)
+   * @param {number} densityWeight - max score bonus from density (0 = disabled)
    */
   function _lookaheadProbe(startTok, probeDirX, probeDirY,
                            extGrid, extCellSize, inChain, tokenById,
-                           maxDist, dirMin, colorTol, corridorHW, maxDepth) {
-    var depth = 0;
-    var totalQuality = 0;
-    var curTok = startTok;
-    var curDirX = probeDirX, curDirY = probeDirY;
-    var probeUsed = {}; // tokens consumed by this probe (not really in chain)
-    probeUsed[startTok.id] = true;
+                           maxDist, dirMin, colorTol, corridorHW, maxDepth,
+                           beamWidth, densityRadius, densityWeight) {
+    beamWidth = beamWidth || 1;
+    densityRadius = densityRadius || 0;
+    densityWeight = densityWeight || 0;
 
-    // Track step directions to measure direction coherence (structural quality
-    // of the probed future). Straight segments and smooth curves score high;
-    // jittery or reversing paths score low.
-    var stepDirXs = [];
-    var stepDirYs = [];
+    // ── Beam state ──
+    // Each beam: { curTok, curDirX, curDirY, probeUsed, stepDirXs, stepDirYs,
+    //              totalQuality, depth }
+    // We track all active beams across steps and keep only top beamWidth
+    // by combined score at each level, then return the best survivor.
+    var beams = [{
+      curTok:       startTok,
+      curDirX:      probeDirX,
+      curDirY:      probeDirY,
+      probeUsed:    {},    // shallow copy per beam branch below
+      stepDirXs:    [],
+      stepDirYs:    [],
+      totalQuality: 0,
+      depth:        0
+    }];
+    beams[0].probeUsed[startTok.id] = true;
 
     for (var step = 0; step < maxDepth; step++) {
-      var perpX = -curDirY, perpY = curDirX;
+      var nextBeams = [];
 
-      // Gather strict-valid candidates from curTok in curDir
-      // (same filters as the real extension loop)
-      var bestScore = -1;
-      var bestTok = null;
-      var bestAlong = 0;
+      for (var bi = 0; bi < beams.length; bi++) {
+        var bm = beams[bi];
+        var perpX = -bm.curDirY, perpY = bm.curDirX;
 
-      for (var si = 1; si <= maxDist; si += extCellSize * 0.5) {
-        var scanX = curTok.x + curDirX * si;
-        var scanY = curTok.y + curDirY * si;
-        var sgx = (scanX / extCellSize) | 0;
-        var sgy = (scanY / extCellSize) | 0;
-        for (var gdy = -1; gdy <= 1; gdy++) {
-          for (var gdx = -1; gdx <= 1; gdx++) {
-            var gk = (sgx + gdx) + ',' + (sgy + gdy);
-            var bucket = extGrid[gk];
-            if (!bucket) continue;
-            for (var bi = 0; bi < bucket.length; bi++) {
-              var cand = bucket[bi];
-              if (inChain[cand.id] || probeUsed[cand.id]) continue;
+        // ── Collect all strict-valid candidates from this beam position ──
+        var stepCands = [];
 
-              var relX = cand.x - curTok.x;
-              var relY = cand.y - curTok.y;
-              var along = relX * curDirX + relY * curDirY;
-              var across = Math.abs(relX * perpX + relY * perpY);
+        for (var si = 1; si <= maxDist; si += extCellSize * 0.5) {
+          var scanX = bm.curTok.x + bm.curDirX * si;
+          var scanY = bm.curTok.y + bm.curDirY * si;
+          var sgx = (scanX / extCellSize) | 0;
+          var sgy = (scanY / extCellSize) | 0;
+          for (var gdy = -1; gdy <= 1; gdy++) {
+            for (var gdx = -1; gdx <= 1; gdx++) {
+              var gk = (sgx + gdx) + ',' + (sgy + gdy);
+              var bucket = extGrid[gk];
+              if (!bucket) continue;
+              for (var bki = 0; bki < bucket.length; bki++) {
+                var cand = bucket[bki];
+                if (inChain[cand.id] || bm.probeUsed[cand.id]) continue;
 
-              if (along < 1 || along > maxDist || across > corridorHW) continue;
+                var relX = cand.x - bm.curTok.x;
+                var relY = cand.y - bm.curTok.y;
+                var along = relX * bm.curDirX + relY * bm.curDirY;
+                var across = Math.abs(relX * perpX + relY * perpY);
 
-              var tokDirDot = Math.abs(cand.tangentX * curDirX + cand.tangentY * curDirY);
-              var tokEndDot = Math.abs(cand.tangentX * curTok.tangentX +
-                                       cand.tangentY * curTok.tangentY);
-              var dirScore = Math.max(tokDirDot, tokEndDot);
-              if (dirScore < dirMin) continue;
+                if (along < 1 || along > maxDist || across > corridorHW) continue;
 
-              var llD = _labDist(curTok.leftLab, cand.leftLab);
-              var rrD = _labDist(curTok.rightLab, cand.rightLab);
-              var lrD = _labDist(curTok.leftLab, cand.rightLab);
-              var rlD = _labDist(curTok.rightLab, cand.leftLab);
-              var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
-              var colorScore = Math.max(0, 1.0 - cDist / colorTol);
+                var tokDirDot = Math.abs(cand.tangentX * bm.curDirX + cand.tangentY * bm.curDirY);
+                var tokEndDot = Math.abs(cand.tangentX * bm.curTok.tangentX +
+                                         cand.tangentY * bm.curTok.tangentY);
+                var dirScore = Math.max(tokDirDot, tokEndDot);
+                if (dirScore < dirMin) continue;
 
-              var score = dirScore * 0.40 +
-                          (1.0 - along / maxDist) * 0.30 +
-                          (1.0 - across / corridorHW) * 0.20 +
-                          colorScore * 0.10;
+                var llD = _labDist(bm.curTok.leftLab, cand.leftLab);
+                var rrD = _labDist(bm.curTok.rightLab, cand.rightLab);
+                var lrD = _labDist(bm.curTok.leftLab, cand.rightLab);
+                var rlD = _labDist(bm.curTok.rightLab, cand.leftLab);
+                var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+                var colorScore = Math.max(0, 1.0 - cDist / colorTol);
 
-              if (score > bestScore) {
-                bestScore = score;
-                bestTok = cand;
-                bestAlong = along;
+                var score = dirScore * 0.40 +
+                            (1.0 - along / maxDist) * 0.30 +
+                            (1.0 - across / corridorHW) * 0.20 +
+                            colorScore * 0.10;
+
+                // ── Density bonus: nearby non-chain tokens signal structural richness ──
+                // Counts tokens within densityRadius that are neither in-chain
+                // nor already consumed by this beam. A denser neighbourhood is
+                // a positive signal for downstream continuability, even if this
+                // specific probe dead-ends at the next step.
+                if (densityWeight > 0 && densityRadius > 0) {
+                  var densCount = 0;
+                  var densR2 = densityRadius * densityRadius;
+                  var densCellR = Math.ceil(densityRadius / extCellSize);
+                  var dcx = (cand.x / extCellSize) | 0;
+                  var dcy = (cand.y / extCellSize) | 0;
+                  for (var ddy = -densCellR; ddy <= densCellR; ddy++) {
+                    for (var ddx = -densCellR; ddx <= densCellR; ddx++) {
+                      var dk = (dcx + ddx) + ',' + (dcy + ddy);
+                      var dbucket = extGrid[dk];
+                      if (!dbucket) continue;
+                      for (var dbi = 0; dbi < dbucket.length; dbi++) {
+                        var dt = dbucket[dbi];
+                        if (dt.id === cand.id || inChain[dt.id] || bm.probeUsed[dt.id]) continue;
+                        var ddxr = dt.x - cand.x, ddyr = dt.y - cand.y;
+                        if (ddxr * ddxr + ddyr * ddyr <= densR2) densCount++;
+                      }
+                    }
+                  }
+                  // Saturate at 5 neighbours: beyond that the density is clearly high
+                  score += densityWeight * Math.min(1.0, densCount / 5.0);
+                }
+
+                stepCands.push({ tok: cand, score: score, along: along });
               }
             }
           }
         }
-      }
 
-      if (!bestTok) break; // no valid continuation at this depth
+        if (stepCands.length === 0) {
+          // This beam dead-ends here — preserve it at current depth so it
+          // still contributes its accumulated quality to the final ranking.
+          nextBeams.push(bm);
+          continue;
+        }
 
-      // Valid step found — advance the probe
-      depth++;
-      totalQuality += bestScore;
-      probeUsed[bestTok.id] = true;
+        // Sort and pick top beamWidth candidates to expand this beam
+        stepCands.sort(function(a, b) { return b.score - a.score; });
+        var toExpand = Math.min(stepCands.length, beamWidth);
 
-      // Update probe direction toward the new token (allows curve following)
-      var stepDx = bestTok.x - curTok.x;
-      var stepDy = bestTok.y - curTok.y;
-      var stepMag = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
-      if (stepMag > 0.1) {
-        var rawStepX = stepDx / stepMag;
-        var rawStepY = stepDy / stepMag;
-        // Record the raw step direction for coherence measurement
-        stepDirXs.push(rawStepX);
-        stepDirYs.push(rawStepY);
+        for (var ei = 0; ei < toExpand; ei++) {
+          var sc = stepCands[ei];
 
-        // Blend: 60% step direction + 40% previous direction (smooth curve tracking)
-        var blendX = rawStepX * 0.6 + curDirX * 0.4;
-        var blendY = rawStepY * 0.6 + curDirY * 0.4;
-        var blendMag = Math.sqrt(blendX * blendX + blendY * blendY);
-        if (blendMag > 0.1) {
-          curDirX = blendX / blendMag;
-          curDirY = blendY / blendMag;
+          // Update probe direction: blend step direction with beam direction
+          var stepDx = sc.tok.x - bm.curTok.x;
+          var stepDy = sc.tok.y - bm.curTok.y;
+          var stepMag = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
+          var newDirX = bm.curDirX, newDirY = bm.curDirY;
+          var rawStepX = bm.curDirX, rawStepY = bm.curDirY;
+          if (stepMag > 0.1) {
+            rawStepX = stepDx / stepMag;
+            rawStepY = stepDy / stepMag;
+            var blendX = rawStepX * 0.6 + bm.curDirX * 0.4;
+            var blendY = rawStepY * 0.6 + bm.curDirY * 0.4;
+            var blendMag = Math.sqrt(blendX * blendX + blendY * blendY);
+            if (blendMag > 0.1) { newDirX = blendX / blendMag; newDirY = blendY / blendMag; }
+          }
+
+          // Create child beam (shallow copy of probeUsed with new entry)
+          var childUsed = {};
+          for (var uk in bm.probeUsed) childUsed[uk] = true;
+          childUsed[sc.tok.id] = true;
+
+          var childStepDirXs = bm.stepDirXs.slice();
+          var childStepDirYs = bm.stepDirYs.slice();
+          childStepDirXs.push(rawStepX);
+          childStepDirYs.push(rawStepY);
+
+          nextBeams.push({
+            curTok:       sc.tok,
+            curDirX:      newDirX,
+            curDirY:      newDirY,
+            probeUsed:    childUsed,
+            stepDirXs:    childStepDirXs,
+            stepDirYs:    childStepDirYs,
+            totalQuality: bm.totalQuality + sc.score,
+            depth:        bm.depth + 1
+          });
         }
       }
 
-      curTok = bestTok;
+      if (nextBeams.length === 0) break;
+
+      // Rank beams by (totalQuality / max(depth, 1)) descending,
+      // keep only top beamWidth so cost stays bounded
+      nextBeams.sort(function(a, b) {
+        var qa = a.totalQuality / Math.max(a.depth, 1);
+        var qb = b.totalQuality / Math.max(b.depth, 1);
+        return qb - qa;
+      });
+      beams = nextBeams.slice(0, beamWidth);
     }
 
-    // Compute direction coherence across the probed path.
+    // ── Select best beam ──
+    // Among all surviving beams, pick the one with the greatest depth,
+    // breaking ties by total quality.
+    var bestBeam = beams[0];
+    for (var fi = 1; fi < beams.length; fi++) {
+      var candidate = beams[fi];
+      if (candidate.depth > bestBeam.depth ||
+          (candidate.depth === bestBeam.depth &&
+           candidate.totalQuality > bestBeam.totalQuality)) {
+        bestBeam = candidate;
+      }
+    }
+
+    var depth = bestBeam ? bestBeam.depth : 0;
+    var totalQuality = bestBeam ? bestBeam.totalQuality : 0;
+    var stepDirXs = bestBeam ? bestBeam.stepDirXs : [];
+    var stepDirYs = bestBeam ? bestBeam.stepDirYs : [];
+
+    // ── Direction coherence ──
     // Average dot product between consecutive step directions:
-    //   ~1.0 = straight or smoothly curving future (structurally clean)
+    //   ~1.0 = straight or smoothly curving (structurally clean)
     //   ~0.7 = mild jitter or gentle curve changes (acceptable)
-    //   < 0.5 = zigzag or reversing path (structurally weak)
-    // For depth < 2 we have no consecutive steps to compare — use a
-    // neutral value (0.5) that neither rewards nor penalizes.
-    var coherenceScore = 0.5; // neutral default for depth 0 or 1
+    //   < 0.5 = zigzag / reversing path (structurally weak)
+    // Neutral value 0.5 for paths too short to compare.
+    var coherenceScore = 0.5;
     if (stepDirXs.length >= 2) {
       var dotSum = 0;
       for (var di = 0; di < stepDirXs.length - 1; di++) {
-        var sdot = stepDirXs[di] * stepDirXs[di + 1] + stepDirYs[di] * stepDirYs[di + 1];
-        dotSum += sdot; // raw dot: -1..1; positive = consistent direction
+        dotSum += stepDirXs[di] * stepDirXs[di + 1] + stepDirYs[di] * stepDirYs[di + 1];
       }
-      // Map to 0..1: dot=1.0 → score=1.0, dot=-1.0 → score=0.0
       var avgDot = dotSum / (stepDirXs.length - 1);
       coherenceScore = (avgDot + 1.0) * 0.5;
     }
@@ -1732,12 +2010,269 @@
     };
   }
 
+  /**
+   * Closure pass: detect chains that should be closed (looped) or joined.
+   *
+   * Two modes:
+   *
+   * 1. SELF-CLOSURE (same-chain loop): A chain is long enough that its two
+   *    endpoints are within closureMaxGapPx of each other, AND the outward
+   *    trends from both ends point toward each other (trend agreement).
+   *    When accepted, the endpoints are linked, making the chain a loop.
+   *
+   * 2. CROSS-CHAIN REJOIN: Two chains (not already bridged or part of the
+   *    same component) have endpoints within closureMaxGapPx, both trends
+   *    point toward each other, and side colors are compatible. When
+   *    accepted, the chains are joined via adjacency (merged downstream).
+   *
+   * Both modes are STRICTLY geometric: no links are created across tokenless
+   * voids. The gap must be within the threshold, and geometric agreement
+   * (trend dot products > closureTrendMin) is enforced as a hard gate.
+   * Color compatibility provides a soft bonus but is NOT a hard rejection.
+   *
+   * This pass runs AFTER extension and bridging. It catches cases where
+   * extension understeered at a transition and left a small closing gap
+   * that bridging also missed (bridge is endpoint-pair focused; closure
+   * is trend-coherence focused).
+   *
+   * Modifies adjacency in-place. Returns { closureCount }.
+   */
+  function _closurePass(chains, loops, adjacency, tokenById, cfg) {
+    if (cfg.closureEnabled === false) return { closureCount: 0 };
+
+    var minLen   = cfg.closureMinChainLen != null ? cfg.closureMinChainLen : 6;
+    var maxGap   = cfg.closureMaxGapPx    != null ? cfg.closureMaxGapPx   : 24;
+    var trendMin = cfg.closureTrendMin    != null ? cfg.closureTrendMin    : 0.40;
+    var colorTol = cfg.closureColorTol    != null ? cfg.closureColorTol    : 35;
+
+    // Build set of loop token IDs (chains already detected as loops)
+    var loopSet = {};
+    for (var li = 0; li < loops.length; li++) {
+      var lids = loops[li].ids;
+      for (var lj = 0; lj < lids.length; lj++) loopSet[lids[lj]] = true;
+    }
+
+    var closureCount = 0;
+    var maxGap2 = maxGap * maxGap;
+
+    // Collect all candidate endpoints (first/last token of each qualifying chain)
+    // with their outward trend direction.
+    var endpoints = [];
+    for (var ei = 0; ei < chains.length; ei++) {
+      var ch = chains[ei].ids;
+      if (ch.length < minLen) continue;
+      var firstId = ch[0], lastId = ch[ch.length - 1];
+      // Skip if already a confirmed loop
+      if (loopSet[firstId] && loopSet[lastId]) continue;
+
+      var firstTok = tokenById[firstId], lastTok = tokenById[lastId];
+      if (!firstTok || !lastTok) continue;
+
+      // Use _chainEndTrend for outward trend (consistent with bridging)
+      var ft = _chainEndTrend(ch, true,  tokenById);
+      var lt = _chainEndTrend(ch, false, tokenById);
+
+      endpoints.push({ tok: firstTok, chainIdx: ei, isFirst: true,  trendX: ft[0], trendY: ft[1] });
+      endpoints.push({ tok: lastTok,  chainIdx: ei, isFirst: false, trendX: lt[0], trendY: lt[1] });
+    }
+
+    // ── Pass A: Same-chain self-closure ──
+    // For each chain, check if its own two endpoints can be linked.
+    var closedChains = {};
+    for (var pi = 0; pi < endpoints.length; pi++) {
+      var epA = endpoints[pi];
+      if (!epA.isFirst) continue;          // only check start→end pairs once
+      var chainA = chains[epA.chainIdx];
+      if (!chainA || chainA.ids.length < minLen) continue;
+      if (closedChains[epA.chainIdx]) continue;
+
+      // Find the matching end endpoint of this same chain
+      var epEnd = null;
+      for (var pj = 0; pj < endpoints.length; pj++) {
+        if (pj !== pi && endpoints[pj].chainIdx === epA.chainIdx && !endpoints[pj].isFirst) {
+          epEnd = endpoints[pj];
+          break;
+        }
+      }
+      if (!epEnd) continue;
+
+      var tokA = epA.tok, tokZ = epEnd.tok;
+      var gdx = tokZ.x - tokA.x, gdy = tokZ.y - tokA.y;
+      var gap2 = gdx * gdx + gdy * gdy;
+      if (gap2 < 4 || gap2 > maxGap2) continue;
+
+      var gap = Math.sqrt(gap2);
+      var invGap = 1.0 / gap;
+      var gapDirX = gdx * invGap, gapDirY = gdy * invGap;
+
+      // _chainEndTrend(ch, fromStart) returns a unit vector pointing OUTWARD
+      // from the endpoint (away from chain interior).
+      // gapDir = (Z - A) / |Z - A| points from start A toward end Z.
+      //
+      // For self-closure: A's outward trend should face TOWARD Z (+gapDir),
+      // and Z's outward trend should face TOWARD A (-gapDir).
+      var trendDotA = epA.trendX  * gapDirX       + epA.trendY  * gapDirY;
+      var trendDotZ = epEnd.trendX * (-gapDirX)   + epEnd.trendY * (-gapDirY);
+
+      if (trendDotA < trendMin || trendDotZ < trendMin) continue;
+
+      // Color: the two endpoints should share similar boundary context
+      var llD = _labDist(tokA.leftLab,  tokZ.leftLab);
+      var rrD = _labDist(tokA.rightLab, tokZ.rightLab);
+      var lrD = _labDist(tokA.leftLab,  tokZ.rightLab);
+      var rlD = _labDist(tokA.rightLab, tokZ.leftLab);
+      var bestColor = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+      if (bestColor > colorTol * 2) continue; // hard-reject only on very large mismatch
+
+      // Accept: link endpoints
+      if (adjacency[tokA.id].indexOf(tokZ.id) < 0) {
+        adjacency[tokA.id].push(tokZ.id);
+        adjacency[tokZ.id].push(tokA.id);
+        closureCount++;
+        closedChains[epA.chainIdx] = true;
+      }
+    }
+
+    // ── Pass B: Cross-chain rejoin ──
+    // Find pairs of endpoints from DIFFERENT chains that are close and trend-compatible.
+    // This catches cases where extension from two separate chains almost but didn't quite meet.
+    for (var pi2 = 0; pi2 < endpoints.length; pi2++) {
+      var eA = endpoints[pi2];
+      for (var pj2 = pi2 + 1; pj2 < endpoints.length; pj2++) {
+        var eB = endpoints[pj2];
+        if (eA.chainIdx === eB.chainIdx) continue; // same chain handled in Pass A
+
+        var tA = eA.tok, tB = eB.tok;
+        var cgdx = tB.x - tA.x, cgdy = tB.y - tA.y;
+        var cgap2 = cgdx * cgdx + cgdy * cgdy;
+        if (cgap2 < 4 || cgap2 > maxGap2) continue;
+
+        // Already linked?
+        if (adjacency[tA.id].indexOf(tB.id) >= 0) continue;
+
+        var cgap = Math.sqrt(cgap2);
+        var cinvGap = 1.0 / cgap;
+        var cgapDirX = cgdx * cinvGap, cgapDirY = cgdy * cinvGap;
+
+        // Each endpoint's outward trend should face toward the other endpoint.
+        // cgapDir = (eB - eA) / |eB - eA|
+        // eA's trend should align with +cgapDir (toward eB).
+        // eB's trend should align with -cgapDir (toward eA).
+        var ctA = eA.trendX * cgapDirX + eA.trendY * cgapDirY;
+        var ctB = eB.trendX * (-cgapDirX) + eB.trendY * (-cgapDirY);
+
+        if (ctA < trendMin || ctB < trendMin) continue;
+
+        // Color compatibility
+        var cllD = _labDist(tA.leftLab,  tB.leftLab);
+        var crrD = _labDist(tA.rightLab, tB.rightLab);
+        var clrD = _labDist(tA.leftLab,  tB.rightLab);
+        var crlD = _labDist(tA.rightLab, tB.leftLab);
+        var cBestColor = Math.min((cllD + crrD) * 0.5, (clrD + crlD) * 0.5);
+        if (cBestColor > colorTol * 2) continue;
+
+        // Gap score (stronger preference for small gaps)
+        var gapScore = 1.0 - (cgap / maxGap);
+        var trendScore = Math.min(ctA, ctB);
+        var colorScore = Math.max(0, 1.0 - cBestColor / colorTol);
+        var combined = trendScore * 0.50 + gapScore * 0.35 + colorScore * 0.15;
+        if (combined < 0.35) continue;
+
+        // Accept
+        adjacency[tA.id].push(tB.id);
+        adjacency[tB.id].push(tA.id);
+        closureCount++;
+      }
+    }
+
+    return { closureCount: closureCount };
+  }
+
   /** Compute unit direction vector from token A to token B. */
   function _computeDirectionTo(tokA, tokB) {
     var dx = tokB.x - tokA.x, dy = tokB.y - tokA.y;
     var mag = Math.sqrt(dx * dx + dy * dy);
     if (mag < 0.1) return null;
     return [dx / mag, dy / mag];
+  }
+
+  /**
+   * Compute the principal axis direction for a set of tokens using PCA.
+   *
+   * Fits a line through the spatial positions of the tokens and returns
+   * a unit direction vector [dx, dy] along the dominant variance axis.
+   * This is orientation-agnostic (no sign) — sign-align with a reference
+   * direction before using for directional decisions.
+   *
+   * Unlike _computeChainEndDirection (which requires ordered sequential
+   * positions), this function works on any unordered cluster of tokens
+   * and is robust to irregular spacing and mild outliers.
+   *
+   * Returns null if the token cluster is degenerate (< 2 tokens or all
+   * coincident).
+   */
+  function _computeXYTrendDir(tokens) {
+    var n = tokens.length;
+    if (n < 2) return null;
+
+    // Compute centroid
+    var cx = 0, cy = 0;
+    for (var i = 0; i < n; i++) { cx += tokens[i].x; cy += tokens[i].y; }
+    cx /= n; cy /= n;
+
+    // 2×2 spatial covariance matrix entries
+    var sxx = 0, sxy = 0, syy = 0;
+    for (var j = 0; j < n; j++) {
+      var dx = tokens[j].x - cx, dy = tokens[j].y - cy;
+      sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+    }
+
+    // Dominant eigenvector of [[sxx, sxy], [sxy, syy]].
+    // For the larger eigenvalue λ = (sxx+syy)/2 + sqrt(((sxx-syy)/2)² + sxy²),
+    // the eigenvector is [sxy, λ - sxx] (unnormalized).
+    var trace2 = (sxx + syy) * 0.5;
+    var diff2  = (sxx - syy) * 0.5;
+    var disc   = Math.sqrt(diff2 * diff2 + sxy * sxy);
+    var lambda = trace2 + disc;
+    var evX    = sxy;
+    var evY    = lambda - sxx;
+    var evMag  = Math.sqrt(evX * evX + evY * evY);
+
+    if (evMag < 0.01) {
+      // Degenerate: tokens nearly coincident or symmetric; fall back to axis
+      return (sxx >= syy) ? [1, 0] : [0, 1];
+    }
+    return [evX / evMag, evY / evMag];
+  }
+
+  /**
+   * Measure how well a direction vector fits a set of tokens (PCA explained
+   * variance ratio, analogous to R²).
+   *
+   * Returns 0..1:
+   *   1.0 = all tokens perfectly collinear along trendDir
+   *   0.5 = tokens have equal variance along and perpendicular to trendDir
+   *   0.0 = all variance is perpendicular (trendDir is the minor axis)
+   *
+   * A value >= 0.65 indicates that the tokens clearly form a line-like
+   * arrangement — safe to use for directional blending.
+   */
+  function _xyTrendConsistency(tokens, trendDir) {
+    var n = tokens.length;
+    if (n < 2 || !trendDir) return 0;
+
+    var cx = 0, cy = 0;
+    for (var i = 0; i < n; i++) { cx += tokens[i].x; cy += tokens[i].y; }
+    cx /= n; cy /= n;
+
+    var varAlong = 0, varTotal = 0;
+    for (var j = 0; j < n; j++) {
+      var dx = tokens[j].x - cx, dy = tokens[j].y - cy;
+      var along = dx * trendDir[0] + dy * trendDir[1];
+      varAlong += along * along;
+      varTotal += dx * dx + dy * dy;
+    }
+    return varTotal > 0.01 ? Math.min(1, varAlong / varTotal) : 0;
   }
 
   /* ==================================================================
