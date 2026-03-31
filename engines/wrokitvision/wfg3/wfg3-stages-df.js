@@ -81,6 +81,8 @@
     lookaheadMaxDepth:          4,    // max probe steps beyond candidate
     lookaheadScoreWeight:       0.25, // weight of lookahead score in candidate ranking
     lookaheadDriftRescueDepth:  2,    // min future steps to rescue a borderline drift step
+    lookaheadCoherenceFraction: 0.30, // fraction of lookahead weight devoted to direction
+                                      // coherence (stable curvature / clean segment preference)
 
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
     bridgeEnabled:          true,
@@ -1101,10 +1103,11 @@
     var lookaheadCfg = null;
     if (cfg.lookaheadEnabled !== false) {
       lookaheadCfg = {
-        enabled:          true,
-        maxDepth:         cfg.lookaheadMaxDepth || 4,
-        scoreWeight:      cfg.lookaheadScoreWeight != null ? cfg.lookaheadScoreWeight : 0.25,
-        driftRescueDepth: cfg.lookaheadDriftRescueDepth || 2
+        enabled:            true,
+        maxDepth:           cfg.lookaheadMaxDepth || 4,
+        scoreWeight:        cfg.lookaheadScoreWeight != null ? cfg.lookaheadScoreWeight : 0.25,
+        driftRescueDepth:   cfg.lookaheadDriftRescueDepth || 2,
+        coherenceFraction:  cfg.lookaheadCoherenceFraction != null ? cfg.lookaheadCoherenceFraction : 0.30
       };
     }
 
@@ -1193,6 +1196,7 @@
     var laMaxDepth = laEnabled ? lookaheadCfg.maxDepth : 0;
     var laScoreWeight = laEnabled ? lookaheadCfg.scoreWeight : 0;
     var laDriftRescueDepth = laEnabled ? lookaheadCfg.driftRescueDepth : 0;
+    var laCoherenceFraction = laEnabled ? (lookaheadCfg.coherenceFraction || 0.30) : 0;
 
     var inChain = {};
     for (var vi = 0; vi < ids.length; vi++) inChain[ids[vi]] = true;
@@ -1348,9 +1352,16 @@
                                    extGrid, extCellSize, inChain, tokenById,
                                    maxDist, dirMin, colorTol, corridorHW, laMaxDepth);
 
-          // Augmented score: base score + lookahead bonus
-          // The lookahead score (0..1) is weighted by laScoreWeight.
-          var augScore = probeCand.score * (1.0 - laScoreWeight) + la.score * laScoreWeight;
+          // Augmented score: base score + lookahead composite.
+          // The lookahead composite blends depth/quality with direction
+          // coherence (stable curvature preference). Coherence fraction
+          // controls how much of the lookahead weight is coherence vs
+          // depth/quality. Total lookahead influence = laScoreWeight (25%).
+          // Max coherence influence = laScoreWeight × coherenceFraction = 7.5%.
+          // Local base score always dominates at (1 - laScoreWeight) = 75%.
+          var laComposite = la.score * (1.0 - laCoherenceFraction) +
+                            la.coherenceScore * laCoherenceFraction;
+          var augScore = probeCand.score * (1.0 - laScoreWeight) + laComposite * laScoreWeight;
 
           if (augScore > bestAugScore) {
             bestAugScore = augScore;
@@ -1529,6 +1540,12 @@
     var probeUsed = {}; // tokens consumed by this probe (not really in chain)
     probeUsed[startTok.id] = true;
 
+    // Track step directions to measure direction coherence (structural quality
+    // of the probed future). Straight segments and smooth curves score high;
+    // jittery or reversing paths score low.
+    var stepDirXs = [];
+    var stepDirYs = [];
+
     for (var step = 0; step < maxDepth; step++) {
       var perpX = -curDirY, perpY = curDirX;
 
@@ -1599,9 +1616,15 @@
       var stepDy = bestTok.y - curTok.y;
       var stepMag = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
       if (stepMag > 0.1) {
+        var rawStepX = stepDx / stepMag;
+        var rawStepY = stepDy / stepMag;
+        // Record the raw step direction for coherence measurement
+        stepDirXs.push(rawStepX);
+        stepDirYs.push(rawStepY);
+
         // Blend: 60% step direction + 40% previous direction (smooth curve tracking)
-        var blendX = (stepDx / stepMag) * 0.6 + curDirX * 0.4;
-        var blendY = (stepDy / stepMag) * 0.6 + curDirY * 0.4;
+        var blendX = rawStepX * 0.6 + curDirX * 0.4;
+        var blendY = rawStepY * 0.6 + curDirY * 0.4;
         var blendMag = Math.sqrt(blendX * blendX + blendY * blendY);
         if (blendMag > 0.1) {
           curDirX = blendX / blendMag;
@@ -1612,9 +1635,29 @@
       curTok = bestTok;
     }
 
+    // Compute direction coherence across the probed path.
+    // Average dot product between consecutive step directions:
+    //   ~1.0 = straight or smoothly curving future (structurally clean)
+    //   ~0.7 = mild jitter or gentle curve changes (acceptable)
+    //   < 0.5 = zigzag or reversing path (structurally weak)
+    // For depth < 2 we have no consecutive steps to compare — use a
+    // neutral value (0.5) that neither rewards nor penalizes.
+    var coherenceScore = 0.5; // neutral default for depth 0 or 1
+    if (stepDirXs.length >= 2) {
+      var dotSum = 0;
+      for (var di = 0; di < stepDirXs.length - 1; di++) {
+        var sdot = stepDirXs[di] * stepDirXs[di + 1] + stepDirYs[di] * stepDirYs[di + 1];
+        dotSum += sdot; // raw dot: -1..1; positive = consistent direction
+      }
+      // Map to 0..1: dot=1.0 → score=1.0, dot=-1.0 → score=0.0
+      var avgDot = dotSum / (stepDirXs.length - 1);
+      coherenceScore = (avgDot + 1.0) * 0.5;
+    }
+
     return {
       depth: depth,
-      score: maxDepth > 0 ? (depth / maxDepth) * (depth > 0 ? totalQuality / depth : 0) : 0
+      score: maxDepth > 0 ? (depth / maxDepth) * (depth > 0 ? totalQuality / depth : 0) : 0,
+      coherenceScore: coherenceScore
     };
   }
 
