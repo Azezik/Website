@@ -20706,6 +20706,10 @@ const _glFamilyStore = _glStore?.createGraphFamilyStore ? _glStore.createGraphFa
 const _gsStore = window.GroupingSupervisionStore || null;
 const _groupingSupervision = _gsStore?.createGroupingSupervisionStore ? _gsStore.createGroupingSupervisionStore(localStorage) : null;
 
+// Re-entrancy guard: prevents duplicate pipeline execution (e.g. a UI-triggered
+// listener firing while Stage D is already running synchronously).
+var _glGenerationInProgress = false;
+
 function graphLearningStatus(msg){
   var text = msg || '';
   if(els.graphLearningStatus) els.graphLearningStatus.textContent = text;
@@ -20983,11 +20987,16 @@ function syncGraphLearningCanvases(){
   return { base, overlay, width: surf.width, height: surf.height };
 }
 
-function renderGraphLearningBaseSurface(){
-  const synced = syncGraphLearningCanvases();
+function renderGraphLearningBaseSurface(synced){
+  if(!synced) synced = syncGraphLearningCanvases();
   if(!synced) return;
   const gl = state.graphLearning;
   const surf = gl.normalizedSurface;
+  // Skip pixel-copy if the canvas already shows this exact surface object.
+  // normalizedSurface is only replaced on new upload/normalization, so
+  // checking reference identity is sufficient and avoids an expensive
+  // O(w×h) pixel loop on every overlay-only re-render.
+  if(synced.base._renderedSurface === surf) return;
   const ctx = synced.base.getContext('2d', { willReadFrequently: true });
   const out = new Uint8ClampedArray(surf.width * surf.height * 4);
   const hasColor = surf.rgb && surf.rgb.r;
@@ -21005,6 +21014,7 @@ function renderGraphLearningBaseSurface(){
     out[j + 3] = 255;
   }
   ctx.putImageData(new ImageData(out, surf.width, surf.height), 0, 0);
+  synced.base._renderedSurface = surf;
 }
 
 function paintGraphLearningOverlay(ctx){
@@ -21395,7 +21405,7 @@ function paintGraphLearningOverlay(ctx){
 function renderGraphLearningViewer(){
   const synced = syncGraphLearningCanvases();
   if(!synced) return;
-  renderGraphLearningBaseSurface();
+  renderGraphLearningBaseSurface(synced);
   const octx = synced.overlay.getContext('2d');
   octx.clearRect(0, 0, synced.width, synced.height);
   paintGraphLearningOverlay(octx);
@@ -21404,7 +21414,13 @@ function renderGraphLearningViewer(){
 function clearGraphLearningViewer(){
   const base = els.graphLearningBaseCanvas;
   const overlay = els.graphLearningOverlayCanvas;
-  if(base){ const bctx = base.getContext('2d'); bctx.clearRect(0, 0, base.width || 1, base.height || 1); base.style.width = ''; base.style.height = ''; }
+  if(base){
+    const bctx = base.getContext('2d');
+    bctx.clearRect(0, 0, base.width || 1, base.height || 1);
+    base.style.width = ''; base.style.height = '';
+    // Invalidate surface cache so the next upload re-draws the base layer.
+    base._renderedSurface = null;
+  }
   if(overlay){ const octx = overlay.getContext('2d'); octx.clearRect(0, 0, overlay.width || 1, overlay.height || 1); overlay.style.width = ''; overlay.style.height = ''; }
 }
 
@@ -21436,8 +21452,13 @@ function graphLearningCaptureAttempt(result, feedback){
 }
 
 function graphLearningRunGeneration(opts){
+  if(_glGenerationInProgress){
+    console.warn('[GraphLearning] graphLearningRunGeneration called while already in progress; skipping duplicate.');
+    return;
+  }
+  _glGenerationInProgress = true;
   var engine = getGraphLearningEngine();
-  if(!engine || !state.graphLearning.normalizedSurface) return;
+  if(!engine || !state.graphLearning.normalizedSurface){ _glGenerationInProgress = false; return; }
   const gl = state.graphLearning;
   if(opts?.feedback) gl.params = engine.adaptParametersFromFeedback(gl.params || engine.DEFAULT_PARAMS, opts.feedback);
   if(!gl.params) gl.params = engine.copyParams(engine.DEFAULT_PARAMS);
@@ -21495,6 +21516,7 @@ function graphLearningRunGeneration(opts){
     graphLearningStatus(graphLearningEngineLabel() + ' attempt ' + gl.attemptNumber + ': ' + (gl.graph?.nodes?.length || 0) + ' regions, ' + (gl.graph?.edges?.length || 0) + ' edges' + modeTag + partTag + colorTag + closureTag + calTag + nocolourTag + '.');
   }
   renderGraphLearningViewer();
+  _glGenerationInProgress = false;
 }
 
 function graphLearningCaptureGray(page){
@@ -21612,7 +21634,6 @@ async function graphLearningOpenFile(file){
   gl.currentVariantLabel = 'baseline';
   gl.currentStrategy = startSource;
 
-  renderGraphLearningBaseSurface();
   graphLearningRunGeneration();
   graphLearningUpdateTrainingBar();
   graphLearningUpdateRegenCount();

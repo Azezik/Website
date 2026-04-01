@@ -318,19 +318,22 @@
       var ordered = _orderChain(comp2, adjacency, tokenById);
 
       // Detect loop: if the first and last token in the ordered chain are
-      // connected and the component has no degree-1 nodes
+      // connected and the component has no degree-1 nodes.
+      // Build an O(1) lookup for component membership to avoid O(n) indexOf
+      // inside the degree-check loop (was O(n²) per component with large chains).
       var isLoop = false;
       if (ordered.length >= 6) {
         var first = ordered[0], last = ordered[ordered.length - 1];
         var firstNeis = adjacency[first];
         if (firstNeis.indexOf(last) >= 0) {
-          // Check if all nodes have degree >= 2
+          var inComp2 = {};
+          for (var ii2 = 0; ii2 < comp2.length; ii2++) inComp2[comp2[ii2]] = true;
           var allDeg2 = true;
           for (var li = 0; li < ordered.length; li++) {
             var deg = 0;
             var tokNeis = adjacency[ordered[li]];
             for (var lj = 0; lj < tokNeis.length; lj++) {
-              if (comp2.indexOf(tokNeis[lj]) >= 0) deg++;
+              if (inComp2[tokNeis[lj]]) deg++;
             }
             if (deg < 2) { allDeg2 = false; break; }
           }
@@ -413,12 +416,15 @@
           if (ordered2.length >= 6) {
             var first2 = ordered2[0], last2 = ordered2[ordered2.length - 1];
             if (adjacency[first2].indexOf(last2) >= 0) {
+              // Build O(1) lookup to avoid O(n) indexOf inside degree-check loop.
+              var inComp4 = {};
+              for (var ii4 = 0; ii4 < comp4.length; ii4++) inComp4[comp4[ii4]] = true;
               var allDeg2b = true;
               for (var li2 = 0; li2 < ordered2.length; li2++) {
                 var deg2 = 0;
                 var tokNeis2 = adjacency[ordered2[li2]];
                 for (var lj2 = 0; lj2 < tokNeis2.length; lj2++) {
-                  if (comp4.indexOf(tokNeis2[lj2]) >= 0) deg2++;
+                  if (inComp4[tokNeis2[lj2]]) deg2++;
                 }
                 if (deg2 < 2) { allDeg2b = false; break; }
               }
@@ -589,11 +595,15 @@
     if (!ordered || ordered.length < 6) return false;
     var first = ordered[0], last = ordered[ordered.length - 1];
     if (!adjacency[first] || adjacency[first].indexOf(last) < 0) return false;
+    // Build O(1) membership lookup — avoids O(n) Array.indexOf inside the
+    // degree-check loop, which was O(n²) per component with large chains.
+    var inComp = {};
+    for (var ci = 0; ci < componentIds.length; ci++) inComp[componentIds[ci]] = true;
     for (var i = 0; i < ordered.length; i++) {
       var deg = 0;
       var neis = adjacency[ordered[i]] || [];
       for (var j = 0; j < neis.length; j++) {
-        if (componentIds.indexOf(neis[j]) >= 0) deg++;
+        if (inComp[neis[j]]) deg++;
       }
       if (deg < 2) return false;
     }
@@ -2136,16 +2146,41 @@
     // ── Pass B: Cross-chain rejoin ──
     // Find pairs of endpoints from DIFFERENT chains that are close and trend-compatible.
     // This catches cases where extension from two separate chains almost but didn't quite meet.
+    //
+    // Spatial index: group endpoints into cells sized (maxGap+1) so each endpoint
+    // only needs to check its 3×3 cell neighbourhood — O(n) instead of O(n²).
+    var clCellSize = maxGap + 1;
+    var clGrid = {};
+    for (var gi2 = 0; gi2 < endpoints.length; gi2++) {
+      var gep = endpoints[gi2];
+      var gcx = (gep.tok.x / clCellSize) | 0;
+      var gcy = (gep.tok.y / clCellSize) | 0;
+      var gck = gcx + ',' + gcy;
+      if (!clGrid[gck]) clGrid[gck] = [];
+      clGrid[gck].push(gi2);
+    }
+
     for (var pi2 = 0; pi2 < endpoints.length; pi2++) {
       var eA = endpoints[pi2];
-      for (var pj2 = pi2 + 1; pj2 < endpoints.length; pj2++) {
-        var eB = endpoints[pj2];
-        if (eA.chainIdx === eB.chainIdx) continue; // same chain handled in Pass A
+      var tA = eA.tok;
+      var acx = (tA.x / clCellSize) | 0;
+      var acy = (tA.y / clCellSize) | 0;
 
-        var tA = eA.tok, tB = eB.tok;
-        var cgdx = tB.x - tA.x, cgdy = tB.y - tA.y;
-        var cgap2 = cgdx * cgdx + cgdy * cgdy;
-        if (cgap2 < 4 || cgap2 > maxGap2) continue;
+      for (var ndy = -1; ndy <= 1; ndy++) {
+        for (var ndx = -1; ndx <= 1; ndx++) {
+          var nck = (acx + ndx) + ',' + (acy + ndy);
+          var ncell = clGrid[nck];
+          if (!ncell) continue;
+          for (var nci = 0; nci < ncell.length; nci++) {
+            var pj2 = ncell[nci];
+            if (pj2 <= pi2) continue; // process each pair once
+            var eB = endpoints[pj2];
+            if (eA.chainIdx === eB.chainIdx) continue; // same chain handled in Pass A
+
+            var tB = eB.tok;
+            var cgdx = tB.x - tA.x, cgdy = tB.y - tA.y;
+            var cgap2 = cgdx * cgdx + cgdy * cgdy;
+            if (cgap2 < 4 || cgap2 > maxGap2) continue;
 
         // Already linked?
         if (adjacency[tA.id].indexOf(tB.id) >= 0) continue;
@@ -2182,8 +2217,10 @@
         adjacency[tA.id].push(tB.id);
         adjacency[tB.id].push(tA.id);
         closureCount++;
-      }
-    }
+          } // nci
+        }   // ndx
+      }     // ndy
+    }       // pi2
 
     return { closureCount: closureCount };
   }
