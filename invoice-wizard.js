@@ -21563,6 +21563,56 @@ function graphLearningCaptureGray(page){
   return { gray, r, g, b, width: w, height: h };
 }
 
+/**
+ * Lightweight surface-only file loader for Graph Learning.
+ *
+ * The full openFile() pipeline does far more than Graph Learning needs:
+ *   - SHA-256 hash of the entire file
+ *   - renderTelemetry() DOM update
+ *   - cleanupDoc() which resets the wizard state and triggers a tab switch
+ *     back to the document dashboard
+ *   - ensureTokensForPage() / buildKeywordIndexForPage() (OCR) — for images
+ *     these run BEFORE the graphLearning.active guard so they always execute
+ *   - preloadAcroFormTokensFromBuffer() / flattenAcroFormAppearances() for PDFs
+ *   - profile calibration, drawOverlay, etc.
+ *
+ * All we actually need is the rendered canvas so graphLearningCaptureGray()
+ * can read pixel data.  Everything else is dead weight that causes the
+ * ~76-second textContent / DOM scripting block seen in the performance trace.
+ */
+async function _graphLearningLoadSurface(file){
+  const isImage = /^image\//.test(file.type || '');
+  state.isImage = isImage;
+  state.pdf = null;
+  state.grayCanvases = {};
+  state.pageViewports = [];
+  state.pageOffsets = [];
+  state.pageRenderPromises = [];
+  state.pageRenderReady = [];
+
+  if(isImage){
+    els.imgCanvas.style.display = 'block';
+    els.pdfCanvas.style.display = 'none';
+    const url = URL.createObjectURL(file);
+    replacePendingBlobUrl(url);
+    await renderImage(url);
+    state.pageNum = 1;
+    state.numPages = 1;
+    state.viewport = state.pageViewports[0] || { w: els.imgCanvas.width || 0, h: els.imgCanvas.height || 0, scale: 1 };
+  } else {
+    // PDF: load and render to canvas without AcroForm flattening or OCR
+    els.imgCanvas.style.display = 'none';
+    els.pdfCanvas.style.display = 'block';
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjsLibRef.getDocument({ data: arrayBuffer });
+    state.pdf = await loadingTask.promise;
+    state.pageNum = 1;
+    state.numPages = state.pdf.numPages;
+    await renderAllPages();
+    state.viewport = state.pageViewports[0] || { w: 0, h: 0, scale: 1 };
+  }
+}
+
 async function graphLearningOpenFile(file){
   var engine = getGraphLearningEngine();
   if(!file || !engine) return;
@@ -21586,9 +21636,13 @@ async function graphLearningOpenFile(file){
   graphLearningStatus('Loading file…');
   state.selectedEngineType = ENGINE_KIND.WROKIT_VISION;
   try {
-    await openFile(file);
+    // Use the lightweight surface loader instead of the full openFile() pipeline.
+    // openFile() runs OCR, SHA-256 hashing, telemetry rendering, AcroForm processing,
+    // and tab switching — none of which Graph Learning needs. Those operations are what
+    // caused the ~76-second textContent/DOM scripting block in the performance trace.
+    await _graphLearningLoadSurface(file);
   } catch(err){
-    console.error('[' + graphLearningEngineLabel() + '][GraphLearning] openFile failed', err);
+    console.error('[' + graphLearningEngineLabel() + '][GraphLearning] surface load failed', err);
     clearGraphLearningViewer();
     graphLearningStatus('Could not load this file for Graph Learning.');
     return;
