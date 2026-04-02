@@ -23033,7 +23033,8 @@ paintGraphLearningOverlay = function(ctx){
   var seedModeLabels = {
     'tile_min_coverage': 'TileMinCov',
     'global_stride': 'GlobalStride',
-    'uniform_scaffold': 'UniformScaffold'
+    'uniform_scaffold': 'UniformScaffold',
+    'structured_contour': 'StructuredContour'
   };
   var seedInfo = 'seed: ' + (seedModeLabels[seedMode] || seedMode);
   if(seedMode === 'uniform_scaffold'){
@@ -23041,6 +23042,10 @@ paintGraphLearningOverlay = function(ctx){
     if(prm.scaffoldStaggered) seedInfo += '  |  staggered';
     if(prm.scaffoldSnapEnabled) seedInfo += '  |  snap';
     seedInfo += '  |  gate=' + (prm.scaffoldEvidenceGateMin != null ? prm.scaffoldEvidenceGateMin : 0.04);
+  } else if(seedMode === 'structured_contour'){
+    seedInfo += '  |  minComp=' + (prm.structuredContourMinCompSize || 10) + 'px';
+    seedInfo += '  |  arcStep=' + (prm.structuredContourArcStep || 8) + 'px';
+    seedInfo += '  |  curvBoost=' + (prm.structuredContourCurvatureBoost != null ? prm.structuredContourCurvatureBoost : 2.0);
   } else {
     if(prm.seedStaggeredPass) seedInfo += '  |  staggered';
     if(prm.seedRefinementEnabled) seedInfo += '  |  corridor-refine';

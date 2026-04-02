@@ -1203,8 +1203,9 @@
                   <option value="tile_min_coverage">Tile Min Coverage (experimental — recommended)</option>
                   <option value="global_stride">Global Stride (original)</option>
                   <option value="uniform_scaffold">Uniform Scaffold (experimental — fair spatial sampling)</option>
+                  <option value="structured_contour">Structured Contour (structure-aware — PCA tangents + arc sampling)</option>
                 </select>
-                <p class="sub" style="margin:4px 0 0;color:var(--muted);font-size:11px;">Global Stride = sample every Nth edge pixel. Tile Min Coverage = spatially fair, evidence-aware seeding with guaranteed coverage per tile. Uniform Scaffold = regular lattice with light evidence gating — reduces early suppression of weaker boundaries.</p>
+                <p class="sub" style="margin:4px 0 0;color:var(--muted);font-size:11px;">Global Stride = sample every Nth edge pixel. Tile Min Coverage = spatially fair, evidence-aware seeding with guaranteed coverage per tile. Uniform Scaffold = regular lattice with light evidence gating — reduces early suppression of weaker boundaries. Structured Contour = connected-component noise filtering, arc-traced spacing, PCA tangents, fan color sampling.</p>
               </div>
               <div style="margin-bottom:10px;">
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
