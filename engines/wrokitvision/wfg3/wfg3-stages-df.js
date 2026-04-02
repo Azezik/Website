@@ -53,80 +53,82 @@
   /* ── Default config for Stages D–F ── */
 
   var DEFAULT_CONFIG_DF = Object.freeze({
-    // Stage D
-    graphNeighborRadius:     9,
-    graphForwardRadius:      16,
-    graphForwardDirMin:      0.70,
-    graphForwardLateralMax:  4,
-    graphOrientationTolDeg: 45,
+    // Stage D — Pass 1: Geometry-first token linking
+    //
+    // CRITICAL: graphNeighborRadius must be >= scaffoldSpacingPx (Stage C)
+    // so that tokens placed on the scaffold grid can reach each other in
+    // Zone 1 (omnidirectional). Previous value of 9 was less than the
+    // scaffold spacing of 12, forcing all scaffold-distance links through
+    // Zone 2's strict tangent alignment gate — which curves cannot pass.
+    graphNeighborRadius:     14,   // was 9; must cover scaffold spacing + snap tolerance
+    graphForwardRadius:      20,   // was 16; extended for sparser regions
+    graphForwardDirMin:      0.55, // was 0.70; softened for curves in Zone 2
+    graphForwardLateralMax:  5,    // was 4; slight increase for curved boundaries
+    graphOrientationTolDeg: 55,    // was 45; more tolerant for curves
     graphSideDeltaETol:    25,
     chainMinLength:        2,
-    linkScoreThreshold:    0.32,
-    chainExtensionMaxDist: 40,
-    chainExtensionDirAlign: 0.50,
+    linkScoreThreshold:    0.22,   // was 0.32; lowered to accept curve-adjacent tokens
+
+    // Stage D — Pass 1b: Chain endpoint continuation
+    chainExtensionMaxDist: 24,     // was 40; reduced to prevent long invalid jumps
+    chainExtensionDirAlign: 0.40,  // was 0.50; softened for curve following
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
-    chainExtensionMaxDirDrift: 0.40,
+    chainExtensionMaxDirDrift: 0.55, // was 0.40; softened so curves don't trigger drift kill
 
     // Microchaining: use local strict-link populations to reinforce continuation
     microchainEnabled:          true,
-    microchainMinCandidates:    3,    // min candidates to activate microchain logic
-    microchainCoherenceThresh:  0.50, // min dot product for candidates to be "coherent"
-    microchainDriftRelief:      0.50, // how much microchain support can soften drift gate (0..1)
-    microchainSupportDecay:     0.85, // per-step decay of accumulated support (momentum)
-    microchainSupportFloor:     0.15, // accumulated support below this = no relief
+    microchainMinCandidates:    2,    // was 3; activate with fewer candidates for sparser regions
+    microchainCoherenceThresh:  0.40, // was 0.50; lowered for curve tokens
+    microchainDriftRelief:      0.65, // was 0.50; stronger relief when support is present
+    microchainSupportDecay:     0.90, // was 0.85; slower decay preserves momentum through curves
+    microchainSupportFloor:     0.10, // was 0.15; lower floor so relief activates sooner
 
     // Lookahead: short-horizon continuation probe (2-4 steps ahead)
     lookaheadEnabled:           true,
     lookaheadMaxDepth:          4,    // max probe steps beyond candidate
-    lookaheadScoreWeight:       0.25, // weight of lookahead score in candidate ranking
+    lookaheadScoreWeight:       0.30, // was 0.25; slightly stronger lookahead influence
     lookaheadDriftRescueDepth:  2,    // min future steps to rescue a borderline drift step
-    lookaheadCoherenceFraction: 0.30, // fraction of lookahead weight devoted to direction
-                                      // coherence (stable curvature / clean segment preference)
+    lookaheadCoherenceFraction: 0.25, // was 0.30; slightly less coherence weight so curves aren't penalized
 
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
     bridgeEnabled:          true,
-    bridgeMaxGapPx:         18,
-    bridgeDirAgreementMin:  0.50,
-    bridgeSideDeltaETol:    30,
-    bridgeMinCombinedScore: 0.30,
+    bridgeMaxGapPx:         24,    // was 18; larger gaps to reconnect fragmented curves
+    bridgeDirAgreementMin:  0.40,  // was 0.50; softened for curve endpoints
+    bridgeSideDeltaETol:    35,    // was 30; slightly more tolerant
+    bridgeMinCombinedScore: 0.25,  // was 0.30; accept more borderline bridges
 
     // Stage D: Structural outlier pruning
+    //
+    // CRITICAL: Previous thresholds were calibrated for straight boundaries.
+    // Curve/circle/swirl tokens naturally have higher direction deviation
+    // between neighbors. Softened to preserve curve structure.
     outlierPruneEnabled:    true,
-    outlierDirDeviationMax: 0.35,
+    outlierDirDeviationMax: 0.55,  // was 0.35; curves have higher neighbor deviation
     outlierMinNeighborSupport: 2,
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
 
     // Stage D: Multi-token XY trend reasoning
-    // When recent chain tokens clearly form a coherent linear/curved arrangement
-    // in XY space, blend that PCA-derived direction into the extension direction.
-    // This makes extension less brittle when individual token tangents are noisy.
     xyTrendEnabled:          true,
-    xyTrendWindowSize:       10,   // tokens used for XY trend PCA fit
-    xyTrendMinTokens:        4,    // minimum chain tokens needed to activate
-    xyTrendBlendWeight:      0.30, // max blend weight of XY trend (0 = off, 1 = full)
-    xyTrendConsistencyMin:   0.65, // min R²-like fit quality to use trend at all
+    xyTrendWindowSize:       10,
+    xyTrendMinTokens:        4,
+    xyTrendBlendWeight:      0.35, // was 0.30; slightly stronger spatial trend influence
+    xyTrendConsistencyMin:   0.55, // was 0.65; activate trend blending sooner for noisy regions
 
     // Stage D: Lookahead upgrade
-    // Depth increase + beam search + density bonus
-    lookaheadBeamWidth:      2,    // how many candidates to try at each probe step
-    lookaheadDensityRadius:  12,   // radius (px) for structural density count bonus
-    lookaheadDensityWeight:  0.10, // max score bonus from nearby structural density
+    lookaheadBeamWidth:      3,    // was 2; wider beam for better curve path discovery
+    lookaheadDensityRadius:  14,   // was 12; slightly wider density sensing
+    lookaheadDensityWeight:  0.15, // was 0.10; stronger density preference
 
     // Stage D: Closure pass
-    // After extension, detect chains whose endpoints are geometrically close
-    // and link them when the geometry (endpoint trends) supports it.
     closureEnabled:          true,
-    closureMinChainLen:      6,    // minimum chain token count to attempt closure
-    closureMaxGapPx:         24,   // maximum gap allowed for closure connection
-    closureTrendMin:         0.40, // minimum trend agreement for closure acceptance
-    closureColorTol:         35,   // side-color tolerance for closure acceptance
+    closureMinChainLen:      4,    // was 6; attempt closure on shorter chains too
+    closureMaxGapPx:         32,   // was 24; larger gap for curve endpoints
+    closureTrendMin:         0.30, // was 0.40; softer trend requirement for curves
+    closureColorTol:         40,   // was 35; slightly more tolerant
 
     // Stage D: Branch anchor recovery
-    // When _recoverResidualChains finds tokens not covered by the primary ordering,
-    // include the primary-chain junction token as an anchor so that T-junction arms
-    // are rooted at the real branch point rather than appearing as floating fragments.
     branchAnchorEnabled:     true,
 
     // Stage E
@@ -145,6 +147,31 @@
 
   function stageD_boundaryGraph(tokens, cfg) {
     cfg = cfg || DEFAULT_CONFIG_DF;
+
+    // ── Phase 0 Diagnostics: track rejection reasons throughout the pipeline ──
+    var _diag = {
+      totalTokens: tokens.length,
+      pass1_linksEvaluated: 0,
+      pass1_linksAccepted: 0,
+      pass1_rejectedPerpendicular: 0,
+      pass1_rejectedZone2Dir: 0,
+      pass1_rejectedZone2Lateral: 0,
+      pass1_rejectedZone2ConnAlign: 0,
+      pass1_rejectedLinkScore: 0,
+      pass1_componentsFound: 0,
+      pass1_tokensInComponents: 0,
+      pass1_tokensOrphaned: 0,
+      extension_chainsExtended: 0,
+      extension_totalStepsAdded: 0,
+      extension_driftKills: 0,
+      extension_noCandidates: 0,
+      extension_driftRescues: 0,
+      outlier_prunedCount: 0,
+      finalChainCount: 0,
+      finalLoopCount: 0,
+      finalTokensInChains: 0
+    };
+
     // Derive image dimensions from token positions (needed only for chain mask rasterization)
     var W = cfg.imageWidth || 0, H = cfg.imageHeight || 0;
     for (var di = 0; di < tokens.length; di++) {
@@ -211,14 +238,16 @@
             var dot = a.tangentX * b.tangentX + a.tangentY * b.tangentY;
             var dirScore = Math.abs(dot);
 
-            // Hard floor: reject truly perpendicular tangents (>80°)
-            if (dirScore < 0.17) continue; // cos(80°) ≈ 0.17
+            _diag.pass1_linksEvaluated++;
+
+            // Hard floor: reject truly perpendicular tangents (>85°)
+            if (dirScore < 0.09) { _diag.pass1_rejectedPerpendicular++; continue; } // cos(85°) ≈ 0.087
 
             if (!inBaseRadius) {
               // ── Zone 2: directionally-biased forward reach ──
               // Only accept if both tangents are well-aligned and the
               // connection vector runs along the tangent direction (not across).
-              if (dirScore < fwdDirMin) continue;
+              if (dirScore < fwdDirMin) { _diag.pass1_rejectedZone2Dir++; continue; }
 
               // Decompose the connection vector into along-tangent and
               // across-tangent components using the average tangent direction.
@@ -240,7 +269,7 @@
               var lateralDist = Math.abs(ddx * (-avgTy) + ddy * avgTx);
 
               // Reject if lateral offset is too large (prevents cross-edge links)
-              if (lateralDist > fwdLatMax) continue;
+              if (lateralDist > fwdLatMax) { _diag.pass1_rejectedZone2Lateral++; continue; }
 
               // Also check that the connection vector aligns with tangents.
               // This catches cases where tangents are parallel but the token
@@ -249,7 +278,7 @@
               var connDotA = Math.abs(a.tangentX * ddx + a.tangentY * ddy) / connMag;
               var connDotB = Math.abs(b.tangentX * ddx + b.tangentY * ddy) / connMag;
               var connAlign = Math.min(connDotA, connDotB);
-              if (connAlign < 0.50) continue;
+              if (connAlign < 0.35) { _diag.pass1_rejectedZone2ConnAlign++; continue; }
             }
 
             // ── Scoring ──
@@ -272,8 +301,9 @@
             // Geometry-dominant weighting: direction 50%, distance 40%, color 10%
             var linkScore = 0.50 * dirScore + 0.40 * distScore + 0.10 * colorScore;
 
-            if (linkScore < linkThreshold) continue;
+            if (linkScore < linkThreshold) { _diag.pass1_rejectedLinkScore++; continue; }
 
+            _diag.pass1_linksAccepted++;
             adjacency[a.id].push(b.id);
             adjacency[b.id].push(a.id);
           }
@@ -303,8 +333,12 @@
       }
       if (comp.length >= cfg.chainMinLength) {
         components.push(comp);
+        _diag.pass1_tokensInComponents += comp.length;
+      } else {
+        _diag.pass1_tokensOrphaned += comp.length;
       }
     }
+    _diag.pass1_componentsFound = components.length;
 
     // Order each chain spatially for meaningful chain structure
     var tokenById = {};
@@ -363,7 +397,7 @@
      *  chain's directional trend. No image evidence is consulted.
      * ================================================================ */
 
-    _extendChainEndpoints(chains, adjacency, tokenById, cfg);
+    _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag);
 
     /* ================================================================
      *  Pass 2: Bridge Candidates
@@ -491,6 +525,7 @@
     // neighbors structurally (direction, color), regardless of confidence.
     if (cfg.outlierPruneEnabled !== false) {
       var cleanup = _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg);
+      _diag.outlier_prunedCount = cleanup.prunedCount;
       if (cleanup.prunedCount > 0) {
         components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
         chains = [];
@@ -549,6 +584,16 @@
       }
     }
 
+    // ── Final diagnostics ──
+    _diag.finalChainCount = chains.length;
+    _diag.finalLoopCount = loops.length;
+    var _diagTokSet = {};
+    for (var _dci = 0; _dci < chains.length; _dci++) {
+      var _dch = chains[_dci].ids;
+      for (var _dcj = 0; _dcj < _dch.length; _dcj++) _diagTokSet[_dch[_dcj]] = true;
+    }
+    for (var _dk in _diagTokSet) _diag.finalTokensInChains++;
+
     return {
       kind: 'wfg3-boundary-graph',
       adjacency: adjacency,
@@ -557,7 +602,8 @@
       chainMask: chainMask,
       bridgeEdgeList: bridgeEdgeList,
       bridgesEvaluated: bridgesEvaluated,
-      bridgesAccepted: bridgesAccepted
+      bridgesAccepted: bridgesAccepted,
+      diagnostics: _diag
     };
   }
 
@@ -689,12 +735,15 @@
         // Spatial zigzag: the angle between consecutive segments.
         // On a smooth boundary, consecutive segments are roughly collinear.
         // A sharp reversal (negative dot) indicates a zigzag.
+        // NOTE: On curves/swirls, consecutive segments naturally have lower
+        // dot products. Only flag truly reversed segments (< -0.5) and
+        // require both tangent AND spatial mismatch to prune.
         var segDot = (d1x * d2x + d1y * d2y) / (m1 * m2);
-        if (segDot < -0.3) {
+        if (segDot < -0.5) { // was -0.3; only flag true reversals, not gentle curves
           // Sharp spatial reversal — this token is a zigzag outlier.
-          // But only prune if it also fails tangent consistency.
+          // But only prune if it also fails tangent consistency by a wide margin.
           var fitC = _tokenNeighborFit(curTok, adjacency[curTok.id] || [], tokenById);
-          if (fitC.dirDev > dirDevMax * 0.8) {
+          if (fitC.dirDev > dirDevMax * 0.9) { // was 0.8; require stronger mismatch
             removed[curTok.id] = true;
           }
         }
@@ -702,12 +751,14 @@
         // Also check: token tangent deviates from the local chain trend
         // (prev→next direction), which catches off-trend tokens that happen
         // to be spatially in-line but oriented wrong.
+        // NOTE: On tight curves the tangent can legitimately be at a large
+        // angle to the prev→next chord. Only prune near-perpendicular cases.
         var trendX = nextTok.x - prevTok.x, trendY = nextTok.y - prevTok.y;
         var trendMag = Math.sqrt(trendX * trendX + trendY * trendY);
         if (trendMag > 0.5) {
           var trendDot = Math.abs(curTok.tangentX * trendX + curTok.tangentY * trendY) / trendMag;
-          // trendDot < 0.3 means tangent is nearly perpendicular to local flow
-          if (trendDot < 0.25) {
+          // trendDot < 0.15 means tangent is truly perpendicular to local flow
+          if (trendDot < 0.15) { // was 0.25; softened to preserve curve tokens
             removed[curTok.id] = true;
           }
         }
@@ -1208,13 +1259,13 @@
    *  No image evidence maps are consulted.
    * ================================================================ */
 
-  function _extendChainEndpoints(chains, adjacency, tokenById, cfg) {
+  function _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag) {
     var maxDist = cfg.chainExtensionMaxDist || 40;
     var dirMin = cfg.chainExtensionDirAlign || 0.50;
     var colorTol = cfg.chainExtensionColorTol || 40;
     var trendWindow = cfg.chainExtensionTrendWindow || 4;
     var maxDirDrift = cfg.chainExtensionMaxDirDrift || 0.40;
-    var corridorHW = 8; // lateral half-width for candidate search
+    var corridorHW = 12; // was 8; widened to capture candidates on curved boundaries
 
     // Microchaining configuration
     var microchainCfg = null;
@@ -1315,14 +1366,19 @@
       var ids = chain.ids;
       if (ids.length < 2) continue;
 
+      var _extBefore = ids.length;
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg, xyTrendCfg, densityCache);
+                   microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg, xyTrendCfg, densityCache);
+                   microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag);
+      if (ids.length > _extBefore) {
+        _diag.extension_chainsExtended++;
+        _diag.extension_totalStepsAdded += (ids.length - _extBefore);
+      }
     }
   }
 
@@ -1347,7 +1403,7 @@
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
                         maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                        microchainCfg, lookaheadCfg, xyTrendCfg, densityCache) {
+                        microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag) {
     if (ids.length < 2) return;
 
     // Compute initial chain-end direction from recent tokens
@@ -1360,7 +1416,7 @@
     // This allows smooth curves to extend while still catching wandering.
     var baseDirX = dirX, baseDirY = dirY;
     var stepsSinceBaseUpdate = 0;
-    var baseUpdateInterval = 3; // re-anchor baseline every N extensions
+    var baseUpdateInterval = 2; // was 3; re-anchor more often so curves track smoothly
 
     // Microchaining state: accumulated support momentum.
     // Starts at 0 (no history); builds as coherent populations are found;
@@ -1398,7 +1454,7 @@
     if (!endTok) return;
 
     var extensionCount = 0;
-    var maxExtensions = 15;
+    var maxExtensions = 50; // was 15; increased so chains can follow full circle/swirl boundaries
 
     while (extensionCount < maxExtensions) {
       extensionCount++;
@@ -1467,7 +1523,7 @@
         }
       }
 
-      if (candidates.length === 0) break;
+      if (candidates.length === 0) { if (_diag) _diag.extension_noCandidates++; break; }
 
       /* ── Microchaining: local strict-link population analysis ──
        *
@@ -1606,13 +1662,15 @@
           // Immediate step exceeds drift threshold — check for lookahead rescue
           var rescued = false;
           if (laEnabled && selectedLookahead && selectedLookahead.depth >= laDriftRescueDepth) {
-            // Only rescue within a bounded overshoot zone (up to 2x threshold).
+            // Only rescue within a bounded overshoot zone (up to 2.5x threshold).
             // Beyond that, the step is too divergent regardless of future.
-            if (driftFromBase <= effectiveDriftMax * 2.0) {
+            // Was 2.0x — increased to 2.5x so curve transitions with valid futures survive.
+            if (driftFromBase <= effectiveDriftMax * 2.5) {
               rescued = true;
+              if (_diag) _diag.extension_driftRescues++;
             }
           }
-          if (!rescued) break;
+          if (!rescued) { if (_diag) _diag.extension_driftKills++; break; }
         }
       }
 

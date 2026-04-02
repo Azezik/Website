@@ -74,30 +74,32 @@
     scaffoldMinSpacing: 5,
 
     // Stage D (token-native, geometry-first)
-    graphNeighborRadius: 9,
-    graphForwardRadius: 16,
-    graphForwardDirMin: 0.70,
-    graphForwardLateralMax: 4,
-    graphOrientationTolDeg: 45,
+    // NOTE: graphNeighborRadius must be >= scaffoldSpacingPx to ensure
+    // scaffold-grid tokens can reach each other in Zone 1 (omnidirectional).
+    graphNeighborRadius: 14,
+    graphForwardRadius: 20,
+    graphForwardDirMin: 0.55,
+    graphForwardLateralMax: 5,
+    graphOrientationTolDeg: 55,
     graphSideDeltaETol: 25,
     chainMinLength: 2,
-    linkScoreThreshold: 0.32,
-    chainExtensionMaxDist: 40,
-    chainExtensionDirAlign: 0.50,
+    linkScoreThreshold: 0.22,
+    chainExtensionMaxDist: 24,
+    chainExtensionDirAlign: 0.40,
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
-    chainExtensionMaxDirDrift: 0.40,
+    chainExtensionMaxDirDrift: 0.55,
 
     // Stage D: Pass-2 Bridging (geometry-first)
     bridgeEnabled: true,
-    bridgeMaxGapPx: 18,
-    bridgeDirAgreementMin: 0.50,
-    bridgeSideDeltaETol: 30,
-    bridgeMinCombinedScore: 0.30,
+    bridgeMaxGapPx: 24,
+    bridgeDirAgreementMin: 0.40,
+    bridgeSideDeltaETol: 35,
+    bridgeMinCombinedScore: 0.25,
 
     // Stage D: Structural outlier pruning (geometry-only)
     outlierPruneEnabled: true,
-    outlierDirDeviationMax: 0.35,
+    outlierDirDeviationMax: 0.55,
     outlierMinNeighborSupport: 2,
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
