@@ -1273,10 +1273,12 @@
     // are not excluded — but since we saturate at 5 neighbors and chains are a small
     // fraction of total tokens, the error is negligible in practice.
     var densityCache = null;
-    if (laDensityWeight > 0 && laDensityRadius > 0) {
+    var _dcDensityRadius = lookaheadCfg ? (lookaheadCfg.densityRadius || 0) : 0;
+    var _dcDensityWeight = lookaheadCfg ? (lookaheadCfg.densityWeight || 0) : 0;
+    if (_dcDensityWeight > 0 && _dcDensityRadius > 0) {
       densityCache = {};
-      var _dcR2 = laDensityRadius * laDensityRadius;
-      var _dcCellR = Math.ceil(laDensityRadius / extCellSize);
+      var _dcR2 = _dcDensityRadius * _dcDensityRadius;
+      var _dcCellR = Math.ceil(_dcDensityRadius / extCellSize);
       for (var _dcKey in tokenById) {
         var _dcTok = tokenById[_dcKey];
         var _dcCx = (_dcTok.x / extCellSize) | 0;
