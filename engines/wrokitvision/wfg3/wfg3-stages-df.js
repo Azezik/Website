@@ -1302,7 +1302,8 @@
     // Global probe budget: cap total lookahead probes across all chains
     // to prevent runaway computation on dense token fields.
     // Budget scales with token count but is capped to prevent O(n²) blowup.
-    var probeBudget = { remaining: Math.min(tokens.length * 20, 40000) };
+    var tokenCount = Object.keys(tokenById).length;
+    var probeBudget = { remaining: Math.min(tokenCount * 20, 40000) };
 
     for (var ci = 0; ci < chains.length; ci++) {
       var chain = chains[ci];
