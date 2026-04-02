@@ -121,7 +121,21 @@
     scaffoldSnapRadius:       4,     // max pixels to snap toward a stronger local peak
     scaffoldSnapEnabled:      true,  // enable/disable local snap
     scaffoldMaxTokens:        25000, // global token cap (browser safety)
-    scaffoldMinSpacing:       5      // minimum distance between final tokens after snap
+    scaffoldMinSpacing:       5,     // minimum distance between final tokens after snap
+
+    // Stage C: Structured contour mode (tokenSeedingMode = 'structured_contour')
+    // Uses connected component analysis + arc tracing + PCA tangents + fan color sampling.
+    structuredContourMinCompSize:       10,   // min edge pixels for a structural component (smaller = noise)
+    structuredContourMinTokensPerComp:  2,    // minimum tokens to place per structural component
+    structuredContourMaxTokensPerComp:  400,  // maximum tokens per structural component
+    structuredContourArcStep:           8,    // base arc-length interval between tokens (pixels)
+    structuredContourCurvatureBoost:    2.0,  // density multiplier at high-curvature regions
+    structuredContourNmsRadius:         4,    // intra-component NMS suppression radius (pixels)
+
+    // Stage C: Enhanced token construction (used by structured_contour internally)
+    tokenEnhancedTangentRadius:         5,    // neighborhood radius (px) for PCA tangent estimation
+    tokenSideFanCount:                  3,    // sample points per side for averaged color
+    tokenSideFanSpread:                 2     // tangent-axis offset per fan sample (px)
   });
 
   /* ==================================================================
@@ -1106,6 +1120,489 @@
     return { tokens: tokens, debugInfo: debugInfo };
   }
 
+  /* ── Structured Contour mode: component analysis ── */
+
+  /**
+   * _computeComponentInfo
+   * Runs connected-component labeling on edgeBinary and classifies each
+   * component as structural (size >= minSize) or noise (size < minSize).
+   *
+   * Returns:
+   *   labels:          Int32Array  — per-pixel component id (0 = background)
+   *   count:           number      — total number of components
+   *   sizes:           Int32Array  — pixel count per component id
+   *   isNoise:         Uint8Array  — 1 if component id is noise
+   *   noiseMap:        Uint8Array  — 1 for pixels belonging to noise components
+   *   componentPixels: Object      — compId → Array<flatPixelIndex> (structural only)
+   */
+  function _computeComponentInfo(edgeBinary, w, h, minSize) {
+    var n = w * h;
+    var cc = CV.connectedComponents(edgeBinary, w, h);
+    var labels = cc.labels;
+    var count  = cc.count;
+
+    // Count pixels per component
+    var sizes = new Int32Array(count + 1);
+    for (var i = 0; i < n; i++) {
+      if (labels[i] > 0) sizes[labels[i]]++;
+    }
+
+    // Mark components too small to be structural boundaries
+    var isNoise = new Uint8Array(count + 1);
+    for (var c = 1; c <= count; c++) {
+      if (sizes[c] < minSize) isNoise[c] = 1;
+    }
+
+    // Build noise mask and per-component pixel lists (structural only)
+    var noiseMap = new Uint8Array(n);
+    var componentPixels = {};
+    for (var j = 0; j < n; j++) {
+      var lbl = labels[j];
+      if (lbl === 0) continue;
+      if (isNoise[lbl]) {
+        noiseMap[j] = 1;
+      } else {
+        if (!componentPixels[lbl]) componentPixels[lbl] = [];
+        componentPixels[lbl].push(j);
+      }
+    }
+
+    return {
+      labels: labels, count: count, sizes: sizes,
+      isNoise: isNoise, noiseMap: noiseMap, componentPixels: componentPixels
+    };
+  }
+
+  /* ── Structured Contour mode: PCA tangent estimation ── */
+
+  /**
+   * _estimateArcTangent
+   * Estimates the local boundary tangent at (px, py) using 2-D PCA over
+   * all component edge pixels within `radius` pixels.  Falls back to the
+   * local gradient direction when fewer than 3 neighbors are found.
+   *
+   * Returns { tx, ty, nx, ny } — unit tangent and unit normal vectors.
+   * The normal is aligned with the local gradient direction.
+   */
+  function _estimateArcTangent(px, py, labels, compId, w, h, gx, gy, radius) {
+    var r = radius, r2 = r * r;
+    var y0 = Math.max(0, py - r), y1 = Math.min(h - 1, py + r);
+    var x0 = Math.max(0, px - r), x1 = Math.min(w - 1, px + r);
+
+    // Collect neighboring component pixels (centered at origin)
+    var ptXs = [], ptYs = [], count = 0;
+    var sumX = 0, sumY = 0;
+    for (var sy = y0; sy <= y1; sy++) {
+      var roff = sy * w;
+      for (var sx = x0; sx <= x1; sx++) {
+        var ddx = sx - px, ddy = sy - py;
+        if (ddx * ddx + ddy * ddy > r2) continue;
+        if (labels[roff + sx] !== compId) continue;
+        ptXs.push(ddx); ptYs.push(ddy);
+        sumX += ddx; sumY += ddy; count++;
+      }
+    }
+
+    if (count < 3) {
+      // Gradient fallback (same as _makeToken)
+      var gi = py * w + px;
+      var rawGx = gx[gi], rawGy = gy[gi];
+      var gmag = Math.sqrt(rawGx * rawGx + rawGy * rawGy);
+      var fnx, fny;
+      if (gmag < 0.001) {
+        // 3×3 neighborhood average fallback
+        var accX = 0, accY = 0;
+        for (var fdy = -1; fdy <= 1; fdy++) {
+          for (var fdx = -1; fdx <= 1; fdx++) {
+            var fsy = py + fdy, fsx = px + fdx;
+            if (fsy >= 0 && fsy < h && fsx >= 0 && fsx < w) {
+              accX += gx[fsy * w + fsx]; accY += gy[fsy * w + fsx];
+            }
+          }
+        }
+        var aMag = Math.sqrt(accX * accX + accY * accY);
+        if (aMag < 0.001) { fnx = 1; fny = 0; } else { fnx = accX / aMag; fny = accY / aMag; }
+      } else { fnx = rawGx / gmag; fny = rawGy / gmag; }
+      return { tx: -fny, ty: fnx, nx: fnx, ny: fny };
+    }
+
+    // 2-D PCA — compute mean-centered covariance matrix
+    var mX = sumX / count, mY = sumY / count;
+    var cxx = 0, cxy = 0, cyy = 0;
+    for (var pi = 0; pi < count; pi++) {
+      var cx = ptXs[pi] - mX, cy = ptYs[pi] - mY;
+      cxx += cx * cx; cxy += cx * cy; cyy += cy * cy;
+    }
+    cxx /= count; cxy /= count; cyy /= count;
+
+    // Eigendecomposition of 2×2 symmetric matrix
+    var tr   = cxx + cyy;
+    var det  = cxx * cyy - cxy * cxy;
+    var disc = Math.sqrt(Math.max(0, tr * tr * 0.25 - det));
+    var lam1 = tr * 0.5 + disc; // largest eigenvalue
+
+    // Corresponding eigenvector (principal component = tangent direction)
+    var evx, evy;
+    if (Math.abs(cxy) > 1e-7) {
+      evx = lam1 - cyy; evy = cxy;
+    } else {
+      evx = cxx >= cyy ? 1 : 0;
+      evy = cxx >= cyy ? 0 : 1;
+    }
+    var emag = Math.sqrt(evx * evx + evy * evy);
+    if (emag < 1e-8) { evx = 1; evy = 0; } else { evx /= emag; evy /= emag; }
+
+    // Normal is perpendicular to tangent; align sign with local gradient
+    var gi2 = py * w + px;
+    var nx = -evy, ny = evx;
+    if (nx * gx[gi2] + ny * gy[gi2] < 0) { nx = -nx; ny = -ny; }
+
+    return { tx: evx, ty: evy, nx: nx, ny: ny };
+  }
+
+  /* ── Structured Contour mode: averaged fan-based side color sampling ── */
+
+  /**
+   * _sampleSideColorFan
+   * Samples LAB color at `fanCount` positions spread ±fanSpread pixels along
+   * the tangent on each side of the boundary, then averages.  Reduces noise
+   * compared to the single-point sample in _makeToken.
+   *
+   * Returns { leftLab, rightLab, deltaE }.
+   */
+  function _sampleSideColorFan(px, py, nx, ny, tx, ty, surface, sampleD, fanCount, fanSpread) {
+    var w = surface.width, h = surface.height;
+    var hasLab = !!surface.lab;
+    var Larr = hasLab ? surface.lab.L : null;
+    var aarr = hasLab ? surface.lab.a : null;
+    var barr = hasLab ? surface.lab.b : null;
+    var gray = surface.gray;
+
+    var lL = 0, la = 0, lb = 0;
+    var rL = 0, ra = 0, rb = 0;
+    var half = (fanCount - 1) * 0.5;
+
+    for (var fi = 0; fi < fanCount; fi++) {
+      var tOff = fanCount > 1 ? (fi - half) * fanSpread : 0;
+      var bx = px + tx * tOff;
+      var by = py + ty * tOff;
+
+      var lx = CV.clamp(Math.round(bx + nx * sampleD), 0, w - 1);
+      var ly = CV.clamp(Math.round(by + ny * sampleD), 0, h - 1);
+      var rx = CV.clamp(Math.round(bx - nx * sampleD), 0, w - 1);
+      var ry = CV.clamp(Math.round(by - ny * sampleD), 0, h - 1);
+
+      if (hasLab) {
+        var li = ly * w + lx, rri = ry * w + rx;
+        lL += Larr[li]; la += aarr[li]; lb += barr[li];
+        rL += Larr[rri]; ra += aarr[rri]; rb += barr[rri];
+      } else {
+        lL += gray[ly * w + lx]  * (100 / 255);
+        rL += gray[ry * w + rx] * (100 / 255);
+      }
+    }
+
+    var invN     = 1 / fanCount;
+    var leftLab  = [lL * invN, la * invN, lb * invN];
+    var rightLab = [rL * invN, ra * invN, rb * invN];
+    var dL = leftLab[0] - rightLab[0];
+    var da = leftLab[1] - rightLab[1];
+    var db = leftLab[2] - rightLab[2];
+
+    return { leftLab: leftLab, rightLab: rightLab,
+             deltaE: Math.sqrt(dL * dL + da * da + db * db) };
+  }
+
+  /* ── Structured Contour mode: enhanced token construction ── */
+
+  /**
+   * _makeTokenStructured
+   * Constructs a boundary token using PCA-based tangent estimation and
+   * fan-averaged side color sampling.  Preserves the same core token
+   * contract fields as _makeToken so Stage D continues to work unchanged.
+   * Adds three optional metadata fields (componentId, arcPosition, curvature)
+   * that Stage D ignores.
+   */
+  function _makeTokenStructured(id, px, py, surface, evidence, labels, compId,
+                                arcPos, curv, cfg) {
+    var sampleD   = cfg.tokenSideSamplePx;
+    var deMax     = cfg.tokenConfidenceDeltaEMax;
+    var tRadius   = cfg.tokenEnhancedTangentRadius || 5;
+    var fanCount  = cfg.tokenSideFanCount  || 3;
+    var fanSpread = cfg.tokenSideFanSpread || 2;
+    var w = surface.width, h = surface.height;
+
+    var dir = _estimateArcTangent(
+      px, py, labels, compId, w, h,
+      evidence.gradX, evidence.gradY, tRadius
+    );
+
+    var sides = _sampleSideColorFan(
+      px, py, dir.nx, dir.ny, dir.tx, dir.ty,
+      surface, sampleD, fanCount, fanSpread
+    );
+
+    var confidence = Math.min(1.0, sides.deltaE / deMax);
+
+    return {
+      // ── Core Stage D contract fields (unchanged semantics) ──
+      id: id, x: px, y: py,
+      tangentX: dir.tx, tangentY: dir.ty,
+      normalX:  dir.nx, normalY:  dir.ny,
+      leftLab:  sides.leftLab, rightLab: sides.rightLab,
+      deltaE:   sides.deltaE,  confidence: confidence,
+      // ── Additive structural metadata — Stage D ignores these ──
+      componentId: compId,
+      arcPosition: arcPos,
+      curvature:   curv
+    };
+  }
+
+  /* ── Structured Contour mode: arc tracing ── */
+
+  /**
+   * _traceComponentArc
+   * Performs a greedy arc walk through the edge pixels of a single component.
+   * Prefers direction-consistent steps; gaps are bridged with a zero-cost jump
+   * using a monotone scan so total cost is O(n).
+   *
+   * @param  {Array<number>}  pixelIndices  flat pixel indices for this component
+   * @param  {number}         w             image width (for coordinate unpacking)
+   * @returns {{
+   *   arcOrder:     Array<number>,   indices into pixelIndices, in walk order
+   *   arcPositions: Float32Array,    normalized arc position per pixelIndices slot
+   *   curvature:    Float32Array,    local curvature per slot  (0=straight, 1=U-turn)
+   *   totalLength:  number           total arc length in pixels
+   * }}
+   */
+  function _traceComponentArc(pixelIndices, w) {
+    var n = pixelIndices.length;
+    if (n === 0) {
+      return { arcOrder: [], arcPositions: new Float32Array(0),
+               curvature: new Float32Array(0), totalLength: 0 };
+    }
+
+    // Build coordinate arrays and fast reverse lookup (flatIndex → coordIndex)
+    var xs = new Int16Array(n), ys = new Int16Array(n);
+    var posMap = {}; // flatPixelIndex → coord index
+    for (var i = 0; i < n; i++) {
+      xs[i] = pixelIndices[i] % w;
+      ys[i] = (pixelIndices[i] / w) | 0;
+      posMap[pixelIndices[i]] = i;
+    }
+
+    // Find a good start pixel — prefer an endpoint (≤1 neighbor in 8-connectivity)
+    var startCoord = 0;
+    outer: for (var s = 0; s < n; s++) {
+      var cx0 = xs[s], cy0 = ys[s], nc = 0;
+      for (var sdy = -1; sdy <= 1; sdy++) {
+        for (var sdx = -1; sdx <= 1; sdx++) {
+          if (sdx === 0 && sdy === 0) continue;
+          if (posMap[(cy0 + sdy) * w + (cx0 + sdx)] !== undefined) nc++;
+        }
+      }
+      if (nc <= 1) { startCoord = s; break outer; }
+    }
+
+    // Greedy walk — prefer direction continuation, O(n) total with monotone jump scan
+    var visited    = new Uint8Array(n);
+    var arcOrder   = [];
+    var arcCumLen  = [];
+    var cumLen     = 0;
+    var unvisited  = 0; // monotone pointer for O(n) jump fallback
+
+    arcOrder.push(startCoord);
+    arcCumLen.push(0);
+    visited[startCoord] = 1;
+
+    while (arcOrder.length < n) {
+      var cur  = arcOrder[arcOrder.length - 1];
+      var curX = xs[cur], curY = ys[cur];
+
+      // Previous step direction (for alignment preference)
+      var prevDx = 0, prevDy = 0;
+      if (arcOrder.length >= 2) {
+        var prev = arcOrder[arcOrder.length - 2];
+        prevDx = curX - xs[prev]; prevDy = curY - ys[prev];
+      }
+
+      // Find best unvisited 8-neighbor
+      var bestNext = -1, bestScore = -Infinity, bestDist = 0;
+      for (var dy = -1; dy <= 1; dy++) {
+        var ny2 = curY + dy;
+        if (ny2 < 0) continue;
+        for (var dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          var nx2 = curX + dx;
+          if (nx2 < 0) continue;
+          var ni = posMap[ny2 * w + nx2];
+          if (ni === undefined || visited[ni]) continue;
+          var stepDist = Math.sqrt(dx * dx + dy * dy);
+          var dot = (prevDx !== 0 || prevDy !== 0)
+            ? (dx * prevDx + dy * prevDy) /
+              (stepDist * Math.sqrt(prevDx * prevDx + prevDy * prevDy))
+            : 0;
+          var score = dot - stepDist * 0.05;
+          if (score > bestScore) {
+            bestScore = score; bestNext = ni; bestDist = stepDist;
+          }
+        }
+      }
+
+      if (bestNext < 0) {
+        // Jump over a gap — O(n) total with monotone scan
+        while (unvisited < n && visited[unvisited]) unvisited++;
+        if (unvisited >= n) break;
+        bestNext = unvisited;
+        bestDist = 0; // gap contributes no arc length
+      }
+
+      cumLen += bestDist;
+      arcOrder.push(bestNext);
+      arcCumLen.push(cumLen);
+      visited[bestNext] = 1;
+    }
+
+    var totalLength = cumLen;
+
+    // Normalized arc positions (per coord index)
+    var arcPositions = new Float32Array(n);
+    for (var ai = 0; ai < arcOrder.length; ai++) {
+      arcPositions[arcOrder[ai]] = totalLength > 0 ? arcCumLen[ai] / totalLength : 0;
+    }
+
+    // Local curvature — turning angle over a ±3-step window, normalized 0..1
+    var curvature = new Float32Array(n);
+    var win = 3;
+    for (var ci = win; ci < arcOrder.length - win; ci++) {
+      var p0 = arcOrder[ci - win], p1 = arcOrder[ci], p2 = arcOrder[ci + win];
+      var v1x = xs[p1] - xs[p0], v1y = ys[p1] - ys[p0];
+      var v2x = xs[p2] - xs[p1], v2y = ys[p2] - ys[p1];
+      var m1 = Math.sqrt(v1x * v1x + v1y * v1y);
+      var m2 = Math.sqrt(v2x * v2x + v2y * v2y);
+      if (m1 < 0.1 || m2 < 0.1) continue;
+      var cosA = (v1x * v2x + v1y * v2y) / (m1 * m2);
+      cosA = Math.max(-1, Math.min(1, cosA));
+      curvature[p1] = Math.acos(cosA) / Math.PI; // 0 = straight, 1 = U-turn
+    }
+
+    return { arcOrder: arcOrder, arcPositions: arcPositions,
+             curvature: curvature, totalLength: totalLength };
+  }
+
+  /* ── Structured Contour mode: main seeding function ── */
+
+  /**
+   * _seedStructuredContour
+   * Structure-aware token seeding pipeline:
+   *   1. Connected component analysis — filters noise components
+   *   2. Arc tracing per structural component
+   *   3. Regular arc-length sampling with curvature-aware density
+   *   4. PCA tangent + fan color sampling per token
+   *
+   * Output tokens use the same Stage D contract fields (id, x, y,
+   * tangentX/Y, normalX/Y, leftLab, rightLab, deltaE, confidence).
+   * Three additive fields (componentId, arcPosition, curvature) are
+   * attached but Stage D does not read them.
+   */
+  function _seedStructuredContour(surface, evidence, cfg) {
+    var w = surface.width, h = surface.height;
+
+    var minCompSize = cfg.structuredContourMinCompSize       || 10;
+    var minPerComp  = cfg.structuredContourMinTokensPerComp  || 2;
+    var maxPerComp  = cfg.structuredContourMaxTokensPerComp  || 400;
+    var arcStep     = cfg.structuredContourArcStep           || 8;
+    var curvBoost   = cfg.structuredContourCurvatureBoost    || 2.0;
+    var nmsR        = cfg.structuredContourNmsRadius         || 4;
+    var maxTokens   = _scaledPositive(
+      cfg.scaffoldMaxTokens || 25000, cfg.phase1MaxTokensScale || 1.0, 1000
+    );
+    var minConf  = cfg.tokenMinConfidence;
+    var keepWeak = _phase1KeepWeakToken(cfg);
+
+    // ── Step 1: Component analysis — structural vs noise classification ──
+    var compInfo = _computeComponentInfo(evidence.edgeBinary, w, h, minCompSize);
+
+    var tokens = [];
+    var nextId = 0;
+
+    // ── Step 2: Process components largest-first (structural priority) ──
+    var compIds = Object.keys(compInfo.componentPixels);
+    compIds.sort(function (a, b) { return compInfo.sizes[+b] - compInfo.sizes[+a]; });
+
+    for (var ci = 0; ci < compIds.length; ci++) {
+      if (tokens.length >= maxTokens) break;
+
+      var compId       = +compIds[ci];
+      var pixelIndices = compInfo.componentPixels[compId];
+
+      // ── Step 3: Arc trace — establishes walk order, arc positions, curvature ──
+      var arcData  = _traceComponentArc(pixelIndices, w);
+      var arcLen   = arcData.totalLength;
+      var arcOrder = arcData.arcOrder;
+
+      // ── Step 4: Token budget proportional to arc length ──
+      var baseBudget = Math.max(1, Math.round(arcLen / Math.max(1, arcStep)));
+      var budget     = Math.max(minPerComp, Math.min(maxPerComp, baseBudget));
+      var stepSize   = Math.max(1, arcLen / budget);
+
+      // ── Step 5: Walk arc, sample at regular intervals (curvature-aware) ──
+      var candidates = [];
+      var nextSample = 0;
+
+      for (var ai = 0; ai < arcOrder.length; ai++) {
+        var aIdx     = arcOrder[ai];
+        var cumArcPx = arcData.arcPositions[aIdx] * arcLen;
+
+        if (cumArcPx < nextSample) continue;
+
+        var spx  = pixelIndices[aIdx] % w;
+        var spy  = (pixelIndices[aIdx] / w) | 0;
+        var curv = arcData.curvature[aIdx];
+
+        // Curvature-aware step: tighter spacing at corners
+        var stepMod = 1.0 / Math.max(0.3, 1.0 + curvBoost * curv);
+        nextSample  = cumArcPx + stepSize * stepMod;
+
+        candidates.push({
+          x: spx, y: spy,
+          score:  _evidenceScore(spx, spy, evidence, w),
+          curv:   curv,
+          aIdx:   aIdx,
+          arcPos: arcData.arcPositions[aIdx]
+        });
+      }
+
+      // ── Step 6: NMS within component — prevents local crowding ──
+      var filtered = _nmsFilter(candidates, nmsR);
+      var selected = filtered.length > budget ? filtered.slice(0, budget) : filtered;
+
+      // ── Step 7: Build enhanced tokens ──
+      for (var si = 0; si < selected.length; si++) {
+        if (tokens.length >= maxTokens) break;
+
+        var tok = _makeTokenStructured(
+          nextId,
+          selected[si].x, selected[si].y,
+          surface, evidence,
+          compInfo.labels, compId,
+          selected[si].arcPos, selected[si].curv,
+          cfg
+        );
+
+        if (tok.confidence < minConf) {
+          if (!keepWeak) continue;
+          tok._weakConfidence = true;
+        }
+        tok.id = nextId++;
+        tok._structuredContour = true;
+        tokens.push(tok);
+      }
+    }
+
+    return tokens;
+  }
+
   /* ── Main Stage C entry point ── */
 
   /**
@@ -1117,6 +1614,14 @@
   function stageC_boundaryTokens(surface, evidence, cfg) {
     cfg = cfg || DEFAULT_CONFIG_AC;
     var mode = cfg.tokenSeedingMode || 'global_stride';
+
+    // ── structured_contour: component-aware, arc-traced, PCA-tangent mode ──
+    if (mode === 'structured_contour') {
+      var scTokens = _seedStructuredContour(surface, evidence, cfg);
+      // Fallback: if no structural components found, use global_stride
+      if (!scTokens.length) scTokens = _seedGlobalStride(surface, evidence, cfg);
+      return scTokens;
+    }
 
     if (mode === 'uniform_scaffold') {
       var scaffoldResult = _seedUniformScaffold(surface, evidence, cfg);
