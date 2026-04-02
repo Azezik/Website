@@ -1258,12 +1258,51 @@
       extGrid[egk].push(tok);
     }
 
+    // Precompute static density scores per token for lookahead.
+    // Density = count of nearby tokens within densityRadius.
+    // Computed once upfront to avoid nested grid scans inside beam search.
+    // Slightly stale as tokens join chains, but density is a soft heuristic
+    // (capped at 5 neighbors) so the approximation is safe.
+    var densityMap = null;
+    if (lookaheadCfg && lookaheadCfg.densityWeight > 0 && lookaheadCfg.densityRadius > 0) {
+      densityMap = {};
+      var _dr = lookaheadCfg.densityRadius;
+      var _dr2 = _dr * _dr;
+      var _dcr = Math.ceil(_dr / extCellSize);
+      for (var _dk in tokenById) {
+        var _dt = tokenById[_dk];
+        var _dcx = (_dt.x / extCellSize) | 0;
+        var _dcy = (_dt.y / extCellSize) | 0;
+        var _dcount = 0;
+        for (var _ddy = -_dcr; _ddy <= _dcr; _ddy++) {
+          for (var _ddx = -_dcr; _ddx <= _dcr; _ddx++) {
+            var _dbk = (_dcx + _ddx) + ',' + (_dcy + _ddy);
+            var _dbu = extGrid[_dbk];
+            if (!_dbu) continue;
+            for (var _dbi = 0; _dbi < _dbu.length; _dbi++) {
+              var _dbt = _dbu[_dbi];
+              if (_dbt.id === _dt.id) continue;
+              var _drx = _dbt.x - _dt.x, _dry = _dbt.y - _dt.y;
+              if (_drx * _drx + _dry * _dry <= _dr2) _dcount++;
+            }
+          }
+        }
+        // Saturate at 5 (same as runtime logic)
+        densityMap[_dt.id] = Math.min(1.0, _dcount / 5.0);
+      }
+    }
+
     // Track which tokens are already in a chain
     var tokenToChain = {};
     for (var ci2 = 0; ci2 < chains.length; ci2++) {
       var cids = chains[ci2].ids;
       for (var cj = 0; cj < cids.length; cj++) tokenToChain[cids[cj]] = ci2;
     }
+
+    // Global probe budget: cap total lookahead probes across all chains
+    // to prevent runaway computation on dense token fields.
+    // Budget scales with token count but is capped to prevent O(n²) blowup.
+    var probeBudget = { remaining: Math.min(tokens.length * 20, 40000) };
 
     for (var ci = 0; ci < chains.length; ci++) {
       var chain = chains[ci];
@@ -1273,11 +1312,11 @@
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg, xyTrendCfg);
+                   microchainCfg, lookaheadCfg, xyTrendCfg, densityMap, probeBudget);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                   microchainCfg, lookaheadCfg, xyTrendCfg);
+                   microchainCfg, lookaheadCfg, xyTrendCfg, densityMap, probeBudget);
     }
   }
 
@@ -1302,7 +1341,7 @@
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
                         maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
-                        microchainCfg, lookaheadCfg, xyTrendCfg) {
+                        microchainCfg, lookaheadCfg, xyTrendCfg, densityMap, probeBudget) {
     if (ids.length < 2) return;
 
     // Compute initial chain-end direction from recent tokens
@@ -1359,25 +1398,33 @@
       extensionCount++;
 
       // Search for candidate tokens ahead of the endpoint.
-      // Use the full maxDist as search horizon — directional alignment
-      // and drift detection prevent false positives, not distance caps.
+      // Use bounding-box grid iteration to visit each cell exactly once,
+      // with early dedup to avoid re-evaluating the same token.
       var candidates = [];
-      var searchRadius = maxDist;
+      var candSeen = {};
 
-      // Scan along the direction and collect candidates from spatial grid
-      for (var si = 1; si <= searchRadius; si += extCellSize * 0.5) {
-        var scanX = endTok.x + dirX * si;
-        var scanY = endTok.y + dirY * si;
-        var sgx = (scanX / extCellSize) | 0;
-        var sgy = (scanY / extCellSize) | 0;
-        for (var gdy = -1; gdy <= 1; gdy++) {
-          for (var gdx = -1; gdx <= 1; gdx++) {
-            var gk = (sgx + gdx) + ',' + (sgy + gdy);
+      // Compute the bounding box of the search corridor in grid coordinates.
+      // Corridor extends maxDist along dirX/dirY and corridorHW laterally.
+      var corridorEndX = endTok.x + dirX * maxDist;
+      var corridorEndY = endTok.y + dirY * maxDist;
+      var bbMinX = Math.min(endTok.x, corridorEndX) - corridorHW;
+      var bbMaxX = Math.max(endTok.x, corridorEndX) + corridorHW;
+      var bbMinY = Math.min(endTok.y, corridorEndY) - corridorHW;
+      var bbMaxY = Math.max(endTok.y, corridorEndY) + corridorHW;
+      var gMinX = ((bbMinX / extCellSize) | 0) - 1;
+      var gMaxX = ((bbMaxX / extCellSize) | 0) + 1;
+      var gMinY = ((bbMinY / extCellSize) | 0) - 1;
+      var gMaxY = ((bbMaxY / extCellSize) | 0) + 1;
+
+      for (var gy = gMinY; gy <= gMaxY; gy++) {
+        for (var gx = gMinX; gx <= gMaxX; gx++) {
+            var gk = gx + ',' + gy;
             var bucket = extGrid[gk];
             if (!bucket) continue;
             for (var bi = 0; bi < bucket.length; bi++) {
               var cand = bucket[bi];
-              if (inChain[cand.id]) continue;
+              if (inChain[cand.id] || candSeen[cand.id]) continue;
+              candSeen[cand.id] = true;
 
               // Project candidate onto the chain's directional axis
               var relX = cand.x - endTok.x;
@@ -1411,22 +1458,10 @@
 
               candidates.push({ tok: cand, score: score, along: along });
             }
-          }
         }
       }
 
       if (candidates.length === 0) break;
-
-      // Deduplicate (same token may be found from multiple scan steps)
-      var seen = {};
-      var uniqueCandidates = [];
-      for (var ui = 0; ui < candidates.length; ui++) {
-        if (!seen[candidates[ui].tok.id]) {
-          seen[candidates[ui].tok.id] = true;
-          uniqueCandidates.push(candidates[ui]);
-        }
-      }
-      candidates = uniqueCandidates;
 
       /* ── Microchaining: local strict-link population analysis ──
        *
@@ -1467,7 +1502,7 @@
       var selectedCandidate;
       var selectedLookahead = null; // { depth, score } of selected candidate
 
-      if (laEnabled && candidates.length > 0) {
+      if (laEnabled && candidates.length > 0 && probeBudget.remaining > 0) {
         // Score each candidate with lookahead-augmented ranking.
         // To keep cost bounded, only probe the top candidates (by base score).
         candidates.sort(function(a, b) { return b.score - a.score; });
@@ -1478,6 +1513,8 @@
         var bestAugLA = null;
 
         for (var pi = 0; pi < probeLimit; pi++) {
+          if (probeBudget.remaining <= 0) break;
+          probeBudget.remaining--;
           var probeCand = candidates[pi];
           var probeTok = probeCand.tok;
 
@@ -1498,7 +1535,7 @@
           var la = _lookaheadProbe(probeTok, pDirX, pDirY,
                                    extGrid, extCellSize, inChain, tokenById,
                                    maxDist, dirMin, colorTol, corridorHW, laMaxDepth,
-                                   laBeamWidth, laDensityRadius, laDensityWeight);
+                                   laBeamWidth, densityMap, laDensityWeight);
 
           // Augmented score: base score + lookahead composite.
           // The lookahead composite blends depth/quality with direction
@@ -1733,15 +1770,14 @@
    * @param {number} corridorHW    - lateral half-width
    * @param {number} maxDepth      - max probe steps
    * @param {number} beamWidth     - candidates to try at each step (default 1 = greedy)
-   * @param {number} densityRadius - radius for density count bonus (0 = disabled)
+   * @param {Object} densityMap    - precomputed density scores per token ID (null = disabled)
    * @param {number} densityWeight - max score bonus from density (0 = disabled)
    */
   function _lookaheadProbe(startTok, probeDirX, probeDirY,
                            extGrid, extCellSize, inChain, tokenById,
                            maxDist, dirMin, colorTol, corridorHW, maxDepth,
-                           beamWidth, densityRadius, densityWeight) {
+                           beamWidth, densityMap, densityWeight) {
     beamWidth = beamWidth || 1;
-    densityRadius = densityRadius || 0;
     densityWeight = densityWeight || 0;
 
     // ── Beam state ──
@@ -1769,21 +1805,31 @@
         var perpX = -bm.curDirY, perpY = bm.curDirX;
 
         // ── Collect all strict-valid candidates from this beam position ──
+        // Uses bounding-box grid iteration with early dedup to visit each
+        // cell and each token at most once (replaces overlapping directional scan).
         var stepCands = [];
+        var stepSeen = {};
 
-        for (var si = 1; si <= maxDist; si += extCellSize * 0.5) {
-          var scanX = bm.curTok.x + bm.curDirX * si;
-          var scanY = bm.curTok.y + bm.curDirY * si;
-          var sgx = (scanX / extCellSize) | 0;
-          var sgy = (scanY / extCellSize) | 0;
-          for (var gdy = -1; gdy <= 1; gdy++) {
-            for (var gdx = -1; gdx <= 1; gdx++) {
-              var gk = (sgx + gdx) + ',' + (sgy + gdy);
+        var _bEndX = bm.curTok.x + bm.curDirX * maxDist;
+        var _bEndY = bm.curTok.y + bm.curDirY * maxDist;
+        var _bMinX = Math.min(bm.curTok.x, _bEndX) - corridorHW;
+        var _bMaxX = Math.max(bm.curTok.x, _bEndX) + corridorHW;
+        var _bMinY = Math.min(bm.curTok.y, _bEndY) - corridorHW;
+        var _bMaxY = Math.max(bm.curTok.y, _bEndY) + corridorHW;
+        var _bgMinX = ((_bMinX / extCellSize) | 0) - 1;
+        var _bgMaxX = ((_bMaxX / extCellSize) | 0) + 1;
+        var _bgMinY = ((_bMinY / extCellSize) | 0) - 1;
+        var _bgMaxY = ((_bMaxY / extCellSize) | 0) + 1;
+
+        for (var _bgy = _bgMinY; _bgy <= _bgMaxY; _bgy++) {
+          for (var _bgx = _bgMinX; _bgx <= _bgMaxX; _bgx++) {
+              var gk = _bgx + ',' + _bgy;
               var bucket = extGrid[gk];
               if (!bucket) continue;
               for (var bki = 0; bki < bucket.length; bki++) {
                 var cand = bucket[bki];
-                if (inChain[cand.id] || bm.probeUsed[cand.id]) continue;
+                if (inChain[cand.id] || bm.probeUsed[cand.id] || stepSeen[cand.id]) continue;
+                stepSeen[cand.id] = true;
 
                 var relX = cand.x - bm.curTok.x;
                 var relY = cand.y - bm.curTok.y;
@@ -1810,37 +1856,17 @@
                             (1.0 - across / corridorHW) * 0.20 +
                             colorScore * 0.10;
 
-                // ── Density bonus: nearby non-chain tokens signal structural richness ──
-                // Counts tokens within densityRadius that are neither in-chain
-                // nor already consumed by this beam. A denser neighbourhood is
-                // a positive signal for downstream continuability, even if this
-                // specific probe dead-ends at the next step.
-                if (densityWeight > 0 && densityRadius > 0) {
-                  var densCount = 0;
-                  var densR2 = densityRadius * densityRadius;
-                  var densCellR = Math.ceil(densityRadius / extCellSize);
-                  var dcx = (cand.x / extCellSize) | 0;
-                  var dcy = (cand.y / extCellSize) | 0;
-                  for (var ddy = -densCellR; ddy <= densCellR; ddy++) {
-                    for (var ddx = -densCellR; ddx <= densCellR; ddx++) {
-                      var dk = (dcx + ddx) + ',' + (dcy + ddy);
-                      var dbucket = extGrid[dk];
-                      if (!dbucket) continue;
-                      for (var dbi = 0; dbi < dbucket.length; dbi++) {
-                        var dt = dbucket[dbi];
-                        if (dt.id === cand.id || inChain[dt.id] || bm.probeUsed[dt.id]) continue;
-                        var ddxr = dt.x - cand.x, ddyr = dt.y - cand.y;
-                        if (ddxr * ddxr + ddyr * ddyr <= densR2) densCount++;
-                      }
-                    }
-                  }
-                  // Saturate at 5 neighbours: beyond that the density is clearly high
-                  score += densityWeight * Math.min(1.0, densCount / 5.0);
+                // ── Density bonus: use precomputed density map (O(1) lookup) ──
+                // Replaces the nested grid scan that counted nearby tokens at runtime.
+                // The precomputed map is slightly stale as tokens join chains, but
+                // density is a soft heuristic so the approximation is safe.
+                if (densityWeight > 0 && densityMap) {
+                  var densVal = densityMap[cand.id];
+                  if (densVal != null) score += densityWeight * densVal;
                 }
 
                 stepCands.push({ tok: cand, score: score, along: along });
               }
-            }
           }
         }
 
@@ -2088,6 +2114,15 @@
 
     // ── Pass A: Same-chain self-closure ──
     // For each chain, check if its own two endpoints can be linked.
+    // Pre-index endpoints by chainIdx for O(1) lookup (avoids O(n²) linear scan).
+    var chainEndMap = {};  // chainIdx → { first: endpoint, last: endpoint }
+    for (var _cei = 0; _cei < endpoints.length; _cei++) {
+      var _ce = endpoints[_cei];
+      if (!chainEndMap[_ce.chainIdx]) chainEndMap[_ce.chainIdx] = {};
+      if (_ce.isFirst) chainEndMap[_ce.chainIdx].first = _ce;
+      else chainEndMap[_ce.chainIdx].last = _ce;
+    }
+
     var closedChains = {};
     for (var pi = 0; pi < endpoints.length; pi++) {
       var epA = endpoints[pi];
@@ -2096,14 +2131,8 @@
       if (!chainA || chainA.ids.length < minLen) continue;
       if (closedChains[epA.chainIdx]) continue;
 
-      // Find the matching end endpoint of this same chain
-      var epEnd = null;
-      for (var pj = 0; pj < endpoints.length; pj++) {
-        if (pj !== pi && endpoints[pj].chainIdx === epA.chainIdx && !endpoints[pj].isFirst) {
-          epEnd = endpoints[pj];
-          break;
-        }
-      }
+      // Find the matching end endpoint of this same chain (O(1) via pre-index)
+      var epEnd = chainEndMap[epA.chainIdx] ? chainEndMap[epA.chainIdx].last : null;
       if (!epEnd) continue;
 
       var tokA = epA.tok, tokZ = epEnd.tok;
