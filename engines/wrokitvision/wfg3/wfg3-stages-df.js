@@ -147,6 +147,25 @@
     // Stage D: Branch anchor recovery
     branchAnchorEnabled:     true,
 
+    // Stage D: Residual recovery — reclaim orphaned tokens after refinement.
+    // Instead of permanently discarding tokens that fail initial linking,
+    // a recovery pass searches for compatible chain attachment points using
+    // relaxed gates. This preserves structural information that strict
+    // Pass 1 gates would otherwise lose permanently.
+    residualRecoveryEnabled:    true,
+    residualRecoveryRadius:     28,    // wider search than Pass 1 base radius
+    residualRecoveryDirMin:     0.20,  // relaxed direction threshold
+    residualRecoveryMaxPasses:  2,     // iterative recovery attempts
+
+    // Stage D: Token salience scoring.
+    // After chain assembly, every token receives a structural salience
+    // score (0..1) reflecting its contribution to coherent boundary
+    // structure.  High-salience tokens (long chains, good coherence,
+    // enclosure contributors) are protected from pruning.  Low-salience
+    // tokens (isolated, noisy, interior clutter) can be demoted.
+    salienceEnabled:            true,
+    saliencePruneFloor:         0.12,  // tokens below this AND unattached → prunable
+
     // Stage E
     watershedFgFraction:   0.25,
     minRegionArea:         24,
@@ -184,6 +203,9 @@
       extension_noCandidates: 0,
       extension_driftRescues: 0,
       outlier_prunedCount: 0,
+      recovery_tokensRecovered: 0,
+      recovery_tokensUnrecovered: 0,
+      recovery_passesRun: 0,
       finalChainCount: 0,
       finalLoopCount: 0,
       finalTokensInChains: 0
@@ -457,6 +479,13 @@
     for (var _rp = 0; _rp < maxRefinementPasses; _rp++) {
       var _rpChanges = 0;
 
+      // ── Boundary-first ordering: sort chains by length descending ──
+      // Longer chains represent stronger structural boundaries (enclosures,
+      // dominant edges).  By extending them first, they "claim" nearby tokens
+      // before shorter fragments can, ensuring the strongest structure
+      // stabilizes before weaker/noisier chains grow.
+      chains.sort(function(a, b) { return b.ids.length - a.ids.length; });
+
       /* ── Extension: grow chain endpoints ── */
       _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag);
 
@@ -531,10 +560,64 @@
       if (_rpChanges === 0) break;
     }
 
+    /* ================================================================
+     *  RESIDUAL RECOVERY PASS
+     *
+     *  After multi-pass refinement, reclaim orphaned tokens that failed
+     *  Pass 1's strict gates but may now be compatible with nearby chains
+     *  that have grown during extension/bridge/closure.
+     *
+     *  This is the key architectural change: no token is permanently
+     *  discarded after Pass 1.  Instead, orphans enter a recovery pass
+     *  where they can attach to chain bodies using relaxed gates.
+     *  The side-color hard gate is still enforced to prevent cross-boundary
+     *  contamination.
+     * ================================================================ */
+    if (cfg.residualRecoveryEnabled !== false) {
+      var recoveryResult = _residualRecoveryPass(tokens, chains, adjacency, tokenById, cfg, _diag);
+
+      if (recoveryResult.recovered > 0) {
+        // Rebuild chains from updated adjacency
+        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+        chains = [];
+        loops = [];
+        for (var _rrci = 0; _rrci < components.length; _rrci++) {
+          var _rrComp = components[_rrci];
+          var _rrOrd = _orderChain(_rrComp, adjacency, tokenById);
+          var _rrLoop = _isLoopChain(_rrOrd, adjacency, _rrComp);
+          chains.push({ ids: _rrOrd, ordered: true });
+          if (_rrLoop) loops.push({ ids: _rrOrd });
+          var _rrRes = _recoverResidualChains(
+            _rrComp, _rrOrd, adjacency, tokenById,
+            cfg.chainMinLength, cfg.branchAnchorEnabled
+          );
+          for (var _rrri = 0; _rrri < _rrRes.length; _rrri++) {
+            chains.push({ ids: _rrRes[_rrri], ordered: true });
+            if (_isLoopChain(_rrRes[_rrri], adjacency, _rrComp))
+              loops.push({ ids: _rrRes[_rrri] });
+          }
+        }
+      }
+    }
+
+    /* ================================================================
+     *  TOKEN SALIENCE SCORING
+     *
+     *  Compute structural importance for every token BEFORE pruning.
+     *  High-salience tokens (in long chains, good coherence, large
+     *  spatial extent) are protected from outlier pruning.
+     *  Low-salience tokens (isolated, noisy, interior) can be demoted.
+     * ================================================================ */
+    var tokenSalience = null;
+    if (cfg.salienceEnabled !== false) {
+      tokenSalience = _computeTokenSalience(tokens, chains, adjacency, tokenById);
+    }
+
     // Structural outlier pruning: remove tokens that mismatch their
-    // neighbors structurally (direction, color), regardless of confidence.
+    // neighbors structurally (direction, color).
+    // NOW SALIENCE-AWARE: high-salience tokens resist pruning.
     if (cfg.outlierPruneEnabled !== false) {
-      var cleanup = _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg);
+      var cleanup = _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg, tokenSalience);
       _diag.outlier_prunedCount = cleanup.prunedCount;
       if (cleanup.prunedCount > 0) {
         components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
@@ -555,6 +638,11 @@
             var prLoop = _isLoopChain(prOrdered, adjacency, compX);
             if (prLoop) loops.push({ ids: prOrdered });
           }
+        }
+
+        // Recompute salience after pruning (structure has changed)
+        if (cfg.salienceEnabled !== false) {
+          tokenSalience = _computeTokenSalience(tokens, chains, adjacency, tokenById);
         }
       }
     }
@@ -613,6 +701,7 @@
       bridgeEdgeList: bridgeEdgeList,
       bridgesEvaluated: bridgesEvaluated,
       bridgesAccepted: bridgesAccepted,
+      tokenSalience: tokenSalience,   // { tokenId → 0..1 } structural importance
       diagnostics: _diag
     };
   }
@@ -686,13 +775,18 @@
    *
    * Confidence is NOT used as a gate. Only structural fit matters.
    */
-  function _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg) {
+  function _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg, salience) {
     var dirDevMax = cfg.outlierDirDeviationMax != null ? cfg.outlierDirDeviationMax : 0.35;
     var minSupport = Math.max(1, cfg.outlierMinNeighborSupport || 2);
     var pruneTiny = cfg.outlierPruneTinyComponents !== false;
     var tinyMax = Math.max(0, cfg.outlierTinyComponentSize || 1);
     var removed = {};
     var prunedCount = 0;
+
+    // Salience-aware pruning: tokens with high salience are protected.
+    // The salience floor determines below which score tokens become prunable.
+    var salienceFloor = cfg.saliencePruneFloor != null ? cfg.saliencePruneFloor : 0.12;
+    var hasSalience = salience && typeof salience === 'object';
 
     // ── Pass A: adjacency-based structural mismatch ──
     // Degree-1 tokens are often valid chain endpoints (especially after
@@ -704,15 +798,28 @@
       var neis = adjacency[t.id] || [];
       if (neis.length >= minSupport) continue;
 
+      // Salience protection: high-salience tokens survive even with
+      // low degree.  They represent structurally important tokens that
+      // may have been recovered into chains via the residual pass.
+      if (hasSalience && (salience[t.id] || 0) >= salienceFloor * 3) continue;
+
       if (neis.length === 0) {
+        // Even isolated tokens are protected if high-salience
+        if (hasSalience && (salience[t.id] || 0) >= salienceFloor) continue;
         removed[t.id] = true;
         continue;
       }
 
       var fit = _tokenNeighborFit(t, neis, tokenById);
       // Degree-1 tokens get 50% more lenient threshold — they are often
-      // valid chain endpoints, not outliers
-      var effectiveDevMax = neis.length === 1 ? dirDevMax * 1.5 : dirDevMax;
+      // valid chain endpoints, not outliers.
+      // Salience provides additional leniency: high-salience tokens get
+      // up to 2x the base threshold.
+      var salienceLeniency = 1.0;
+      if (hasSalience) {
+        salienceLeniency = 1.0 + (salience[t.id] || 0); // 1.0..2.0
+      }
+      var effectiveDevMax = neis.length === 1 ? dirDevMax * 1.5 * salienceLeniency : dirDevMax * salienceLeniency;
       if (fit.dirDev > effectiveDevMax) {
         removed[t.id] = true;
       }
@@ -752,8 +859,12 @@
         if (segDot < -0.5) { // was -0.3; only flag true reversals, not gentle curves
           // Sharp spatial reversal — this token is a zigzag outlier.
           // But only prune if it also fails tangent consistency by a wide margin.
+          // Salience protection: high-salience tokens resist zigzag pruning.
+          var curSalience = hasSalience ? (salience[curTok.id] || 0) : 0;
+          if (curSalience >= salienceFloor * 3) continue; // protected
           var fitC = _tokenNeighborFit(curTok, adjacency[curTok.id] || [], tokenById);
-          if (fitC.dirDev > dirDevMax * 0.9) { // was 0.8; require stronger mismatch
+          var zigzagDevMax = dirDevMax * 0.9 * (1.0 + curSalience);
+          if (fitC.dirDev > zigzagDevMax) {
             removed[curTok.id] = true;
           }
         }
@@ -768,7 +879,10 @@
         if (trendMag > 0.5) {
           var trendDot = Math.abs(curTok.tangentX * trendX + curTok.tangentY * trendY) / trendMag;
           // trendDot < 0.15 means tangent is truly perpendicular to local flow
-          if (trendDot < 0.15) { // was 0.25; softened to preserve curve tokens
+          // Salience lowers the threshold further for important tokens
+          var perpThresh = 0.15;
+          if (hasSalience) perpThresh = 0.15 * (1.0 - (salience[curTok.id] || 0) * 0.5);
+          if (trendDot < perpThresh) {
             removed[curTok.id] = true;
           }
         }
@@ -2527,6 +2641,272 @@
       varTotal += dx * dx + dy * dy;
     }
     return varTotal > 0.01 ? Math.min(1, varAlong / varTotal) : 0;
+  }
+
+  /* ==================================================================
+   *  Residual Recovery Pass
+   *
+   *  After multi-pass refinement (extension / bridge / closure), many
+   *  tokens may still be unattached — they failed Pass 1's strict gates
+   *  and extension's narrow corridor never reached them.
+   *
+   *  Instead of leaving these permanently orphaned, this pass searches
+   *  for compatible attachment points on existing chain BODIES (not just
+   *  endpoints).  It uses wider radius and relaxed direction gates while
+   *  still enforcing the side-color hard gate to prevent cross-boundary
+   *  contamination.
+   *
+   *  Tokens are processed in confidence-descending order so the most
+   *  reliable orphans attach first.  Attachment prefers longer chains
+   *  (boundary-first: enclosing structure claims tokens before interior
+   *  fragments).
+   *
+   *  This is the key mechanism that prevents premature token loss:
+   *  tokens that couldn't link in Pass 1 due to strict directional
+   *  gates may now find compatible chain segments that have grown
+   *  closer during extension.
+   * ================================================================== */
+
+  function _residualRecoveryPass(tokens, chains, adjacency, tokenById, cfg, _diag) {
+    var recoveryRadius = cfg.residualRecoveryRadius || 28;
+    var recoveryDirMin = cfg.residualRecoveryDirMin != null ? cfg.residualRecoveryDirMin : 0.20;
+    var sideColorGate  = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+    var maxPasses      = cfg.residualRecoveryMaxPasses || 2;
+
+    // Build set of tokens currently in chains
+    var inChain = {};
+    for (var ci = 0; ci < chains.length; ci++) {
+      var cids = chains[ci].ids;
+      for (var cj = 0; cj < cids.length; cj++) inChain[cids[cj]] = true;
+    }
+
+    // Build spatial grid of ALL tokens for proximity lookup
+    var cellSize = recoveryRadius + 1;
+    var grid = {};
+    for (var ti = 0; ti < tokens.length; ti++) {
+      var t = tokens[ti];
+      var key = ((t.x / cellSize) | 0) + ',' + ((t.y / cellSize) | 0);
+      if (!grid[key]) grid[key] = [];
+      grid[key].push(t);
+    }
+
+    // Build chain-length lookup: tokenId → length of its chain
+    var tokenChainLen = {};
+    for (var cli = 0; cli < chains.length; cli++) {
+      var chLen = chains[cli].ids.length;
+      var chIds = chains[cli].ids;
+      for (var clj = 0; clj < chIds.length; clj++) {
+        tokenChainLen[chIds[clj]] = chLen;
+      }
+    }
+
+    var totalRecovered = 0;
+
+    for (var pass = 0; pass < maxPasses; pass++) {
+      // Collect unattached tokens, sorted by confidence descending
+      var unattached = [];
+      for (var ui = 0; ui < tokens.length; ui++) {
+        if (!inChain[tokens[ui].id]) unattached.push(tokens[ui]);
+      }
+      if (unattached.length === 0) break;
+
+      unattached.sort(function(a, b) { return b.confidence - a.confidence; });
+
+      var passRecovered = 0;
+
+      for (var ri = 0; ri < unattached.length; ri++) {
+        var orphan = unattached[ri];
+        if (inChain[orphan.id]) continue; // may have been claimed this pass
+
+        var ogx = (orphan.x / cellSize) | 0;
+        var ogy = (orphan.y / cellSize) | 0;
+
+        var bestTarget = null;
+        var bestScore = -1;
+        var bestChainLen = 0;
+
+        // Search nearby cells for chain tokens
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            var nk = (ogx + dx) + ',' + (ogy + dy);
+            var bucket = grid[nk];
+            if (!bucket) continue;
+
+            for (var bi = 0; bi < bucket.length; bi++) {
+              var cand = bucket[bi];
+              if (cand.id === orphan.id) continue;
+              if (!inChain[cand.id]) continue; // only attach to chain tokens
+
+              var ddx = cand.x - orphan.x, ddy = cand.y - orphan.y;
+              var dist2 = ddx * ddx + ddy * ddy;
+              if (dist2 > recoveryRadius * recoveryRadius) continue;
+              var dist = Math.sqrt(dist2);
+              if (dist < 0.5) continue;
+
+              // Direction: orphan tangent vs candidate tangent
+              var dot = Math.abs(orphan.tangentX * cand.tangentX +
+                                 orphan.tangentY * cand.tangentY);
+              if (dot < recoveryDirMin) continue;
+
+              // Side color HARD GATE (same as Pass 1)
+              var llD = _labDist(orphan.leftLab, cand.leftLab);
+              var rrD = _labDist(orphan.rightLab, cand.rightLab);
+              var lrD = _labDist(orphan.leftLab, cand.rightLab);
+              var rlD = _labDist(orphan.rightLab, cand.leftLab);
+              var bestColorDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+              if (bestColorDist > sideColorGate) continue;
+
+              // Connection vector alignment: orphan→cand should run along tangent
+              var connDotO = Math.abs(orphan.tangentX * ddx + orphan.tangentY * ddy) / dist;
+              var connDotC = Math.abs(cand.tangentX * ddx + cand.tangentY * ddy) / dist;
+              var connAlign = (connDotO + connDotC) * 0.5;
+
+              // Scoring: direction + proximity + connection alignment + color
+              var distScore = 1.0 - dist / recoveryRadius;
+              var colorScore = Math.max(0, 1.0 - bestColorDist / 40);
+              var score = dot * 0.30 + distScore * 0.25 + connAlign * 0.25 + colorScore * 0.20;
+
+              // Prefer attachment to longer chains (enclosure priority)
+              var candChainLen = tokenChainLen[cand.id] || 1;
+              if (score > bestScore ||
+                  (score > bestScore - 0.05 && candChainLen > bestChainLen)) {
+                bestScore = score;
+                bestTarget = cand;
+                bestChainLen = candChainLen;
+              }
+            }
+          }
+        }
+
+        if (bestTarget && bestScore > 0.20) {
+          // Link orphan to target
+          adjacency[orphan.id].push(bestTarget.id);
+          adjacency[bestTarget.id].push(orphan.id);
+          inChain[orphan.id] = true;
+          tokenChainLen[orphan.id] = bestChainLen; // inherit chain length for subsequent decisions
+          passRecovered++;
+        }
+      }
+
+      totalRecovered += passRecovered;
+      if (_diag) _diag.recovery_passesRun++;
+      if (passRecovered === 0) break; // no progress
+    }
+
+    if (_diag) {
+      _diag.recovery_tokensRecovered = totalRecovered;
+      // Count remaining unattached
+      var remaining = 0;
+      for (var fi = 0; fi < tokens.length; fi++) {
+        if (!inChain[tokens[fi].id]) remaining++;
+      }
+      _diag.recovery_tokensUnrecovered = remaining;
+    }
+
+    return { recovered: totalRecovered };
+  }
+
+  /* ==================================================================
+   *  Token Salience Scoring
+   *
+   *  Computes a structural importance score (0..1) for every token.
+   *  High salience = token participates in coherent enclosing structure.
+   *  Low salience = token is isolated, noisy, or trapped inside
+   *  already-enclosed regions.
+   *
+   *  Salience components:
+   *    1. Chain membership & length (35%) — tokens in long chains that
+   *       form dominant boundaries receive the highest structural score
+   *    2. Adjacency degree (20%) — well-connected tokens are more
+   *       structurally integrated
+   *    3. Directional coherence (20%) — tokens whose tangents agree
+   *       with their neighbors are more likely genuine boundary tokens
+   *    4. Spatial extent (15%) — tokens in chains that span large
+   *       distances (enclosing boundaries) get a bonus
+   *    5. Confidence (10%) — original Stage C boundary evidence strength
+   *
+   *  Salience is used to:
+   *    - Protect structurally important tokens from outlier pruning
+   *    - Identify interior clutter that can be safely demoted
+   *    - Provide downstream stages with structural priority information
+   * ================================================================== */
+
+  function _computeTokenSalience(tokens, chains, adjacency, tokenById) {
+    var salience = {};  // tokenId → 0..1
+
+    // ── Precompute chain membership and chain stats ──
+    var tokenToChainIdx = {};
+    var chainStats = [];    // [ { length, spatialExtent } ]
+    var maxChainLen = 1;
+
+    for (var ci = 0; ci < chains.length; ci++) {
+      var cids = chains[ci].ids;
+      var cLen = cids.length;
+      if (cLen > maxChainLen) maxChainLen = cLen;
+
+      // Spatial extent: bounding box diagonal of chain tokens
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (var cj = 0; cj < cids.length; cj++) {
+        tokenToChainIdx[cids[cj]] = ci;
+        var ct = tokenById[cids[cj]];
+        if (ct) {
+          if (ct.x < minX) minX = ct.x;
+          if (ct.y < minY) minY = ct.y;
+          if (ct.x > maxX) maxX = ct.x;
+          if (ct.y > maxY) maxY = ct.y;
+        }
+      }
+      var diag = Math.sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
+      chainStats[ci] = { length: cLen, spatialExtent: diag };
+    }
+
+    // Max spatial extent for normalization
+    var maxExtent = 1;
+    for (var si = 0; si < chainStats.length; si++) {
+      if (chainStats[si].spatialExtent > maxExtent) maxExtent = chainStats[si].spatialExtent;
+    }
+
+    // ── Score each token ──
+    for (var ti = 0; ti < tokens.length; ti++) {
+      var tok = tokens[ti];
+      var id = tok.id;
+
+      // 1. Chain membership & length (0..1)
+      var chainLenScore = 0;
+      var chainIdx = tokenToChainIdx[id];
+      if (chainIdx != null) {
+        chainLenScore = Math.min(1.0, chainStats[chainIdx].length / Math.max(maxChainLen, 1));
+      }
+
+      // 2. Adjacency degree (0..1, saturates at 4 neighbors)
+      var neis = adjacency[id] || [];
+      var degreeScore = Math.min(1.0, neis.length / 4.0);
+
+      // 3. Directional coherence with neighbors (0..1)
+      var coherenceScore = 0;
+      if (neis.length > 0) {
+        var fit = _tokenNeighborFit(tok, neis, tokenById);
+        coherenceScore = 1.0 - fit.dirDev; // dirDev 0=perfect → coherence 1.0
+      }
+
+      // 4. Spatial extent of containing chain (0..1)
+      var extentScore = 0;
+      if (chainIdx != null) {
+        extentScore = chainStats[chainIdx].spatialExtent / maxExtent;
+      }
+
+      // 5. Confidence (0..1, already normalized in Stage C)
+      var confScore = Math.min(1.0, tok.confidence || 0);
+
+      // Combined salience
+      salience[id] = chainLenScore  * 0.35 +
+                     degreeScore    * 0.20 +
+                     coherenceScore * 0.20 +
+                     extentScore    * 0.15 +
+                     confScore      * 0.10;
+    }
+
+    return salience;
   }
 
   /* ==================================================================
