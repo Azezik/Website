@@ -55,65 +55,64 @@
   var DEFAULT_CONFIG_DF = Object.freeze({
     // Stage D — Pass 1: Geometry-first token linking
     //
-    // CRITICAL: graphNeighborRadius must be >= scaffoldSpacingPx (Stage C)
-    // so that tokens placed on the scaffold grid can reach each other in
-    // Zone 1 (omnidirectional). Previous value of 9 was less than the
-    // scaffold spacing of 12, forcing all scaffold-distance links through
-    // Zone 2's strict tangent alignment gate — which curves cannot pass.
-    graphNeighborRadius:     14,
-    graphForwardRadius:      20,
-    graphForwardDirMin:      0.55,
-    graphForwardLateralMax:  5,
+    // DESIGN RULE: 95% of tokens MUST end up in chains.  Tokens represent
+    // real boundary evidence from Stage C.  If Stage D discards them, all
+    // downstream structure (regions, groups) loses that information.
+    // Gates exist to prevent cross-boundary contamination, NOT to filter
+    // "weak" tokens — that's salience scoring's job, not linking's job.
+    //
+    // Radii are generous so tokens can find same-boundary neighbors even
+    // when other-boundary tokens are interleaved between them.
+    graphNeighborRadius:     20,     // was 14; wider Zone 1 for intersection regions
+    graphForwardRadius:      32,     // was 20; wider Zone 2 to span boundary gaps
+    graphForwardDirMin:      0.35,   // was 0.55; relaxed for curves and corners
+    graphForwardLateralMax:  8,      // was 5; wider lateral for noisy token placement
     graphOrientationTolDeg: 55,
     graphSideDeltaETol:    25,
     chainMinLength:        2,
-    linkScoreThreshold:    0.25,   // was 0.22; raised slightly to work with rebalanced scoring
+    linkScoreThreshold:    0.18,     // was 0.25; let more borderline links through
 
-    // Side color hard gate: maximum side-color distance above which links
-    // are NEVER created, regardless of geometric score. This is the primary
-    // mechanism to prevent cross-boundary contamination — tokens from
-    // different boundaries (different side colors) cannot link even if
-    // geometrically close and tangent-aligned.
+    // Side color hard gate: the PRIMARY cross-boundary safety mechanism.
+    // This is the ONE gate that must remain meaningful — it separates
+    // tokens on different boundaries.  All other gates can be relaxed.
     graphSideColorGate:    55,
 
     // Stage D — Pass 1b: Chain endpoint continuation
-    chainExtensionMaxDist: 24,     // conservative: ~2x scaffold spacing
-    chainExtensionDirAlign: 0.40,
+    chainExtensionMaxDist: 36,      // was 24; wider reach for sparser regions
+    chainExtensionDirAlign: 0.30,   // was 0.40; relaxed for curves
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
-    chainExtensionMaxDirDrift: 0.55,
+    chainExtensionMaxDirDrift: 0.65, // was 0.55; more drift tolerance for curves
 
     // Microchaining: use local strict-link populations to reinforce continuation
     microchainEnabled:          true,
-    microchainMinCandidates:    2,    // was 3; activate with fewer candidates for sparser regions
-    microchainCoherenceThresh:  0.40, // was 0.50; lowered for curve tokens
-    microchainDriftRelief:      0.65, // was 0.50; stronger relief when support is present
-    microchainSupportDecay:     0.90, // was 0.85; slower decay preserves momentum through curves
-    microchainSupportFloor:     0.10, // was 0.15; lower floor so relief activates sooner
+    microchainMinCandidates:    2,
+    microchainCoherenceThresh:  0.30, // was 0.40; activate with weaker coherence
+    microchainDriftRelief:      0.75, // was 0.65; stronger relief
+    microchainSupportDecay:     0.92, // was 0.90; slower decay
+    microchainSupportFloor:     0.08, // was 0.10; lower floor
 
     // Lookahead: short-horizon continuation probe (2-4 steps ahead)
     lookaheadEnabled:           true,
-    lookaheadMaxDepth:          4,    // max probe steps beyond candidate
-    lookaheadScoreWeight:       0.30, // was 0.25; slightly stronger lookahead influence
-    lookaheadDriftRescueDepth:  2,    // min future steps to rescue a borderline drift step
-    lookaheadCoherenceFraction: 0.25, // was 0.30; slightly less coherence weight so curves aren't penalized
+    lookaheadMaxDepth:          4,
+    lookaheadScoreWeight:       0.30,
+    lookaheadDriftRescueDepth:  2,
+    lookaheadCoherenceFraction: 0.20, // was 0.25; less coherence penalty
 
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
-    // Bridge MUST honor the same side color hard gate as Pass 1 linking.
-    // Without it, endpoints from different boundaries merge freely.
     bridgeEnabled:          true,
-    bridgeMaxGapPx:         24,    // ~2x scaffold spacing; prevents cross-shape reach
-    bridgeDirAgreementMin:  0.50,  // strong directional agreement required
-    bridgeSideDeltaETol:    35,    // side color scoring tolerance
-    bridgeMinCombinedScore: 0.30,  // reject borderline bridges
+    bridgeMaxGapPx:         36,      // was 24; wider to bridge more gaps
+    bridgeDirAgreementMin:  0.35,    // was 0.50; relaxed for curves/corners
+    bridgeSideDeltaETol:    35,
+    bridgeMinCombinedScore: 0.22,    // was 0.30; accept more bridges
 
     // Stage D: Structural outlier pruning
     //
-    // CRITICAL: Previous thresholds were calibrated for straight boundaries.
-    // Curve/circle/swirl tokens naturally have higher direction deviation
-    // between neighbors. Softened to preserve curve structure.
+    // Pruning is now CONSERVATIVE — salience scoring handles priority,
+    // not pruning.  Only remove tokens that are genuinely structural
+    // misfits, not "borderline" tokens.
     outlierPruneEnabled:    true,
-    outlierDirDeviationMax: 0.55,  // was 0.35; curves have higher neighbor deviation
+    outlierDirDeviationMax: 0.70,    // was 0.55; very lenient
     outlierMinNeighborSupport: 2,
     outlierPruneTinyComponents: true,
     outlierTinyComponentSize: 1,
@@ -122,27 +121,23 @@
     xyTrendEnabled:          true,
     xyTrendWindowSize:       10,
     xyTrendMinTokens:        4,
-    xyTrendBlendWeight:      0.35, // was 0.30; slightly stronger spatial trend influence
-    xyTrendConsistencyMin:   0.55, // was 0.65; activate trend blending sooner for noisy regions
+    xyTrendBlendWeight:      0.35,
+    xyTrendConsistencyMin:   0.50,   // was 0.55; activate sooner
 
     // Stage D: Lookahead upgrade
-    lookaheadBeamWidth:      3,    // was 2; wider beam for better curve path discovery
-    lookaheadDensityRadius:  14,   // was 12; slightly wider density sensing
-    lookaheadDensityWeight:  0.15, // was 0.10; stronger density preference
+    lookaheadBeamWidth:      3,
+    lookaheadDensityRadius:  16,     // was 14; slightly wider
+    lookaheadDensityWeight:  0.15,
 
     // Stage D: Closure pass
-    // Closure MUST honor the same side color hard gate as Pass 1 linking.
     closureEnabled:          true,
-    closureMinChainLen:      4,    // minimum chain length for closure consideration
-    closureMaxGapPx:         32,   // reasonable gap for same-boundary closure
-    closureTrendMin:         0.35, // endpoints must trend toward each other
-    closureColorTol:         40,   // side color tolerance for closure scoring
+    closureMinChainLen:      3,      // was 4; allow shorter chains to close
+    closureMaxGapPx:         40,     // was 32; wider closure reach
+    closureTrendMin:         0.25,   // was 0.35; more lenient trend agreement
+    closureColorTol:         45,     // was 40; slightly wider
 
     // Stage D: Multi-pass refinement
-    // Extension, bridge, and closure run in a loop. Limited to 2 passes
-    // to prevent error compounding — bad merges in pass 1 should not
-    // propagate further.
-    maxRefinementPasses:     2,
+    maxRefinementPasses:     3,      // was 2; one more pass to reach more tokens
 
     // Stage D: Branch anchor recovery
     branchAnchorEnabled:     true,
@@ -153,9 +148,9 @@
     // relaxed gates. This preserves structural information that strict
     // Pass 1 gates would otherwise lose permanently.
     residualRecoveryEnabled:    true,
-    residualRecoveryRadius:     28,    // wider search than Pass 1 base radius
-    residualRecoveryDirMin:     0.20,  // relaxed direction threshold
-    residualRecoveryMaxPasses:  2,     // iterative recovery attempts
+    residualRecoveryRadius:     40,    // was 28; match rescue radius
+    residualRecoveryDirMin:     0.10,  // was 0.20; very relaxed for corners
+    residualRecoveryMaxPasses:  3,     // was 2; more attempts
 
     // Stage D: Rescue linking — create seed chains from orphaned tokens.
     // After Pass 1's strict gates, some regions may have ZERO chains
@@ -169,10 +164,10 @@
     // cross-boundary contamination.  This creates seed chains in
     // previously dead regions, which subsequent passes then grow.
     rescueLinkingEnabled:       true,
-    rescueLinkingRadius:        40,    // 2× fwdRadius for wider search
-    rescueLinkingDirMin:        0.12,  // very relaxed tangent alignment
-    rescueLinkingScoreMin:      0.15,  // lower acceptance than Pass 1
-    rescueLinkingMaxPasses:     3,     // iterative rescue attempts
+    rescueLinkingRadius:        48,    // was 40; even wider for large gaps
+    rescueLinkingDirMin:        0.08,  // was 0.12; nearly omnidirectional for corners
+    rescueLinkingScoreMin:      0.10,  // was 0.15; accept weaker links
+    rescueLinkingMaxPasses:     4,     // was 3; more passes to chain-propagate
 
     // Stage D: Token salience scoring.
     // After chain assembly, every token receives a structural salience
@@ -182,6 +177,13 @@
     // tokens (isolated, noisy, interior clutter) can be demoted.
     salienceEnabled:            true,
     saliencePruneFloor:         0.12,  // tokens below this AND unattached → prunable
+
+    // Stage D: Coverage enforcement.
+    // DESIGN RULE: 95% of tokens MUST end up in chains.  If after all
+    // passes the coverage is below this target, a final aggressive sweep
+    // links remaining orphans to their nearest same-boundary token
+    // using only the side-color gate (all geometry gates dropped).
+    minTokenCoverageRatio:      0.95,
 
     // Stage E
     watershedFgFraction:   0.25,
@@ -688,6 +690,155 @@
         // Recompute salience after pruning (structure has changed)
         if (cfg.salienceEnabled !== false) {
           tokenSalience = _computeTokenSalience(tokens, chains, adjacency, tokenById);
+        }
+      }
+    }
+
+    /* ================================================================
+     *  COVERAGE ENFORCEMENT SWEEP
+     *
+     *  DESIGN RULE: 95% of tokens MUST end up in chains.
+     *
+     *  If after all passes coverage is still below the target, run a
+     *  final aggressive sweep.  For each remaining orphan, find the
+     *  nearest token (orphan or chained) that passes the side-color
+     *  gate and link them.  All geometry gates are dropped — only
+     *  boundary identity matters.
+     *
+     *  This guarantees that the chain overlay reflects the token field.
+     * ================================================================ */
+    var minCoverage = cfg.minTokenCoverageRatio != null ? cfg.minTokenCoverageRatio : 0.95;
+    if (tokens.length > 0 && minCoverage > 0) {
+      // Count current coverage
+      var _covInChain = {};
+      for (var _covi = 0; _covi < chains.length; _covi++) {
+        var _covIds = chains[_covi].ids;
+        for (var _covj = 0; _covj < _covIds.length; _covj++) _covInChain[_covIds[_covj]] = true;
+      }
+      var _covCount = 0;
+      for (var _covk in _covInChain) _covCount++;
+      var _covRatio = _covCount / tokens.length;
+
+      if (_covRatio < minCoverage) {
+        // Build spatial grid for nearest-neighbor search
+        var _swCellSize = 50;
+        var _swGrid = {};
+        for (var _swi = 0; _swi < tokens.length; _swi++) {
+          var _swt = tokens[_swi];
+          var _swk = ((_swt.x / _swCellSize) | 0) + ',' + ((_swt.y / _swCellSize) | 0);
+          if (!_swGrid[_swk]) _swGrid[_swk] = [];
+          _swGrid[_swk].push(_swt);
+        }
+
+        var _sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+        var _swMaxRadius = 60; // generous last-resort radius
+        var _swLinksCreated = 0;
+        var _sweepMaxPasses = 5;
+
+        for (var _swPass = 0; _swPass < _sweepMaxPasses; _swPass++) {
+          var _swPassLinks = 0;
+
+          // Collect orphans
+          var _swOrphans = [];
+          for (var _swo = 0; _swo < tokens.length; _swo++) {
+            if (!_covInChain[tokens[_swo].id]) _swOrphans.push(tokens[_swo]);
+          }
+          if (_swOrphans.length === 0) break;
+
+          // Check if we already meet coverage
+          var _swCurrentCov = 1.0 - (_swOrphans.length / tokens.length);
+          if (_swCurrentCov >= minCoverage) break;
+
+          for (var _swoi = 0; _swoi < _swOrphans.length; _swoi++) {
+            var _swOrp = _swOrphans[_swoi];
+            if (_covInChain[_swOrp.id]) continue; // already linked this pass
+
+            var _swgx = (_swOrp.x / _swCellSize) | 0;
+            var _swgy = (_swOrp.y / _swCellSize) | 0;
+
+            var _swBest = null;
+            var _swBestDist = _swMaxRadius + 1;
+
+            for (var _swdy = -1; _swdy <= 1; _swdy++) {
+              for (var _swdx = -1; _swdx <= 1; _swdx++) {
+                var _swBucket = _swGrid[(_swgx + _swdx) + ',' + (_swgy + _swdy)];
+                if (!_swBucket) continue;
+                for (var _swbi = 0; _swbi < _swBucket.length; _swbi++) {
+                  var _swCand = _swBucket[_swbi];
+                  if (_swCand.id === _swOrp.id) continue;
+
+                  var _swddx = _swCand.x - _swOrp.x, _swddy = _swCand.y - _swOrp.y;
+                  var _swDist2 = _swddx * _swddx + _swddy * _swddy;
+                  if (_swDist2 > _swMaxRadius * _swMaxRadius) continue;
+                  var _swDist = Math.sqrt(_swDist2);
+                  if (_swDist < 0.5) continue;
+
+                  // Side-color gate only — the sole safety check
+                  var _swllD = _labDist(_swOrp.leftLab, _swCand.leftLab);
+                  var _swrrD = _labDist(_swOrp.rightLab, _swCand.rightLab);
+                  var _swlrD = _labDist(_swOrp.leftLab, _swCand.rightLab);
+                  var _swrlD = _labDist(_swOrp.rightLab, _swCand.leftLab);
+                  var _swColorDist = Math.min((_swllD + _swrrD) * 0.5, (_swlrD + _swrlD) * 0.5);
+                  if (_swColorDist > _sideColorGate) continue;
+
+                  // Prefer chained tokens (attach to existing structure)
+                  var _swEffDist = _swDist;
+                  if (_covInChain[_swCand.id]) _swEffDist *= 0.5; // halve distance for chained targets
+
+                  if (_swEffDist < _swBestDist) {
+                    _swBestDist = _swEffDist;
+                    _swBest = _swCand;
+                  }
+                }
+              }
+            }
+
+            if (_swBest) {
+              // Check not already linked
+              var _swExisting = adjacency[_swOrp.id];
+              var _swDup = false;
+              for (var _swdi = 0; _swdi < _swExisting.length; _swdi++) {
+                if (_swExisting[_swdi] === _swBest.id) { _swDup = true; break; }
+              }
+              if (!_swDup) {
+                adjacency[_swOrp.id].push(_swBest.id);
+                adjacency[_swBest.id].push(_swOrp.id);
+                _covInChain[_swOrp.id] = true;
+                _swPassLinks++;
+              }
+            }
+          }
+
+          _swLinksCreated += _swPassLinks;
+          if (_swPassLinks === 0) break;
+        }
+
+        // Rebuild chains if sweep created new links
+        if (_swLinksCreated > 0) {
+          components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+          chains = [];
+          loops = [];
+          for (var _swci = 0; _swci < components.length; _swci++) {
+            var _swComp = components[_swci];
+            var _swOrd = _orderChain(_swComp, adjacency, tokenById);
+            var _swLoop = _isLoopChain(_swOrd, adjacency, _swComp);
+            chains.push({ ids: _swOrd, ordered: true });
+            if (_swLoop) loops.push({ ids: _swOrd });
+            var _swRes = _recoverResidualChains(
+              _swComp, _swOrd, adjacency, tokenById,
+              cfg.chainMinLength, cfg.branchAnchorEnabled
+            );
+            for (var _swri = 0; _swri < _swRes.length; _swri++) {
+              chains.push({ ids: _swRes[_swri], ordered: true });
+              if (_isLoopChain(_swRes[_swri], adjacency, _swComp))
+                loops.push({ ids: _swRes[_swri] });
+            }
+          }
+
+          // Recompute salience with final chain structure
+          if (cfg.salienceEnabled !== false) {
+            tokenSalience = _computeTokenSalience(tokens, chains, adjacency, tokenById);
+          }
         }
       }
     }
