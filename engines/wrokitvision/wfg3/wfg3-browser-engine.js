@@ -85,7 +85,7 @@
     graphSideColorGate: 55,
     chainMinLength: 2,
     linkScoreThreshold: 0.25,
-    chainExtensionMaxDist: 24,
+    chainExtensionMaxDist: 32,
     chainExtensionDirAlign: 0.40,
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
@@ -93,10 +93,10 @@
 
     // Stage D: Pass-2 Bridging (geometry-first)
     bridgeEnabled: true,
-    bridgeMaxGapPx: 24,
-    bridgeDirAgreementMin: 0.40,
-    bridgeSideDeltaETol: 35,
-    bridgeMinCombinedScore: 0.25,
+    bridgeMaxGapPx: 40,
+    bridgeDirAgreementMin: 0.30,
+    bridgeSideDeltaETol: 40,
+    bridgeMinCombinedScore: 0.20,
 
     // Stage D: Structural outlier pruning (geometry-only)
     outlierPruneEnabled: true,
