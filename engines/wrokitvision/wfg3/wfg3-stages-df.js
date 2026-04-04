@@ -438,15 +438,18 @@
      *  tokens already claimed by a higher-confidence seed.
      *
      *  Structural merge (Phase 2) reconnects some fragments, but only
-     *  by matching endpoints locally.  It cannot unify 15 fragments
-     *  scattered along the same square edge.
+     *  by matching endpoints locally.  It cannot unify 30+ fragments
+     *  scattered around the same object boundary.
      *
-     *  Contour consolidation operates at boundary IDENTITY level:
+     *  Contour consolidation operates at WHOLE-BOUNDARY scale:
      *
      *    1. Compute per-chain boundary signature (avg left/right LAB)
-     *    2. Cluster chains by boundary identity (matching side colors)
-     *    3. Within each cluster, order chains spatially along the contour
-     *    4. Concatenate into unified chains, adding adjacency links
+     *    2. Group chains by side-color identity (transitive closure)
+     *    3. Within each color group, find spatially connected components
+     *       using any-token-to-any-token proximity — this naturally
+     *       separates distinct objects that share the same colors
+     *    4. Within each spatial component, order fragments by greedy
+     *       nearest-endpoint walk and concatenate into one chain
      *    5. Re-detect loops on the unified chains
      *
      *  This reduces many-chains-per-object toward one-chain-per-boundary,
@@ -2003,174 +2006,199 @@
    * ──────────────────────────────────────────────────────────────────── */
   function _consolidateBoundaryContours(chains, loops, adjacency, tokenById, cfg) {
     var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
-    // Proximity threshold: how close any token in chain A must be to any
-    // token in chain B for them to be consolidation candidates.
-    // This must be generous enough to span corners and small gaps.
+    // Proximity threshold for any-token-to-any-token spatial connectivity.
+    // Fragments along the same boundary typically have tokens within a few
+    // pixels of each other.  Separate objects are typically much farther apart.
+    // Connected components in the spatial graph naturally separate distinct
+    // objects even when they share the same side-color signature.
     var proximityThreshold = cfg.consolidationProximityPx || 50;
     var proxThresh2 = proximityThreshold * proximityThreshold;
     var chainMinLen = cfg.chainMinLength || 2;
 
     if (chains.length < 2) return { chains: chains, loops: loops };
 
-    // ── Step 1: Compute per-chain boundary signature ──
-    var sigs = []; // { avgLeftLab[3], avgRightLab[3], centroidX, centroidY, chainIdx }
+    // ── Step 1: Compute per-chain boundary signature (avg left/right LAB) ──
+    var sigs = [];
     for (var ci = 0; ci < chains.length; ci++) {
       var ids = chains[ci].ids;
       if (ids.length < 1) continue;
-      var sL = [0, 0, 0], sR = [0, 0, 0], cx = 0, cy = 0, n = 0;
+      var sL = [0, 0, 0], sR = [0, 0, 0], n = 0;
       for (var ti = 0; ti < ids.length; ti++) {
         var tok = tokenById[ids[ti]];
         if (!tok) continue;
         sL[0] += tok.leftLab[0]; sL[1] += tok.leftLab[1]; sL[2] += tok.leftLab[2];
         sR[0] += tok.rightLab[0]; sR[1] += tok.rightLab[1]; sR[2] += tok.rightLab[2];
-        cx += tok.x; cy += tok.y;
         n++;
       }
       if (n === 0) continue;
       sigs.push({
         avgLeft: [sL[0] / n, sL[1] / n, sL[2] / n],
         avgRight: [sR[0] / n, sR[1] / n, sR[2] / n],
-        cx: cx / n, cy: cy / n,
         chainIdx: ci,
         tokenCount: n
       });
     }
 
-    // ── Step 2: Build spatial index of all tokens for proximity checks ──
+    // ── Step 2: Group chains by side-color identity ──
+    // Two chains share boundary identity if their avg left/right LAB match
+    // (or are flipped) within the sideColorGate.  We build a color-match
+    // graph and extract connected components — these are "color groups"
+    // that MIGHT belong to the same boundary (but could be separate objects
+    // with the same colors).
+    var colorAdj = {};
+    for (var i = 0; i < sigs.length; i++) colorAdj[i] = {};
+
+    for (var ai = 0; ai < sigs.length; ai++) {
+      var sigA = sigs[ai];
+      for (var bi = ai + 1; bi < sigs.length; bi++) {
+        var sigB = sigs[bi];
+        var sameDist = (_labDist(sigA.avgLeft, sigB.avgLeft) +
+                       _labDist(sigA.avgRight, sigB.avgRight)) * 0.5;
+        var flipDist = (_labDist(sigA.avgLeft, sigB.avgRight) +
+                       _labDist(sigA.avgRight, sigB.avgLeft)) * 0.5;
+        if (Math.min(sameDist, flipDist) <= sideColorGate) {
+          colorAdj[ai][bi] = true;
+          colorAdj[bi][ai] = true;
+        }
+      }
+    }
+
+    var colorVisited = {};
+    var colorGroups = [];
+    for (var cgi = 0; cgi < sigs.length; cgi++) {
+      if (colorVisited[cgi]) continue;
+      var cg = [];
+      var cq = [cgi];
+      colorVisited[cgi] = true;
+      while (cq.length > 0) {
+        var ccur = cq.shift();
+        cg.push(ccur);
+        for (var cnk in colorAdj[ccur]) {
+          var cni = +cnk;
+          if (!colorVisited[cni]) {
+            colorVisited[cni] = true;
+            cq.push(cni);
+          }
+        }
+      }
+      colorGroups.push(cg);
+    }
+
+    // ── Step 3: Build spatial index of ALL chain tokens ──
     var proxCellSize = proximityThreshold + 1;
-    var tokenToChainIdx = {}; // tokenId → index into sigs array
     var proxGrid = {};
+
     for (var si = 0; si < sigs.length; si++) {
-      var sig = sigs[si];
-      var chIds = chains[sig.chainIdx].ids;
+      var chIds = chains[sigs[si].chainIdx].ids;
       for (var tii = 0; tii < chIds.length; tii++) {
         var ttok = tokenById[chIds[tii]];
         if (!ttok) continue;
-        tokenToChainIdx[chIds[tii]] = si;
         var pgk = ((ttok.x / proxCellSize) | 0) + ',' + ((ttok.y / proxCellSize) | 0);
         if (!proxGrid[pgk]) proxGrid[pgk] = [];
         proxGrid[pgk].push({ tok: ttok, sigIdx: si });
       }
     }
 
-    // ── Step 3: Build compatibility graph between chains ──
+    // ── Step 4: Within each color group, find spatially connected components ──
     //
-    // Two chains are compatible if:
-    //   a) Their side-color signatures match (same boundary identity)
-    //   b) An ENDPOINT of one chain is near the BODY of the other chain,
-    //      OR both chains have endpoints near each other
-    //
-    // CRITICAL: We do NOT use "any token near any token" because
-    // when all objects have the same color (e.g., all magenta on white),
-    // every boundary has the same side-color signature.  Using body-to-body
-    // proximity would merge all objects into one chain.
-    //
-    // Endpoint-to-body proximity ensures chains can only consolidate if
-    // they're adjacent ALONG THE CONTOUR — fragments must continue each
-    // other, not just happen to be near each other on different objects.
-    var compatAdj = {}; // sigIdx → set of compatible sigIdx
-    for (var i = 0; i < sigs.length; i++) compatAdj[i] = {};
+    // This is the key separation mechanism: chains on different objects
+    // share the same side colors but are physically far apart.  Connected
+    // components in the any-token-to-any-token proximity graph naturally
+    // separate distinct objects.  Fragments along the SAME boundary are
+    // physically close (within proximityThreshold) and will cluster together.
+    var finalGroups = [];
 
-    // Collect endpoints for each chain
-    var chainEndpoints = []; // parallel to sigs: [{ startTok, endTok }]
-    for (var epi = 0; epi < sigs.length; epi++) {
-      var epIds = chains[sigs[epi].chainIdx].ids;
-      chainEndpoints.push({
-        startTok: tokenById[epIds[0]],
-        endTok: tokenById[epIds[epIds.length - 1]]
-      });
-    }
+    for (var cgIdx = 0; cgIdx < colorGroups.length; cgIdx++) {
+      var cGroup = colorGroups[cgIdx];
 
-    for (var ai = 0; ai < sigs.length; ai++) {
-      var sigA = sigs[ai];
-      var epA = chainEndpoints[ai];
-      if (!epA.startTok || !epA.endTok) continue;
+      if (cGroup.length === 1) {
+        finalGroups.push(cGroup);
+        continue;
+      }
 
-      // Check A's endpoints against all other chains' bodies and endpoints
-      var endpoints = [epA.startTok, epA.endTok];
+      // Build set for O(1) membership check
+      var inGroup = {};
+      for (var ig = 0; ig < cGroup.length; ig++) inGroup[cGroup[ig]] = true;
 
-      for (var eIdx = 0; eIdx < 2; eIdx++) {
-        var epTok = endpoints[eIdx];
-        var egx = (epTok.x / proxCellSize) | 0;
-        var egy = (epTok.y / proxCellSize) | 0;
+      // Build spatial adjacency between chains in this color group.
+      // Two chains are spatially connected if ANY token in one is within
+      // proximityThreshold of ANY token in the other.
+      var spatialAdj = {};
+      for (var ig2 = 0; ig2 < cGroup.length; ig2++) spatialAdj[cGroup[ig2]] = {};
 
-        // Search nearby tokens in the spatial grid
-        var nearbyChains = {}; // sigIdx → closest distance²
-        for (var pdy = -1; pdy <= 1; pdy++) {
-          for (var pdx = -1; pdx <= 1; pdx++) {
-            var pBucket = proxGrid[(egx + pdx) + ',' + (egy + pdy)];
-            if (!pBucket) continue;
-            for (var pbi = 0; pbi < pBucket.length; pbi++) {
-              var pb = pBucket[pbi];
-              if (pb.sigIdx === ai) continue;
+      for (var ig3 = 0; ig3 < cGroup.length; ig3++) {
+        var sigIdx = cGroup[ig3];
+        var schIds = chains[sigs[sigIdx].chainIdx].ids;
 
-              var pdx2 = pb.tok.x - epTok.x, pdy2 = pb.tok.y - epTok.y;
-              var d2 = pdx2 * pdx2 + pdy2 * pdy2;
-              if (d2 <= proxThresh2) {
-                if (nearbyChains[pb.sigIdx] === undefined || d2 < nearbyChains[pb.sigIdx]) {
-                  nearbyChains[pb.sigIdx] = d2;
+        for (var sti = 0; sti < schIds.length; sti++) {
+          var stok = tokenById[schIds[sti]];
+          if (!stok) continue;
+
+          var sgx = (stok.x / proxCellSize) | 0;
+          var sgy = (stok.y / proxCellSize) | 0;
+
+          for (var sdy = -1; sdy <= 1; sdy++) {
+            for (var sdx = -1; sdx <= 1; sdx++) {
+              var sBucket = proxGrid[(sgx + sdx) + ',' + (sgy + sdy)];
+              if (!sBucket) continue;
+              for (var sbi = 0; sbi < sBucket.length; sbi++) {
+                var sOther = sBucket[sbi];
+                if (sOther.sigIdx === sigIdx) continue;
+                if (!inGroup[sOther.sigIdx]) continue;
+                if (spatialAdj[sigIdx][sOther.sigIdx]) continue;
+
+                var sddx = sOther.tok.x - stok.x;
+                var sddy = sOther.tok.y - stok.y;
+                if (sddx * sddx + sddy * sddy <= proxThresh2) {
+                  spatialAdj[sigIdx][sOther.sigIdx] = true;
+                  spatialAdj[sOther.sigIdx][sigIdx] = true;
                 }
               }
             }
           }
         }
+      }
 
-        // For each nearby chain, check side-color compatibility
-        for (var ncIdx in nearbyChains) {
-          var bi = +ncIdx;
-          if (bi <= ai) continue;
-          if (compatAdj[ai][bi]) continue;
-
-          var sigB = sigs[bi];
-
-          // Side-color signature match
-          var sameDist = (_labDist(sigA.avgLeft, sigB.avgLeft) +
-                         _labDist(sigA.avgRight, sigB.avgRight)) * 0.5;
-          var flipDist = (_labDist(sigA.avgLeft, sigB.avgRight) +
-                         _labDist(sigA.avgRight, sigB.avgLeft)) * 0.5;
-          var bestDist = Math.min(sameDist, flipDist);
-
-          if (bestDist <= sideColorGate) {
-            compatAdj[ai][bi] = true;
-            compatAdj[bi][ai] = true;
+      // BFS to find spatial connected components within this color group
+      var spVisited = {};
+      for (var ig4 = 0; ig4 < cGroup.length; ig4++) {
+        var spIdx = cGroup[ig4];
+        if (spVisited[spIdx]) continue;
+        var comp = [];
+        var sq = [spIdx];
+        spVisited[spIdx] = true;
+        while (sq.length > 0) {
+          var sc = sq.shift();
+          comp.push(sc);
+          for (var snk in spatialAdj[sc]) {
+            var sni = +snk;
+            if (!spVisited[sni]) {
+              spVisited[sni] = true;
+              sq.push(sni);
+            }
           }
         }
+        finalGroups.push(comp);
       }
     }
 
-    // ── Step 4: Find connected components in compatibility graph ──
-    // Each component = a boundary group (all fragments of the same boundary)
-    var visited = {};
-    var groups = []; // each group is an array of sigIdx
-    for (var gi = 0; gi < sigs.length; gi++) {
-      if (visited[gi]) continue;
-      var group = [];
-      var queue = [gi];
-      visited[gi] = true;
-      while (queue.length > 0) {
-        var cur = queue.shift();
-        group.push(cur);
-        var neighbors = compatAdj[cur];
-        for (var nk in neighbors) {
-          var ni = +nk;
-          if (!visited[ni]) {
-            visited[ni] = true;
-            queue.push(ni);
-          }
-        }
-      }
-      groups.push(group);
-    }
-
-    // ── Step 5: For each group, order chains spatially and concatenate ──
+    // ── Step 5: Within each group, order fragments and concatenate ──
+    //
+    // For each group of chains that share boundary identity AND are
+    // spatially connected, we form a single unified chain:
+    //   1. Determine side-color orientation (flipped or not) relative to
+    //      a reference chain in the group
+    //   2. Start from the fragment whose endpoint is farthest from centroid
+    //   3. Greedily walk to the nearest unvisited fragment (by endpoint
+    //      distance), orienting each fragment to minimize the gap
+    //   4. Concatenate all fragments into one chain
     var newChains = [];
     var newLoops = [];
 
-    for (var gri = 0; gri < groups.length; gri++) {
-      var grp = groups[gri];
+    for (var gri = 0; gri < finalGroups.length; gri++) {
+      var grp = finalGroups[gri];
 
       if (grp.length === 1) {
-        // Single chain — no consolidation needed
         var singleChain = chains[sigs[grp[0]].chainIdx];
         if (singleChain.ids.length >= chainMinLen) {
           newChains.push(singleChain);
@@ -2178,109 +2206,103 @@
         continue;
       }
 
-      // Order chains within this group by nearest-endpoint walk.
-      // Start from the chain with the endpoint farthest from the group centroid
-      // (likely an outer corner of the shape).
+      // Determine flip status relative to first chain in group
+      var refSig = sigs[grp[0]];
+      var fragInfos = [];
 
-      // Compute group centroid
-      var gcx = 0, gcy = 0;
       for (var gci = 0; gci < grp.length; gci++) {
-        gcx += sigs[grp[gci]].cx;
-        gcy += sigs[grp[gci]].cy;
-      }
-      gcx /= grp.length;
-      gcy /= grp.length;
+        var gSig = sigs[grp[gci]];
+        var gChain = chains[gSig.chainIdx];
+        var gIds = gChain.ids;
+        var sameDist2 = (_labDist(refSig.avgLeft, gSig.avgLeft) +
+                        _labDist(refSig.avgRight, gSig.avgRight)) * 0.5;
+        var flipDist2 = (_labDist(refSig.avgLeft, gSig.avgRight) +
+                        _labDist(refSig.avgRight, gSig.avgLeft)) * 0.5;
+        var isFlipped = flipDist2 < sameDist2;
 
-      // For each chain, compute its two endpoints and their distances from centroid
-      var chainInfos = [];
-      for (var cii = 0; cii < grp.length; cii++) {
-        var sigI = sigs[grp[cii]];
-        var chI = chains[sigI.chainIdx];
-        var idsI = chI.ids;
-        var firstT = tokenById[idsI[0]];
-        var lastT = tokenById[idsI[idsI.length - 1]];
-        if (!firstT || !lastT) continue;
-        chainInfos.push({
-          sigIdx: grp[cii],
-          chainIdx: sigI.chainIdx,
-          ids: idsI,
-          startTok: firstT,
-          endTok: lastT
+        // Get the oriented token array for this fragment
+        var oriented = isFlipped ? gIds.slice().reverse() : gIds.slice();
+        var oFirst = tokenById[oriented[0]];
+        var oLast = tokenById[oriented[oriented.length - 1]];
+        if (!oFirst || !oLast) continue;
+
+        fragInfos.push({
+          ids: oriented,
+          startTok: oFirst,
+          endTok: oLast
         });
       }
 
-      if (chainInfos.length === 0) continue;
+      if (fragInfos.length === 0) continue;
 
-      // Find the endpoint farthest from centroid → start of the walk
-      var bestStart = 0;
-      var bestStartDist2 = -1;
-      var bestStartIsEnd = false;
-      for (var bsi = 0; bsi < chainInfos.length; bsi++) {
-        var ci2 = chainInfos[bsi];
-        var sd2 = (ci2.startTok.x - gcx) * (ci2.startTok.x - gcx) +
-                  (ci2.startTok.y - gcy) * (ci2.startTok.y - gcy);
-        var ed2 = (ci2.endTok.x - gcx) * (ci2.endTok.x - gcx) +
-                  (ci2.endTok.y - gcy) * (ci2.endTok.y - gcy);
-        if (sd2 > bestStartDist2) { bestStartDist2 = sd2; bestStart = bsi; bestStartIsEnd = false; }
-        if (ed2 > bestStartDist2) { bestStartDist2 = ed2; bestStart = bsi; bestStartIsEnd = true; }
+      // Compute group centroid from ALL tokens
+      var gcx = 0, gcy = 0, gtn = 0;
+      for (var gti = 0; gti < fragInfos.length; gti++) {
+        var gtIds = fragInfos[gti].ids;
+        for (var gtj = 0; gtj < gtIds.length; gtj++) {
+          var gt = tokenById[gtIds[gtj]];
+          if (gt) { gcx += gt.x; gcy += gt.y; gtn++; }
+        }
+      }
+      if (gtn > 0) { gcx /= gtn; gcy /= gtn; }
+
+      // Find starting fragment: endpoint farthest from centroid
+      var bestStart = 0, bestDist2 = -1, bestIsEnd = false;
+      for (var bsi = 0; bsi < fragInfos.length; bsi++) {
+        var bFrag = fragInfos[bsi];
+        var bsd2 = (bFrag.startTok.x - gcx) * (bFrag.startTok.x - gcx) +
+                   (bFrag.startTok.y - gcy) * (bFrag.startTok.y - gcy);
+        var bed2 = (bFrag.endTok.x - gcx) * (bFrag.endTok.x - gcx) +
+                   (bFrag.endTok.y - gcy) * (bFrag.endTok.y - gcy);
+        if (bsd2 > bestDist2) { bestDist2 = bsd2; bestStart = bsi; bestIsEnd = false; }
+        if (bed2 > bestDist2) { bestDist2 = bed2; bestStart = bsi; bestIsEnd = true; }
       }
 
-      // Nearest-endpoint walk: greedily pick the next chain whose
-      // nearest endpoint is closest to the current chain's trailing endpoint.
+      // Greedy nearest-endpoint walk to order all fragments
       var ordered = [];
-      var usedChain = {};
+      var used = {};
 
-      // First chain — orient it so the farthest-from-centroid endpoint is at the start
-      var firstInfo = chainInfos[bestStart];
-      if (bestStartIsEnd) {
-        // The far endpoint is at the end — reverse so it's at the start
-        ordered.push(firstInfo.ids.slice().reverse());
-      } else {
-        ordered.push(firstInfo.ids.slice());
-      }
-      usedChain[bestStart] = true;
+      var firstFrag = fragInfos[bestStart];
+      var firstIds = bestIsEnd ? firstFrag.ids.slice().reverse() : firstFrag.ids.slice();
+      ordered.push(firstIds);
+      used[bestStart] = true;
 
-      // Walk: pick next chain whose endpoint is nearest to current trailing end
-      for (var wi = 1; wi < chainInfos.length; wi++) {
+      for (var wi = 1; wi < fragInfos.length; wi++) {
         var curIds = ordered[ordered.length - 1];
         var curEnd = tokenById[curIds[curIds.length - 1]];
         if (!curEnd) break;
 
-        var bestNext = -1;
-        var bestNextDist2 = Infinity;
-        var bestNextReverse = false;
+        var bestNext = -1, bestNextD2 = Infinity, bestNextReverse = false;
 
-        for (var wj = 0; wj < chainInfos.length; wj++) {
-          if (usedChain[wj]) continue;
-          var wInfo = chainInfos[wj];
+        for (var wj = 0; wj < fragInfos.length; wj++) {
+          if (used[wj]) continue;
+          var wFrag = fragInfos[wj];
 
-          // Distance from current end to this chain's start
-          var ds = (wInfo.startTok.x - curEnd.x) * (wInfo.startTok.x - curEnd.x) +
-                   (wInfo.startTok.y - curEnd.y) * (wInfo.startTok.y - curEnd.y);
-          // Distance from current end to this chain's end (would need to reverse)
-          var de = (wInfo.endTok.x - curEnd.x) * (wInfo.endTok.x - curEnd.x) +
-                   (wInfo.endTok.y - curEnd.y) * (wInfo.endTok.y - curEnd.y);
+          // Distance to this fragment's start
+          var wds = (wFrag.startTok.x - curEnd.x) * (wFrag.startTok.x - curEnd.x) +
+                    (wFrag.startTok.y - curEnd.y) * (wFrag.startTok.y - curEnd.y);
+          // Distance to this fragment's end (would reverse)
+          var wde = (wFrag.endTok.x - curEnd.x) * (wFrag.endTok.x - curEnd.x) +
+                    (wFrag.endTok.y - curEnd.y) * (wFrag.endTok.y - curEnd.y);
 
-          var minD = Math.min(ds, de);
-          if (minD < bestNextDist2) {
-            bestNextDist2 = minD;
+          var wMinD = Math.min(wds, wde);
+          if (wMinD < bestNextD2) {
+            bestNextD2 = wMinD;
             bestNext = wj;
-            bestNextReverse = de < ds;
+            bestNextReverse = wde < wds;
           }
         }
 
         if (bestNext < 0) break;
 
-        var nextIds = chainInfos[bestNext].ids;
-        if (bestNextReverse) {
-          ordered.push(nextIds.slice().reverse());
-        } else {
-          ordered.push(nextIds.slice());
-        }
-        usedChain[bestNext] = true;
+        var nextIds = bestNextReverse
+          ? fragInfos[bestNext].ids.slice().reverse()
+          : fragInfos[bestNext].ids.slice();
+        ordered.push(nextIds);
+        used[bestNext] = true;
       }
 
-      // Concatenate all ordered chain fragments into one unified chain
+      // Concatenate all ordered fragments into one unified chain
       var unified = [];
       for (var ui = 0; ui < ordered.length; ui++) {
         var uIds = ordered[ui];
@@ -2293,7 +2315,6 @@
           var juncA = uIds[uIds.length - 1];
           var juncB = ordered[ui + 1][0];
           if (juncA !== juncB) {
-            // Check not already linked
             var alreadyLinked = false;
             var adjA = adjacency[juncA];
             if (adjA) {
@@ -2315,6 +2336,8 @@
     }
 
     // ── Step 6: Re-detect loops on unified chains ──
+    // After consolidation, unified chains may now have endpoints that are
+    // close enough to close into loops.
     var sideColorGateLoop = sideColorGate;
     for (var nli = 0; nli < newChains.length; nli++) {
       var nIds = newChains[nli].ids;
@@ -2326,8 +2349,6 @@
 
       var ldx = nFirst.x - nLast.x, ldy = nFirst.y - nLast.y;
       var loopDist2 = ldx * ldx + ldy * ldy;
-      // Generous closure radius: allow endpoints within the consolidation
-      // proximity threshold to close (these are now big unified chains)
       var closureR = cfg.closureMaxGapPx || 50;
       if (loopDist2 > closureR * closureR) continue;
 
@@ -2339,7 +2360,7 @@
       var bestCD = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
       if (bestCD > sideColorGateLoop) continue;
 
-      // Direction check: endpoints should face toward each other
+      // Direction check: at least one end should face the other
       var endDir = _estimateChainEndDir(nIds, false, tokenById);
       var startDir = _estimateChainEndDir(nIds, true, tokenById);
       if (endDir && startDir) {
@@ -2348,7 +2369,7 @@
           var gapX = ldx / loopDist, gapY = ldy / loopDist;
           var e2f = endDir[0] * gapX + endDir[1] * gapY;
           var f2e = startDir[0] * (-gapX) + startDir[1] * (-gapY);
-          if (e2f < 0.15 && f2e < 0.15) continue; // neither end faces the other
+          if (e2f < 0.15 && f2e < 0.15) continue;
         }
       }
 
