@@ -759,6 +759,12 @@
     var traceDirMin = cfg.graphForwardDirMin || 0.35;
     var chainMinLen = cfg.chainMinLength || 2;
 
+    // Seed suppression radius: tokens within this distance of an existing
+    // chain's body are NOT allowed to start new chains.  This prevents
+    // repeated seeding on the same boundary that creates many fragments.
+    var seedSuppressionRadius = cfg.seedSuppressionRadius || traceRadius;
+    var seedSupprR2 = seedSuppressionRadius * seedSuppressionRadius;
+
     // Set of token IDs already claimed by a chain
     var claimed = {};
 
@@ -771,9 +777,44 @@
     var loops = [];
     var traceR2 = traceRadius * traceRadius;
 
+    // Spatial index of claimed chain-body tokens for seed suppression.
+    // Updated after each chain is created.
+    var claimedGrid = {};
+    var claimedCellSize = seedSuppressionRadius + 1;
+
     for (var si = 0; si < seedOrder.length; si++) {
       var seed = seedOrder[si];
       if (claimed[seed.id]) continue;
+
+      // ── Seed suppression: skip if this token is near an existing chain ──
+      // If any claimed token is within seedSuppressionRadius, this token
+      // is already covered by an existing chain and should not start a new one.
+      var suppressed = false;
+      var ssgx = (seed.x / claimedCellSize) | 0;
+      var ssgy = (seed.y / claimedCellSize) | 0;
+      for (var ssdy = -1; ssdy <= 1 && !suppressed; ssdy++) {
+        for (var ssdx = -1; ssdx <= 1 && !suppressed; ssdx++) {
+          var ssBucket = claimedGrid[(ssgx + ssdx) + ',' + (ssgy + ssdy)];
+          if (!ssBucket) continue;
+          for (var ssbi = 0; ssbi < ssBucket.length; ssbi++) {
+            var ssTok = ssBucket[ssbi];
+            var sddx = ssTok.x - seed.x, sddy = ssTok.y - seed.y;
+            if (sddx * sddx + sddy * sddy <= seedSupprR2) {
+              // Check side-color compatibility — only suppress if same boundary
+              var ssLL = _labDist(seed.leftLab, ssTok.leftLab);
+              var ssRR = _labDist(seed.rightLab, ssTok.rightLab);
+              var ssLR = _labDist(seed.leftLab, ssTok.rightLab);
+              var ssRL = _labDist(seed.rightLab, ssTok.leftLab);
+              var ssBestD = Math.min((ssLL + ssRR) * 0.5, (ssLR + ssRL) * 0.5);
+              if (ssBestD <= sideColorGate) {
+                suppressed = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (suppressed) continue;
 
       // ── Trace forward from seed ──
       var forward = _traceDirection(seed, tokenById, grid, cellSize, traceRadius, traceR2,
@@ -792,8 +833,16 @@
 
       if (chainIds.length < chainMinLen) continue;
 
-      // Claim all tokens in this chain
-      for (var ci2 = 0; ci2 < chainIds.length; ci2++) claimed[chainIds[ci2]] = true;
+      // Claim all tokens in this chain and add to spatial index
+      for (var ci2 = 0; ci2 < chainIds.length; ci2++) {
+        claimed[chainIds[ci2]] = true;
+        var clTok = tokenById[chainIds[ci2]];
+        if (clTok) {
+          var clk = ((clTok.x / claimedCellSize) | 0) + ',' + ((clTok.y / claimedCellSize) | 0);
+          if (!claimedGrid[clk]) claimedGrid[clk] = [];
+          claimedGrid[clk].push(clTok);
+        }
+      }
 
       // Check for loop: if first and last tokens are close and direction-compatible
       var isLoop = false;
@@ -812,13 +861,9 @@
               var loopDist = Math.sqrt(loopDist2);
               if (loopDist > 0.5) {
                 var gapX = ldx / loopDist, gapY = ldy / loopDist;
-                // Last end should point toward first (positive dot with gap direction)
                 var lastToFirst = lastDir[0] * gapX + lastDir[1] * gapY;
-                // First end should point away from last (negative dot) — but since
-                // firstDir points outward from start, we check it points toward last
                 var firstToLast = firstDir[0] * (-gapX) + firstDir[1] * (-gapY);
                 if (lastToFirst > 0.35 && firstToLast > 0.35) {
-                  // Side color consistency between endpoints
                   var llD = _labDist(firstTok.leftLab, lastTok.leftLab);
                   var rrD = _labDist(firstTok.rightLab, lastTok.rightLab);
                   var lrD = _labDist(firstTok.leftLab, lastTok.rightLab);
@@ -829,7 +874,6 @@
                   }
                 }
               } else {
-                // Endpoints are nearly coincident — definitely a loop
                 isLoop = true;
               }
             }
@@ -856,6 +900,12 @@
    *
    * The side-color hard gate is always enforced (non-negotiable).
    *
+   * RECOVERY: If no candidate is found with the normal direction gate,
+   * the tracer performs up to 2 recovery attempts with progressively
+   * relaxed direction requirements and expanded search radius.  This
+   * allows tracing through corners (90° turns) and across small token
+   * gaps without terminating the chain.
+   *
    * Returns array of token IDs (not including the start token).
    */
   function _traceDirection(startTok, tokenById, grid, cellSize, traceRadius, traceR2,
@@ -880,102 +930,150 @@
     var localClaimed = {};
     localClaimed[startTok.id] = true;
 
+    // Recovery parameters: progressively relaxed direction + wider radius
+    // Level 0: normal (dirMin, traceRadius, lateral guard ON)
+    // Level 1: corners allowed (dirMin=-0.15 = ~99°, radius*1.5, lateral guard OFF)
+    // Level 2: wide search (dirMin=-0.50 = ~120°, radius*2.0, lateral guard OFF, side-color only)
+    var recoveryDirMins = [dirMin, -0.15, -0.50];
+    var recoveryRadiusMults = [1.0, 1.5, 2.0];
+    var recoveryLateralGuard = [true, false, false];
+    var maxRecoveryLevel = 2;
+
+    // Track consecutive recovery steps — if too many in a row, the boundary
+    // has genuinely ended, not just turned a corner
+    var consecutiveRecoveries = 0;
+    var maxConsecutiveRecoveries = 3;
+
     for (var step = 0; step < maxSteps; step++) {
-      var cgx = (curTok.x / cellSize) | 0;
-      var cgy = (curTok.y / cellSize) | 0;
 
       var bestId = -1;
       var bestScore = -Infinity;
       var bestIsFlipped = false;
+      var usedRecovery = false;
 
-      for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-          var nk = (cgx + dx) + ',' + (cgy + dy);
-          var cell = grid[nk];
-          if (!cell) continue;
+      // Try normal search first, then recovery levels if needed
+      for (var recLevel = 0; recLevel <= maxRecoveryLevel; recLevel++) {
+        var effDirMin = recoveryDirMins[recLevel];
+        var effRadiusMult = recoveryRadiusMults[recLevel];
+        var effTraceR2 = traceR2 * effRadiusMult * effRadiusMult;
+        var effLateralGuard = recoveryLateralGuard[recLevel];
 
-          for (var ci = 0; ci < cell.length; ci++) {
-            var cand = cell[ci];
-            if (cand.id === curTok.id) continue;
-            if (claimed[cand.id] || localClaimed[cand.id]) continue;
+        // Determine grid search range based on effective radius
+        var effRadius = traceRadius * effRadiusMult;
+        var gridRange = Math.ceil(effRadius / cellSize);
+        if (gridRange < 1) gridRange = 1;
 
-            var ddx = cand.x - curTok.x, ddy = cand.y - curTok.y;
-            var dist2 = ddx * ddx + ddy * ddy;
-            if (dist2 > traceR2 || dist2 < 1) continue;
-            var dist = Math.sqrt(dist2);
+        var cgx = (curTok.x / cellSize) | 0;
+        var cgy = (curTok.y / cellSize) | 0;
 
-            // ── Side-color HARD GATE ──
-            var llD = _labDist(curTok.leftLab, cand.leftLab);
-            var rrD = _labDist(curTok.rightLab, cand.rightLab);
-            var lrD = _labDist(curTok.leftLab, cand.rightLab);
-            var rlD = _labDist(curTok.rightLab, cand.leftLab);
-            var sameSideDist = (llD + rrD) * 0.5;
-            var flipSideDist = (lrD + rlD) * 0.5;
-            var bestColorDist = Math.min(sameSideDist, flipSideDist);
-            if (bestColorDist > sideColorGate) continue;
+        bestId = -1;
+        bestScore = -Infinity;
+        bestIsFlipped = false;
 
-            // ── Component 1: Direction continuity (40%) ──
-            var connDirX = ddx / dist, connDirY = ddy / dist;
-            var dirContinuity;
-            if (hasDir) {
-              // How well does this step continue the chain's heading?
-              dirContinuity = connDirX * dirX + connDirY * dirY;
-              // Reject candidates that go backward
-              if (dirContinuity < dirMin) continue;
+        for (var dy = -gridRange; dy <= gridRange; dy++) {
+          for (var dx = -gridRange; dx <= gridRange; dx++) {
+            var nk = (cgx + dx) + ',' + (cgy + dy);
+            var cell = grid[nk];
+            if (!cell) continue;
 
-              // Lateral distance guard: reject candidates that are mostly
-              // sideways relative to the chain direction.  This prevents
-              // cross-boundary jumps between parallel boundaries.
-              var lateralDist = Math.abs(ddx * (-dirY) + ddy * dirX);
-              if (lateralDist > dist * 0.65) continue; // >~40° lateral offset
+            for (var ci = 0; ci < cell.length; ci++) {
+              var cand = cell[ci];
+              if (cand.id === curTok.id) continue;
+              if (claimed[cand.id] || localClaimed[cand.id]) continue;
 
-              // Normalize to [0, 1] where 1 = perfectly forward
-              dirContinuity = (dirContinuity + 1.0) * 0.5;
-            } else {
-              // No direction yet — use tangent alignment for initial heading
-              dirContinuity = Math.abs(curTok.tangentX * connDirX + curTok.tangentY * connDirY);
-            }
+              var ddx = cand.x - curTok.x, ddy = cand.y - curTok.y;
+              var dist2 = ddx * ddx + ddy * ddy;
+              if (dist2 > effTraceR2 || dist2 < 1) continue;
+              var dist = Math.sqrt(dist2);
 
-            // ── Component 2: Tangent alignment (25%) ──
-            var tangDot = Math.abs(curTok.tangentX * cand.tangentX + curTok.tangentY * cand.tangentY);
+              // ── Side-color HARD GATE (always enforced, non-negotiable) ──
+              var llD = _labDist(curTok.leftLab, cand.leftLab);
+              var rrD = _labDist(curTok.rightLab, cand.rightLab);
+              var lrD = _labDist(curTok.leftLab, cand.rightLab);
+              var rlD = _labDist(curTok.rightLab, cand.leftLab);
+              var sameSideDist = (llD + rrD) * 0.5;
+              var flipSideDist = (lrD + rlD) * 0.5;
+              var bestColorDist = Math.min(sameSideDist, flipSideDist);
+              if (bestColorDist > sideColorGate) continue;
 
-            // ── Component 3: Side-color consistency with chain identity (20%) ──
-            // Compare candidate's side colors to the chain's running side identity
-            var chainSideLeft = [sideLeftL, sideLeftA, sideLeftB];
-            var chainSideRight = [sideRightL, sideRightA, sideRightB];
-            var sameChainDist = (_labDist(chainSideLeft, cand.leftLab) +
-                                _labDist(chainSideRight, cand.rightLab)) * 0.5;
-            var flipChainDist = (_labDist(chainSideLeft, cand.rightLab) +
-                                _labDist(chainSideRight, cand.leftLab)) * 0.5;
-            var chainColorDist = Math.min(sameChainDist, flipChainDist);
-            var colorScore = Math.max(0, 1.0 - chainColorDist / sideColorGate);
+              // ── Component 1: Direction continuity (40%) ──
+              var connDirX = ddx / dist, connDirY = ddy / dist;
+              var dirContinuity;
+              if (hasDir) {
+                dirContinuity = connDirX * dirX + connDirY * dirY;
+                // Apply the effective direction minimum for this recovery level
+                if (dirContinuity < effDirMin) continue;
 
-            // ── Component 4: Spacing regularity (15%) ──
-            var spacingScore;
-            if (spacingCount >= 2 && avgSpacing > 1) {
-              // Prefer candidates at similar spacing to what we've been doing
-              var spacingRatio = dist / avgSpacing;
-              // Score peaks at 1.0 when spacing matches, drops off for 2x or 0.5x
-              spacingScore = Math.max(0, 1.0 - Math.abs(spacingRatio - 1.0));
-            } else {
-              // Not enough history — give moderate score, prefer closer
-              spacingScore = Math.max(0, 1.0 - dist / traceRadius);
-            }
+                // Lateral distance guard (only at level 0)
+                if (effLateralGuard) {
+                  var lateralDist = Math.abs(ddx * (-dirY) + ddy * dirX);
+                  if (lateralDist > dist * 0.65) continue;
+                }
 
-            var score = 0.40 * dirContinuity + 0.25 * tangDot + 0.20 * colorScore + 0.15 * spacingScore;
+                // Normalize to [0, 1] where 1 = perfectly forward
+                dirContinuity = (dirContinuity + 1.0) * 0.5;
+              } else {
+                dirContinuity = Math.abs(curTok.tangentX * connDirX + curTok.tangentY * connDirY);
+              }
 
-            if (score > bestScore) {
-              bestScore = score;
-              bestId = cand.id;
-              // Save flip state for side-identity update
-              bestIsFlipped = flipChainDist < sameChainDist;
+              // ── Component 2: Tangent alignment (25%) ──
+              var tangDot = Math.abs(curTok.tangentX * cand.tangentX + curTok.tangentY * cand.tangentY);
+
+              // ── Component 3: Side-color consistency with chain identity (20%) ──
+              var chainSideLeft = [sideLeftL, sideLeftA, sideLeftB];
+              var chainSideRight = [sideRightL, sideRightA, sideRightB];
+              var sameChainDist = (_labDist(chainSideLeft, cand.leftLab) +
+                                  _labDist(chainSideRight, cand.rightLab)) * 0.5;
+              var flipChainDist = (_labDist(chainSideLeft, cand.rightLab) +
+                                  _labDist(chainSideRight, cand.leftLab)) * 0.5;
+              var chainColorDist = Math.min(sameChainDist, flipChainDist);
+              var colorScore = Math.max(0, 1.0 - chainColorDist / sideColorGate);
+
+              // ── Component 4: Spacing regularity (15%) ──
+              var spacingScore;
+              if (spacingCount >= 2 && avgSpacing > 1) {
+                var spacingRatio = dist / avgSpacing;
+                spacingScore = Math.max(0, 1.0 - Math.abs(spacingRatio - 1.0));
+              } else {
+                spacingScore = Math.max(0, 1.0 - dist / traceRadius);
+              }
+
+              // In recovery mode, weight side-color more heavily since direction
+              // is unreliable at corners
+              var score;
+              if (recLevel === 0) {
+                score = 0.40 * dirContinuity + 0.25 * tangDot + 0.20 * colorScore + 0.15 * spacingScore;
+              } else {
+                // Recovery: side color is primary signal, direction secondary
+                score = 0.20 * dirContinuity + 0.15 * tangDot + 0.40 * colorScore + 0.25 * spacingScore;
+              }
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestId = cand.id;
+                bestIsFlipped = flipChainDist < sameChainDist;
+              }
             }
           }
         }
+
+        // If we found a candidate at this level, stop searching deeper levels
+        if (bestId >= 0) {
+          usedRecovery = recLevel > 0;
+          break;
+        }
       }
 
-      // No acceptable candidate found — chain terminates
+      // No candidate even after all recovery levels — chain genuinely terminates
       if (bestId < 0) break;
+
+      // Track consecutive recoveries
+      if (usedRecovery) {
+        consecutiveRecoveries++;
+        if (consecutiveRecoveries > maxConsecutiveRecoveries) break;
+      } else {
+        consecutiveRecoveries = 0;
+      }
 
       var bestTok = tokenById[bestId];
       result.push(bestId);
@@ -987,9 +1085,11 @@
       if (stepDist > 0.5) {
         var newDirX = stepDx / stepDist, newDirY = stepDy / stepDist;
         if (hasDir) {
-          // Exponential moving average: 60% new, 40% old for responsiveness to curves
-          dirX = 0.60 * newDirX + 0.40 * dirX;
-          dirY = 0.60 * newDirY + 0.40 * dirY;
+          // After a recovery step (corner), snap direction more aggressively
+          // to the new heading so the chain can continue along the new edge
+          var dirAlpha = usedRecovery ? 0.85 : 0.60;
+          dirX = dirAlpha * newDirX + (1 - dirAlpha) * dirX;
+          dirY = dirAlpha * newDirY + (1 - dirAlpha) * dirY;
           var dirMag = Math.sqrt(dirX * dirX + dirY * dirY);
           if (dirMag > 0.01) { dirX /= dirMag; dirY /= dirMag; }
         } else {
@@ -999,8 +1099,7 @@
         }
       }
 
-      // Update side identity: blend with new token (EMA, α = 0.3)
-      // Use the flip state saved alongside the best candidate selection
+      // Update side identity EMA (α = 0.15)
       var isFlipped = bestIsFlipped;
       var candLL, candLA, candLB, candRL, candRA, candRB;
       if (isFlipped) {
@@ -1010,7 +1109,6 @@
         candLL = bestTok.leftLab[0]; candLA = bestTok.leftLab[1]; candLB = bestTok.leftLab[2];
         candRL = bestTok.rightLab[0]; candRA = bestTok.rightLab[1]; candRB = bestTok.rightLab[2];
       }
-      // Side-identity EMA with α = 0.15 (slow drift preserves boundary identity)
       sideLeftL = 0.85 * sideLeftL + 0.15 * candLL;
       sideLeftA = 0.85 * sideLeftA + 0.15 * candLA;
       sideLeftB = 0.85 * sideLeftB + 0.15 * candLB;
