@@ -157,6 +157,23 @@
     residualRecoveryDirMin:     0.20,  // relaxed direction threshold
     residualRecoveryMaxPasses:  2,     // iterative recovery attempts
 
+    // Stage D: Rescue linking — create seed chains from orphaned tokens.
+    // After Pass 1's strict gates, some regions may have ZERO chains
+    // (all tokens orphaned).  Subsequent passes (extension, bridge,
+    // closure, recovery) all require existing chains to operate on —
+    // they cannot create chains from scratch.
+    //
+    // Rescue linking fixes this: it runs BEFORE refinement, linking
+    // orphaned tokens (degree 0) to other nearby orphans using relaxed
+    // gates while maintaining the side-color hard gate to prevent
+    // cross-boundary contamination.  This creates seed chains in
+    // previously dead regions, which subsequent passes then grow.
+    rescueLinkingEnabled:       true,
+    rescueLinkingRadius:        40,    // 2× fwdRadius for wider search
+    rescueLinkingDirMin:        0.12,  // very relaxed tangent alignment
+    rescueLinkingScoreMin:      0.15,  // lower acceptance than Pass 1
+    rescueLinkingMaxPasses:     3,     // iterative rescue attempts
+
     // Stage D: Token salience scoring.
     // After chain assembly, every token receives a structural salience
     // score (0..1) reflecting its contribution to coherent boundary
@@ -203,6 +220,9 @@
       extension_noCandidates: 0,
       extension_driftRescues: 0,
       outlier_prunedCount: 0,
+      rescue_linksCreated: 0,
+      rescue_chainsSeeded: 0,
+      rescue_passesRun: 0,
       recovery_tokensRecovered: 0,
       recovery_tokensUnrecovered: 0,
       recovery_passesRun: 0,
@@ -397,6 +417,31 @@
     // Order each chain spatially for meaningful chain structure
     var tokenById = {};
     for (var oi = 0; oi < tokens.length; oi++) tokenById[tokens[oi].id] = tokens[oi];
+
+    /* ================================================================
+     *  RESCUE LINKING: Seed chains in zero-chain regions
+     *
+     *  If Pass 1 left orphaned tokens (degree 0), no subsequent pass
+     *  can create chains for them — extension, bridge, closure, and
+     *  residual recovery ALL require existing chains.
+     *
+     *  Rescue linking runs NOW (before chain ordering and refinement)
+     *  to connect orphans to nearby tokens with compatible boundary
+     *  identity (side colors).  This creates seed chains that the
+     *  refinement loop can then grow into full structural chains.
+     *
+     *  Only degree-0 tokens are targeted — existing Pass 1 links are
+     *  never disturbed.  The side-color hard gate is still enforced.
+     * ================================================================ */
+    if (cfg.rescueLinkingEnabled !== false && _diag.pass1_tokensOrphaned > 0) {
+      var rescueResult = _rescueLinkingPass(tokens, adjacency, tokenById, grid, cellSize, cfg, _diag);
+
+      if (rescueResult.linksCreated > 0) {
+        // Rebuild components from updated adjacency
+        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+        _diag.rescue_chainsSeeded = components.length - _diag.pass1_componentsFound;
+      }
+    }
 
     var chains = [];
     var loops = [];
@@ -2641,6 +2686,183 @@
       varTotal += dx * dx + dy * dy;
     }
     return varTotal > 0.01 ? Math.min(1, varAlong / varTotal) : 0;
+  }
+
+  /* ==================================================================
+   *  Rescue Linking Pass
+   *
+   *  THE FUNDAMENTAL PROBLEM: After Pass 1's strict gates, some image
+   *  regions have ZERO chains (all tokens are degree-0 orphans).
+   *  Every subsequent Stage D mechanism (extension, bridge, closure,
+   *  residual recovery) requires existing chains to operate on.
+   *  They cannot create chains from scratch.
+   *
+   *  This pass fixes that by linking orphans to OTHER orphans.
+   *
+   *  At intersections/corners of overlapping shapes, tokens fail
+   *  Pass 1 because:
+   *    1. Nearby tokens are on DIFFERENT boundaries → side-color gate
+   *       correctly rejects them
+   *    2. Same-boundary tokens are farther apart (interleaved with
+   *       other-boundary tokens) → beyond base/forward radius
+   *    3. Corner tokens have noisy tangent estimates → direction gates
+   *       reject them
+   *
+   *  Rescue linking addresses this by:
+   *    - Using a wider search radius (2× forward radius)
+   *    - Relaxing the direction threshold (0.12 vs 0.55)
+   *    - MAINTAINING the side-color hard gate (cross-boundary safety)
+   *    - Using side-color identity as the primary matching signal
+   *    - Only targeting degree-0 tokens (doesn't disturb existing links)
+   *
+   *  The output is "seed chains" — small groups of rescued tokens that
+   *  extension/bridge/closure can then grow into full chains.
+   *
+   *  Runs iteratively: each pass creates new links, then the next pass
+   *  can link newly-linked tokens to other nearby tokens.
+   * ================================================================== */
+
+  function _rescueLinkingPass(tokens, adjacency, tokenById, grid, cellSize, cfg, _diag) {
+    var rescueRadius   = cfg.rescueLinkingRadius   || 40;
+    var rescueDirMin   = cfg.rescueLinkingDirMin    != null ? cfg.rescueLinkingDirMin : 0.12;
+    var rescueScoreMin = cfg.rescueLinkingScoreMin  != null ? cfg.rescueLinkingScoreMin : 0.15;
+    var sideColorGate  = cfg.graphSideColorGate     != null ? cfg.graphSideColorGate : 55;
+    var maxPasses      = cfg.rescueLinkingMaxPasses  || 3;
+    var rescueR2       = rescueRadius * rescueRadius;
+
+    // Build rescue spatial grid with cell size matching rescue radius
+    var rCellSize = rescueRadius + 1;
+    var rGrid = {};
+    for (var gi = 0; gi < tokens.length; gi++) {
+      var gt = tokens[gi];
+      var rk = ((gt.x / rCellSize) | 0) + ',' + ((gt.y / rCellSize) | 0);
+      if (!rGrid[rk]) rGrid[rk] = [];
+      rGrid[rk].push(gt);
+    }
+
+    var totalRescueLinks = 0;
+
+    for (var pass = 0; pass < maxPasses; pass++) {
+      var passLinks = 0;
+
+      // Collect current orphans (degree 0)
+      var orphans = [];
+      for (var oi = 0; oi < tokens.length; oi++) {
+        if ((adjacency[tokens[oi].id] || []).length === 0) {
+          orphans.push(tokens[oi]);
+        }
+      }
+      if (orphans.length === 0) break;
+
+      // Sort orphans by confidence descending — most reliable tokens
+      // get rescued first, seeding the strongest possible structure.
+      orphans.sort(function(a, b) { return b.confidence - a.confidence; });
+
+      for (var ri = 0; ri < orphans.length; ri++) {
+        var orphan = orphans[ri];
+        // Skip if this orphan already gained links during this pass
+        if ((adjacency[orphan.id] || []).length > 0) continue;
+
+        var ogx = (orphan.x / rCellSize) | 0;
+        var ogy = (orphan.y / rCellSize) | 0;
+
+        // Collect all rescue-compatible candidates within rescue radius.
+        // We search for ANY token (orphan or not) that shares boundary
+        // identity.  This allows orphans near the periphery of existing
+        // chains to attach directly, not just orphan-to-orphan.
+        var bestTarget = null;
+        var bestScore = -1;
+
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            var bucket = rGrid[(ogx + dx) + ',' + (ogy + dy)];
+            if (!bucket) continue;
+
+            for (var bi = 0; bi < bucket.length; bi++) {
+              var cand = bucket[bi];
+              if (cand.id === orphan.id) continue;
+
+              var ddx = cand.x - orphan.x, ddy = cand.y - orphan.y;
+              var dist2 = ddx * ddx + ddy * ddy;
+              if (dist2 > rescueR2 || dist2 < 1) continue;
+              var dist = Math.sqrt(dist2);
+
+              // ── Side-color HARD GATE (non-negotiable) ──
+              // This is the only gate that MUST remain strict: it prevents
+              // cross-boundary contamination.  Two tokens on different
+              // boundaries (different colors on each side) must never link.
+              var llD = _labDist(orphan.leftLab, cand.leftLab);
+              var rrD = _labDist(orphan.rightLab, cand.rightLab);
+              var lrD = _labDist(orphan.leftLab, cand.rightLab);
+              var rlD = _labDist(orphan.rightLab, cand.leftLab);
+              var bestColorDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+              if (bestColorDist > sideColorGate) continue;
+
+              // ── Direction: relaxed tangent alignment ──
+              // At corners, tangent estimation is noisy.  We only reject
+              // truly perpendicular token pairs (< 0.12 ≈ 83°).
+              var dot = Math.abs(orphan.tangentX * cand.tangentX +
+                                 orphan.tangentY * cand.tangentY);
+              if (dot < rescueDirMin) continue;
+
+              // ── Connection vector alignment (very relaxed) ──
+              // The vector between the two tokens should roughly run along
+              // at least one of their tangent directions.  But at corners
+              // this can be quite loose, so we just check it's not
+              // completely perpendicular to BOTH tangents.
+              var invDist = 1.0 / dist;
+              var connDotO = Math.abs(orphan.tangentX * ddx + orphan.tangentY * ddy) * invDist;
+              var connDotC = Math.abs(cand.tangentX * ddx + cand.tangentY * ddy) * invDist;
+              var connAlign = Math.max(connDotO, connDotC); // at least ONE tangent aligns
+
+              // ── Scoring: color identity dominant ──
+              // For rescue links, boundary identity (side color match) is
+              // the strongest signal.  Direction and geometry are secondary
+              // because they're unreliable at corners/intersections.
+              var colorScore = Math.max(0, 1.0 - bestColorDist / 40);
+              var distScore  = 1.0 - dist / rescueRadius;
+              var score = colorScore  * 0.40 +
+                          dot         * 0.25 +
+                          distScore   * 0.20 +
+                          connAlign   * 0.15;
+
+              if (score < rescueScoreMin) continue;
+
+              // Prefer candidates that already have links (attach to
+              // existing structure rather than creating isolated pairs)
+              var candDeg = (adjacency[cand.id] || []).length;
+              var adjBonus = candDeg > 0 ? 0.10 : 0;
+
+              if (score + adjBonus > bestScore) {
+                bestScore = score + adjBonus;
+                bestTarget = cand;
+              }
+            }
+          }
+        }
+
+        if (bestTarget) {
+          // Check we're not creating a duplicate link
+          var existing = adjacency[orphan.id];
+          var alreadyLinked = false;
+          for (var eli = 0; eli < existing.length; eli++) {
+            if (existing[eli] === bestTarget.id) { alreadyLinked = true; break; }
+          }
+          if (!alreadyLinked) {
+            adjacency[orphan.id].push(bestTarget.id);
+            adjacency[bestTarget.id].push(orphan.id);
+            passLinks++;
+          }
+        }
+      }
+
+      totalRescueLinks += passLinks;
+      if (_diag) _diag.rescue_passesRun++;
+      if (passLinks === 0) break; // no progress
+    }
+
+    if (_diag) _diag.rescue_linksCreated = totalRescueLinks;
+    return { linksCreated: totalRescueLinks };
   }
 
   /* ==================================================================
