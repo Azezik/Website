@@ -60,14 +60,21 @@
     // Zone 1 (omnidirectional). Previous value of 9 was less than the
     // scaffold spacing of 12, forcing all scaffold-distance links through
     // Zone 2's strict tangent alignment gate — which curves cannot pass.
-    graphNeighborRadius:     14,   // was 9; must cover scaffold spacing + snap tolerance
-    graphForwardRadius:      20,   // was 16; extended for sparser regions
-    graphForwardDirMin:      0.55, // was 0.70; softened for curves in Zone 2
-    graphForwardLateralMax:  5,    // was 4; slight increase for curved boundaries
-    graphOrientationTolDeg: 55,    // was 45; more tolerant for curves
+    graphNeighborRadius:     14,
+    graphForwardRadius:      20,
+    graphForwardDirMin:      0.55,
+    graphForwardLateralMax:  5,
+    graphOrientationTolDeg: 55,
     graphSideDeltaETol:    25,
     chainMinLength:        2,
-    linkScoreThreshold:    0.22,   // was 0.32; lowered to accept curve-adjacent tokens
+    linkScoreThreshold:    0.25,   // was 0.22; raised slightly to work with rebalanced scoring
+
+    // Side color hard gate: maximum side-color distance above which links
+    // are NEVER created, regardless of geometric score. This is the primary
+    // mechanism to prevent cross-boundary contamination — tokens from
+    // different boundaries (different side colors) cannot link even if
+    // geometrically close and tangent-aligned.
+    graphSideColorGate:    55,
 
     // Stage D — Pass 1b: Chain endpoint continuation
     chainExtensionMaxDist: 24,     // was 40; reduced to prevent long invalid jumps
@@ -157,6 +164,7 @@
       pass1_rejectedZone2Dir: 0,
       pass1_rejectedZone2Lateral: 0,
       pass1_rejectedZone2ConnAlign: 0,
+      pass1_rejectedSideColorGate: 0,
       pass1_rejectedLinkScore: 0,
       pass1_componentsFound: 0,
       pass1_tokensInComponents: 0,
@@ -183,6 +191,7 @@
     var fwdDirMin = cfg.graphForwardDirMin || 0.70;
     var fwdLatMax = cfg.graphForwardLateralMax || 4;
     var sideTol = cfg.graphSideDeltaETol;
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
     var linkThreshold = cfg.linkScoreThreshold != null ? cfg.linkScoreThreshold : 0.45;
 
     // Spatial index: cell size set so a ±1 cell scan (3x3) covers fwdRadius.
@@ -288,7 +297,9 @@
             var distRatio = dist / effectiveRadius;
             var distScore = 1.0 - distRatio * distRatio;
 
-            // Side color score: weak tiebreaker only.
+            // Side color: measures boundary identity compatibility.
+            // Tokens on the SAME boundary share similar side colors.
+            // Tokens on DIFFERENT boundaries have very different side colors.
             var llDist = _labDist(a.leftLab, b.leftLab);
             var rrDist = _labDist(a.rightLab, b.rightLab);
             var lrDist = _labDist(a.leftLab, b.rightLab);
@@ -296,10 +307,22 @@
             var sameDist = (llDist + rrDist) * 0.5;
             var flipDist = (lrDist + rlDist) * 0.5;
             var bestColorDist = Math.min(sameDist, flipDist);
+
+            // ── Side color HARD GATE ──
+            // This is the primary cross-boundary contamination prevention.
+            // Tokens from different boundaries (e.g., grid line vs object edge)
+            // have very different side colors (ΔE > 55). Rejecting these
+            // prevents different boundaries from merging into one component,
+            // which was the root cause of the "45 chains from 51k tokens" failure.
+            if (bestColorDist > sideColorGate) { _diag.pass1_rejectedSideColorGate++; continue; }
+
             var colorScore = Math.max(0, 1.0 - bestColorDist / (sideTol * 2));
 
-            // Geometry-dominant weighting: direction 50%, distance 40%, color 10%
-            var linkScore = 0.50 * dirScore + 0.40 * distScore + 0.10 * colorScore;
+            // Balanced weighting: direction 40%, distance 35%, color 25%
+            // Color is promoted from tiebreaker (10%) to significant factor (25%)
+            // so that cross-boundary links with borderline color differences
+            // are penalized enough to fall below threshold.
+            var linkScore = 0.40 * dirScore + 0.35 * distScore + 0.25 * colorScore;
 
             if (linkScore < linkThreshold) { _diag.pass1_rejectedLinkScore++; continue; }
 
@@ -1030,7 +1053,32 @@
 
   /**
    * Order a component's token IDs along the boundary curve.
-   * Uses greedy walk from an endpoint (degree-1 node) or arbitrary start.
+   *
+   * DIRECTION-COHERENT WALKING (architectural fix):
+   *
+   * The previous implementation used pure nearest-neighbor walking, which
+   * caused catastrophic cross-boundary interleaving: when a component
+   * contained tokens from multiple boundaries (e.g., a grid border +
+   * nearby object edges), the walk would meander between them based
+   * solely on proximity. This consumed object-boundary tokens into the
+   * grid-line chain, preventing them from being recovered as separate chains.
+   *
+   * The new implementation scores neighbors by:
+   *   1. Direction coherence: does stepping to this neighbor continue the
+   *      chain's current heading? (50% weight when direction is known)
+   *   2. Tangent alignment: does the neighbor's tangent match the current
+   *      token's tangent? (30% weight) — tokens on the same boundary
+   *      have similar tangents
+   *   3. Proximity: closer is still preferred, but not dominant (20% weight)
+   *
+   * For the first step (no direction history), the walk uses the start
+   * token's tangent to determine preferred direction: it prefers neighbors
+   * that lie along the tangent axis (i.e., along the boundary).
+   *
+   * Effect: The walk stays on ONE boundary. When it reaches a junction
+   * where another boundary crosses, it prefers to continue straight rather
+   * than detour. Tokens on other boundaries become residuals, which
+   * _recoverResidualChains picks up as separate chains.
    */
   function _orderChain(compIds, adjacency, tokenById) {
     var inComp = {};
@@ -1045,8 +1093,6 @@
     if (cCount > 0) { cx /= cCount; cy /= cCount; }
 
     // Find the degree-1 node (endpoint) farthest from centroid.
-    // This picks a true extremum rather than an arbitrary first match,
-    // leading to longer walks through the component.
     var start = compIds[0];
     var bestEndDist2 = -1;
     var hasEndpoint = false;
@@ -1086,7 +1132,7 @@
       }
     }
 
-    // Forward greedy walk from start: always pick nearest unvisited neighbor
+    // ── Direction-coherent forward walk ──
     var ordered = [start];
     var used = {};
     used[start] = true;
@@ -1094,42 +1140,133 @@
     while (ordered.length < compIds.length) {
       var last = ordered[ordered.length - 1];
       var lastTok = tokenById[last];
-      var best = -1, bestDist = Infinity;
+      if (!lastTok) break;
+
+      // Compute direction estimate from last 2 tokens
+      var hasDirEst = false;
+      var estDirX = 0, estDirY = 0;
+      if (ordered.length >= 2) {
+        var prevId = ordered[ordered.length - 2];
+        var prevTok2 = tokenById[prevId];
+        if (prevTok2) {
+          var _edx = lastTok.x - prevTok2.x, _edy = lastTok.y - prevTok2.y;
+          var _emag = Math.sqrt(_edx * _edx + _edy * _edy);
+          if (_emag > 0.5) {
+            estDirX = _edx / _emag;
+            estDirY = _edy / _emag;
+            hasDirEst = true;
+          }
+        }
+      }
+
+      var best = -1, bestScore = -Infinity;
       var neis2 = adjacency[last];
       for (var n = 0; n < neis2.length; n++) {
         var nid = neis2[n];
         if (!inComp[nid] || used[nid]) continue;
         var nt = tokenById[nid];
-        var d = (nt.x - lastTok.x) * (nt.x - lastTok.x) +
-                (nt.y - lastTok.y) * (nt.y - lastTok.y);
-        if (d < bestDist) { bestDist = d; best = nid; }
+        if (!nt) continue;
+        var _dx = nt.x - lastTok.x, _dy = nt.y - lastTok.y;
+        var _d2 = _dx * _dx + _dy * _dy;
+        if (_d2 < 0.01) continue;
+        var _d = Math.sqrt(_d2);
+
+        // Proximity: inverse distance, closer is better
+        var proxScore = 1.0 / (1.0 + _d);
+        // Tangent alignment between current and candidate tokens
+        var tangDot = Math.abs(lastTok.tangentX * nt.tangentX + lastTok.tangentY * nt.tangentY);
+
+        var score;
+        if (hasDirEst) {
+          // Direction coherence: does the step follow the chain's heading?
+          // connDot ranges from -1 (backward) to +1 (forward)
+          var connDot = (_dx * estDirX + _dy * estDirY) / _d;
+          // Map to [0, 1]: forward = 1.0, perpendicular = 0.5, backward = 0.0
+          var connScore = (connDot + 1.0) * 0.5;
+          // Direction coherence dominates: keeps walk on current boundary
+          score = connScore * 0.50 + tangDot * 0.30 + proxScore * 0.20;
+        } else {
+          // No direction yet: use tangent to determine initial heading.
+          // Prefer neighbors that lie along the tangent direction (along boundary).
+          var connTangDot = Math.abs(lastTok.tangentX * _dx / _d + lastTok.tangentY * _dy / _d);
+          score = connTangDot * 0.40 + tangDot * 0.35 + proxScore * 0.25;
+        }
+
+        if (score > bestScore) { bestScore = score; best = nid; }
       }
-      if (best < 0) break; // no unvisited neighbor reachable
+
+      if (best < 0) break;
       ordered.push(best);
       used[best] = true;
     }
 
-    // Backward walk: extend from the start node in the opposite direction.
-    // This recovers the other branch when start was at a junction or when
-    // a better path exists behind the chosen start point.
+    // ── Direction-coherent backward walk ──
+    // Same direction-aware logic, starting from ordered[0] heading away
+    // from ordered[1] (i.e., the reverse direction of the forward walk).
     if (ordered.length < compIds.length) {
       var backward = [];
       var bwCur = ordered[0];
+      // Initial backward direction: from ordered[1] → ordered[0]
+      var bwHasDir = ordered.length >= 2;
+      var bwDirX = 0, bwDirY = 0;
+      if (bwHasDir) {
+        var bwRefTok = tokenById[ordered[1]];
+        var bwStartTok = tokenById[ordered[0]];
+        if (bwRefTok && bwStartTok) {
+          var _bwdx = bwStartTok.x - bwRefTok.x, _bwdy = bwStartTok.y - bwRefTok.y;
+          var _bwmag = Math.sqrt(_bwdx * _bwdx + _bwdy * _bwdy);
+          if (_bwmag > 0.5) {
+            bwDirX = _bwdx / _bwmag;
+            bwDirY = _bwdy / _bwmag;
+          } else { bwHasDir = false; }
+        } else { bwHasDir = false; }
+      }
+
       while (ordered.length + backward.length < compIds.length) {
         var bwTok = tokenById[bwCur];
-        var bwBest = -1, bwBestDist = Infinity;
+        if (!bwTok) break;
+        var bwBest = -1, bwBestScore = -Infinity;
         var bwNeis = adjacency[bwCur];
         for (var bn = 0; bn < bwNeis.length; bn++) {
           var bnid = bwNeis[bn];
           if (!inComp[bnid] || used[bnid]) continue;
           var bnt = tokenById[bnid];
-          var bd = (bnt.x - bwTok.x) * (bnt.x - bwTok.x) +
-                   (bnt.y - bwTok.y) * (bnt.y - bwTok.y);
-          if (bd < bwBestDist) { bwBestDist = bd; bwBest = bnid; }
+          if (!bnt) continue;
+          var _bdx = bnt.x - bwTok.x, _bdy = bnt.y - bwTok.y;
+          var _bd2 = _bdx * _bdx + _bdy * _bdy;
+          if (_bd2 < 0.01) continue;
+          var _bd = Math.sqrt(_bd2);
+
+          var bProx = 1.0 / (1.0 + _bd);
+          var bTang = Math.abs(bwTok.tangentX * bnt.tangentX + bwTok.tangentY * bnt.tangentY);
+
+          var bScore;
+          if (bwHasDir) {
+            var bConn = (_bdx * bwDirX + _bdy * bwDirY) / _bd;
+            var bConnS = (bConn + 1.0) * 0.5;
+            bScore = bConnS * 0.50 + bTang * 0.30 + bProx * 0.20;
+          } else {
+            var bConnT = Math.abs(bwTok.tangentX * _bdx / _bd + bwTok.tangentY * _bdy / _bd);
+            bScore = bConnT * 0.40 + bTang * 0.35 + bProx * 0.25;
+          }
+
+          if (bScore > bwBestScore) { bwBestScore = bScore; bwBest = bnid; }
         }
         if (bwBest < 0) break;
         backward.push(bwBest);
         used[bwBest] = true;
+
+        // Update backward direction estimate
+        var bwNewTok = tokenById[bwBest];
+        if (bwNewTok) {
+          var _bwUdx = bwNewTok.x - bwTok.x, _bwUdy = bwNewTok.y - bwTok.y;
+          var _bwUmag = Math.sqrt(_bwUdx * _bwUdx + _bwUdy * _bwUdy);
+          if (_bwUmag > 0.5) {
+            bwDirX = _bwUdx / _bwUmag;
+            bwDirY = _bwUdy / _bwUmag;
+            bwHasDir = true;
+          }
+        }
         bwCur = bwBest;
       }
       if (backward.length > 0) {
