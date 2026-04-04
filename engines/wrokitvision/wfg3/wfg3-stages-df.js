@@ -419,7 +419,7 @@
     // ── Step 2: Structural merge ──
     // Merge chain pairs whose endpoints align in direction, side pattern,
     // and spacing.  This replaces the old proximity-based bridging.
-    var mergeResult = _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg);
+    var mergeResult = _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg, grid, cellSize);
     chains = mergeResult.chains;
     loops = mergeResult.loops;
     bridgesAccepted = mergeResult.mergeCount;
@@ -456,7 +456,7 @@
      *  even across corners and curves.
      * ================================================================ */
 
-    var consolResult = _consolidateBoundaryContours(chains, loops, adjacency, tokenById, cfg);
+    var consolResult = _consolidateBoundaryContours(chains, loops, adjacency, tokenById, cfg, grid, cellSize);
     chains = consolResult.chains;
     loops = consolResult.loops;
 
@@ -570,6 +570,63 @@
     var da = lab1[1] - lab2[1];
     var db = lab1[2] - lab2[2];
     return Math.sqrt(dL * dL + da * da + db * db);
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   *  Path continuity check
+   *
+   *  Verifies that the straight-line path between two tokens has
+   *  sufficient token density — i.e., we are not jumping across
+   *  empty space to reach a distant candidate.
+   *
+   *  Samples N points along the line from (ax, ay) to (bx, by) and
+   *  checks the token spatial grid at each sample point.  If any
+   *  sample point has zero nearby tokens within sampleRadius, the
+   *  path is considered broken (returns false).
+   *
+   *  Short distances (below minCheckDist) are automatically approved
+   *  since there's no room for a gap.
+   *
+   *  This is the PRIMARY mechanism preventing cross-gap jumps between
+   *  separate objects: even if a candidate passes all color/direction
+   *  gates, it must be reachable via continuous token support.
+   * ──────────────────────────────────────────────────────────────────── */
+  function _checkPathContinuity(ax, ay, bx, by, grid, cellSize, minCheckDist) {
+    var pdx = bx - ax, pdy = by - ay;
+    var dist = Math.sqrt(pdx * pdx + pdy * pdy);
+
+    // Short steps don't need continuity checking — there's no room for a gap
+    if (dist < minCheckDist) return true;
+
+    // Sample every ~cellSize pixels along the path (excluding endpoints
+    // which we already know have tokens)
+    var nSamples = Math.max(1, Math.floor(dist / cellSize));
+    if (nSamples > 8) nSamples = 8; // cap to avoid excessive lookups
+
+    // Search radius at each sample: one grid cell
+    for (var si = 1; si <= nSamples; si++) {
+      var t = si / (nSamples + 1); // interior point, excludes 0 and 1
+      var sx = ax + pdx * t;
+      var sy = ay + pdy * t;
+
+      var sgx = (sx / cellSize) | 0;
+      var sgy = (sy / cellSize) | 0;
+
+      // Check if any token exists in the 3x3 grid neighborhood
+      var found = false;
+      for (var sdy = -1; sdy <= 1 && !found; sdy++) {
+        for (var sdx = -1; sdx <= 1 && !found; sdx++) {
+          var sk = (sgx + sdx) + ',' + (sgy + sdy);
+          if (grid[sk] && grid[sk].length > 0) {
+            found = true;
+          }
+        }
+      }
+
+      if (!found) return false; // gap in token coverage — path is broken
+    }
+
+    return true; // continuous token support along the path
   }
 
   /* ────────────────────────────────────────────────────────────────────
@@ -996,6 +1053,21 @@
               var bestColorDist = Math.min(sameSideDist, flipSideDist);
               if (bestColorDist > sideColorGate) continue;
 
+              // ── SPACING GAP GATE ──
+              // If we have spacing history, reject candidates that are much
+              // farther than local average — these are jumps across empty space
+              if (spacingCount >= 2 && avgSpacing > 1) {
+                var gapRatio = dist / avgSpacing;
+                if (gapRatio > 3.0) continue; // >3× local spacing = gap jump
+              }
+
+              // ── PATH CONTINUITY GATE ──
+              // Verify that the straight-line path to the candidate has
+              // continuous token support.  This prevents jumping across
+              // empty regions even if the candidate passes all other checks.
+              if (!_checkPathContinuity(curTok.x, curTok.y, cand.x, cand.y,
+                                        grid, cellSize, cellSize * 1.5)) continue;
+
               // ── Component 1: Direction continuity (40%) ──
               var connDirX = ddx / dist, connDirY = ddy / dist;
               var dirContinuity;
@@ -1258,6 +1330,16 @@
             var bestColorDist = Math.min(sameSideDist, flipSideDist);
             if (bestColorDist > sideColorGate) continue;
 
+            // Spacing gap gate
+            if (spacingCount >= 2 && avgSpacing > 1) {
+              var extGapRatio = dist / avgSpacing;
+              if (extGapRatio > 3.0) continue;
+            }
+
+            // Path continuity gate
+            if (!_checkPathContinuity(curTok.x, curTok.y, cand.x, cand.y,
+                                      grid, cellSize, cellSize * 1.5)) continue;
+
             // Direction continuity
             var connX = ddx / dist, connY = ddy / dist;
             var dirCont = connX * dirX + connY * dirY;
@@ -1372,7 +1454,7 @@
    *  This replaces the old _bridgePass which only checked endpoint
    *  proximity and tangent alignment, without chain-level side identity.
    * ──────────────────────────────────────────────────────────────────── */
-  function _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg) {
+  function _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg, grid, cellSize) {
     var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
     var mergeRadius = cfg.bridgeMaxGapPx || 36;
     var mergeR2 = mergeRadius * mergeRadius;
@@ -1494,6 +1576,14 @@
               // Reject if lateral offset exceeds 40% of the gap distance
               // (i.e., the gap is more sideways than forward)
               if (lateralOffset > gap * 0.40) continue;
+            }
+
+            // ── Check 1c: Path continuity ──
+            // Verify continuous token support between the two endpoints.
+            // This prevents merging chains across empty space.
+            if (grid && cellSize > 0) {
+              if (!_checkPathContinuity(tokA.x, tokA.y, tokB.x, tokB.y,
+                                        grid, cellSize, cellSize * 1.5)) continue;
             }
 
             // ── Check 2: Side-pattern match ──
@@ -2102,7 +2192,7 @@
    *  still cluster together.  The side-color match ensures fragments
    *  from different boundaries (even if spatially close) stay separate.
    * ──────────────────────────────────────────────────────────────────── */
-  function _consolidateBoundaryContours(chains, loops, adjacency, tokenById, cfg) {
+  function _consolidateBoundaryContours(chains, loops, adjacency, tokenById, cfg, tokenGrid, tokenCellSize) {
     var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
     // Proximity threshold for any-token-to-any-token spatial connectivity.
     // Fragments along the same boundary typically have tokens within a few
@@ -2248,6 +2338,10 @@
                 var sddx = sOther.tok.x - stok.x;
                 var sddy = sOther.tok.y - stok.y;
                 if (sddx * sddx + sddy * sddy <= proxThresh2) {
+                  // Path continuity: verify token support between these two tokens
+                  if (tokenGrid && tokenCellSize > 0 &&
+                      !_checkPathContinuity(stok.x, stok.y, sOther.tok.x, sOther.tok.y,
+                                            tokenGrid, tokenCellSize, tokenCellSize * 1.5)) continue;
                   spatialAdj[sigIdx][sOther.sigIdx] = true;
                   spatialAdj[sOther.sigIdx][sigIdx] = true;
                 }
