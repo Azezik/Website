@@ -178,6 +178,19 @@
     salienceEnabled:            true,
     saliencePruneFloor:         0.12,  // tokens below this AND unattached → prunable
 
+    // Stage D: Meso-scale tangent refinement.
+    // DESIGN RULE: Token tangents from Stage C are computed at 1-3px Sobel
+    // scale — far too noisy for contour-scale linking.  Before ANY linking,
+    // replace each token's tangent with a PCA-derived contour direction
+    // estimated from the spatial arrangement of nearby same-boundary tokens.
+    // This operates at token-spacing scale (~8-15px) where contours are
+    // visible, not at pixel-noise scale.
+    mesoTangentEnabled:         true,
+    mesoTangentRadius:          24,     // neighborhood search radius (px)
+    mesoTangentMinNeighbors:    3,      // need ≥3 neighbors for meaningful PCA
+    mesoTangentSideColorGate:   55,     // same as main side-color gate
+    mesoTangentEigenRatioMin:   1.5,    // λ1/λ2 must show clear linear structure
+
     // Stage D: Coverage enforcement.
     // DESIGN RULE: 95% of tokens MUST end up in chains.  If after all
     // passes the coverage is below this target, a final aggressive sweep
@@ -228,6 +241,10 @@
       recovery_tokensRecovered: 0,
       recovery_tokensUnrecovered: 0,
       recovery_passesRun: 0,
+      meso_refined: 0,
+      meso_skippedFewNeighbors: 0,
+      meso_skippedIsotropic: 0,
+      meso_totalTokens: 0,
       finalChainCount: 0,
       finalLoopCount: 0,
       finalTokensInChains: 0
@@ -239,6 +256,15 @@
       if (tokens[di].x >= W) W = tokens[di].x + 1;
       if (tokens[di].y >= H) H = tokens[di].y + 1;
     }
+    // ── Meso-scale tangent refinement ──
+    // Replace noisy 1-pixel Sobel tangents with PCA-derived contour directions
+    // BEFORE any linking.  This is the single most impactful preprocessing step:
+    // it transforms tangent comparison from "do two random pixel-noise vectors agree?"
+    // to "do two tokens lie along the same contour direction at visible scale?"
+    if (cfg.mesoTangentEnabled !== false) {
+      _refineTangentsMesoScale(tokens, cfg, _diag);
+    }
+
     var radius = cfg.graphNeighborRadius;
     var fwdRadius = cfg.graphForwardRadius || 16;
     var fwdDirMin = cfg.graphForwardDirMin || 0.70;
@@ -909,6 +935,169 @@
     var da = lab1[1] - lab2[1];
     var db = lab1[2] - lab2[2];
     return Math.sqrt(dL * dL + da * da + db * db);
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   *  Meso-scale tangent refinement
+   *
+   *  Problem: Stage C computes tangents from single-pixel Sobel gradients
+   *  (1-3px scale).  These are too noisy for contour-scale linking — two
+   *  tokens on the same smooth boundary 15px apart may have wildly
+   *  different micro-tangents, causing Pass 1 to reject the link.
+   *
+   *  Solution: Before any linking, for each token find nearby tokens on
+   *  the same boundary (side-color gate), fit PCA on their spatial (x,y)
+   *  positions, and replace the token tangent with the PCA principal axis.
+   *  This estimates contour direction at token-spacing scale (~8-15px)
+   *  where the contour is actually visible as a coherent structure.
+   *
+   *  The side-color gate ensures we only aggregate tokens from the SAME
+   *  boundary, preventing cross-boundary contamination from biasing the
+   *  PCA direction.
+   * ──────────────────────────────────────────────────────────────────── */
+  function _refineTangentsMesoScale(tokens, cfg, _diag) {
+    var radius    = cfg.mesoTangentRadius || 24;
+    var minNeigh  = cfg.mesoTangentMinNeighbors || 3;
+    var colorGate = cfg.mesoTangentSideColorGate != null ? cfg.mesoTangentSideColorGate : 55;
+    var eigenMin  = cfg.mesoTangentEigenRatioMin || 1.5;
+
+    // Build spatial grid for neighbor lookup
+    var cellSize = radius + 1;
+    var grid = {};
+    for (var gi = 0; gi < tokens.length; gi++) {
+      var gt = tokens[gi];
+      var gx = (gt.x / cellSize) | 0;
+      var gy = (gt.y / cellSize) | 0;
+      var gk = gx + ',' + gy;
+      if (!grid[gk]) grid[gk] = [];
+      grid[gk].push(gt);
+    }
+
+    var refined = 0, skippedFewNeighbors = 0, skippedIsotropic = 0;
+    var radius2 = radius * radius;
+
+    for (var ti = 0; ti < tokens.length; ti++) {
+      var tok = tokens[ti];
+      var cx = (tok.x / cellSize) | 0;
+      var cy = (tok.y / cellSize) | 0;
+
+      // Gather same-boundary neighbors within radius
+      var neighbors = [];
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          var nk = (cx + dx) + ',' + (cy + dy);
+          var cell = grid[nk];
+          if (!cell) continue;
+          for (var ni = 0; ni < cell.length; ni++) {
+            var nb = cell[ni];
+            if (nb.id === tok.id) continue;
+            var ddx = nb.x - tok.x, ddy = nb.y - tok.y;
+            if (ddx * ddx + ddy * ddy > radius2) continue;
+
+            // Side-color gate: same boundary check
+            var llD = _labDist(tok.leftLab, nb.leftLab);
+            var rrD = _labDist(tok.rightLab, nb.rightLab);
+            var lrD = _labDist(tok.leftLab, nb.rightLab);
+            var rlD = _labDist(tok.rightLab, nb.leftLab);
+            var sameD = (llD + rrD) * 0.5;
+            var flipD = (lrD + rlD) * 0.5;
+            if (Math.min(sameD, flipD) > colorGate) continue;
+
+            neighbors.push(nb);
+          }
+        }
+      }
+
+      if (neighbors.length < minNeigh) {
+        skippedFewNeighbors++;
+        continue; // keep original Sobel tangent
+      }
+
+      // PCA on spatial positions of token + its neighbors
+      // Compute centroid
+      var sumX = tok.x, sumY = tok.y;
+      var n = neighbors.length + 1; // include self
+      for (var pi = 0; pi < neighbors.length; pi++) {
+        sumX += neighbors[pi].x;
+        sumY += neighbors[pi].y;
+      }
+      var meanX = sumX / n, meanY = sumY / n;
+
+      // Compute 2×2 covariance matrix
+      var cxx = 0, cxy = 0, cyy = 0;
+      var rx = tok.x - meanX, ry = tok.y - meanY;
+      cxx += rx * rx; cxy += rx * ry; cyy += ry * ry;
+      for (var qi = 0; qi < neighbors.length; qi++) {
+        rx = neighbors[qi].x - meanX;
+        ry = neighbors[qi].y - meanY;
+        cxx += rx * rx; cxy += rx * ry; cyy += ry * ry;
+      }
+      cxx /= n; cxy /= n; cyy /= n;
+
+      // Analytical eigendecomposition of 2×2 symmetric matrix
+      // [[cxx, cxy], [cxy, cyy]]
+      var trace = cxx + cyy;
+      var det = cxx * cyy - cxy * cxy;
+      var disc = trace * trace - 4 * det;
+      if (disc < 0) disc = 0;
+      var sqrtDisc = Math.sqrt(disc);
+      var lambda1 = (trace + sqrtDisc) * 0.5; // larger eigenvalue
+      var lambda2 = (trace - sqrtDisc) * 0.5; // smaller eigenvalue
+
+      // Check eigenratio: is there clear linear structure?
+      // If points are clustered isotropically, PCA direction is meaningless.
+      if (lambda2 < 1e-8) {
+        // Degenerate: nearly all variance in one direction — good, use it
+      } else if (lambda1 / lambda2 < eigenMin) {
+        skippedIsotropic++;
+        continue; // cluster is too round, keep original tangent
+      }
+
+      // Principal eigenvector (for lambda1)
+      var evx, evy;
+      if (Math.abs(cxy) > 1e-10) {
+        evx = lambda1 - cyy;
+        evy = cxy;
+      } else if (cxx >= cyy) {
+        evx = 1; evy = 0;
+      } else {
+        evx = 0; evy = 1;
+      }
+      var evMag = Math.sqrt(evx * evx + evy * evy);
+      if (evMag < 1e-10) continue;
+      evx /= evMag; evy /= evMag;
+
+      // Sign-align with original tangent so direction sense is preserved
+      var origDot = evx * tok.tangentX + evy * tok.tangentY;
+      if (origDot < 0) { evx = -evx; evy = -evy; }
+
+      // Derive new normal perpendicular to new tangent.
+      // Original convention: tx = -ny, ty = nx  →  nx = ty, ny = -tx
+      // New normal candidate from same convention:
+      var newNx = evy, newNy = -evx;
+      // Ensure normal preserves left/right side assignment by checking
+      // it points roughly the same direction as the original normal
+      var oldNx = tok.normalX, oldNy = tok.normalY;
+      if (newNx * oldNx + newNy * oldNy < 0) {
+        newNx = -newNx; newNy = -newNy;
+      }
+
+      tok.tangentX = evx;
+      tok.tangentY = evy;
+      tok.normalX = newNx;
+      tok.normalY = newNy;
+
+      refined++;
+    }
+
+    if (_diag) {
+      _diag.meso_refined = refined;
+      _diag.meso_skippedFewNeighbors = skippedFewNeighbors;
+      _diag.meso_skippedIsotropic = skippedIsotropic;
+      _diag.meso_totalTokens = tokens.length;
+    }
+
+    return refined;
   }
 
   function _componentsFromAdjacency(tokens, adjacency, minLen) {
