@@ -77,9 +77,7 @@
     graphSideColorGate:    55,
 
     // Stage D — Pass 1b: Chain endpoint continuation
-    // With graphSideColorGate in place, extension can reach further without
-    // risk of cross-boundary contamination.
-    chainExtensionMaxDist: 32,     // was 24; safe to increase with color gate
+    chainExtensionMaxDist: 24,     // conservative: ~2x scaffold spacing
     chainExtensionDirAlign: 0.40,
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
@@ -101,13 +99,13 @@
     lookaheadCoherenceFraction: 0.25, // was 0.30; slightly less coherence weight so curves aren't penalized
 
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
-    // With graphSideColorGate preventing cross-boundary links, bridge can
-    // safely span larger gaps to reconnect arc fragments and boundary breaks.
+    // Bridge MUST honor the same side color hard gate as Pass 1 linking.
+    // Without it, endpoints from different boundaries merge freely.
     bridgeEnabled:          true,
-    bridgeMaxGapPx:         40,    // was 24; larger gaps for arc/circle fragments
-    bridgeDirAgreementMin:  0.30,  // was 0.40; softer for curve fragment reconnection
-    bridgeSideDeltaETol:    40,    // was 35; more tolerant for gradient boundaries
-    bridgeMinCombinedScore: 0.20,  // was 0.25; accept more borderline bridges
+    bridgeMaxGapPx:         24,    // ~2x scaffold spacing; prevents cross-shape reach
+    bridgeDirAgreementMin:  0.50,  // strong directional agreement required
+    bridgeSideDeltaETol:    35,    // side color scoring tolerance
+    bridgeMinCombinedScore: 0.30,  // reject borderline bridges
 
     // Stage D: Structural outlier pruning
     //
@@ -133,20 +131,18 @@
     lookaheadDensityWeight:  0.15, // was 0.10; stronger density preference
 
     // Stage D: Closure pass
-    // Closure must span large gaps for circles/arcs — a circle of radius 50px
-    // can have a 100px gap between arc endpoints after direction-coherent ordering.
+    // Closure MUST honor the same side color hard gate as Pass 1 linking.
     closureEnabled:          true,
-    closureMinChainLen:      3,    // was 4; allow short chains to close
-    closureMaxGapPx:         48,   // was 32; much larger for circle/arc closure
-    closureTrendMin:         0.20, // was 0.30; very soft for curved shape closure
-    closureColorTol:         45,   // was 40; tolerant for gradient boundaries
+    closureMinChainLen:      4,    // minimum chain length for closure consideration
+    closureMaxGapPx:         32,   // reasonable gap for same-boundary closure
+    closureTrendMin:         0.35, // endpoints must trend toward each other
+    closureColorTol:         40,   // side color tolerance for closure scoring
 
     // Stage D: Multi-pass refinement
-    // Extension, bridge, and closure run in a loop. Each pass builds on
-    // the previous pass's connections: extension grows chains, bridge
-    // reconnects fragments, closure forms loops. Iteration continues
-    // until no more connections are made or maxRefinementPasses is reached.
-    maxRefinementPasses:     3,
+    // Extension, bridge, and closure run in a loop. Limited to 2 passes
+    // to prevent error compounding — bad merges in pass 1 should not
+    // propagate further.
+    maxRefinementPasses:     2,
 
     // Stage D: Branch anchor recovery
     branchAnchorEnabled:     true,
@@ -879,6 +875,7 @@
     var dirMin = cfg.bridgeDirAgreementMin;
     var bridgeSideTol = cfg.bridgeSideDeltaETol;
     var minCombined = cfg.bridgeMinCombinedScore != null ? cfg.bridgeMinCombinedScore : 0.30;
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
 
     // Identify chain endpoints (first/last token in each non-loop chain)
     var loopSet = {};
@@ -968,19 +965,21 @@
             var trendDotB = epB.trendX * (-gapDirX) + epB.trendY * (-gapDirY);
             var trendScore = Math.min(Math.max(trendDotA, 0), Math.max(trendDotB, 0));
 
-            // ── Composite score (geometry-first) ──
-            // Color is a weak tiebreaker — no hard rejection.
+            // ── Side color HARD GATE (same as Pass 1 linking) ──
+            // Endpoints from different boundaries must not bridge.
             var llD = _labDist(tokA.leftLab, tokB.leftLab);
             var rrD = _labDist(tokA.rightLab, tokB.rightLab);
             var lrD = _labDist(tokA.leftLab, tokB.rightLab);
             var rlD = _labDist(tokA.rightLab, tokB.leftLab);
             var bestColorDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+            if (bestColorDist > sideColorGate) continue;
+
             var colorScore = Math.max(0, 1.0 - bestColorDist / (bridgeSideTol * 2));
             var gapScore = 1.0 - (gap / maxGap);
 
-            // Geometry-dominant: direction 40%, trend 30%, gap 20%, color 10%
-            var combinedScore = dirScore * 0.40 + trendScore * 0.30 +
-                                gapScore * 0.20 + colorScore * 0.10;
+            // Balanced: direction 35%, trend 25%, gap 20%, color 20%
+            var combinedScore = dirScore * 0.35 + trendScore * 0.25 +
+                                gapScore * 0.20 + colorScore * 0.20;
 
             if (combinedScore < minCombined) continue;
 
@@ -1394,6 +1393,7 @@
     var trendWindow = cfg.chainExtensionTrendWindow || 4;
     var maxDirDrift = cfg.chainExtensionMaxDirDrift || 0.40;
     var corridorHW = 12; // was 8; widened to capture candidates on curved boundaries
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
 
     // Microchaining configuration
     var microchainCfg = null;
@@ -1498,10 +1498,12 @@
       _tokenExtend(ids, false, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                   sideColorGate,
                    microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag);
       _tokenExtend(ids, true, tokenById, adjacency,
                    extGrid, extCellSize, tokenToChain, chains, ci,
                    maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                   sideColorGate,
                    microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag);
       if (ids.length > _extBefore) {
         _diag.extension_chainsExtended++;
@@ -1531,6 +1533,7 @@
   function _tokenExtend(ids, fromStart, tokenById, adjacency,
                         extGrid, extCellSize, tokenToChain, allChains, myChainIdx,
                         maxDist, dirMin, colorTol, corridorHW, trendWindow, maxDirDrift,
+                        sideColorGate,
                         microchainCfg, lookaheadCfg, xyTrendCfg, densityCache, _diag) {
     if (ids.length < 2) return;
 
@@ -1632,12 +1635,14 @@
             var bestDirScore = Math.max(tokDirDot, tokEndDot);
             if (bestDirScore < dirMin) continue;
 
-            // Sided color compatibility — soft factor, no hard veto.
+            // Sided color compatibility — HARD GATE then scoring.
+            // Extension must not cross boundary identity, same as Pass 1.
             var llD = _labDist(endTok.leftLab, cand.leftLab);
             var rrD = _labDist(endTok.rightLab, cand.rightLab);
             var lrD = _labDist(endTok.leftLab, cand.rightLab);
             var rlD = _labDist(endTok.rightLab, cand.leftLab);
             var cDist = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+            if (cDist > sideColorGate) continue; // hard gate: same boundary only
             var extColorScore = Math.max(0, 1.0 - cDist / colorTol);
 
             // Score: geometry-dominant. Color is a weak tiebreaker.
@@ -2269,6 +2274,7 @@
     var maxGap   = cfg.closureMaxGapPx    != null ? cfg.closureMaxGapPx   : 24;
     var trendMin = cfg.closureTrendMin    != null ? cfg.closureTrendMin    : 0.40;
     var colorTol = cfg.closureColorTol    != null ? cfg.closureColorTol    : 35;
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
 
     // Build set of loop token IDs (chains already detected as loops)
     var loopSet = {};
@@ -2355,13 +2361,13 @@
 
       if (trendDotA < trendMin || trendDotZ < trendMin) continue;
 
-      // Color: the two endpoints should share similar boundary context
+      // Color: side color hard gate (same as Pass 1 linking)
       var llD = _labDist(tokA.leftLab,  tokZ.leftLab);
       var rrD = _labDist(tokA.rightLab, tokZ.rightLab);
       var lrD = _labDist(tokA.leftLab,  tokZ.rightLab);
       var rlD = _labDist(tokA.rightLab, tokZ.leftLab);
       var bestColor = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
-      if (bestColor > colorTol * 2) continue; // hard-reject only on very large mismatch
+      if (bestColor > sideColorGate) continue; // hard gate: same boundary only
 
       // Accept: link endpoints
       if (adjacency[tokA.id].indexOf(tokZ.id) < 0) {
@@ -2409,13 +2415,13 @@
 
             if (ctA < trendMin || ctB < trendMin) continue;
 
-            // Color compatibility
+            // Color: side color hard gate (same as Pass 1 linking)
             var cllD = _labDist(tA.leftLab,  tB.leftLab);
             var crrD = _labDist(tA.rightLab, tB.rightLab);
             var clrD = _labDist(tA.leftLab,  tB.rightLab);
             var crlD = _labDist(tA.rightLab, tB.leftLab);
             var cBestColor = Math.min((cllD + crrD) * 0.5, (clrD + crlD) * 0.5);
-            if (cBestColor > colorTol * 2) continue;
+            if (cBestColor > sideColorGate) continue; // hard gate: same boundary only
 
             // Gap score (stronger preference for small gaps)
             var gapScore = 1.0 - (cgap / maxGap);
