@@ -53,17 +53,17 @@
   /* ── Default config for Stages D–F ── */
 
   var DEFAULT_CONFIG_DF = Object.freeze({
-    // Stage D — Pass 1: Geometry-first token linking
+    // Stage D — Boundary-following chain builder (Phase 1 architecture)
     //
-    // DESIGN RULE: 95% of tokens MUST end up in chains.  Tokens represent
-    // real boundary evidence from Stage C.  If Stage D discards them, all
-    // downstream structure (regions, groups) loses that information.
-    // Gates exist to prevent cross-boundary contamination, NOT to filter
-    // "weak" tokens — that's salience scoring's job, not linking's job.
+    // DESIGN RULE: Chains represent real object boundaries.  Structure
+    // dominates over coverage.  Tokens not on clear boundaries remain
+    // unlinked rather than being force-merged into chains.
     //
-    // Radii are generous so tokens can find same-boundary neighbors even
-    // when other-boundary tokens are interleaved between them.
-    graphNeighborRadius:     20,     // was 14; wider Zone 1 for intersection regions
+    // The seed-and-trace system uses graphForwardRadius as the trace
+    // search radius and graphSideColorGate as the hard boundary-identity
+    // gate.  Other graph-first parameters are retained for compatibility
+    // but are not actively used by the Phase 1 chain builder.
+    graphNeighborRadius:     20,     // retained for compat; not used by trace
     graphForwardRadius:      32,     // was 20; wider Zone 2 to span boundary gaps
     graphForwardDirMin:      0.35,   // was 0.55; relaxed for curves and corners
     graphForwardLateralMax:  8,      // was 5; wider lateral for noisy token placement
@@ -191,12 +191,10 @@
     mesoTangentSideColorGate:   55,     // same as main side-color gate
     mesoTangentEigenRatioMin:   1.5,    // λ1/λ2 must show clear linear structure
 
-    // Stage D: Coverage enforcement.
-    // DESIGN RULE: 95% of tokens MUST end up in chains.  If after all
-    // passes the coverage is below this target, a final aggressive sweep
-    // links remaining orphans to their nearest same-boundary token
-    // using only the side-color gate (all geometry gates dropped).
-    minTokenCoverageRatio:      0.95,
+    // Stage D: Coverage enforcement (DISABLED in Phase 1).
+    // Phase 1 architecture prioritizes structure over coverage.
+    // Tokens not on clear boundaries remain unlinked.
+    minTokenCoverageRatio:      0.0,  // was 0.95; disabled for boundary-following
 
     // Stage E
     watershedFgFraction:   0.25,
@@ -265,19 +263,41 @@
       _refineTangentsMesoScale(tokens, cfg, _diag);
     }
 
-    var radius = cfg.graphNeighborRadius;
-    var fwdRadius = cfg.graphForwardRadius || 16;
-    var fwdDirMin = cfg.graphForwardDirMin || 0.70;
-    var fwdLatMax = cfg.graphForwardLateralMax || 4;
-    var sideTol = cfg.graphSideDeltaETol;
-    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
-    var linkThreshold = cfg.linkScoreThreshold != null ? cfg.linkScoreThreshold : 0.45;
+    /* ================================================================
+     *  BOUNDARY-FOLLOWING CHAIN BUILDER (Phase 1 architecture)
+     *
+     *  Instead of building an adjacency graph → finding connected
+     *  components → greedy ordering, we directly trace boundary-following
+     *  chains from seed tokens.
+     *
+     *  Each chain is built by:
+     *    1. Picking a seed token (highest confidence unused token)
+     *    2. Tracing forward: at each step, scoring candidates by how well
+     *       they continue the current boundary path (direction continuity,
+     *       tangent alignment, side-color consistency, spacing regularity)
+     *    3. Tracing backward from seed using the same logic
+     *    4. The result is an ordered chain that follows a real boundary
+     *
+     *  Chain-level state is tracked throughout:
+     *    - Running direction (updated each step)
+     *    - Side identity (left/right LAB, checked for consistency)
+     *    - Step spacing (for regularity scoring)
+     *
+     *  The adjacency dict is built FROM the traced chains (consecutive
+     *  tokens in a chain become adjacent), so the downstream pipeline
+     *  (extension, bridging, closure, recovery) still works.
+     * ================================================================ */
 
-    // Spatial index: cell size set so a ±1 cell scan (3x3) covers fwdRadius.
-    // A token at position p in cell C can reach any token in cells C ± 1.
-    // Worst case: token at cell boundary (0) → farthest point in neighbor cell
-    // is cellSize * 2. So cellSize must be >= fwdRadius to guarantee coverage.
-    var cellSize = fwdRadius + 1;
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+    var traceRadius = cfg.graphForwardRadius || 32;
+    var traceDirMin = cfg.graphForwardDirMin || 0.35;
+
+    // Token lookup
+    var tokenById = {};
+    for (var oi = 0; oi < tokens.length; oi++) tokenById[tokens[oi].id] = tokens[oi];
+
+    // Spatial index for tracing
+    var cellSize = traceRadius + 1;
     var grid = {};
     for (var ti = 0; ti < tokens.length; ti++) {
       var t = tokens[ti];
@@ -288,235 +308,48 @@
       grid[key].push(t);
     }
 
-    // Build adjacency (Pass 1: geometry-first with directional forward reach)
-    //
-    // Two acceptance zones per token pair:
-    //   Zone 1 (base):    dist <= radius — standard omnidirectional check
-    //   Zone 2 (forward): dist <= fwdRadius — requires strong tangent alignment
-    //                      and small lateral offset (elliptical reach along tangent)
-    //
-    // This lets tokens 8-16px apart along a boundary connect when
-    // geometrically consistent, without linking across parallel edges.
+    // Trace all chains
+    var traceResult = _seedAndTrace(tokens, tokenById, grid, cellSize, cfg, _diag);
+    var chains = traceResult.chains;
+    var loops = traceResult.loops;
+
+    // Build adjacency dict from traced chains.
+    // Consecutive tokens in each chain become adjacent — this is the
+    // structural adjacency that downstream passes (extension, bridge,
+    // closure) operate on.
     var adjacency = {};
     for (var ai = 0; ai < tokens.length; ai++) adjacency[tokens[ai].id] = [];
 
-    for (var bi = 0; bi < tokens.length; bi++) {
-      var a = tokens[bi];
-      var ax = (a.x / cellSize) | 0;
-      var ay = (a.y / cellSize) | 0;
-
-      for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-          var nk = (ax + dx) + ',' + (ay + dy);
-          var cell = grid[nk];
-          if (!cell) continue;
-          for (var ci = 0; ci < cell.length; ci++) {
-            var b = cell[ci];
-            if (b.id <= a.id) continue; // undirected, avoid duplicates
-            var ddx = b.x - a.x, ddy = b.y - a.y;
-            var dist2 = ddx * ddx + ddy * ddy;
-
-            // Quick reject: beyond even the extended forward radius
-            if (dist2 > fwdRadius * fwdRadius) continue;
-
-            var dist = Math.sqrt(dist2);
-            var inBaseRadius = dist <= radius;
-
-            // Direction score: |dot(tangentA, tangentB)|
-            var dot = a.tangentX * b.tangentX + a.tangentY * b.tangentY;
-            var dirScore = Math.abs(dot);
-
-            _diag.pass1_linksEvaluated++;
-
-            // Hard floor: reject truly perpendicular tangents (>85°)
-            if (dirScore < 0.09) { _diag.pass1_rejectedPerpendicular++; continue; } // cos(85°) ≈ 0.087
-
-            if (!inBaseRadius) {
-              // ── Zone 2: directionally-biased forward reach ──
-              // Only accept if both tangents are well-aligned and the
-              // connection vector runs along the tangent direction (not across).
-              if (dirScore < fwdDirMin) { _diag.pass1_rejectedZone2Dir++; continue; }
-
-              // Decompose the connection vector into along-tangent and
-              // across-tangent components using the average tangent direction.
-              // Use the average of both tangents (sign-aligned) as the axis.
-              var avgTx, avgTy;
-              if (dot >= 0) {
-                avgTx = a.tangentX + b.tangentX;
-                avgTy = a.tangentY + b.tangentY;
-              } else {
-                avgTx = a.tangentX - b.tangentX;
-                avgTy = a.tangentY - b.tangentY;
-              }
-              var avgMag = Math.sqrt(avgTx * avgTx + avgTy * avgTy);
-              if (avgMag < 0.01) continue;
-              avgTx /= avgMag; avgTy /= avgMag;
-
-              // Project connection vector onto the average tangent
-              var alongDist = Math.abs(ddx * avgTx + ddy * avgTy);
-              var lateralDist = Math.abs(ddx * (-avgTy) + ddy * avgTx);
-
-              // Reject if lateral offset is too large (prevents cross-edge links)
-              if (lateralDist > fwdLatMax) { _diag.pass1_rejectedZone2Lateral++; continue; }
-
-              // Also check that the connection vector aligns with tangents.
-              // This catches cases where tangents are parallel but the token
-              // pair is side-by-side rather than along the boundary.
-              var connMag = dist; // already computed
-              var connDotA = Math.abs(a.tangentX * ddx + a.tangentY * ddy) / connMag;
-              var connDotB = Math.abs(b.tangentX * ddx + b.tangentY * ddy) / connMag;
-              var connAlign = Math.min(connDotA, connDotB);
-              if (connAlign < 0.35) { _diag.pass1_rejectedZone2ConnAlign++; continue; }
-            }
-
-            // ── Scoring ──
-            // Use the effective radius for distance normalization:
-            // base radius for Zone 1, forward radius for Zone 2.
-            var effectiveRadius = inBaseRadius ? radius : fwdRadius;
-            var distRatio = dist / effectiveRadius;
-            var distScore = 1.0 - distRatio * distRatio;
-
-            // Side color: measures boundary identity compatibility.
-            // Tokens on the SAME boundary share similar side colors.
-            // Tokens on DIFFERENT boundaries have very different side colors.
-            var llDist = _labDist(a.leftLab, b.leftLab);
-            var rrDist = _labDist(a.rightLab, b.rightLab);
-            var lrDist = _labDist(a.leftLab, b.rightLab);
-            var rlDist = _labDist(a.rightLab, b.leftLab);
-            var sameDist = (llDist + rrDist) * 0.5;
-            var flipDist = (lrDist + rlDist) * 0.5;
-            var bestColorDist = Math.min(sameDist, flipDist);
-
-            // ── Side color HARD GATE ──
-            // This is the primary cross-boundary contamination prevention.
-            // Tokens from different boundaries (e.g., grid line vs object edge)
-            // have very different side colors (ΔE > 55). Rejecting these
-            // prevents different boundaries from merging into one component,
-            // which was the root cause of the "45 chains from 51k tokens" failure.
-            if (bestColorDist > sideColorGate) { _diag.pass1_rejectedSideColorGate++; continue; }
-
-            var colorScore = Math.max(0, 1.0 - bestColorDist / (sideTol * 2));
-
-            // Balanced weighting: direction 40%, distance 35%, color 25%
-            // Color is promoted from tiebreaker (10%) to significant factor (25%)
-            // so that cross-boundary links with borderline color differences
-            // are penalized enough to fall below threshold.
-            var linkScore = 0.40 * dirScore + 0.35 * distScore + 0.25 * colorScore;
-
-            if (linkScore < linkThreshold) { _diag.pass1_rejectedLinkScore++; continue; }
-
-            _diag.pass1_linksAccepted++;
-            adjacency[a.id].push(b.id);
-            adjacency[b.id].push(a.id);
-          }
+    for (var ki = 0; ki < chains.length; ki++) {
+      var chIds = chains[ki].ids;
+      for (var kj = 0; kj < chIds.length - 1; kj++) {
+        var idA = chIds[kj], idB = chIds[kj + 1];
+        adjacency[idA].push(idB);
+        adjacency[idB].push(idA);
+      }
+      // Close loop adjacency
+      if (chains[ki]._isLoop && chIds.length >= 3) {
+        var loopA = chIds[0], loopB = chIds[chIds.length - 1];
+        var alreadyLinked = false;
+        for (var lci = 0; lci < adjacency[loopA].length; lci++) {
+          if (adjacency[loopA][lci] === loopB) { alreadyLinked = true; break; }
+        }
+        if (!alreadyLinked) {
+          adjacency[loopA].push(loopB);
+          adjacency[loopB].push(loopA);
         }
       }
     }
 
-    // Find connected components via BFS
-    var visited = {};
-    var components = [];
-    for (var vi = 0; vi < tokens.length; vi++) {
-      var tid = tokens[vi].id;
-      if (visited[tid]) continue;
-      var comp = [];
-      var queue = [tid];
-      visited[tid] = true;
-      while (queue.length > 0) {
-        var cur = queue.shift();
-        comp.push(cur);
-        var neis = adjacency[cur];
-        for (var ni = 0; ni < neis.length; ni++) {
-          if (!visited[neis[ni]]) {
-            visited[neis[ni]] = true;
-            queue.push(neis[ni]);
-          }
-        }
-      }
-      if (comp.length >= cfg.chainMinLength) {
-        components.push(comp);
-        _diag.pass1_tokensInComponents += comp.length;
-      } else {
-        _diag.pass1_tokensOrphaned += comp.length;
-      }
-    }
-    _diag.pass1_componentsFound = components.length;
+    // Diagnostics
+    _diag.pass1_componentsFound = chains.length;
+    var _tracedCount = 0;
+    for (var _tci = 0; _tci < chains.length; _tci++) _tracedCount += chains[_tci].ids.length;
+    _diag.pass1_tokensInComponents = _tracedCount;
+    _diag.pass1_tokensOrphaned = tokens.length - _tracedCount;
 
-    // Order each chain spatially for meaningful chain structure
-    var tokenById = {};
-    for (var oi = 0; oi < tokens.length; oi++) tokenById[tokens[oi].id] = tokens[oi];
-
-    /* ================================================================
-     *  RESCUE LINKING: Seed chains in zero-chain regions
-     *
-     *  If Pass 1 left orphaned tokens (degree 0), no subsequent pass
-     *  can create chains for them — extension, bridge, closure, and
-     *  residual recovery ALL require existing chains.
-     *
-     *  Rescue linking runs NOW (before chain ordering and refinement)
-     *  to connect orphans to nearby tokens with compatible boundary
-     *  identity (side colors).  This creates seed chains that the
-     *  refinement loop can then grow into full structural chains.
-     *
-     *  Only degree-0 tokens are targeted — existing Pass 1 links are
-     *  never disturbed.  The side-color hard gate is still enforced.
-     * ================================================================ */
-    if (cfg.rescueLinkingEnabled !== false && _diag.pass1_tokensOrphaned > 0) {
-      var rescueResult = _rescueLinkingPass(tokens, adjacency, tokenById, grid, cellSize, cfg, _diag);
-
-      if (rescueResult.linksCreated > 0) {
-        // Rebuild components from updated adjacency
-        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
-        _diag.rescue_chainsSeeded = components.length - _diag.pass1_componentsFound;
-      }
-    }
-
-    var chains = [];
-    var loops = [];
-
-    for (var ki = 0; ki < components.length; ki++) {
-      var comp2 = components[ki];
-      var ordered = _orderChain(comp2, adjacency, tokenById);
-
-      // Detect loop: if the first and last token in the ordered chain are
-      // connected and the component has no degree-1 nodes
-      var isLoop = false;
-      if (ordered.length >= 6) {
-        var first = ordered[0], last = ordered[ordered.length - 1];
-        var firstNeis = adjacency[first];
-        var lastInFirst = false;
-        for (var fni = 0; fni < firstNeis.length; fni++) { if (firstNeis[fni] === last) { lastInFirst = true; break; } }
-        if (lastInFirst) {
-          // Build O(1) set for component membership — avoids O(n) indexOf per neighbor
-          var comp2Set = {};
-          for (var c2i = 0; c2i < comp2.length; c2i++) comp2Set[comp2[c2i]] = true;
-          // Check if all nodes have degree >= 2
-          var allDeg2 = true;
-          for (var li = 0; li < ordered.length; li++) {
-            var deg = 0;
-            var tokNeis = adjacency[ordered[li]];
-            for (var lj = 0; lj < tokNeis.length; lj++) {
-              if (comp2Set[tokNeis[lj]]) deg++;
-            }
-            if (deg < 2) { allDeg2 = false; break; }
-          }
-          isLoop = allDeg2;
-        }
-      }
-
-      chains.push({ ids: ordered, ordered: true });
-      if (isLoop) loops.push({ ids: ordered });
-
-      // Recover residual tokens that _orderChain dropped from this component.
-      // These are valid graph structure that would otherwise be silently lost.
-      var residuals = _recoverResidualChains(comp2, ordered, adjacency, tokenById, cfg.chainMinLength, cfg.branchAnchorEnabled);
-      for (var rsi = 0; rsi < residuals.length; rsi++) {
-        var resOrdered = residuals[rsi];
-        chains.push({ ids: resOrdered, ordered: true });
-        var resLoop = _isLoopChain(resOrdered, adjacency, comp2);
-        if (resLoop) loops.push({ ids: resOrdered });
-      }
-    }
+    // Strip internal _isLoop flag from chain objects (not part of contract)
+    for (var _si = 0; _si < chains.length; _si++) delete chains[_si]._isLoop;
 
     /* ================================================================
      *  MULTI-PASS STRUCTURE ASSEMBLY
@@ -547,7 +380,18 @@
     var bridgeEdgeList = [];
     var bridgesEvaluated = 0;
     var bridgesAccepted = 0;
-    var maxRefinementPasses = cfg.maxRefinementPasses || 3;
+
+    // Phase 1 architecture: multi-pass refinement (extension, bridging, closure)
+    // is disabled.  These mechanisms assume graph-first chain semantics:
+    //   - Extension adds tokens to chains without checking chain-level side identity
+    //   - Bridging merges chains based on endpoint proximity, not structural matching
+    //   - After bridge/closure, chains are rebuilt via _componentsFromAdjacency →
+    //     _orderChain, which destroys boundary-following order
+    //
+    // Boundary-following chains from seed-and-trace are already structurally
+    // coherent.  Phase 2 will introduce structural merge with proper
+    // direction/spacing/side-pattern validation.
+    var maxRefinementPasses = 0; // disabled — was cfg.maxRefinementPasses || 3
 
     for (var _rp = 0; _rp < maxRefinementPasses; _rp++) {
       var _rpChanges = 0;
@@ -646,7 +490,12 @@
      *  The side-color hard gate is still enforced to prevent cross-boundary
      *  contamination.
      * ================================================================ */
-    if (cfg.residualRecoveryEnabled !== false) {
+    // Phase 1 architecture: residual recovery is disabled.
+    // Boundary-following chains are structurally coherent — force-attaching
+    // orphan tokens with relaxed gates would corrupt chain identity.
+    // Orphan tokens remain unlinked; they will be addressed by Phase 2's
+    // noise classification system.
+    if (false && cfg.residualRecoveryEnabled !== false) {
       var recoveryResult = _residualRecoveryPass(tokens, chains, adjacency, tokenById, cfg, _diag);
 
       if (recoveryResult.recovered > 0) {
@@ -686,10 +535,13 @@
       tokenSalience = _computeTokenSalience(tokens, chains, adjacency, tokenById);
     }
 
-    // Structural outlier pruning: remove tokens that mismatch their
-    // neighbors structurally (direction, color).
-    // NOW SALIENCE-AWARE: high-salience tokens resist pruning.
-    if (cfg.outlierPruneEnabled !== false) {
+    // Phase 1 architecture: outlier pruning is disabled.
+    // Boundary-following chains are built by tracing — every token in a chain
+    // was accepted because it continued the boundary path.  Pruning + the
+    // subsequent chain rebuild via _componentsFromAdjacency → _orderChain
+    // would destroy boundary-following order.  Phase 2 will introduce
+    // structure-aware pruning that respects traced chain order.
+    if (false && cfg.outlierPruneEnabled !== false) {
       var cleanup = _pruneStructuralOutliers(tokens, adjacency, tokenById, cfg, tokenSalience);
       _diag.outlier_prunedCount = cleanup.prunedCount;
       if (cleanup.prunedCount > 0) {
@@ -733,8 +585,12 @@
      *
      *  This guarantees that the chain overlay reflects the token field.
      * ================================================================ */
-    var minCoverage = cfg.minTokenCoverageRatio != null ? cfg.minTokenCoverageRatio : 0.95;
-    if (tokens.length > 0 && minCoverage > 0) {
+    // Phase 1 architecture: coverage enforcement sweep is disabled.
+    // Force-linking orphans with zero geometry checks corrupts boundary-following
+    // chains by merging noise/interior tokens into structural boundaries.
+    // Structure-first design: tokens not on boundaries stay unlinked.
+    var minCoverage = 0; // disabled — was cfg.minTokenCoverageRatio || 0.95
+    if (false && tokens.length > 0 && minCoverage > 0) {
       // Count current coverage
       var _covInChain = {};
       for (var _covi = 0; _covi < chains.length; _covi++) {
@@ -1098,6 +954,322 @@
     }
 
     return refined;
+  }
+
+  /* ─────────────��───────────────────────��────────────────────────────
+   *  Seed-and-trace boundary-following chain builder
+   *
+   *  Replaces the graph→components→ordering pipeline with direct
+   *  boundary tracing.  Each chain is constructed as an ordered walk
+   *  along a boundary, maintaining chain-level state:
+   *    - running direction (smoothed over recent steps)
+   *    - side identity (left/right LAB of the boundary)
+   *    - step spacing (for regularity)
+   *
+   *  Seeds are chosen by descending confidence — the strongest boundary
+   *  evidence initiates chains first, claiming tokens before weaker
+   *  seeds can.  This ensures dominant structure emerges cleanly.
+   *
+   *  A chain terminates when no candidate scores above the acceptance
+   *  threshold, meaning the boundary has ended, become ambiguous, or
+   *  crossed into another structure.
+   * ───────────────────────────────────��──────────────────────────────── */
+  function _seedAndTrace(tokens, tokenById, grid, cellSize, cfg, _diag) {
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+    var traceRadius = cfg.graphForwardRadius || 32;
+    var traceDirMin = cfg.graphForwardDirMin || 0.35;
+    var chainMinLen = cfg.chainMinLength || 2;
+
+    // Set of token IDs already claimed by a chain
+    var claimed = {};
+
+    // Sort tokens by confidence descending — best evidence seeds first
+    var seedOrder = tokens.slice().sort(function(a, b) {
+      return b.confidence - a.confidence;
+    });
+
+    var chains = [];
+    var loops = [];
+    var traceR2 = traceRadius * traceRadius;
+
+    for (var si = 0; si < seedOrder.length; si++) {
+      var seed = seedOrder[si];
+      if (claimed[seed.id]) continue;
+
+      // ── Trace forward from seed ──
+      var forward = _traceDirection(seed, tokenById, grid, cellSize, traceRadius, traceR2,
+                                     sideColorGate, traceDirMin, claimed, false);
+
+      // ── Trace backward from seed ──
+      var backward = _traceDirection(seed, tokenById, grid, cellSize, traceRadius, traceR2,
+                                      sideColorGate, traceDirMin, claimed, true);
+
+      // Assemble chain: backward (reversed) + seed + forward
+      backward.reverse();
+      var chainIds = [];
+      for (var bi = 0; bi < backward.length; bi++) chainIds.push(backward[bi]);
+      chainIds.push(seed.id);
+      for (var fi = 0; fi < forward.length; fi++) chainIds.push(forward[fi]);
+
+      if (chainIds.length < chainMinLen) continue;
+
+      // Claim all tokens in this chain
+      for (var ci2 = 0; ci2 < chainIds.length; ci2++) claimed[chainIds[ci2]] = true;
+
+      // Check for loop: if first and last tokens are close and direction-compatible
+      var isLoop = false;
+      if (chainIds.length >= 6) {
+        var firstTok = tokenById[chainIds[0]];
+        var lastTok = tokenById[chainIds[chainIds.length - 1]];
+        if (firstTok && lastTok) {
+          var ldx = firstTok.x - lastTok.x, ldy = firstTok.y - lastTok.y;
+          var loopDist2 = ldx * ldx + ldy * ldy;
+          // Close enough to form a loop (within 1.5x typical step spacing)
+          if (loopDist2 < traceRadius * traceRadius) {
+            // Check direction consistency: chain-end directions should point toward each other
+            var lastDir = _estimateChainEndDir(chainIds, false, tokenById);
+            var firstDir = _estimateChainEndDir(chainIds, true, tokenById);
+            if (lastDir && firstDir) {
+              var loopDist = Math.sqrt(loopDist2);
+              if (loopDist > 0.5) {
+                var gapX = ldx / loopDist, gapY = ldy / loopDist;
+                // Last end should point toward first (positive dot with gap direction)
+                var lastToFirst = lastDir[0] * gapX + lastDir[1] * gapY;
+                // First end should point away from last (negative dot) — but since
+                // firstDir points outward from start, we check it points toward last
+                var firstToLast = firstDir[0] * (-gapX) + firstDir[1] * (-gapY);
+                if (lastToFirst > 0.2 && firstToLast > 0.2) {
+                  // Side color consistency between endpoints
+                  var llD = _labDist(firstTok.leftLab, lastTok.leftLab);
+                  var rrD = _labDist(firstTok.rightLab, lastTok.rightLab);
+                  var lrD = _labDist(firstTok.leftLab, lastTok.rightLab);
+                  var rlD = _labDist(firstTok.rightLab, lastTok.leftLab);
+                  var bestCD = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+                  if (bestCD <= sideColorGate) {
+                    isLoop = true;
+                  }
+                }
+              } else {
+                // Endpoints are nearly coincident — definitely a loop
+                isLoop = true;
+              }
+            }
+          }
+        }
+      }
+
+      var chainObj = { ids: chainIds, ordered: true, _isLoop: isLoop };
+      chains.push(chainObj);
+      if (isLoop) loops.push({ ids: chainIds });
+    }
+
+    return { chains: chains, loops: loops };
+  }
+
+  /**
+   * Trace a boundary chain in one direction from a starting token.
+   *
+   * At each step, candidates within traceRadius are scored by:
+   *   1. Direction continuity (40%): does stepping here continue the chain's heading?
+   *   2. Tangent alignment (25%): does the candidate's tangent match the boundary direction?
+   *   3. Side-color consistency (20%): does the candidate have the same left/right colors?
+   *   4. Spacing regularity (15%): is the step distance consistent with previous steps?
+   *
+   * The side-color hard gate is always enforced (non-negotiable).
+   *
+   * Returns array of token IDs (not including the start token).
+   */
+  function _traceDirection(startTok, tokenById, grid, cellSize, traceRadius, traceR2,
+                            sideColorGate, dirMin, claimed, isBackward) {
+    var result = [];
+    var curTok = startTok;
+
+    // Chain state: running direction (initialized from token tangent)
+    var dirX = isBackward ? -curTok.tangentX : curTok.tangentX;
+    var dirY = isBackward ? -curTok.tangentY : curTok.tangentY;
+    var hasDir = true;
+
+    // Chain state: side identity (left/right LAB running average)
+    var sideLeftL = curTok.leftLab[0], sideLeftA = curTok.leftLab[1], sideLeftB = curTok.leftLab[2];
+    var sideRightL = curTok.rightLab[0], sideRightA = curTok.rightLab[1], sideRightB = curTok.rightLab[2];
+
+    // Chain state: step spacing (running average)
+    var avgSpacing = 0;
+    var spacingCount = 0;
+
+    var maxSteps = 500; // safety limit
+    var localClaimed = {};
+    localClaimed[startTok.id] = true;
+
+    for (var step = 0; step < maxSteps; step++) {
+      var cgx = (curTok.x / cellSize) | 0;
+      var cgy = (curTok.y / cellSize) | 0;
+
+      var bestId = -1;
+      var bestScore = -Infinity;
+      var bestIsFlipped = false;
+
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          var nk = (cgx + dx) + ',' + (cgy + dy);
+          var cell = grid[nk];
+          if (!cell) continue;
+
+          for (var ci = 0; ci < cell.length; ci++) {
+            var cand = cell[ci];
+            if (cand.id === curTok.id) continue;
+            if (claimed[cand.id] || localClaimed[cand.id]) continue;
+
+            var ddx = cand.x - curTok.x, ddy = cand.y - curTok.y;
+            var dist2 = ddx * ddx + ddy * ddy;
+            if (dist2 > traceR2 || dist2 < 1) continue;
+            var dist = Math.sqrt(dist2);
+
+            // ── Side-color HARD GATE ──
+            var llD = _labDist(curTok.leftLab, cand.leftLab);
+            var rrD = _labDist(curTok.rightLab, cand.rightLab);
+            var lrD = _labDist(curTok.leftLab, cand.rightLab);
+            var rlD = _labDist(curTok.rightLab, cand.leftLab);
+            var sameSideDist = (llD + rrD) * 0.5;
+            var flipSideDist = (lrD + rlD) * 0.5;
+            var bestColorDist = Math.min(sameSideDist, flipSideDist);
+            if (bestColorDist > sideColorGate) continue;
+
+            // ── Component 1: Direction continuity (40%) ──
+            var connDirX = ddx / dist, connDirY = ddy / dist;
+            var dirContinuity;
+            if (hasDir) {
+              // How well does this step continue the chain's heading?
+              dirContinuity = connDirX * dirX + connDirY * dirY;
+              // Reject candidates that go backward
+              if (dirContinuity < dirMin) continue;
+              // Normalize to [0, 1] where 1 = perfectly forward
+              dirContinuity = (dirContinuity + 1.0) * 0.5;
+            } else {
+              // No direction yet — use tangent alignment for initial heading
+              dirContinuity = Math.abs(curTok.tangentX * connDirX + curTok.tangentY * connDirY);
+            }
+
+            // ── Component 2: Tangent alignment (25%) ──
+            var tangDot = Math.abs(curTok.tangentX * cand.tangentX + curTok.tangentY * cand.tangentY);
+
+            // ── Component 3: Side-color consistency with chain identity (20%) ──
+            // Compare candidate's side colors to the chain's running side identity
+            var chainSideLeft = [sideLeftL, sideLeftA, sideLeftB];
+            var chainSideRight = [sideRightL, sideRightA, sideRightB];
+            var sameChainDist = (_labDist(chainSideLeft, cand.leftLab) +
+                                _labDist(chainSideRight, cand.rightLab)) * 0.5;
+            var flipChainDist = (_labDist(chainSideLeft, cand.rightLab) +
+                                _labDist(chainSideRight, cand.leftLab)) * 0.5;
+            var chainColorDist = Math.min(sameChainDist, flipChainDist);
+            var colorScore = Math.max(0, 1.0 - chainColorDist / sideColorGate);
+
+            // ── Component 4: Spacing regularity (15%) ──
+            var spacingScore;
+            if (spacingCount >= 2 && avgSpacing > 1) {
+              // Prefer candidates at similar spacing to what we've been doing
+              var spacingRatio = dist / avgSpacing;
+              // Score peaks at 1.0 when spacing matches, drops off for 2x or 0.5x
+              spacingScore = Math.max(0, 1.0 - Math.abs(spacingRatio - 1.0));
+            } else {
+              // Not enough history — give moderate score, prefer closer
+              spacingScore = Math.max(0, 1.0 - dist / traceRadius);
+            }
+
+            var score = 0.40 * dirContinuity + 0.25 * tangDot + 0.20 * colorScore + 0.15 * spacingScore;
+
+            if (score > bestScore) {
+              bestScore = score;
+              bestId = cand.id;
+              // Save flip state for side-identity update
+              bestIsFlipped = flipChainDist < sameChainDist;
+            }
+          }
+        }
+      }
+
+      // No acceptable candidate found — chain terminates
+      if (bestId < 0) break;
+
+      var bestTok = tokenById[bestId];
+      result.push(bestId);
+      localClaimed[bestId] = true;
+
+      // Update chain direction: blend new step direction with running direction
+      var stepDx = bestTok.x - curTok.x, stepDy = bestTok.y - curTok.y;
+      var stepDist = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
+      if (stepDist > 0.5) {
+        var newDirX = stepDx / stepDist, newDirY = stepDy / stepDist;
+        if (hasDir) {
+          // Exponential moving average: 60% new, 40% old for responsiveness to curves
+          dirX = 0.60 * newDirX + 0.40 * dirX;
+          dirY = 0.60 * newDirY + 0.40 * dirY;
+          var dirMag = Math.sqrt(dirX * dirX + dirY * dirY);
+          if (dirMag > 0.01) { dirX /= dirMag; dirY /= dirMag; }
+        } else {
+          dirX = newDirX;
+          dirY = newDirY;
+          hasDir = true;
+        }
+      }
+
+      // Update side identity: blend with new token (EMA, α = 0.3)
+      // Use the flip state saved alongside the best candidate selection
+      var isFlipped = bestIsFlipped;
+      var candLL, candLA, candLB, candRL, candRA, candRB;
+      if (isFlipped) {
+        candLL = bestTok.rightLab[0]; candLA = bestTok.rightLab[1]; candLB = bestTok.rightLab[2];
+        candRL = bestTok.leftLab[0]; candRA = bestTok.leftLab[1]; candRB = bestTok.leftLab[2];
+      } else {
+        candLL = bestTok.leftLab[0]; candLA = bestTok.leftLab[1]; candLB = bestTok.leftLab[2];
+        candRL = bestTok.rightLab[0]; candRA = bestTok.rightLab[1]; candRB = bestTok.rightLab[2];
+      }
+      sideLeftL = 0.7 * sideLeftL + 0.3 * candLL;
+      sideLeftA = 0.7 * sideLeftA + 0.3 * candLA;
+      sideLeftB = 0.7 * sideLeftB + 0.3 * candLB;
+      sideRightL = 0.7 * sideRightL + 0.3 * candRL;
+      sideRightA = 0.7 * sideRightA + 0.3 * candRA;
+      sideRightB = 0.7 * sideRightB + 0.3 * candRB;
+
+      // Update spacing
+      if (stepDist > 0.5) {
+        if (spacingCount === 0) {
+          avgSpacing = stepDist;
+        } else {
+          avgSpacing = 0.7 * avgSpacing + 0.3 * stepDist;
+        }
+        spacingCount++;
+      }
+
+      curTok = bestTok;
+    }
+
+    return result;
+  }
+
+  /**
+   * Estimate the chain-end direction for loop detection.
+   * Returns [dx, dy] unit vector pointing outward from the endpoint,
+   * or null if unable to compute.
+   */
+  function _estimateChainEndDir(ids, fromStart, tokenById) {
+    var n = ids.length;
+    var windowSize = Math.min(4, n);
+    var endIdx, refIdx;
+    if (fromStart) {
+      endIdx = 0;
+      refIdx = Math.min(windowSize - 1, n - 1);
+    } else {
+      endIdx = n - 1;
+      refIdx = Math.max(n - windowSize, 0);
+    }
+    var endTok = tokenById[ids[endIdx]];
+    var refTok = tokenById[ids[refIdx]];
+    if (!endTok || !refTok) return null;
+    var dx = endTok.x - refTok.x, dy = endTok.y - refTok.y;
+    var mag = Math.sqrt(dx * dx + dy * dy);
+    if (mag < 0.1) return null;
+    return [dx / mag, dy / mag];
   }
 
   function _componentsFromAdjacency(tokens, adjacency, minLen) {
