@@ -290,6 +290,7 @@
 
     var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
     var traceRadius = cfg.graphForwardRadius || 32;
+    var traceR2 = traceRadius * traceRadius;
     var traceDirMin = cfg.graphForwardDirMin || 0.35;
 
     // Token lookup
@@ -352,130 +353,82 @@
     for (var _si = 0; _si < chains.length; _si++) delete chains[_si]._isLoop;
 
     /* ================================================================
-     *  MULTI-PASS STRUCTURE ASSEMBLY
+     *  PHASE 2: BOUNDARY-AWARE STRUCTURE ASSEMBLY
      *
-     *  Extension, bridge, and closure run in an iterative loop.
-     *  Each pass builds on the previous pass's connections:
+     *  Three mechanisms, run in sequence:
      *
-     *    1. Extension grows chains by finding compatible unlinked tokens
-     *    2. Bridge reconnects chain endpoints across gaps
-     *    3. Closure forms loops and joins compatible endpoints
+     *  1. Boundary-aware extension: grow chain endpoints using the same
+     *     trace logic as Phase 1 (direction, side identity, spacing).
+     *     Properly prepends to start / appends to end.
      *
-     *  After each bridge/closure that makes changes, components are
-     *  re-discovered and chains re-ordered so the next pass operates
-     *  on the updated structure.
+     *  2. Structural merge: merge chain pairs that are clearly on the
+     *     same boundary (matching endpoint direction, side pattern,
+     *     spacing).  This replaces the old proximity-based bridging.
      *
-     *  Iteration continues until no more connections are made or
-     *  maxRefinementPasses is reached.
+     *  3. Noise classification: orphan tokens are tagged (not force-linked).
      *
-     *  This is the key structural mechanism: a single pass often leaves
-     *  partial connections that a second pass can complete. For example:
-     *    - Pass 1 extension grows chain A closer to chain B
-     *    - Pass 1 bridge connects A and B → merged chain AB
-     *    - Pass 2 extension grows AB's new endpoint toward chain C
-     *    - Pass 2 bridge connects AB and C
-     *    - Pass 3 closure closes the loop
+     *  No graph-first chain rebuilds.  Chain order is always maintained.
      * ================================================================ */
 
     var bridgeEdgeList = [];
     var bridgesEvaluated = 0;
     var bridgesAccepted = 0;
 
-    // Phase 1 architecture: multi-pass refinement (extension, bridging, closure)
-    // is disabled.  These mechanisms assume graph-first chain semantics:
-    //   - Extension adds tokens to chains without checking chain-level side identity
-    //   - Bridging merges chains based on endpoint proximity, not structural matching
-    //   - After bridge/closure, chains are rebuilt via _componentsFromAdjacency →
-    //     _orderChain, which destroys boundary-following order
-    //
-    // Boundary-following chains from seed-and-trace are already structurally
-    // coherent.  Phase 2 will introduce structural merge with proper
-    // direction/spacing/side-pattern validation.
-    var maxRefinementPasses = 0; // disabled — was cfg.maxRefinementPasses || 3
+    // Track which tokens are in chains (for extension to avoid)
+    var claimed = {};
+    for (var _clI = 0; _clI < chains.length; _clI++) {
+      var _clIds = chains[_clI].ids;
+      for (var _clJ = 0; _clJ < _clIds.length; _clJ++) claimed[_clIds[_clJ]] = true;
+    }
 
-    for (var _rp = 0; _rp < maxRefinementPasses; _rp++) {
-      var _rpChanges = 0;
+    // ── Step 1: Boundary-aware extension ──
+    // Grow each chain's endpoints using the same trace-style scoring
+    // as Phase 1 (direction continuity + tangent + side identity + spacing).
+    // Longer chains extend first to claim tokens before shorter fragments.
+    var maxExtPasses = cfg.maxRefinementPasses || 3;
+    for (var _extPass = 0; _extPass < maxExtPasses; _extPass++) {
+      var _extChanged = 0;
 
-      // ── Boundary-first ordering: sort chains by length descending ──
-      // Longer chains represent stronger structural boundaries (enclosures,
-      // dominant edges).  By extending them first, they "claim" nearby tokens
-      // before shorter fragments can, ensuring the strongest structure
-      // stabilizes before weaker/noisier chains grow.
+      // Sort by length descending — strongest boundaries extend first
       chains.sort(function(a, b) { return b.ids.length - a.ids.length; });
 
-      /* ── Extension: grow chain endpoints ── */
-      _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag);
+      for (var _ei = 0; _ei < chains.length; _ei++) {
+        var _ech = chains[_ei];
+        if (_ech.ids.length < 2) continue;
 
-      /* ── Bridge: reconnect chain endpoints across gaps ── */
-      if (cfg.bridgeEnabled && chains.length > 1) {
-        var bridgeResult = _bridgePass(
-          chains, loops, adjacency, tokenById, cfg
-        );
-        if (_rp === 0) {
-          bridgeEdgeList = bridgeResult.bridgeEdgeList;
-          bridgesEvaluated = bridgeResult.bridgesEvaluated;
-        } else {
-          bridgeEdgeList = bridgeEdgeList.concat(bridgeResult.bridgeEdgeList);
-          bridgesEvaluated += bridgeResult.bridgesEvaluated;
-        }
-        bridgesAccepted += bridgeResult.bridgesAccepted;
-        _rpChanges += bridgeResult.bridgesAccepted;
-
-        if (bridgeResult.bridgesAccepted > 0) {
-          // Re-discover components and rebuild chains after bridging
-          var _rpComps = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
-          chains = [];
-          loops = [];
-          for (var _rpci = 0; _rpci < _rpComps.length; _rpci++) {
-            var _rpComp = _rpComps[_rpci];
-            var _rpOrd = _orderChain(_rpComp, adjacency, tokenById);
-            var _rpLoop = _isLoopChain(_rpOrd, adjacency, _rpComp);
-            chains.push({ ids: _rpOrd, ordered: true });
-            if (_rpLoop) loops.push({ ids: _rpOrd });
-            var _rpRes = _recoverResidualChains(
-              _rpComp, _rpOrd, adjacency, tokenById,
-              cfg.chainMinLength, cfg.branchAnchorEnabled
-            );
-            for (var _rpri = 0; _rpri < _rpRes.length; _rpri++) {
-              chains.push({ ids: _rpRes[_rpri], ordered: true });
-              if (_isLoopChain(_rpRes[_rpri], adjacency, _rpComp))
-                loops.push({ ids: _rpRes[_rpri] });
-            }
-          }
-        }
+        // Extend from end (append)
+        var endAdded = _boundaryExtend(_ech.ids, false, tokenById, grid, cellSize,
+                                        traceRadius, traceR2, sideColorGate, traceDirMin,
+                                        claimed, adjacency);
+        // Extend from start (prepend)
+        var startAdded = _boundaryExtend(_ech.ids, true, tokenById, grid, cellSize,
+                                          traceRadius, traceR2, sideColorGate, traceDirMin,
+                                          claimed, adjacency);
+        _extChanged += endAdded + startAdded;
+        _diag.extension_totalStepsAdded += endAdded + startAdded;
+        if (endAdded + startAdded > 0) _diag.extension_chainsExtended++;
       }
 
-      /* ── Closure: form loops and join compatible endpoints ── */
-      if (cfg.closureEnabled !== false) {
-        var closureResult = _closurePass(chains, loops, adjacency, tokenById, cfg);
-        _rpChanges += closureResult.closureCount;
-
-        if (closureResult.closureCount > 0) {
-          var _clComps = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
-          chains = [];
-          loops = [];
-          for (var _clci = 0; _clci < _clComps.length; _clci++) {
-            var _clComp = _clComps[_clci];
-            var _clOrd = _orderChain(_clComp, adjacency, tokenById);
-            var _clLoop = _isLoopChain(_clOrd, adjacency, _clComp);
-            chains.push({ ids: _clOrd, ordered: true });
-            if (_clLoop) loops.push({ ids: _clOrd });
-            var _clRes = _recoverResidualChains(
-              _clComp, _clOrd, adjacency, tokenById,
-              cfg.chainMinLength, cfg.branchAnchorEnabled
-            );
-            for (var _clri = 0; _clri < _clRes.length; _clri++) {
-              chains.push({ ids: _clRes[_clri], ordered: true });
-              if (_isLoopChain(_clRes[_clri], adjacency, _clComp))
-                loops.push({ ids: _clRes[_clri] });
-            }
-          }
-        }
-      }
-
-      // Stop if no progress was made this pass
-      if (_rpChanges === 0) break;
+      if (_extChanged === 0) break;
     }
+
+    // ── Step 2: Structural merge ──
+    // Merge chain pairs whose endpoints align in direction, side pattern,
+    // and spacing.  This replaces the old proximity-based bridging.
+    var mergeResult = _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg);
+    chains = mergeResult.chains;
+    loops = mergeResult.loops;
+    bridgesAccepted = mergeResult.mergeCount;
+    bridgeEdgeList = mergeResult.mergeEdgeList;
+
+    // ── Step 3: Noise classification ──
+    // Tag orphan tokens (not in any chain) by structural role.
+    // This replaces the old coverage enforcement sweep.
+    var tokenClassification = _classifyOrphanTokens(tokens, chains, tokenById, grid, cellSize, cfg);
+
+    // Update diagnostics
+    _diag.extension_chainsExtended = _diag.extension_chainsExtended || 0;
+    _diag.extension_totalStepsAdded = _diag.extension_totalStepsAdded || 0;
 
     /* ================================================================
      *  RESIDUAL RECOVERY PASS
@@ -780,6 +733,7 @@
       bridgesEvaluated: bridgesEvaluated,
       bridgesAccepted: bridgesAccepted,
       tokenSalience: tokenSalience,   // { tokenId → 0..1 } structural importance
+      tokenClassification: tokenClassification, // { tokenId → 'boundary'|'interior'|'weak'|'unresolved' }
       diagnostics: _diag
     };
   }
@@ -1270,6 +1224,511 @@
     var mag = Math.sqrt(dx * dx + dy * dy);
     if (mag < 0.1) return null;
     return [dx / mag, dy / mag];
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   *  Boundary-aware chain extension (Phase 2)
+   *
+   *  Grows a chain from one endpoint using the same boundary-following
+   *  logic as the Phase 1 tracer.  Maintains chain-level state:
+   *  direction, side identity, spacing.
+   *
+   *  When fromStart=true, new tokens are PREPENDED to the ids array.
+   *  When fromStart=false, new tokens are APPENDED.
+   *  This preserves chain order — no graph-first rebuild needed.
+   *
+   *  Returns the number of tokens added.
+   * ──────────────────────────────────────────────────────────────────── */
+  function _boundaryExtend(ids, fromStart, tokenById, grid, cellSize,
+                           traceRadius, traceR2, sideColorGate, dirMin,
+                           claimed, adjacency) {
+    if (ids.length < 2) return 0;
+
+    // Compute chain-end state from existing tokens
+    var endIdx = fromStart ? 0 : ids.length - 1;
+    var refIdx = fromStart ? Math.min(3, ids.length - 1) : Math.max(ids.length - 4, 0);
+    var endTok = tokenById[ids[endIdx]];
+    var refTok = tokenById[ids[refIdx]];
+    if (!endTok || !refTok) return 0;
+
+    // Direction: from ref toward end (outward from chain)
+    var dirX = endTok.x - refTok.x, dirY = endTok.y - refTok.y;
+    var dirMag = Math.sqrt(dirX * dirX + dirY * dirY);
+    if (dirMag < 0.5) {
+      // Fallback to token tangent
+      dirX = fromStart ? -endTok.tangentX : endTok.tangentX;
+      dirY = fromStart ? -endTok.tangentY : endTok.tangentY;
+    } else {
+      dirX /= dirMag; dirY /= dirMag;
+    }
+
+    // Side identity: compute from the last few tokens in this direction
+    var sideWindow = Math.min(5, ids.length);
+    var sLL = 0, sLA = 0, sLB = 0, sRL = 0, sRA = 0, sRB = 0;
+    for (var sw = 0; sw < sideWindow; sw++) {
+      var swIdx = fromStart ? sw : ids.length - 1 - sw;
+      var swTok = tokenById[ids[swIdx]];
+      if (!swTok) continue;
+      sLL += swTok.leftLab[0]; sLA += swTok.leftLab[1]; sLB += swTok.leftLab[2];
+      sRL += swTok.rightLab[0]; sRA += swTok.rightLab[1]; sRB += swTok.rightLab[2];
+    }
+    sLL /= sideWindow; sLA /= sideWindow; sLB /= sideWindow;
+    sRL /= sideWindow; sRA /= sideWindow; sRB /= sideWindow;
+
+    // Average spacing from the last few steps
+    var avgSpacing = 0;
+    var spacingCount = 0;
+    for (var sp = 0; sp < Math.min(5, ids.length - 1); sp++) {
+      var spA = fromStart ? sp : ids.length - 1 - sp;
+      var spB = fromStart ? sp + 1 : ids.length - 2 - sp;
+      if (spB < 0 || spB >= ids.length) break;
+      var tA = tokenById[ids[spA]], tB = tokenById[ids[spB]];
+      if (!tA || !tB) continue;
+      var sdx = tA.x - tB.x, sdy = tA.y - tB.y;
+      avgSpacing += Math.sqrt(sdx * sdx + sdy * sdy);
+      spacingCount++;
+    }
+    if (spacingCount > 0) avgSpacing /= spacingCount;
+
+    var added = 0;
+    var maxSteps = 100;
+    var curTok = endTok;
+
+    for (var step = 0; step < maxSteps; step++) {
+      var cgx = (curTok.x / cellSize) | 0;
+      var cgy = (curTok.y / cellSize) | 0;
+
+      var bestId = -1;
+      var bestScore = -Infinity;
+      var bestIsFlipped = false;
+
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          var nk = (cgx + dx) + ',' + (cgy + dy);
+          var cell = grid[nk];
+          if (!cell) continue;
+
+          for (var ci = 0; ci < cell.length; ci++) {
+            var cand = cell[ci];
+            if (cand.id === curTok.id || claimed[cand.id]) continue;
+
+            var ddx = cand.x - curTok.x, ddy = cand.y - curTok.y;
+            var dist2 = ddx * ddx + ddy * ddy;
+            if (dist2 > traceR2 || dist2 < 1) continue;
+            var dist = Math.sqrt(dist2);
+
+            // Side-color HARD GATE
+            var llD = _labDist(curTok.leftLab, cand.leftLab);
+            var rrD = _labDist(curTok.rightLab, cand.rightLab);
+            var lrD = _labDist(curTok.leftLab, cand.rightLab);
+            var rlD = _labDist(curTok.rightLab, cand.leftLab);
+            var sameSideDist = (llD + rrD) * 0.5;
+            var flipSideDist = (lrD + rlD) * 0.5;
+            var bestColorDist = Math.min(sameSideDist, flipSideDist);
+            if (bestColorDist > sideColorGate) continue;
+
+            // Direction continuity
+            var connX = ddx / dist, connY = ddy / dist;
+            var dirCont = connX * dirX + connY * dirY;
+            if (dirCont < dirMin) continue;
+            dirCont = (dirCont + 1.0) * 0.5;
+
+            // Tangent alignment
+            var tangDot = Math.abs(curTok.tangentX * cand.tangentX + curTok.tangentY * cand.tangentY);
+
+            // Chain-level side identity match
+            var chainLeft = [sLL, sLA, sLB], chainRight = [sRL, sRA, sRB];
+            var sameCD = (_labDist(chainLeft, cand.leftLab) + _labDist(chainRight, cand.rightLab)) * 0.5;
+            var flipCD = (_labDist(chainLeft, cand.rightLab) + _labDist(chainRight, cand.leftLab)) * 0.5;
+            var chainCD = Math.min(sameCD, flipCD);
+            var colorScore = Math.max(0, 1.0 - chainCD / sideColorGate);
+
+            // Spacing regularity
+            var spacingScore;
+            if (spacingCount >= 2 && avgSpacing > 1) {
+              var spacingRatio = dist / avgSpacing;
+              spacingScore = Math.max(0, 1.0 - Math.abs(spacingRatio - 1.0));
+            } else {
+              spacingScore = Math.max(0, 1.0 - dist / traceRadius);
+            }
+
+            var score = 0.40 * dirCont + 0.25 * tangDot + 0.20 * colorScore + 0.15 * spacingScore;
+
+            if (score > bestScore) {
+              bestScore = score;
+              bestId = cand.id;
+              bestIsFlipped = flipCD < sameCD;
+            }
+          }
+        }
+      }
+
+      if (bestId < 0) break;
+
+      var bestTok = tokenById[bestId];
+
+      // Add to chain in correct position
+      if (fromStart) {
+        ids.unshift(bestId);
+      } else {
+        ids.push(bestId);
+      }
+      claimed[bestId] = true;
+      added++;
+
+      // Update adjacency
+      var prevId = fromStart ? ids[1] : ids[ids.length - 2];
+      adjacency[bestId].push(prevId);
+      adjacency[prevId].push(bestId);
+
+      // Update direction (EMA)
+      var stepDx = bestTok.x - curTok.x, stepDy = bestTok.y - curTok.y;
+      var stepDist = Math.sqrt(stepDx * stepDx + stepDy * stepDy);
+      if (stepDist > 0.5) {
+        var newDX = stepDx / stepDist, newDY = stepDy / stepDist;
+        dirX = 0.60 * newDX + 0.40 * dirX;
+        dirY = 0.60 * newDY + 0.40 * dirY;
+        var dm = Math.sqrt(dirX * dirX + dirY * dirY);
+        if (dm > 0.01) { dirX /= dm; dirY /= dm; }
+      }
+
+      // Update side identity (EMA)
+      var cLL, cLA, cLB, cRL, cRA, cRB;
+      if (bestIsFlipped) {
+        cLL = bestTok.rightLab[0]; cLA = bestTok.rightLab[1]; cLB = bestTok.rightLab[2];
+        cRL = bestTok.leftLab[0]; cRA = bestTok.leftLab[1]; cRB = bestTok.leftLab[2];
+      } else {
+        cLL = bestTok.leftLab[0]; cLA = bestTok.leftLab[1]; cLB = bestTok.leftLab[2];
+        cRL = bestTok.rightLab[0]; cRA = bestTok.rightLab[1]; cRB = bestTok.rightLab[2];
+      }
+      sLL = 0.7 * sLL + 0.3 * cLL; sLA = 0.7 * sLA + 0.3 * cLA; sLB = 0.7 * sLB + 0.3 * cLB;
+      sRL = 0.7 * sRL + 0.3 * cRL; sRA = 0.7 * sRA + 0.3 * cRA; sRB = 0.7 * sRB + 0.3 * cRB;
+
+      // Update spacing
+      if (stepDist > 0.5) {
+        avgSpacing = spacingCount > 0 ? (0.7 * avgSpacing + 0.3 * stepDist) : stepDist;
+        spacingCount++;
+      }
+
+      curTok = bestTok;
+    }
+
+    return added;
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   *  Structural merge (Phase 2)
+   *
+   *  Merges chain pairs that are clearly on the same boundary.
+   *
+   *  For each pair of chain endpoints (A_end, B_start or B_end):
+   *    1. Proximity: endpoint gap within merge radius
+   *    2. Direction: both chain-end directions point toward each other
+   *    3. Side pattern: left/right LAB colors match
+   *    4. Tangent alignment: endpoint tangents are compatible
+   *
+   *  When two chains merge:
+   *    - One chain's ids are concatenated onto the other
+   *    - Adjacency is updated (link between the joining endpoints)
+   *    - The consumed chain is marked empty
+   *
+   *  This replaces the old _bridgePass which only checked endpoint
+   *  proximity and tangent alignment, without chain-level side identity.
+   * ──────────────────────────────────────────────────────────────────── */
+  function _structuralMerge(chains, loops, adjacency, tokenById, claimed, cfg) {
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+    var mergeRadius = cfg.bridgeMaxGapPx || 36;
+    var mergeR2 = mergeRadius * mergeRadius;
+    var mergeDirMin = 0.20; // endpoints must face toward each other
+    var mergeSideTol = sideColorGate; // side identity must match
+
+    var mergeCount = 0;
+    var mergeEdgeList = [];
+
+    // Collect endpoint info for all chains
+    // ep = { tok, chainIdx, isStart, dirX, dirY, sideLeft[3], sideRight[3] }
+    function _chainEndInfo(ch, isStart, chainIdx) {
+      var ids = ch.ids;
+      if (ids.length < 2) return null;
+      var endIdx = isStart ? 0 : ids.length - 1;
+      var refIdx = isStart ? Math.min(3, ids.length - 1) : Math.max(ids.length - 4, 0);
+      var endTok = tokenById[ids[endIdx]];
+      var refTok = tokenById[ids[refIdx]];
+      if (!endTok || !refTok) return null;
+
+      var dx = endTok.x - refTok.x, dy = endTok.y - refTok.y;
+      var mag = Math.sqrt(dx * dx + dy * dy);
+      if (mag < 0.5) {
+        dx = isStart ? -endTok.tangentX : endTok.tangentX;
+        dy = isStart ? -endTok.tangentY : endTok.tangentY;
+      } else {
+        dx /= mag; dy /= mag;
+      }
+
+      // Average side identity from last few tokens at this end
+      var sWindow = Math.min(5, ids.length);
+      var sL = [0, 0, 0], sR = [0, 0, 0];
+      for (var si = 0; si < sWindow; si++) {
+        var sIdx = isStart ? si : ids.length - 1 - si;
+        var sTok = tokenById[ids[sIdx]];
+        if (!sTok) continue;
+        sL[0] += sTok.leftLab[0]; sL[1] += sTok.leftLab[1]; sL[2] += sTok.leftLab[2];
+        sR[0] += sTok.rightLab[0]; sR[1] += sTok.rightLab[1]; sR[2] += sTok.rightLab[2];
+      }
+      sL[0] /= sWindow; sL[1] /= sWindow; sL[2] /= sWindow;
+      sR[0] /= sWindow; sR[1] /= sWindow; sR[2] /= sWindow;
+
+      return {
+        tok: endTok, chainIdx: chainIdx, isStart: isStart,
+        dirX: dx, dirY: dy, sideLeft: sL, sideRight: sR
+      };
+    }
+
+    // Build endpoint list
+    var endpoints = [];
+    for (var ei = 0; ei < chains.length; ei++) {
+      if (chains[ei].ids.length < 2) continue;
+      var epStart = _chainEndInfo(chains[ei], true, ei);
+      var epEnd = _chainEndInfo(chains[ei], false, ei);
+      if (epStart) endpoints.push(epStart);
+      if (epEnd) endpoints.push(epEnd);
+    }
+
+    // Spatial index for endpoints
+    var epCellSize = mergeRadius + 1;
+    var epGrid = {};
+    for (var gi = 0; gi < endpoints.length; gi++) {
+      var ep = endpoints[gi];
+      var gk = ((ep.tok.x / epCellSize) | 0) + ',' + ((ep.tok.y / epCellSize) | 0);
+      if (!epGrid[gk]) epGrid[gk] = [];
+      epGrid[gk].push(ep);
+    }
+
+    // Track which chains have been merged (consumed)
+    var consumed = {};
+
+    // Try to merge each endpoint pair
+    for (var pi = 0; pi < endpoints.length; pi++) {
+      var epA = endpoints[pi];
+      if (consumed[epA.chainIdx]) continue;
+
+      var tokA = epA.tok;
+      var agx = (tokA.x / epCellSize) | 0;
+      var agy = (tokA.y / epCellSize) | 0;
+
+      var bestMerge = null;
+      var bestMergeScore = -1;
+
+      for (var mdy = -1; mdy <= 1; mdy++) {
+        for (var mdx = -1; mdx <= 1; mdx++) {
+          var mBucket = epGrid[(agx + mdx) + ',' + (agy + mdy)];
+          if (!mBucket) continue;
+          for (var mj = 0; mj < mBucket.length; mj++) {
+            var epB = mBucket[mj];
+            if (epB.chainIdx === epA.chainIdx) continue; // same chain
+            if (consumed[epB.chainIdx]) continue;
+
+            var tokB = epB.tok;
+            var gdx = tokB.x - tokA.x, gdy = tokB.y - tokA.y;
+            var gap2 = gdx * gdx + gdy * gdy;
+            if (gap2 > mergeR2 || gap2 < 1) continue;
+            var gap = Math.sqrt(gap2);
+            var gapDirX = gdx / gap, gapDirY = gdy / gap;
+
+            // ── Check 1: Direction — endpoints face toward each other ──
+            // A's direction should point toward B (positive dot with gap direction)
+            var aDotGap = epA.dirX * gapDirX + epA.dirY * gapDirY;
+            // B's direction should point toward A (negative dot with gap direction)
+            var bDotGap = epB.dirX * (-gapDirX) + epB.dirY * (-gapDirY);
+
+            if (aDotGap < mergeDirMin || bDotGap < mergeDirMin) continue;
+
+            // ── Check 2: Side-pattern match ──
+            // The chains' accumulated side identities must be compatible
+            var sameSide = (_labDist(epA.sideLeft, epB.sideLeft) +
+                           _labDist(epA.sideRight, epB.sideRight)) * 0.5;
+            var flipSide = (_labDist(epA.sideLeft, epB.sideRight) +
+                           _labDist(epA.sideRight, epB.sideLeft)) * 0.5;
+            var bestSideDist = Math.min(sameSide, flipSide);
+            if (bestSideDist > mergeSideTol) continue;
+
+            // ── Check 3: Tangent alignment at endpoints ──
+            var tangDot = Math.abs(tokA.tangentX * tokB.tangentX + tokA.tangentY * tokB.tangentY);
+            if (tangDot < 0.20) continue;
+
+            // Score: direction matching + side consistency + tangent + proximity
+            var dirScore = (aDotGap + bDotGap) * 0.5;
+            var sideScore = Math.max(0, 1.0 - bestSideDist / mergeSideTol);
+            var proxScore = Math.max(0, 1.0 - gap / mergeRadius);
+            var mScore = 0.35 * dirScore + 0.30 * sideScore + 0.20 * tangDot + 0.15 * proxScore;
+
+            if (mScore > bestMergeScore) {
+              bestMergeScore = mScore;
+              bestMerge = epB;
+            }
+          }
+        }
+      }
+
+      if (!bestMerge) continue;
+
+      // Execute merge: concatenate chain B into chain A
+      var chA = chains[epA.chainIdx];
+      var chB = chains[bestMerge.chainIdx];
+
+      // Determine concatenation order based on which endpoints are connecting
+      // epA.isStart / bestMerge.isStart determine orientation
+      var idsA = chA.ids;
+      var idsB = chB.ids;
+      var merged;
+
+      if (!epA.isStart && bestMerge.isStart) {
+        // A_end → B_start: append B after A
+        merged = idsA.concat(idsB);
+      } else if (epA.isStart && !bestMerge.isStart) {
+        // A_start ← B_end: prepend B before A
+        merged = idsB.concat(idsA);
+      } else if (!epA.isStart && !bestMerge.isStart) {
+        // A_end → B_end: append reversed B after A
+        merged = idsA.concat(idsB.slice().reverse());
+      } else {
+        // A_start → B_start: prepend reversed B before A
+        merged = idsB.slice().reverse().concat(idsA);
+      }
+
+      chA.ids = merged;
+
+      // Add adjacency link between the joining endpoints
+      var joinIdA = epA.tok.id, joinIdB = bestMerge.tok.id;
+      adjacency[joinIdA].push(joinIdB);
+      adjacency[joinIdB].push(joinIdA);
+
+      mergeEdgeList.push([joinIdA, joinIdB]);
+      mergeCount++;
+
+      // Mark chain B as consumed
+      chB.ids = [];
+      consumed[bestMerge.chainIdx] = true;
+    }
+
+    // Remove empty chains
+    var finalChains = [];
+    var finalLoops = [];
+    for (var fi = 0; fi < chains.length; fi++) {
+      if (chains[fi].ids.length >= (cfg.chainMinLength || 2)) {
+        finalChains.push(chains[fi]);
+        // Re-check loop status after merging
+        if (chains[fi].ids.length >= 6) {
+          var fIds = chains[fi].ids;
+          var fFirst = tokenById[fIds[0]], fLast = tokenById[fIds[fIds.length - 1]];
+          if (fFirst && fLast) {
+            var fdx = fFirst.x - fLast.x, fdy = fFirst.y - fLast.y;
+            if (fdx * fdx + fdy * fdy < mergeR2) {
+              finalLoops.push({ ids: fIds });
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      chains: finalChains,
+      loops: finalLoops,
+      mergeCount: mergeCount,
+      mergeEdgeList: mergeEdgeList
+    };
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   *  Noise classification (Phase 2)
+   *
+   *  Orphan tokens (not in any chain) are classified by structural role
+   *  rather than force-linked.  Classification:
+   *
+   *    'boundary' — tokens that are in chains (included for completeness)
+   *    'interior' — orphan tokens surrounded mostly by same-color neighbors,
+   *                 indicating they're inside an object, not on a boundary
+   *    'weak'     — orphan tokens with low confidence or few nearby tokens,
+   *                 representing weak/ambiguous boundary evidence
+   *    'unresolved' — orphan tokens that could be boundary but couldn't be
+   *                   connected (gaps, intersections, noise)
+   *
+   *  This replaces the coverage enforcement sweep.  Downstream stages
+   *  can use classification to weight token contributions differently.
+   * ──────────────────────────────────────────────────────────────────── */
+  function _classifyOrphanTokens(tokens, chains, tokenById, grid, cellSize, cfg) {
+    var sideColorGate = cfg.graphSideColorGate != null ? cfg.graphSideColorGate : 55;
+
+    // Build set of chained token IDs
+    var inChain = {};
+    for (var ci = 0; ci < chains.length; ci++) {
+      var ch = chains[ci].ids;
+      for (var cj = 0; cj < ch.length; cj++) inChain[ch[cj]] = true;
+    }
+
+    var classification = {};
+
+    for (var ti = 0; ti < tokens.length; ti++) {
+      var tok = tokens[ti];
+
+      if (inChain[tok.id]) {
+        classification[tok.id] = 'boundary';
+        continue;
+      }
+
+      // Orphan token — classify it
+      var cgx = (tok.x / cellSize) | 0;
+      var cgy = (tok.y / cellSize) | 0;
+
+      // Count nearby tokens and their boundary diversity
+      var nearbyCount = 0;
+      var sameBoundaryCount = 0;
+      var radius2 = cellSize * cellSize * 4; // search within 2 cells
+
+      for (var dy = -2; dy <= 2; dy++) {
+        for (var dx = -2; dx <= 2; dx++) {
+          var nk = (cgx + dx) + ',' + (cgy + dy);
+          var cell = grid[nk];
+          if (!cell) continue;
+          for (var ni = 0; ni < cell.length; ni++) {
+            var nb = cell[ni];
+            if (nb.id === tok.id) continue;
+            var ddx = nb.x - tok.x, ddy = nb.y - tok.y;
+            if (ddx * ddx + ddy * ddy > radius2) continue;
+            nearbyCount++;
+
+            // Check if same boundary identity
+            var llD = _labDist(tok.leftLab, nb.leftLab);
+            var rrD = _labDist(tok.rightLab, nb.rightLab);
+            var lrD = _labDist(tok.leftLab, nb.rightLab);
+            var rlD = _labDist(tok.rightLab, nb.leftLab);
+            var bestCD = Math.min((llD + rrD) * 0.5, (lrD + rlD) * 0.5);
+            if (bestCD <= sideColorGate) sameBoundaryCount++;
+          }
+        }
+      }
+
+      if (nearbyCount < 2) {
+        // Very few neighbors — weak evidence
+        classification[tok.id] = 'weak';
+      } else if (tok.confidence < 0.15) {
+        // Low confidence token
+        classification[tok.id] = 'weak';
+      } else if (tok.deltaE != null && tok.deltaE < 5) {
+        // Very low color contrast — likely interior
+        classification[tok.id] = 'interior';
+      } else if (sameBoundaryCount > 0 && sameBoundaryCount >= nearbyCount * 0.5) {
+        // Has nearby same-boundary tokens but couldn't connect —
+        // likely at an intersection, gap, or ambiguous region
+        classification[tok.id] = 'unresolved';
+      } else {
+        // Has neighbors but they're all from different boundaries —
+        // likely interior clutter where many boundaries meet
+        classification[tok.id] = 'interior';
+      }
+    }
+
+    return classification;
   }
 
   function _componentsFromAdjacency(tokens, adjacency, minLen) {

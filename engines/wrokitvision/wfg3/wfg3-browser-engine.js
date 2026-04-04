@@ -301,6 +301,7 @@
         wfg3_bridgesEvaluated: boundaryGraph.bridgesEvaluated || 0,
         wfg3_bridgesAccepted: boundaryGraph.bridgesAccepted || 0,
         wfg3_tokenSalience: boundaryGraph.tokenSalience || null,
+        wfg3_tokenClassification: boundaryGraph.tokenClassification || null,
 
         // WFG3-specific Stage E artifacts
         wfg3_labelMap: partition.labelMap,
