@@ -77,11 +77,13 @@
     graphSideColorGate:    55,
 
     // Stage D — Pass 1b: Chain endpoint continuation
-    chainExtensionMaxDist: 24,     // was 40; reduced to prevent long invalid jumps
-    chainExtensionDirAlign: 0.40,  // was 0.50; softened for curve following
+    // With graphSideColorGate in place, extension can reach further without
+    // risk of cross-boundary contamination.
+    chainExtensionMaxDist: 32,     // was 24; safe to increase with color gate
+    chainExtensionDirAlign: 0.40,
     chainExtensionColorTol: 120,
     chainExtensionTrendWindow: 4,
-    chainExtensionMaxDirDrift: 0.55, // was 0.40; softened so curves don't trigger drift kill
+    chainExtensionMaxDirDrift: 0.55,
 
     // Microchaining: use local strict-link populations to reinforce continuation
     microchainEnabled:          true,
@@ -99,11 +101,13 @@
     lookaheadCoherenceFraction: 0.25, // was 0.30; slightly less coherence weight so curves aren't penalized
 
     // Stage D: Pass-2 Bridging (token-native, geometry-first)
+    // With graphSideColorGate preventing cross-boundary links, bridge can
+    // safely span larger gaps to reconnect arc fragments and boundary breaks.
     bridgeEnabled:          true,
-    bridgeMaxGapPx:         24,    // was 18; larger gaps to reconnect fragmented curves
-    bridgeDirAgreementMin:  0.40,  // was 0.50; softened for curve endpoints
-    bridgeSideDeltaETol:    35,    // was 30; slightly more tolerant
-    bridgeMinCombinedScore: 0.25,  // was 0.30; accept more borderline bridges
+    bridgeMaxGapPx:         40,    // was 24; larger gaps for arc/circle fragments
+    bridgeDirAgreementMin:  0.30,  // was 0.40; softer for curve fragment reconnection
+    bridgeSideDeltaETol:    40,    // was 35; more tolerant for gradient boundaries
+    bridgeMinCombinedScore: 0.20,  // was 0.25; accept more borderline bridges
 
     // Stage D: Structural outlier pruning
     //
@@ -129,11 +133,20 @@
     lookaheadDensityWeight:  0.15, // was 0.10; stronger density preference
 
     // Stage D: Closure pass
+    // Closure must span large gaps for circles/arcs — a circle of radius 50px
+    // can have a 100px gap between arc endpoints after direction-coherent ordering.
     closureEnabled:          true,
-    closureMinChainLen:      4,    // was 6; attempt closure on shorter chains too
-    closureMaxGapPx:         32,   // was 24; larger gap for curve endpoints
-    closureTrendMin:         0.30, // was 0.40; softer trend requirement for curves
-    closureColorTol:         40,   // was 35; slightly more tolerant
+    closureMinChainLen:      3,    // was 4; allow short chains to close
+    closureMaxGapPx:         48,   // was 32; much larger for circle/arc closure
+    closureTrendMin:         0.20, // was 0.30; very soft for curved shape closure
+    closureColorTol:         45,   // was 40; tolerant for gradient boundaries
+
+    // Stage D: Multi-pass refinement
+    // Extension, bridge, and closure run in a loop. Each pass builds on
+    // the previous pass's connections: extension grows chains, bridge
+    // reconnects fragments, closure forms loops. Iteration continues
+    // until no more connections are made or maxRefinementPasses is reached.
+    maxRefinementPasses:     3,
 
     // Stage D: Branch anchor recovery
     branchAnchorEnabled:     true,
@@ -415,133 +428,111 @@
     }
 
     /* ================================================================
-     *  Pass 1b: Chain Endpoint Continuation (token-native)
-     *  Extend chains by finding compatible unlinked tokens along the
-     *  chain's directional trend. No image evidence is consulted.
-     * ================================================================ */
-
-    _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag);
-
-    /* ================================================================
-     *  Pass 2: Bridge Candidates
-     *  Scan chain endpoints for pairings across larger gaps.
+     *  MULTI-PASS STRUCTURE ASSEMBLY
+     *
+     *  Extension, bridge, and closure run in an iterative loop.
+     *  Each pass builds on the previous pass's connections:
+     *
+     *    1. Extension grows chains by finding compatible unlinked tokens
+     *    2. Bridge reconnects chain endpoints across gaps
+     *    3. Closure forms loops and joins compatible endpoints
+     *
+     *  After each bridge/closure that makes changes, components are
+     *  re-discovered and chains re-ordered so the next pass operates
+     *  on the updated structure.
+     *
+     *  Iteration continues until no more connections are made or
+     *  maxRefinementPasses is reached.
+     *
+     *  This is the key structural mechanism: a single pass often leaves
+     *  partial connections that a second pass can complete. For example:
+     *    - Pass 1 extension grows chain A closer to chain B
+     *    - Pass 1 bridge connects A and B → merged chain AB
+     *    - Pass 2 extension grows AB's new endpoint toward chain C
+     *    - Pass 2 bridge connects AB and C
+     *    - Pass 3 closure closes the loop
      * ================================================================ */
 
     var bridgeEdgeList = [];
     var bridgesEvaluated = 0;
     var bridgesAccepted = 0;
+    var maxRefinementPasses = cfg.maxRefinementPasses || 3;
 
-    if (cfg.bridgeEnabled && chains.length > 1) {
-      var bridgeResult = _bridgePass(
-        chains, loops, adjacency, tokenById, cfg
-      );
-      bridgeEdgeList = bridgeResult.bridgeEdgeList;
-      bridgesEvaluated = bridgeResult.bridgesEvaluated;
-      bridgesAccepted = bridgeResult.bridgesAccepted;
+    for (var _rp = 0; _rp < maxRefinementPasses; _rp++) {
+      var _rpChanges = 0;
 
-      // Re-discover components after bridging to merge chains
-      if (bridgesAccepted > 0) {
-        visited = {};
-        components = [];
-        for (var vi2 = 0; vi2 < tokens.length; vi2++) {
-          var tid2 = tokens[vi2].id;
-          if (visited[tid2]) continue;
-          var comp3 = [];
-          var queue2 = [tid2];
-          visited[tid2] = true;
-          while (queue2.length > 0) {
-            var cur2 = queue2.shift();
-            comp3.push(cur2);
-            var neis2 = adjacency[cur2];
-            for (var ni2 = 0; ni2 < neis2.length; ni2++) {
-              if (!visited[neis2[ni2]]) {
-                visited[neis2[ni2]] = true;
-                queue2.push(neis2[ni2]);
-              }
-            }
-          }
-          if (comp3.length >= cfg.chainMinLength) {
-            components.push(comp3);
-          }
+      /* ── Extension: grow chain endpoints ── */
+      _extendChainEndpoints(chains, adjacency, tokenById, cfg, _diag);
+
+      /* ── Bridge: reconnect chain endpoints across gaps ── */
+      if (cfg.bridgeEnabled && chains.length > 1) {
+        var bridgeResult = _bridgePass(
+          chains, loops, adjacency, tokenById, cfg
+        );
+        if (_rp === 0) {
+          bridgeEdgeList = bridgeResult.bridgeEdgeList;
+          bridgesEvaluated = bridgeResult.bridgesEvaluated;
+        } else {
+          bridgeEdgeList = bridgeEdgeList.concat(bridgeResult.bridgeEdgeList);
+          bridgesEvaluated += bridgeResult.bridgesEvaluated;
         }
+        bridgesAccepted += bridgeResult.bridgesAccepted;
+        _rpChanges += bridgeResult.bridgesAccepted;
 
-        // Re-order and re-detect loops on merged chains
-        chains = [];
-        loops = [];
-        for (var ki2 = 0; ki2 < components.length; ki2++) {
-          var comp4 = components[ki2];
-          var ordered2 = _orderChain(comp4, adjacency, tokenById);
-          var isLoop2 = false;
-          if (ordered2.length >= 6) {
-            var first2 = ordered2[0], last2 = ordered2[ordered2.length - 1];
-            var firstNeis2 = adjacency[first2];
-            var lastInFirst2 = false;
-            for (var fni2 = 0; fni2 < firstNeis2.length; fni2++) { if (firstNeis2[fni2] === last2) { lastInFirst2 = true; break; } }
-            if (lastInFirst2) {
-              // Build O(1) set for component membership
-              var comp4Set = {};
-              for (var c4i = 0; c4i < comp4.length; c4i++) comp4Set[comp4[c4i]] = true;
-              var allDeg2b = true;
-              for (var li2 = 0; li2 < ordered2.length; li2++) {
-                var deg2 = 0;
-                var tokNeis2 = adjacency[ordered2[li2]];
-                for (var lj2 = 0; lj2 < tokNeis2.length; lj2++) {
-                  if (comp4Set[tokNeis2[lj2]]) deg2++;
-                }
-                if (deg2 < 2) { allDeg2b = false; break; }
-              }
-              isLoop2 = allDeg2b;
-            }
-          }
-          chains.push({ ids: ordered2, ordered: true });
-          if (isLoop2) loops.push({ ids: ordered2 });
-
-          // Recover residual tokens after bridge re-ordering
-          var bridgeResiduals = _recoverResidualChains(comp4, ordered2, adjacency, tokenById, cfg.chainMinLength, cfg.branchAnchorEnabled);
-          for (var bri = 0; bri < bridgeResiduals.length; bri++) {
-            var brOrdered = bridgeResiduals[bri];
-            chains.push({ ids: brOrdered, ordered: true });
-            var brLoop = _isLoopChain(brOrdered, adjacency, comp4);
-            if (brLoop) loops.push({ ids: brOrdered });
-          }
-        }
-      }
-    }
-
-    /* ================================================================
-     *  Pass 2b: Closure Pass
-     *  Detect chain endpoints that are geometrically close and
-     *  trend-compatible, then link them (self-closure or cross-chain
-     *  rejoin). Runs after extension and bridging so it operates on
-     *  the most complete chain state available.
-     * ================================================================ */
-
-    if (cfg.closureEnabled !== false) {
-      var closureResult = _closurePass(chains, loops, adjacency, tokenById, cfg);
-      if (closureResult.closureCount > 0) {
-        // Rebuild components and chains after closure links are added
-        components = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
-        chains = [];
-        loops = [];
-        for (var cci = 0; cci < components.length; cci++) {
-          var ccomp = components[cci];
-          var ccOrdered = _orderChain(ccomp, adjacency, tokenById);
-          var ccLoop = _isLoopChain(ccOrdered, adjacency, ccomp);
-          chains.push({ ids: ccOrdered, ordered: true });
-          if (ccLoop) loops.push({ ids: ccOrdered });
-          var ccResiduals = _recoverResidualChains(
-            ccomp, ccOrdered, adjacency, tokenById,
-            cfg.chainMinLength, cfg.branchAnchorEnabled
-          );
-          for (var ccri = 0; ccri < ccResiduals.length; ccri++) {
-            var ccResOrdered = ccResiduals[ccri];
-            chains.push({ ids: ccResOrdered, ordered: true });
-            if (_isLoopChain(ccResOrdered, adjacency, ccomp)) {
-              loops.push({ ids: ccResOrdered });
+        if (bridgeResult.bridgesAccepted > 0) {
+          // Re-discover components and rebuild chains after bridging
+          var _rpComps = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+          chains = [];
+          loops = [];
+          for (var _rpci = 0; _rpci < _rpComps.length; _rpci++) {
+            var _rpComp = _rpComps[_rpci];
+            var _rpOrd = _orderChain(_rpComp, adjacency, tokenById);
+            var _rpLoop = _isLoopChain(_rpOrd, adjacency, _rpComp);
+            chains.push({ ids: _rpOrd, ordered: true });
+            if (_rpLoop) loops.push({ ids: _rpOrd });
+            var _rpRes = _recoverResidualChains(
+              _rpComp, _rpOrd, adjacency, tokenById,
+              cfg.chainMinLength, cfg.branchAnchorEnabled
+            );
+            for (var _rpri = 0; _rpri < _rpRes.length; _rpri++) {
+              chains.push({ ids: _rpRes[_rpri], ordered: true });
+              if (_isLoopChain(_rpRes[_rpri], adjacency, _rpComp))
+                loops.push({ ids: _rpRes[_rpri] });
             }
           }
         }
       }
+
+      /* ── Closure: form loops and join compatible endpoints ── */
+      if (cfg.closureEnabled !== false) {
+        var closureResult = _closurePass(chains, loops, adjacency, tokenById, cfg);
+        _rpChanges += closureResult.closureCount;
+
+        if (closureResult.closureCount > 0) {
+          var _clComps = _componentsFromAdjacency(tokens, adjacency, cfg.chainMinLength);
+          chains = [];
+          loops = [];
+          for (var _clci = 0; _clci < _clComps.length; _clci++) {
+            var _clComp = _clComps[_clci];
+            var _clOrd = _orderChain(_clComp, adjacency, tokenById);
+            var _clLoop = _isLoopChain(_clOrd, adjacency, _clComp);
+            chains.push({ ids: _clOrd, ordered: true });
+            if (_clLoop) loops.push({ ids: _clOrd });
+            var _clRes = _recoverResidualChains(
+              _clComp, _clOrd, adjacency, tokenById,
+              cfg.chainMinLength, cfg.branchAnchorEnabled
+            );
+            for (var _clri = 0; _clri < _clRes.length; _clri++) {
+              chains.push({ ids: _clRes[_clri], ordered: true });
+              if (_isLoopChain(_clRes[_clri], adjacency, _clComp))
+                loops.push({ ids: _clRes[_clri] });
+            }
+          }
+        }
+      }
+
+      // Stop if no progress was made this pass
+      if (_rpChanges === 0) break;
     }
 
     // Structural outlier pruning: remove tokens that mismatch their
