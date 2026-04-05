@@ -1912,7 +1912,9 @@ let state = {
   selectedEngineType: loadExtractionEnginePreference(),
   wfg4: {
     configSurface: null,
-    runSurface: null
+    runSurface: null,
+    configDisplayActive: false,
+    rawConfigLayout: null
   },
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
@@ -9131,7 +9133,7 @@ function boxFromAnchor(landmarkPx, anchor, viewportPx){
 
 function ensureGrayCanvas(page){
   if(state.grayCanvases[page]) return state.grayCanvases[page];
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   const offY = state.pageOffsets[page-1] || 0;
   const vp = state.pageViewports[page-1] || state.viewport;
   const w = src.width;
@@ -9158,7 +9160,7 @@ function getPageGrayImageData(page){
     const raw = gctx.getImageData(0, 0, grayCanvas.width, grayCanvas.height);
     const gray = new Uint8Array(grayCanvas.width * grayCanvas.height);
     for(let i = 0, j = 0; i < raw.data.length; i += 4, j++) gray[j] = raw.data[i];
-    const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+    const src = getActiveDisplaySurfaceNode();
     const offY = state.pageOffsets[page-1] || 0;
     const vp = state.pageViewports[page-1] || state.viewport;
     const colorHeight = Math.round((vp.h ?? vp.height) || grayCanvas.height || 1);
@@ -12076,7 +12078,7 @@ const sn = v => (typeof v==='number' && Number.isFinite(v)) ? Math.round(v*100)/
 
 function sizeOverlayTo(cssW, cssH){
   if(guardInteractive('overlay.size')) return;
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   const pxW = src?.width || Math.round(cssW * (window.devicePixelRatio || 1));
   const pxH = src?.height || Math.round(cssH * (window.devicePixelRatio || 1));
   els.overlayCanvas.style.width = cssW + 'px';
@@ -12088,7 +12090,7 @@ function sizeOverlayTo(cssW, cssH){
 
 function syncOverlay(){
   if(guardInteractive('overlay.sync')) return;
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   if(!src) return;
   const isConfig = isConfigMode();
   const rect = src.getBoundingClientRect();
@@ -12126,7 +12128,7 @@ function syncOverlay(){
 }
 
 function isOverlayPinned(){
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   const ov = els.overlayCanvas;
   if(!src || !ov) return false;
   const srcRect = src.getBoundingClientRect();
@@ -12401,6 +12403,7 @@ async function openFile(file){
   }
 }
 function cleanupDoc(){
+  restoreRawLayoutFromWfg4();
   // Revoke any pending blob URL from image uploads
   if(state._pendingBlobUrl){ try { URL.revokeObjectURL(state._pendingBlobUrl); } catch(_){} state._pendingBlobUrl = null; }
   state.tokensByPage = [];
@@ -12428,6 +12431,10 @@ function cleanupDoc(){
   state.pageNum = 1;
   state.numPages = 0;
   state.viewport = { w:0, h:0, scale:1 };
+  if(state.wfg4){
+    state.wfg4.configSurface = null;
+    state.wfg4.runSurface = null;
+  }
   clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
 }
@@ -13575,6 +13582,38 @@ const tokenProvider = (!isSkinV2 && window.LegacyTokenProviderAdapter?.createLeg
 function captureWfg4SurfaceForMode(mode){
   if(!window.WFG4Engine?.prepareDocumentSurface) return null;
   const vp = state.pageViewports?.[(state.pageNum || 1) - 1] || state.viewport || null;
+  const pages = [];
+  if(state.isImage){
+    const imgNode = els.imgCanvas;
+    const imgW = Math.max(1, Math.round(imgNode?.width || state.viewport?.w || state.viewport?.width || 1));
+    const imgH = Math.max(1, Math.round(imgNode?.height || state.viewport?.h || state.viewport?.height || 1));
+    if(imgNode){
+      const tmp = document.createElement('canvas');
+      tmp.width = imgW;
+      tmp.height = imgH;
+      const tctx = tmp.getContext('2d');
+      if(tctx){
+        try { tctx.drawImage(imgNode, 0, 0, imgW, imgH); } catch(_err){}
+      }
+      pages.push({ pageIndex: 0, pageNumber: 1, width: imgW, height: imgH, canvas: tmp });
+    }
+  } else if(Array.isArray(state.pageViewports) && state.pageViewports.length){
+    const src = els.pdfCanvas;
+    for(let i=0; i<state.pageViewports.length; i++){
+      const pageVp = state.pageViewports[i] || {};
+      const pageW = Math.max(1, Math.round(pageVp.width || pageVp.w || 1));
+      const pageH = Math.max(1, Math.round(pageVp.height || pageVp.h || 1));
+      const offY = Math.max(0, Math.round(state.pageOffsets?.[i] || 0));
+      const tmp = document.createElement('canvas');
+      tmp.width = pageW;
+      tmp.height = pageH;
+      const tctx = tmp.getContext('2d');
+      if(tctx && src){
+        try { tctx.drawImage(src, 0, offY, pageW, pageH, 0, 0, pageW, pageH); } catch(_err){}
+      }
+      pages.push({ pageIndex: i, pageNumber: i + 1, width: pageW, height: pageH, canvas: tmp });
+    }
+  }
   const payload = {
     mode,
     fileName: state.currentFileName || '',
@@ -13584,7 +13623,8 @@ function captureWfg4SurfaceForMode(mode){
     wizardId: currentWizardId() || null,
     pageCount: Number.isFinite(state.numPages) ? state.numPages : 0,
     activePage: Number.isFinite(state.pageNum) ? state.pageNum : 1,
-    viewport: vp
+    viewport: vp,
+    pages
   };
   try {
     return window.WFG4Engine.prepareDocumentSurface(payload);
@@ -13595,12 +13635,24 @@ function captureWfg4SurfaceForMode(mode){
 }
 
 function syncWfg4SurfaceContext(mode){
-  if(getConfiguredEngineType() !== ENGINE_KIND.WFG4) return;
+  const isWfg4 = getConfiguredEngineType() === ENGINE_KIND.WFG4;
+  if(!isWfg4){
+    if(mode === 'config' && state.wfg4?.configDisplayActive){
+      restoreRawLayoutFromWfg4();
+    }
+    return;
+  }
   const surface = captureWfg4SurfaceForMode(mode);
   if(!surface) return;
   state.wfg4 = state.wfg4 || { configSurface: null, runSurface: null };
   if(mode === 'config'){
+    if(!state.wfg4.rawConfigLayout){
+      state.wfg4.rawConfigLayout = snapshotCurrentLayout();
+    }
     state.wfg4.configSurface = surface;
+    Promise.resolve(renderWfg4CanonicalIntoViewer(surface))
+      .then(() => drawOverlay())
+      .catch(err => console.warn('[wfg4] canonical display swap failed', err));
   } else {
     state.wfg4.runSurface = surface;
   }
@@ -15351,6 +15403,121 @@ function computeKeywordRelationsForConfig(fieldKey, boxPx, normBox, page, pageW,
   return { mother, secondaries, page };
 }
 
+
+function isWfg4ConfigCanonicalDisplayActive(){
+  return isConfigMode()
+    && getConfiguredEngineType() === ENGINE_KIND.WFG4
+    && !!state.wfg4?.configDisplayActive
+    && !!state.wfg4?.configSurface;
+}
+
+function getActiveDisplaySurfaceNode(){
+  if(isWfg4ConfigCanonicalDisplayActive()) return els.pdfCanvas;
+  return state.isImage ? els.imgCanvas : els.pdfCanvas;
+}
+
+function snapshotCurrentLayout(){
+  return {
+    pageViewports: Array.isArray(state.pageViewports) ? state.pageViewports.map(v => v ? { ...v } : v) : [],
+    pageOffsets: Array.isArray(state.pageOffsets) ? state.pageOffsets.slice() : [],
+    viewport: state.viewport ? { ...state.viewport } : null,
+    numPages: state.numPages || 0
+  };
+}
+
+function restoreRawLayoutFromWfg4(){
+  if(!state.wfg4?.rawConfigLayout) return;
+  const raw = state.wfg4.rawConfigLayout;
+  state.pageViewports = Array.isArray(raw.pageViewports) ? raw.pageViewports.map(v => v ? { ...v } : v) : state.pageViewports;
+  state.pageOffsets = Array.isArray(raw.pageOffsets) ? raw.pageOffsets.slice() : state.pageOffsets;
+  state.viewport = raw.viewport ? { ...raw.viewport } : state.viewport;
+  state.numPages = Number.isFinite(raw.numPages) ? raw.numPages : state.numPages;
+  state.wfg4.configDisplayActive = false;
+  state.wfg4.rawConfigLayout = null;
+}
+
+function renderWfg4CanonicalIntoViewer(surface){
+  if(!surface?.pages?.length || !els.pdfCanvas) return false;
+  const pages = surface.pages;
+  let maxW = 0;
+  let totalH = 0;
+  const pageViewports = [];
+  const pageOffsets = [];
+  const renderedPages = [];
+
+  for(let i=0; i<pages.length; i++){
+    const page = pages[i] || {};
+    const dims = page.dimensions?.working || page.dimensions?.original || {};
+    const width = Math.max(1, Math.round(dims.width || 1));
+    const height = Math.max(1, Math.round(dims.height || 1));
+    maxW = Math.max(maxW, width);
+    pageOffsets[i] = totalH;
+    const vp = {
+      width,
+      height,
+      w: width,
+      h: height,
+      scale: 1,
+      pageNumber: i + 1
+    };
+    pageViewports[i] = vp;
+    totalH += height;
+    renderedPages.push({
+      width,
+      height,
+      dataUrl: page.artifacts?.displayDataUrl || page.artifacts?.grayDataUrl || page.artifacts?.edgeDataUrl || null
+    });
+  }
+
+  const canvas = els.pdfCanvas;
+  canvas.width = maxW;
+  canvas.height = totalH;
+  canvas.style.width = `${maxW}px`;
+  canvas.style.height = `${totalH}px`;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.clearRect(0, 0, maxW, totalH);
+
+  let y = 0;
+  const draws = renderedPages.map((entry, idx) => new Promise(resolve => {
+    if(!entry.dataUrl){
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, y, entry.width, entry.height);
+      ctx.fillStyle = '#475569';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(`WFG4 canonical page ${idx + 1}`, 12, y + 20);
+      y += entry.height;
+      resolve();
+      return;
+    }
+    const top = y;
+    y += entry.height;
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, top, entry.width, entry.height);
+      resolve();
+    };
+    img.onerror = () => {
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, top, entry.width, entry.height);
+      resolve();
+    };
+    img.src = entry.dataUrl;
+  }));
+
+  return Promise.all(draws).then(() => {
+    state.pageViewports = pageViewports;
+    state.pageOffsets = pageOffsets;
+    state.viewport = pageViewports[Math.max(0, (state.pageNum || 1) - 1)] || pageViewports[0] || state.viewport;
+    state.numPages = pageViewports.length;
+    if(els.pageControls) els.pageControls.style.display = 'none';
+    els.imgCanvas.style.display = 'none';
+    els.pdfCanvas.style.display = 'block';
+    state.wfg4.configDisplayActive = true;
+    updatePageIndicator();
+    return true;
+  });
+}
+
 function pageFromYPx(yPx){
   for(let i=state.pageOffsets.length-1; i>=0; i--){
     if(yPx >= state.pageOffsets[i]) return i+1;
@@ -15359,7 +15526,7 @@ function pageFromYPx(yPx){
 }
 
 function getScaleFactors(){
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   if(!src) return { scaleX:1, scaleY:1 };
   const rect = src.getBoundingClientRect();
   if(!rect.width || !rect.height) return { scaleX:1, scaleY:1 };
@@ -16153,6 +16320,25 @@ async function finalizeSelection(e) {
   state.pageNum = state.selectionPx.page;
   state.viewport = state.pageViewports[state.pageNum - 1];
   updatePageIndicator();
+  const useWfg4DirectSelection = isWfg4ConfigCanonicalDisplayActive();
+  if(useWfg4DirectSelection){
+    state.snappedPx = { ...state.selectionPx };
+    state.snappedText = '';
+    state.snappedLineMetrics = null;
+    const { scaleX, scaleY } = getScaleFactors();
+    state.snappedCss = {
+      x: state.snappedPx.x/scaleX,
+      y: state.snappedPx.y/scaleY,
+      w: state.snappedPx.w/scaleX,
+      h: state.snappedPx.h/scaleY,
+      page: state.snappedPx.page
+    };
+    drawOverlay();
+    if(state.visualRun?.active){
+      updateVisualRunControls();
+    }
+    return;
+  }
   const tokens = await ensureTokensForPage(state.pageNum);
   const step = state.steps[state.stepIdx] || {};
   let snap = null;
@@ -19186,6 +19372,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     tokens: pageTokens,
     profile: state.profile,
     geometryId: state.activeGeometryId || currentGeometryId(),
+    wfg4Surface: state.wfg4?.configSurface || null,
     precomputedStructuralMap: getWrokitVisionPrecomputedForPage(state.pageNum)
   };
   const engineOwnedConfig = EngineRegistry?.registerFieldConfig
@@ -21552,7 +21739,7 @@ function graphLearningCaptureGray(page){
   // For images, capture at full natural resolution so the entire image is
   // included.  ensureGrayCanvas/getPageGrayImageData use the scaled display
   // width which clips large images.  PDFs are fine via the normal path.
-  const src = state.isImage ? els.imgCanvas : els.pdfCanvas;
+  const src = getActiveDisplaySurfaceNode();
   if(!src) return null;
   const isImg = state.isImage && src.tagName === 'IMG';
   if(!isImg){
