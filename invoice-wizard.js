@@ -690,6 +690,7 @@ const els = {
   imgCanvas:       document.getElementById('imgCanvas'),
   overlayCanvas:   document.getElementById('overlayCanvas'),
   overlayHud:      document.getElementById('overlayHud'),
+  wfg4DebugWatermark: document.getElementById('wfg4DebugWatermark'),
 
   boxModeBtn:      document.getElementById('boxModeBtn'),
   rawDataBtn:      document.getElementById('rawDataBtn'),
@@ -12178,7 +12179,10 @@ function applySelectionFromCss(startCss, endCss, opts={}){
   }
   finalizeSelection();
 }
-function updatePageIndicator(){ els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`; }
+function updatePageIndicator(){
+  els.pageIndicator.textContent = `Page ${state.pageNum}/${state.numPages}`;
+  updateWfg4DebugWatermark();
+}
 
 function bufferLikelyHasAcroForm(arrayBuffer){
   try {
@@ -12437,6 +12441,7 @@ function cleanupDoc(){
   }
   clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
+  updateWfg4DebugWatermark();
 }
 
 function clearDocumentSurfaces(){
@@ -15411,6 +15416,61 @@ function isWfg4ConfigCanonicalDisplayActive(){
     && !!state.wfg4?.configSurface;
 }
 
+function ensureWfg4DebugWatermarkElement(){
+  if(els.wfg4DebugWatermark) return els.wfg4DebugWatermark;
+  if(!els.viewer) return null;
+  const node = document.createElement('div');
+  node.id = 'wfg4DebugWatermark';
+  node.style.position = 'absolute';
+  node.style.right = '10px';
+  node.style.bottom = '10px';
+  node.style.zIndex = '4';
+  node.style.pointerEvents = 'none';
+  node.style.padding = '3px 6px';
+  node.style.borderRadius = '6px';
+  node.style.background = 'rgba(0,0,0,0.55)';
+  node.style.color = '#f8fafc';
+  node.style.fontSize = '11px';
+  node.style.lineHeight = '1.2';
+  node.style.fontFamily = 'IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  node.style.textShadow = '0 1px 2px rgba(0,0,0,0.75)';
+  node.style.display = 'none';
+  els.viewer.appendChild(node);
+  els.wfg4DebugWatermark = node;
+  return node;
+}
+
+function getWfg4CanonicalDimensionsForPage(pageNumber){
+  const pages = state.wfg4?.configSurface?.pages;
+  if(!Array.isArray(pages) || !pages.length) return null;
+  const idx = Math.max(0, Math.min(pages.length - 1, (pageNumber || 1) - 1));
+  const page = pages[idx] || {};
+  const dims = page.dimensions?.working || page.dimensions?.original || {};
+  const width = Math.round(dims.width || page.width || 0);
+  const height = Math.round(dims.height || page.height || 0);
+  if(!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+function updateWfg4DebugWatermark(){
+  const node = ensureWfg4DebugWatermarkElement();
+  if(!node) return;
+  if(!isWfg4ConfigCanonicalDisplayActive()){
+    node.style.display = 'none';
+    node.textContent = '';
+    return;
+  }
+  const pageNumber = Math.max(1, Number.isFinite(state.pageNum) ? state.pageNum : 1);
+  const dims = getWfg4CanonicalDimensionsForPage(pageNumber);
+  if(!dims){
+    node.style.display = 'none';
+    node.textContent = '';
+    return;
+  }
+  node.textContent = `WFG4 Surface (page ${pageNumber}, ${dims.width} x ${dims.height})`;
+  node.style.display = 'block';
+}
+
 function getActiveDisplaySurfaceNode(){
   if(isWfg4ConfigCanonicalDisplayActive()) return els.pdfCanvas;
   return state.isImage ? els.imgCanvas : els.pdfCanvas;
@@ -15434,6 +15494,7 @@ function restoreRawLayoutFromWfg4(){
   state.numPages = Number.isFinite(raw.numPages) ? raw.numPages : state.numPages;
   state.wfg4.configDisplayActive = false;
   state.wfg4.rawConfigLayout = null;
+  updateWfg4DebugWatermark();
 }
 
 function renderWfg4CanonicalIntoViewer(surface){
@@ -15514,6 +15575,7 @@ function renderWfg4CanonicalIntoViewer(surface){
     els.pdfCanvas.style.display = 'block';
     state.wfg4.configDisplayActive = true;
     updatePageIndicator();
+    updateWfg4DebugWatermark();
     return true;
   });
 }
@@ -16421,6 +16483,7 @@ function drawOverlay(options = {}){
   if(state.graphLearning?.active){
     paintGraphLearningOverlay(overlayCtx, scaleX, scaleY);
   }
+  updateWfg4DebugWatermark();
 }
 
 function drawOverlayForVisibilityChange(){

@@ -23,3 +23,24 @@
 ### Risks / Uncertainties
 - Some diagnostic/learning helper paths that rely on active display node now follow the canonical display while WFG4 config mode is active; this is intended for coordinate consistency but should be validated in advanced debug workflows.
 - Canvas data URL artifacts increase in-memory surface payload size for large multi-page documents.
+
+## 2026-04-05 — Phase: WFG4 debug watermark
+
+### Files Modified
+- `invoice-wizard.js`
+- `docs/wfg4-dev-log.md`
+
+### What Was Added
+- Added a config-only WFG4 debug watermark overlay element that is attached to the same viewer container as document and bbox overlay layers.
+- Watermark visibility is gated to only show when:
+  - configured engine is `wfg4`,
+  - config mode is active,
+  - canonical WFG4 config display is currently active.
+- Watermark text is dynamically generated as:
+  - `WFG4 Surface (page X, WIDTH x HEIGHT)`
+  - where `X` uses the current 1-based page number and `WIDTH/HEIGHT` come from WFG4 canonical page working dimensions metadata.
+- Watermark is non-interactive (`pointer-events: none`) and layered above overlays without affecting selection math or engine internals.
+
+### Assumptions
+- Canonical dimensions are read from `state.wfg4.configSurface.pages[pageIndex].dimensions.working` with fallback to original/page dimensions if needed.
+- Page number shown is the active viewer page (`state.pageNum`), which is already managed as 1-based in wizard UI.
