@@ -24511,6 +24511,136 @@ function wfg2GetEffectiveParams(){
   return _wfg2 ? _wfg2.copyParams(_wfg2.DEFAULT_PARAMS) : null;
 }
 
+function objectLearningUsesLocalWfg3(){
+  return getGraphLearningEngineType() === 'wfg3' && !!_wfg3;
+}
+
+function objectLearningGetWfg3Params(){
+  if(!_wfg3) return null;
+  var src = (state.graphLearning?.params && state.graphLearning.graph?.engine === 'wfg3')
+    ? state.graphLearning.params
+    : _wfg3.DEFAULT_PARAMS;
+  var params = _wfg3.copyParams(src);
+  var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
+  params.pipelineMode = pipelineMode;
+  return params;
+}
+
+function objectLearningClampBoxToSurface(box, surface){
+  if(!box || !surface) return null;
+  var x0 = Math.max(0, Math.floor(box.x || 0));
+  var y0 = Math.max(0, Math.floor(box.y || 0));
+  var x1 = Math.min(surface.width, Math.ceil((box.x || 0) + (box.w || 0)));
+  var y1 = Math.min(surface.height, Math.ceil((box.y || 0) + (box.h || 0)));
+  var w = Math.max(1, x1 - x0);
+  var h = Math.max(1, y1 - y0);
+  return { x: x0, y: y0, w: w, h: h };
+}
+
+function objectLearningCropSurface(surface, bbox){
+  if(!surface || !bbox || !surface.width || !surface.height) return null;
+  var crop = objectLearningClampBoxToSurface(bbox, surface);
+  if(!crop) return null;
+  var cw = crop.w, ch = crop.h;
+  var out = {
+    kind: 'wfg3-local-surface',
+    width: cw,
+    height: ch,
+    gray: new Uint8Array(cw * ch),
+    rgb: null,
+    lab: null,
+    source: Object.assign({}, surface.source || {}, {
+      localCrop: { x: crop.x, y: crop.y, w: crop.w, h: crop.h }
+    }),
+    artifacts: { localCrop: { x: crop.x, y: crop.y, w: crop.w, h: crop.h } }
+  };
+  if(surface.rgb && surface.rgb.r && surface.rgb.g && surface.rgb.b){
+    out.rgb = {
+      r: new Uint8Array(cw * ch),
+      g: new Uint8Array(cw * ch),
+      b: new Uint8Array(cw * ch)
+    };
+  }
+  if(surface.lab && surface.lab.L && surface.lab.a && surface.lab.b){
+    out.lab = {
+      L: new Float32Array(cw * ch),
+      a: new Float32Array(cw * ch),
+      b: new Float32Array(cw * ch)
+    };
+  }
+  for(var y = 0; y < ch; y++){
+    var srcRow = (crop.y + y) * surface.width;
+    var dstRow = y * cw;
+    for(var x = 0; x < cw; x++){
+      var si = srcRow + crop.x + x;
+      var di = dstRow + x;
+      out.gray[di] = surface.gray?.[si] || 0;
+      if(out.rgb){
+        out.rgb.r[di] = surface.rgb.r?.[si] || 0;
+        out.rgb.g[di] = surface.rgb.g?.[si] || 0;
+        out.rgb.b[di] = surface.rgb.b?.[si] || 0;
+      }
+      if(out.lab){
+        out.lab.L[di] = surface.lab.L?.[si] || 0;
+        out.lab.a[di] = surface.lab.a?.[si] || 0;
+        out.lab.b[di] = surface.lab.b?.[si] || 0;
+      }
+    }
+  }
+  return { crop: crop, surface: out };
+}
+
+function objectLearningTranslateLocalGraph(localGraph, crop){
+  if(!localGraph) return null;
+  var tx = crop?.x || 0, ty = crop?.y || 0;
+  var nodes = (localGraph.nodes || []).map(function(n){
+    var b = n.bbox || { x: 0, y: 0, w: 0, h: 0 };
+    return Object.assign({}, n, {
+      x: (n.x || 0) + tx,
+      y: (n.y || 0) + ty,
+      center: n.center ? { x: (n.center.x || 0) + tx, y: (n.center.y || 0) + ty } : n.center,
+      bbox: { x: (b.x || 0) + tx, y: (b.y || 0) + ty, w: b.w || 0, h: b.h || 0 }
+    });
+  });
+  var edges = (localGraph.edges || []).map(function(e){
+    return Object.assign({}, e, {
+      from: e.from != null ? e.from : e.source,
+      to: e.to != null ? e.to : e.target
+    });
+  });
+  return Object.assign({}, localGraph, {
+    engine: 'wfg3_local_object',
+    localCrop: crop,
+    nodes: nodes,
+    edges: edges
+  });
+}
+
+function objectLearningRunWfg3LocalOnBox(box, surface){
+  if(!_wfg3 || !surface || !box) return null;
+  var cropped = objectLearningCropSurface(surface, box);
+  if(!cropped || !cropped.surface) return null;
+  var graph = _wfg3.generateFeatureGraph(cropped.surface, objectLearningGetWfg3Params() || _wfg3.DEFAULT_PARAMS);
+  if(!graph) return null;
+  return objectLearningTranslateLocalGraph(graph, cropped.crop);
+}
+
+function objectLearningSetWfg3LocalPreviewGraph(localGraph){
+  if(!localGraph) return;
+  state.objectLearning.graph = localGraph;
+}
+
+function objectLearningSetWfg3StatusFromGraph(localGraph, prefix){
+  if(!localGraph) return;
+  var art = localGraph.artifacts || {};
+  var msg = (prefix || 'WFG3 local') + ': ' +
+    (art.wfg3_tokenCount || 0) + ' tokens, ' +
+    (art.wfg3_chainCount || 0) + ' chains, ' +
+    (art.wfg3_regionCount || 0) + ' regions, ' +
+    (art.wfg3_groupCount || 0) + ' groups, backend=' + (art.wfg3_backend || '?') + '.';
+  objectLearningStatus(msg);
+}
+
 function wfg2UpdateObjectLearningSummary(summary){
   var baseline = wfg2LoadAcceptedBaseline();
   if(!baseline) return;
@@ -24714,6 +24844,8 @@ function objectLearningDrawOverlay(ctx){
     var labelMap = graph.partition.labelMap;
     var regionCount = graph.partition.regionCount || 0;
     var surf = ol.normalizedSurface;
+    var localCrop = graph?.localCrop || null;
+    // Full-surface label map path
     if(surf && labelMap.length === surf.width * surf.height){
       var w = surf.width, h = surf.height;
       var imgData = ctx.getImageData(0, 0, w, h);
@@ -24729,6 +24861,66 @@ function objectLearningDrawOverlay(ctx){
         }
       }
       ctx.putImageData(imgData, 0, 0);
+    } else if(surf && localCrop && labelMap.length === localCrop.w * localCrop.h){
+      // Local-crop label map path (WFG3 local mode): render only inside the crop viewport.
+      var lw = localCrop.w, lh = localCrop.h;
+      var lx = localCrop.x, ly = localCrop.y;
+      var imgData2 = ctx.getImageData(lx, ly, lw, lh);
+      var d2 = imgData2.data;
+      var palette2 = _objectLearningPartitionPalette(regionCount);
+      for(var pi2 = 0, pj2 = 0; pi2 < labelMap.length; pi2++, pj2 += 4){
+        var label2 = labelMap[pi2];
+        if(label2 >= 0 && label2 < palette2.length){
+          var pc2 = palette2[label2];
+          d2[pj2] = (d2[pj2] * 0.6 + pc2[0] * 0.4) | 0;
+          d2[pj2+1] = (d2[pj2+1] * 0.6 + pc2[1] * 0.4) | 0;
+          d2[pj2+2] = (d2[pj2+2] * 0.6 + pc2[2] * 0.4) | 0;
+        }
+      }
+      ctx.putImageData(imgData2, lx, ly);
+    }
+  }
+
+  // WFG3-local overlays (token/chains/group boundaries) inside local crop preview.
+  if(objectLearningUsesLocalWfg3() && graph?.artifacts){
+    var artf = graph.artifacts || {};
+    var crop = graph.localCrop || null;
+    if(crop){
+      // Draw local viewport boundary so the user can see local WFG3 scope.
+      ctx.strokeStyle = 'rgba(233,30,99,0.9)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      ctx.strokeRect(crop.x, crop.y, crop.w, crop.h);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(233,30,99,0.9)';
+      ctx.font = '11px IBM Plex Mono, monospace';
+      ctx.fillText('WFG3 LOCAL VIEWPORT', crop.x + 4, Math.max(12, crop.y - 4));
+    }
+    // Chain mask as a high-contrast overlay in local crop space.
+    if(showCompiled && artf.wfg3_chainMask && crop){
+      var cm = artf.wfg3_chainMask;
+      if(cm.length === crop.w * crop.h){
+        var cmData = ctx.getImageData(crop.x, crop.y, crop.w, crop.h);
+        var cd = cmData.data;
+        for(var cmi = 0, cmj = 0; cmi < cm.length; cmi++, cmj += 4){
+          if(cm[cmi] > 0){
+            cd[cmj] = Math.min(255, cd[cmj] + 110);
+            cd[cmj + 1] = Math.max(0, cd[cmj + 1] - 40);
+            cd[cmj + 2] = Math.max(0, cd[cmj + 2] - 40);
+          }
+        }
+        ctx.putImageData(cmData, crop.x, crop.y);
+      }
+    }
+    // Tokens
+    if(showCompiled && Array.isArray(artf.wfg3_tokens) && artf.wfg3_tokens.length){
+      ctx.fillStyle = 'rgba(0,188,212,0.95)';
+      for(var ti = 0; ti < artf.wfg3_tokens.length; ti++){
+        var tk = artf.wfg3_tokens[ti];
+        var tx = (tk.x || 0) + (crop?.x || 0);
+        var ty = (tk.y || 0) + (crop?.y || 0);
+        ctx.fillRect(tx - 1, ty - 1, 2, 2);
+      }
     }
   }
 
@@ -24762,7 +24954,7 @@ function objectLearningDrawOverlay(ctx){
     ctx.textBaseline = 'top';
     nodes.forEach(function(n, idx){
       var b = n.bbox || {};
-      var label = n.id || ('R' + idx);
+      var label = String(n.id != null ? n.id : ('R' + idx));
       // Shorten ID for display
       var shortId = label.replace('wfg2-p-', 'R');
       ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -24905,20 +25097,42 @@ function objectLearningUpdateButtons(){
   var hasBoxes = (state.objectLearning.boxes || []).length > 0;
   if(els.objectLearningUndoBtn) els.objectLearningUndoBtn.disabled = !hasBoxes;
   if(els.objectLearningClearBtn) els.objectLearningClearBtn.disabled = !hasBoxes;
-  if(els.objectLearningAnalyzeBtn) els.objectLearningAnalyzeBtn.disabled = !hasBoxes || !state.objectLearning.graph;
+  var readyForAnalyze = objectLearningUsesLocalWfg3()
+    ? (!!state.objectLearning.normalizedSurface && hasBoxes)
+    : (!!state.objectLearning.graph && hasBoxes);
+  if(els.objectLearningAnalyzeBtn) els.objectLearningAnalyzeBtn.disabled = !readyForAnalyze;
 }
 
 function objectLearningAnalyze(){
   var ol = state.objectLearning;
-  if(!ol.graph || !ol.boxes.length){ objectLearningStatus('Upload file and draw at least one object box.'); return; }
-  ol.analyses = ol.boxes.map(function(b){ return objectLearningAnalyzeBox(b, ol.graph); });
+  if(!ol.boxes.length){ objectLearningStatus('Upload file and draw at least one object box.'); return; }
+  if(objectLearningUsesLocalWfg3()){
+    if(!ol.normalizedSurface){ objectLearningStatus('Upload file before running WFG3 local object analysis.'); return; }
+    ol.localGraphsByBox = {};
+    var previewGraph = null;
+    ol.analyses = ol.boxes.map(function(b){
+      var localGraph = objectLearningRunWfg3LocalOnBox(b, ol.normalizedSurface);
+      if(localGraph) ol.localGraphsByBox[b.id] = localGraph;
+      if(!previewGraph && localGraph) previewGraph = localGraph;
+      return objectLearningAnalyzeBox(b, localGraph || { nodes: [], edges: [] });
+    });
+    if(previewGraph){
+      objectLearningSetWfg3LocalPreviewGraph(previewGraph);
+      objectLearningSetWfg3StatusFromGraph(previewGraph, 'Analyzed local WFG3');
+    }
+  } else {
+    if(!ol.graph){ objectLearningStatus('Upload file and draw at least one object box.'); return; }
+    ol.analyses = ol.boxes.map(function(b){ return objectLearningAnalyzeBox(b, ol.graph); });
+  }
   ol.aggregate = objectLearningBuildAggregate(ol.analyses);
   ol.constraints = ol.aggregate?.constraints || [];
   ol.objective = ol.aggregate?.autoTuneObjective || 0;
   renderObjectLearningResults();
   renderObjectLearningViewer();
   if(ol.aggregate){
-    objectLearningStatus('Analyzed ' + ol.aggregate.boxCount + ' object(s): cohesion ' + ol.aggregate.objectCohesionScore.toFixed(1) + '%.');
+    if(!objectLearningUsesLocalWfg3()){
+      objectLearningStatus('Analyzed ' + ol.aggregate.boxCount + ' object(s): cohesion ' + ol.aggregate.objectCohesionScore.toFixed(1) + '%.');
+    }
     wfg2UpdateObjectLearningSummary({
       boxCount: ol.aggregate.boxCount,
       objectCohesionScore: ol.aggregate.objectCohesionScore,
@@ -24946,7 +25160,7 @@ function objectLearningBindDrawing(){
   if(!canvas || canvas._objBound) return;
   var isDown = false;
   canvas.addEventListener('pointerdown', function(evt){
-    if(!state.objectLearning.graph) return;
+    if(!state.objectLearning.normalizedSurface) return;
     var p = objectLearningCanvasToSurfacePoint(evt); if(!p) return;
     isDown = true;
     state.objectLearning.drawing = { startX: p.x, startY: p.y, x: p.x, y: p.y, w: 1, h: 1 };
@@ -24982,18 +25196,32 @@ function objectLearningBindDrawing(){
 
 function objectLearningRunGeneration(){
   var ol = state.objectLearning;
-  if(!_wfg2 || !ol.normalizedSurface) return;
-  var params = wfg2GetEffectiveParams();
-  // Use the pipeline mode from Object Learning's own selector (parity with Graph Learning)
-  var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
-  if(params) params.pipelineMode = pipelineMode;
-  ol.graph = _wfg2.generateFeatureGraph(ol.normalizedSurface, params || _wfg2.DEFAULT_PARAMS);
+  if(!ol.normalizedSurface) return;
+  if(objectLearningUsesLocalWfg3()){
+    // WFG3 local mode intentionally does not build a full-document graph in Object Learning.
+    // Local graph processing is run per user-selected box at analysis/reference time.
+    ol.graph = {
+      engine: 'wfg3_local_object',
+      localOnly: true,
+      nodes: [],
+      edges: [],
+      partition: null
+    };
+  } else {
+    if(!_wfg2) return;
+    var params = wfg2GetEffectiveParams();
+    // Use the pipeline mode from Object Learning's own selector (parity with Graph Learning)
+    var pipelineMode = els.objectLearningPipelineMode ? els.objectLearningPipelineMode.value : 'partition';
+    if(params) params.pipelineMode = pipelineMode;
+    ol.graph = _wfg2.generateFeatureGraph(ol.normalizedSurface, params || _wfg2.DEFAULT_PARAMS);
+  }
   objectLearningUpdateButtons();
   renderObjectLearningViewer();
 }
 
 async function objectLearningOpenFile(file){
-  if(!file || !_wfg2) return;
+  if(!file) return;
+  if(!objectLearningUsesLocalWfg3() && !_wfg2) return;
   state.objectLearning.active = true;
   state.objectLearning.fileName = file.name || 'untitled';
   state.objectLearning.fileId = 'wfg2obj-' + Date.now().toString(36);
@@ -25015,13 +25243,19 @@ async function objectLearningOpenFile(file){
   var page = state.pageNum || 1;
   var img = graphLearningCaptureGray(page);
   if(!img || !img.width || !img.height){ objectLearningStatus('File loaded but no render surface was available.'); return; }
-  state.objectLearning.normalizedSurface = _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
+  state.objectLearning.normalizedSurface = objectLearningUsesLocalWfg3()
+    ? _wfg3.normalizeVisualInput(img, { maxSide: 1300 })
+    : _wfg2.normalizeVisualInput(img, { maxSide: 1300 });
   if(!state.objectLearning.normalizedSurface){ objectLearningStatus('Normalization failed for this file.'); return; }
   renderObjectLearningBaseSurface();
   objectLearningRunGeneration();
   objectLearningBindDrawing();
   updateObjectLearningBaselineStatus();
-  objectLearningStatus('File loaded. Draw one or more object boxes, then click Analyze Objects.');
+  objectLearningStatus(
+    objectLearningUsesLocalWfg3()
+      ? 'File loaded (WFG3 local mode). Draw object boxes; analysis runs only inside each selected box.'
+      : 'File loaded. Draw one or more object boxes, then click Analyze Objects.'
+  );
 }
 
 if(els.objectLearningFileInput){
@@ -25187,23 +25421,38 @@ if(els.objectLearningCreateFieldBtn){
 function objectLearningUpdateSetReferenceBtn(){
   if(!els.objectLearningSetReferenceBtn) return;
   var ol = state.objectLearning;
-  els.objectLearningSetReferenceBtn.disabled = !(ol.currentFieldId && ol.boxes.length === 1 && ol.graph);
+  var hasGraphContext = objectLearningUsesLocalWfg3()
+    ? !!ol.normalizedSurface
+    : !!ol.graph;
+  els.objectLearningSetReferenceBtn.disabled = !(ol.currentFieldId && ol.boxes.length === 1 && hasGraphContext);
 }
 
 if(els.objectLearningSetReferenceBtn){
   els.objectLearningSetReferenceBtn.addEventListener('click', function(){
     var ol = state.objectLearning;
-    if(!ol.currentFieldId || !ol.boxes.length || !ol.graph || !_olEngine) return;
+    if(!ol.currentFieldId || !ol.boxes.length || !_olEngine) return;
 
     var bbox = ol.boxes[0]; // Use the first drawn box as the reference
     var surfaceSize = { width: ol.normalizedSurface?.width || 1, height: ol.normalizedSurface?.height || 1 };
+    var refGraph = ol.graph;
+    if(objectLearningUsesLocalWfg3()){
+      if(!ol.normalizedSurface) return;
+      refGraph = objectLearningRunWfg3LocalOnBox(bbox, ol.normalizedSurface);
+      if(!refGraph){
+        objectLearningStatus('WFG3 local reference extraction failed for the selected box.');
+        return;
+      }
+    } else if(!ol.graph){
+      return;
+    }
 
     // Build reference descriptor
-    ol.referenceDescriptor = _olEngine.buildReferenceDescriptor(bbox, ol.graph, surfaceSize);
+    ol.referenceDescriptor = _olEngine.buildReferenceDescriptor(bbox, refGraph, surfaceSize);
     ol.referenceBbox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
 
     // Capture reference graph statistics for graph normalization
-    ol.referenceGraphStats = _olEngine.computeGraphStats(ol.graph, surfaceSize);
+    ol.referenceGraphStats = _olEngine.computeGraphStats(refGraph, surfaceSize);
+    if(objectLearningUsesLocalWfg3()) objectLearningSetWfg3LocalPreviewGraph(refGraph);
 
     // Create or update field config
     ol.fieldConfig = _olEngine.createFieldConfig(ol.currentFieldId, ol.referenceBbox, ol.referenceDescriptor);
@@ -25215,7 +25464,11 @@ if(els.objectLearningSetReferenceBtn){
       _olStore.saveFieldConfig(ol.currentFieldId, ol.fieldConfig);
     }
 
-    objectLearningStatus('Reference set for field "' + ol.currentFieldId + '". Switch to Batch Processing to train.');
+    if(objectLearningUsesLocalWfg3()){
+      objectLearningSetWfg3StatusFromGraph(refGraph, 'Reference set for "' + ol.currentFieldId + '"');
+    } else {
+      objectLearningStatus('Reference set for field "' + ol.currentFieldId + '". Switch to Batch Processing to train.');
+    }
     objectLearningRenderDescriptor();
     renderObjectLearningViewer();
     objectLearningRefreshFieldSelect();
