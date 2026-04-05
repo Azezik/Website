@@ -752,7 +752,7 @@ const MAX_CUSTOM_FIELDS = 30;
 const CUSTOM_WIZARD_KEY = 'wiz.customTemplates';
 const EXTRACTED_WIZARD_SELECTION_KEY = 'wiz.extractedSelection';
 const EXTRACTION_ENGINE_KEY = 'wiz.extractionEngine';
-const ENGINE_KIND = EngineRegistry?.ENGINE_KIND || { LEGACY: 'legacy', AI_ALGO: 'ai_algo', WROKIT_VISION: 'wrokit_vision' };
+const ENGINE_KIND = EngineRegistry?.ENGINE_KIND || { LEGACY: 'legacy', AI_ALGO: 'ai_algo', WROKIT_VISION: 'wrokit_vision', WFG4: 'wfg4' };
 
 const PROFILE_TYPE = { STATIC_PROFILE:'STATIC_PROFILE', CUSTOM_WIZARD:'CUSTOM_WIZARD' };
 const magicTypeResolutionLog = new Set();
@@ -764,7 +764,7 @@ function normalizeEngineType(raw){
   }
   const value = String(raw || '').toLowerCase();
   if(value === 'ai') return ENGINE_KIND.AI_ALGO;
-  if(value === ENGINE_KIND.AI_ALGO || value === ENGINE_KIND.WROKIT_VISION || value === ENGINE_KIND.LEGACY) return value;
+  if(value === ENGINE_KIND.AI_ALGO || value === ENGINE_KIND.WROKIT_VISION || value === ENGINE_KIND.WFG4 || value === ENGINE_KIND.LEGACY) return value;
   return ENGINE_KIND.LEGACY;
 }
 
@@ -792,7 +792,11 @@ function getProfileEngineType(profile){
 
 function resolveFieldEngineType(fieldSpec){
   const configuredEngine = getConfiguredEngineType();
-  if(isRunMode() && (configuredEngine === ENGINE_KIND.WROKIT_VISION || configuredEngine === ENGINE_KIND.AI_ALGO)){
+  if(isRunMode() && (
+    configuredEngine === ENGINE_KIND.WROKIT_VISION
+    || configuredEngine === ENGINE_KIND.AI_ALGO
+    || configuredEngine === ENGINE_KIND.WFG4
+  )){
     return configuredEngine;
   }
   const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
@@ -1906,6 +1910,10 @@ let state = {
   currentAreaRows: [],
   wizardComplete: false,
   selectedEngineType: loadExtractionEnginePreference(),
+  wfg4: {
+    configSurface: null,
+    runSurface: null
+  },
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
   debugSandbox: {
@@ -10064,7 +10072,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         boxPx: resolvedBox,
         viewport: viewportPx,
         profile: state.profile,
-        geometryId: state.activeGeometryId || currentGeometryId()
+        geometryId: state.activeGeometryId || currentGeometryId(),
+        wfg4Surface: state.wfg4?.[isRunMode() ? 'runSurface' : 'configSurface'] || null
       };
       if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
         enginePayload.runtimeMaps = runtimeMaps;
@@ -10081,7 +10090,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           boxPx: engineResult?.boxPx || resolvedBox,
           tokens: engineResult?.tokens || [],
           method: engineResult?.method || fieldEngineType,
-          engineUsed: fieldEngineType
+          engineUsed: fieldEngineType,
+          extractionMeta: engineResult?.extractionMeta || null
         };
       }
     }
@@ -12347,6 +12357,7 @@ async function openFile(file){
     if(!state.graphLearning?.active && !state.objectLearning?.active){
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
+      syncWfg4SurfaceContext('config');
       drawOverlay();
     }
     return;
@@ -12375,6 +12386,7 @@ async function openFile(file){
       await ensureTokensForPage(1);
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
+      syncWfg4SurfaceContext('config');
       drawOverlay();
     } else {
       try { await ensureTokensForPage(1); } catch(_){ /* best-effort for graph learning */ }
@@ -12512,6 +12524,7 @@ async function prepareRunDocument(file){
       // Keep URL alive while imgCanvas is active; cleanupDoc handles revocation.
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
+      syncWfg4SurfaceContext('run');
       return { type:'image' };
     } catch(err){
       console.error('Image load failed in run mode', err);
@@ -12551,6 +12564,7 @@ async function prepareRunDocument(file){
   state.numPages = state.pdf.numPages;
   state.viewport = state.pageViewports[0] || { w:0, h:0, scale };
   state.overlayPinned = false;
+  syncWfg4SurfaceContext('run');
   return { type:'pdf' };
 }
 
@@ -13557,6 +13571,40 @@ const tokenProvider = (!isSkinV2 && window.LegacyTokenProviderAdapter?.createLeg
         getPageViewport,
         getTokenSourceInfo: getTokenSourceInfoForPage
       };
+
+function captureWfg4SurfaceForMode(mode){
+  if(!window.WFG4Engine?.prepareDocumentSurface) return null;
+  const vp = state.pageViewports?.[(state.pageNum || 1) - 1] || state.viewport || null;
+  const payload = {
+    mode,
+    fileName: state.currentFileName || '',
+    mimeType: state.isImage ? 'image/*' : 'application/pdf',
+    isImage: !!state.isImage,
+    geometryId: state.activeGeometryId || currentGeometryId() || null,
+    wizardId: currentWizardId() || null,
+    pageCount: Number.isFinite(state.numPages) ? state.numPages : 0,
+    activePage: Number.isFinite(state.pageNum) ? state.pageNum : 1,
+    viewport: vp
+  };
+  try {
+    return window.WFG4Engine.prepareDocumentSurface(payload);
+  } catch(err){
+    console.warn('[wfg4] prepareDocumentSurface failed', err);
+    return null;
+  }
+}
+
+function syncWfg4SurfaceContext(mode){
+  if(getConfiguredEngineType() !== ENGINE_KIND.WFG4) return;
+  const surface = captureWfg4SurfaceForMode(mode);
+  if(!surface) return;
+  state.wfg4 = state.wfg4 || { configSurface: null, runSurface: null };
+  if(mode === 'config'){
+    state.wfg4.configSurface = surface;
+  } else {
+    state.wfg4.runSurface = surface;
+  }
+}
 
 
 const extractionEngineByType = new Map();
@@ -17254,6 +17302,9 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   }
   if(extras.wrokitVisionConfig){
     entry.wrokitVisionConfig = clonePlain(extras.wrokitVisionConfig);
+  }
+  if(extras.wfg4Config){
+    entry.wfg4Config = clonePlain(extras.wfg4Config);
   }
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
