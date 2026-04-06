@@ -94,6 +94,8 @@
     let runFeatures = null;
     let matrix = null;
     let localized = predictedBox;
+    let orbProjectedBox = null;
+    let postRefineBox = null;
     let transformModel = 'none';
     let inliers = 0;
     let inlierRatio = 0;
@@ -136,6 +138,7 @@
         localized = Types.cornersToBox
           ? Types.cornersToBox(projectedOnPage, page)
           : predictedBox;
+        orbProjectedBox = localized ? { ...localized } : null;
       }
 
       if(refFieldCanvas && localized){
@@ -150,6 +153,7 @@
         if(refined.ok){
           localized = { ...refined.box, page };
           usedRefine = true;
+          postRefineBox = { ...localized };
         }
         refineScore = refined.score || 0;
 
@@ -208,6 +212,9 @@
       return {
         ok: !!(matrix || usedStructural),
         localizedBox: localized || predictedBox,
+        predictedBox: predictedBox || null,
+        orbProjectedBox: orbProjectedBox || null,
+        postRefineBox: postRefineBox || (usedStructural ? localized : null),
         localizationConfidence,
         transformModel,
         matchCount,

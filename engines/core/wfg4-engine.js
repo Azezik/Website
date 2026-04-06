@@ -344,6 +344,12 @@
       : { ok:false, localizedBox: boxPx || null, localizationConfidence: 0.1, reason: 'localization_module_missing' };
 
     const finalBox = localized.localizedBox || boxPx;
+    const debugBboxStages = {
+      referenceBbox: boxPx ? { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, page: boxPx.page } : null,
+      orbProjectedBbox: localized.orbProjectedBox || null,
+      refinedBbox: localized.postRefineBox || null,
+      ocrCropBbox: finalBox ? { x: finalBox.x, y: finalBox.y, w: finalBox.w, h: finalBox.h, page: finalBox.page } : null
+    };
     if(!finalBox){
       return {
         value: '',
@@ -357,7 +363,8 @@
         extractionMeta: {
           schema: WFG4_SCHEMA_VERSION,
           reason: 'missing_box',
-          localization: localized
+          localization: localized,
+          debugBboxStages
         }
       };
     }
@@ -392,7 +399,8 @@
           schema: WFG4_SCHEMA_VERSION,
           fieldKey: fieldSpec.fieldKey || null,
           reason: 'no_token_in_localized_scope',
-          localization: localized
+          localization: localized,
+          debugBboxStages
         }
       };
     }
@@ -416,7 +424,8 @@
         readout: {
           confidence: readConfidence,
           source: 'localized-token-read-assist'
-        }
+        },
+        debugBboxStages
       }
     };
   }

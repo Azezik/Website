@@ -655,6 +655,17 @@ const els = {
   resetModelBtn:   document.getElementById('reset-model-btn'),
   logoutBtn:       document.getElementById('logout-btn'),
   extractionEngineSelect: document.getElementById('extraction-engine-select'),
+  wfg4DebugToggleLabel: document.getElementById('wfg4-debug-toggle-label'),
+  wfg4DebugToggle: document.getElementById('wfg4-debug-toggle'),
+  wfg4DebugPanel: document.getElementById('wfg4DebugPanel'),
+  wfg4DebugStatus: document.getElementById('wfg4DebugStatus'),
+  wfg4DebugFieldList: document.getElementById('wfg4DebugFieldList'),
+  wfg4DebugGoodBtn: document.getElementById('wfg4DebugGoodBtn'),
+  wfg4DebugBadBtn: document.getElementById('wfg4DebugBadBtn'),
+  wfg4DebugCorrectionPanel: document.getElementById('wfg4DebugCorrectionPanel'),
+  wfg4DebugCorrectionPrompt: document.getElementById('wfg4DebugCorrectionPrompt'),
+  wfg4DebugCorrectionConfirmBtn: document.getElementById('wfg4DebugCorrectionConfirmBtn'),
+  wfg4DebugCorrectionDoneBtn: document.getElementById('wfg4DebugCorrectionDoneBtn'),
   dropzone:        document.getElementById('dropzone'),
   fileInput:       document.getElementById('file-input'),
   staticDebugModal: document.getElementById('staticDebugModal'),
@@ -834,6 +845,10 @@ function syncExtractionEngineUI(){
     if(els.showTextGraphToggle) els.showTextGraphToggle.checked = false;
   }
   syncFeatureGraphLayerVisibilityUI();
+  const isWfg4 = activeEngine === ENGINE_KIND.WFG4;
+  if(els.wfg4DebugToggleLabel) els.wfg4DebugToggleLabel.style.display = isWfg4 ? 'flex' : 'none';
+  if(!isWfg4 && els.wfg4DebugToggle) els.wfg4DebugToggle.checked = false;
+  if(!isWfg4) state.wfg4.debugMode = false;
 }
 
 function normalizeWizardId(raw){
@@ -1915,7 +1930,11 @@ let state = {
     configSurface: null,
     runSurface: null,
     configDisplayActive: false,
-    rawConfigLayout: null
+    rawConfigLayout: null,
+    debugMode: false,
+    debugPending: null,
+    debugLog: [],
+    debugCorrectionState: null
   },
   ocrTrace: { enabled: false, session: null },
   ocrAccuracyReport: null,
@@ -19296,6 +19315,10 @@ els.extractionEngineSelect?.addEventListener('change', ()=>{
   syncExtractionEngineUI();
   drawOverlay();
 });
+els.wfg4DebugToggle?.addEventListener('change', ()=>{
+  state.wfg4.debugMode = !!els.wfg4DebugToggle.checked;
+  console.info('[wfg4-debug] debug mode', state.wfg4.debugMode ? 'ON' : 'OFF');
+});
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
   if(els.ocrTraceToggle){
@@ -20427,6 +20450,26 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         }
         docStageState.extractedStaticKeys = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim()).map(entry => entry.fieldKey).filter(Boolean);
         logDocStage('static-extract', 'done', { extractedStaticKeys: docStageState.extractedStaticKeys });
+
+        // --- WFG4 Debug Mode pause ---
+        if(isWfg4DebugActive()){
+          const rawEntries = rawStore.get(state.currentFileId) || [];
+          const debugFieldData = wfg4DebugCollectFieldData(rawEntries, activeProfile.fields || []);
+          const runSurface = state.wfg4.runSurface || null;
+
+          // Render document into viewer so user can see the overlays
+          if(runSurface?.pages?.length && els.pdfCanvas){
+            await renderWfg4CanonicalIntoViewer(runSurface);
+            drawOverlay();
+          }
+
+          // Pause: show debug panel and wait for user verdict
+          await new Promise(resolve => {
+            wfg4DebugShowPanel(debugFieldData, file, runSurface);
+            state.wfg4.debugPending._resolve = resolve;
+          });
+          logDocStage('wfg4-debug', 'resolved', { verdict: state.wfg4.debugLog[state.wfg4.debugLog.length - 1]?.verdict || null });
+        }
       },
       buildPostCheck: async () => {
         const extractedEntriesForGate = (rawStore.get(state.currentFileId) || []).filter(entry => String(entry?.value || '').trim());
@@ -20511,8 +20554,281 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
   }
 }
 
+/* ====================== WFG4 Debug Mode ======================== */
+
+function isWfg4DebugActive(){
+  return !!(state.wfg4.debugMode && getConfiguredEngineType() === ENGINE_KIND.WFG4 && isRunMode());
+}
+
+function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
+  const fieldDataList = [];
+  for(const entry of (rawStoreEntries || [])){
+    const profileField = (profileFields || []).find(f => f.fieldKey === entry.fieldKey);
+    const meta = entry.extractionMeta || {};
+    const localization = meta.localization || {};
+    const stages = meta.debugBboxStages || {};
+    fieldDataList.push({
+      fieldKey: entry.fieldKey,
+      value: entry.value || '',
+      localizationConfidence: localization.localizationConfidence ?? null,
+      readoutConfidence: meta.readout?.confidence ?? entry.confidence ?? null,
+      referenceBbox: stages.referenceBbox || profileField?.configBox || profileField?.rawBox || null,
+      orbProjectedBbox: stages.orbProjectedBbox || null,
+      refinedBbox: stages.refinedBbox || null,
+      ocrCropBbox: stages.ocrCropBbox || null,
+      transformModel: localization.transformModel || null,
+      matchCount: localization.matchCount ?? null,
+      inliers: localization.inliers ?? null,
+      inlierRatio: localization.inlierRatio ?? null,
+      usedRefine: localization.usedRefine ?? false,
+      refineScore: localization.refineScore ?? null,
+      usedStructural: localization.usedStructural ?? false,
+      reason: localization.reason || null,
+      userCorrectedBbox: null
+    });
+  }
+  return fieldDataList;
+}
+
+function wfg4DebugBboxDelta(a, b){
+  if(!a || !b) return null;
+  return {
+    dx: (b.x ?? 0) - (a.x ?? 0),
+    dy: (b.y ?? 0) - (a.y ?? 0),
+    dw: (b.w ?? 0) - (a.w ?? 0),
+    dh: (b.h ?? 0) - (a.h ?? 0)
+  };
+}
+
+function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
+  const firstPage = surface?.pages?.[0] || {};
+  const canonDims = firstPage.dimensions?.working || firstPage.dimensions?.original || {};
+  const perField = fieldDataList.map(fd => {
+    const projectedVsRefined = wfg4DebugBboxDelta(fd.orbProjectedBbox, fd.refinedBbox);
+    const refinedVsUser = fd.userCorrectedBbox ? wfg4DebugBboxDelta(fd.refinedBbox || fd.ocrCropBbox, fd.userCorrectedBbox) : null;
+    const refVsProjected = wfg4DebugBboxDelta(fd.referenceBbox, fd.orbProjectedBbox);
+    return {
+      fieldKey: fd.fieldKey,
+      referenceBbox: fd.referenceBbox,
+      orbProjectedBbox: fd.orbProjectedBbox,
+      refinedBbox: fd.refinedBbox,
+      ocrCropBbox: fd.ocrCropBbox,
+      userCorrectedBbox: fd.userCorrectedBbox,
+      derivedMetrics: {
+        deltaProjectedVsRefined: projectedVsRefined,
+        deltaRefinedVsUser: refinedVsUser,
+        deltaRefVsProjected: refVsProjected,
+        bboxSizeDiff: fd.ocrCropBbox && fd.referenceBbox ? {
+          dw: (fd.ocrCropBbox.w ?? 0) - (fd.referenceBbox.w ?? 0),
+          dh: (fd.ocrCropBbox.h ?? 0) - (fd.referenceBbox.h ?? 0)
+        } : null
+      }
+    };
+  });
+  return {
+    timestamp: new Date().toISOString(),
+    verdict: null,
+    fileMetadata: {
+      fileName: file?.name || null,
+      fileType: file?.type || null,
+      fileSize: file?.size || null,
+      renderedWidth: canonDims.width || null,
+      renderedHeight: canonDims.height || null,
+      canonicalSurfaceWidth: canonDims.width || null,
+      canonicalSurfaceHeight: canonDims.height || null,
+      scaleFactor: firstPage.scale || null
+    },
+    fields: perField
+  };
+}
+
+function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
+  if(!ctx) return;
+  const colors = {
+    reference: 'rgba(59,130,246,0.8)',
+    orbProjected: 'rgba(234,179,8,0.8)',
+    refined: 'rgba(34,197,94,0.8)',
+    ocrCrop: 'rgba(239,68,68,0.8)'
+  };
+  const labels = {
+    reference: 'REF',
+    orbProjected: 'ORB',
+    refined: 'REFN',
+    ocrCrop: 'OCR'
+  };
+  const dashes = {
+    reference: [6, 3],
+    orbProjected: [4, 4],
+    refined: [8, 2],
+    ocrCrop: []
+  };
+  ctx.save();
+  ctx.font = '10px "IBM Plex Mono", monospace';
+  for(const fd of fieldDataList){
+    const page = fd.referenceBbox?.page || fd.ocrCropBbox?.page || 1;
+    const offPx = (state.pageOffsets[(page||1)-1] || 0) / scaleY;
+    const stages = [
+      { key: 'reference', box: fd.referenceBbox },
+      { key: 'orbProjected', box: fd.orbProjectedBbox },
+      { key: 'refined', box: fd.refinedBbox },
+      { key: 'ocrCrop', box: fd.ocrCropBbox }
+    ];
+    for(const st of stages){
+      if(!st.box) continue;
+      const x = (st.box.x ?? 0) / scaleX;
+      const y = ((st.box.y ?? 0) / scaleY) + offPx;
+      const w = (st.box.w ?? 0) / scaleX;
+      const h = (st.box.h ?? 0) / scaleY;
+      ctx.strokeStyle = colors[st.key];
+      ctx.lineWidth = st.key === 'ocrCrop' ? 2 : 1.5;
+      ctx.setLineDash(dashes[st.key]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = colors[st.key];
+      ctx.fillText(labels[st.key], x + 2, y - 3);
+    }
+    const labelBox = fd.ocrCropBbox || fd.refinedBbox || fd.referenceBbox;
+    if(labelBox){
+      const lx = (labelBox.x ?? 0) / scaleX + (labelBox.w ?? 0) / scaleX + 4;
+      const ly = ((labelBox.y ?? 0) / scaleY) + offPx + 10;
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillText(`${fd.fieldKey}`, lx, ly);
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText(`val: ${(fd.value || '').substring(0, 20)}`, lx, ly + 12);
+      ctx.fillText(`loc: ${fd.localizationConfidence != null ? fd.localizationConfidence.toFixed(2) : '—'}  read: ${fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(2) : '—'}`, lx, ly + 24);
+    }
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function wfg4DebugRenderFieldList(fieldDataList){
+  if(!els.wfg4DebugFieldList) return;
+  els.wfg4DebugFieldList.innerHTML = '';
+  for(const fd of fieldDataList){
+    const row = document.createElement('div');
+    row.style.cssText = 'margin-bottom:4px;padding:3px 0;border-bottom:1px solid #334155;';
+    const locConf = fd.localizationConfidence != null ? fd.localizationConfidence.toFixed(3) : '—';
+    const readConf = fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(3) : '—';
+    row.innerHTML = `<span style="color:#60a5fa;font-weight:600;">${fd.fieldKey}</span> `
+      + `<span style="color:#a3e635;">→ "${(fd.value || '').substring(0, 30)}"</span> `
+      + `<span style="color:#94a3b8;">loc:${locConf} read:${readConf}</span> `
+      + `<span style="color:#fbbf24;">${fd.transformModel || ''}</span>`;
+    els.wfg4DebugFieldList.appendChild(row);
+  }
+}
+
+function wfg4DebugShowPanel(fieldDataList, file, surface){
+  if(!els.wfg4DebugPanel) return;
+  state.wfg4.debugPending = { fieldDataList, file, surface };
+  els.wfg4DebugPanel.style.display = 'block';
+  if(els.wfg4DebugCorrectionPanel) els.wfg4DebugCorrectionPanel.style.display = 'none';
+  if(els.wfg4DebugStatus) els.wfg4DebugStatus.textContent = `${fieldDataList.length} field(s) — awaiting review`;
+  wfg4DebugRenderFieldList(fieldDataList);
+
+  const { scaleX, scaleY } = getScaleFactors();
+  if(overlayCtx){
+    wfg4DebugPaintOverlays(overlayCtx, fieldDataList, scaleX, scaleY);
+  }
+}
+
+function wfg4DebugHidePanel(){
+  if(els.wfg4DebugPanel) els.wfg4DebugPanel.style.display = 'none';
+  if(els.wfg4DebugCorrectionPanel) els.wfg4DebugCorrectionPanel.style.display = 'none';
+  state.wfg4.debugPending = null;
+  state.wfg4.debugCorrectionState = null;
+}
+
+function wfg4DebugLogEntry(verdict){
+  const pending = state.wfg4.debugPending;
+  if(!pending) return null;
+  const entry = wfg4DebugBuildLogEntry(pending.fieldDataList, pending.file, pending.surface);
+  entry.verdict = verdict;
+  state.wfg4.debugLog.push(entry);
+  try {
+    const existing = JSON.parse(localStorage.getItem('wfg4_debug_log') || '[]');
+    existing.push(entry);
+    if(existing.length > 200) existing.splice(0, existing.length - 200);
+    localStorage.setItem('wfg4_debug_log', JSON.stringify(existing));
+  } catch(e){ console.warn('[wfg4-debug] log persist failed', e); }
+  console.info('[wfg4-debug] logged entry', { verdict, fields: entry.fields.length, file: entry.fileMetadata.fileName });
+  return entry;
+}
+
+function wfg4DebugStartCorrectionMode(){
+  const pending = state.wfg4.debugPending;
+  if(!pending || !pending.fieldDataList.length) return;
+  state.wfg4.debugCorrectionState = {
+    fieldIndex: 0,
+    corrections: []
+  };
+  if(els.wfg4DebugCorrectionPanel) els.wfg4DebugCorrectionPanel.style.display = 'block';
+  if(els.wfg4DebugCorrectionDoneBtn) els.wfg4DebugCorrectionDoneBtn.style.display = 'none';
+  wfg4DebugPromptCorrectionField();
+}
+
+function wfg4DebugPromptCorrectionField(){
+  const pending = state.wfg4.debugPending;
+  const cs = state.wfg4.debugCorrectionState;
+  if(!pending || !cs) return;
+  const fields = pending.fieldDataList;
+  if(cs.fieldIndex >= fields.length){
+    if(els.wfg4DebugCorrectionPrompt) els.wfg4DebugCorrectionPrompt.textContent = 'All fields corrected. Click "Finish Corrections".';
+    if(els.wfg4DebugCorrectionConfirmBtn) els.wfg4DebugCorrectionConfirmBtn.style.display = 'none';
+    if(els.wfg4DebugCorrectionDoneBtn) els.wfg4DebugCorrectionDoneBtn.style.display = 'inline-block';
+    return;
+  }
+  const fd = fields[cs.fieldIndex];
+  if(els.wfg4DebugCorrectionPrompt){
+    els.wfg4DebugCorrectionPrompt.textContent = `Field ${cs.fieldIndex + 1}/${fields.length}: Draw correct bbox for "${fd.fieldKey}"`;
+  }
+  if(els.wfg4DebugCorrectionConfirmBtn) els.wfg4DebugCorrectionConfirmBtn.style.display = 'inline-block';
+}
+
+function wfg4DebugConfirmCorrectionField(){
+  const cs = state.wfg4.debugCorrectionState;
+  const pending = state.wfg4.debugPending;
+  if(!cs || !pending) return;
+  const snappedBox = state.snappedPx || null;
+  const fd = pending.fieldDataList[cs.fieldIndex];
+  if(fd){
+    fd.userCorrectedBbox = snappedBox ? { x: snappedBox.x, y: snappedBox.y, w: snappedBox.w, h: snappedBox.h, page: snappedBox.page } : null;
+    cs.corrections.push({ fieldKey: fd.fieldKey, correctedBbox: fd.userCorrectedBbox });
+  }
+  cs.fieldIndex++;
+  state.snappedPx = null;
+  wfg4DebugPromptCorrectionField();
+}
+
+function wfg4DebugFinishCorrections(){
+  wfg4DebugLogEntry('BAD');
+  const resolve = state.wfg4.debugPending?._resolve;
+  wfg4DebugHidePanel();
+  if(resolve) resolve();
+}
+
+// Wire up GOOD/BAD buttons
+els.wfg4DebugGoodBtn?.addEventListener('click', ()=>{
+  wfg4DebugLogEntry('GOOD');
+  const resolve = state.wfg4.debugPending?._resolve;
+  wfg4DebugHidePanel();
+  if(resolve) resolve();
+});
+els.wfg4DebugBadBtn?.addEventListener('click', ()=>{
+  wfg4DebugStartCorrectionMode();
+});
+els.wfg4DebugCorrectionConfirmBtn?.addEventListener('click', ()=>{
+  wfg4DebugConfirmCorrectionField();
+});
+els.wfg4DebugCorrectionDoneBtn?.addEventListener('click', ()=>{
+  wfg4DebugFinishCorrections();
+});
+
 async function processBatch(files){
   if(!files.length) return;
+  if(state.wfg4.debugMode && getConfiguredEngineType() === ENGINE_KIND.WFG4 && files.length > 1){
+    alert('WFG4 Debug Mode only allows 1 file at a time. Please upload a single file.');
+    return;
+  }
   let runCtx;
   try{
     runCtx = resolveRunWizardContext({ profileOverride: state.profile });
