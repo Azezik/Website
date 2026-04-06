@@ -167,3 +167,47 @@ Full WFG4 lifecycle traced through code:
 
 ### Verdict
 **Working end to end** after these three fixes. No remaining structural blockers in the config → save → load → run → compile lifecycle for WFG4.
+
+## 2026-04-06 — Phase: Debug PDF run-mode OCR fallback failure
+
+### Root Cause
+PDFs with empty text layers (scanned PDFs, certain flattened PDFs where text was removed or embedded as image) fail in run mode with `Error attempting to read image` from Tesseract.
+
+**Exact failure chain:**
+1. `prepareRunDocument` reads PDF text tokens via PDF.js `getTextContent()` but does NOT render the PDF to `els.pdfCanvas` (run mode skips `renderAllPages()` for speed).
+2. `cleanupDoc()` → `clearDocumentSurfaces()` resets `els.pdfCanvas` to 0×0.
+3. When PDF text layer has zero tokens, `resolveExtractionTokensForField` falls back to Tesseract OCR (`pdf_empty_tokens_fallback` reason).
+4. `readImageTokensForPageWithBBox` → `getPdfBitmapCanvas(pageNum-1)` returns `{canvas:null}` because pdfCanvas is 0×0.
+5. Fallback chain `canvasEl || getPdfBitmapCanvas(...)?.canvas || els.imgCanvas` lands on `els.imgCanvas` — an `<img>` element with no `src` (cleared by `cleanupDoc`).
+6. Tesseract.js receives a blank `<img>` element → throws `Error attempting to read image`.
+
+### What runtime readout path is actually used today
+
+- **Flattened PDFs (working):** PDF.js text layer (`getTextContent`) returns tokens → extraction uses `pdfjs` token source. Canvas rendering and Tesseract are never invoked. WFG4 localization is visual-first on the canonical surface; readout uses these PDF text tokens as read-assist.
+
+- **Images (working):** `els.imgCanvas` has a valid loaded image → Tesseract OCR reads it directly. WFG4 localization is visual-first; readout uses OCR tokens.
+
+- **PDFs with empty text layer (was failing):** PDF.js returns zero tokens → fallback to Tesseract → but `els.pdfCanvas` is 0×0 (never rendered in run mode) → falls through to `els.imgCanvas` (blank `<img>`) → Tesseract crash.
+
+### Classification
+**PDF-specific OCR fallback bug.** The Tesseract fallback path assumed a rendered canvas would be available, but run mode never renders PDFs to canvas. This is a legacy assumption leak — the run-mode optimization (skip canvas rendering) was added without updating the OCR fallback source resolution. WFG4 architecture is not at fault; this bug exists underneath WFG4 in the shared token-resolution layer.
+
+### Fix Summary
+Modified `readImageTokensForPageWithBBox` in `invoice-wizard.js` to:
+1. **On-demand PDF page render:** When the main pdfCanvas is unavailable (0×0) and `state.pdf` exists, render the specific page to a temporary off-screen canvas using the already-loaded PDF.js document object. This is the same rendering approach used by `renderAllPages` but scoped to a single page and not attached to the DOM.
+2. **Source validation guards:** Before passing any source to Tesseract, validate that `<img>` elements have a loaded `src` and `<canvas>` elements have non-zero dimensions. Returns `[]` instead of crashing.
+
+### Files Modified
+- `invoice-wizard.js` (`readImageTokensForPageWithBBox`, lines ~18852–18890)
+- `docs/wfg4-dev-log.md` (this entry)
+
+### Architectural Boundary Preserved
+- WFG4 visual localization remains visual-first and unchanged.
+- The fix is entirely within the shared token-resolution / OCR fallback layer underneath WFG4.
+- Non-visual sources (PDF text, AcroForm) are not promoted to drive localization.
+- The on-demand render only provides pixel data for Tesseract readout after WFG4 localization has already determined the target region.
+
+### Remaining Risk
+- PDFs that fail both PDF.js text extraction AND PDF.js canvas rendering (corrupt or encrypted) will still return zero tokens gracefully (no crash, but no extraction).
+- On-demand page rendering adds a per-page rendering cost for text-layer-empty PDFs; this is bounded by `ensureTesseractTokensForPageWithBBox` caching (one render + one OCR call per page).
+- Very large pages may produce large temporary canvases; this is the same memory profile as `renderAllPages` but scoped to one page at a time.
