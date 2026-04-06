@@ -19538,6 +19538,37 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   let value = '', boxPx = state.snappedPx;
   let confidence = 0, raw = '', corrections=[];
   let fieldTokens = [];
+  // P1 fix: pre-register engine-owned config (WFG4) BEFORE extractFieldValue, so
+  // visual-first localization at config time has a real reference packet to match
+  // against (instead of failing with `missing_reference_or_surface` and only
+  // succeeding after the user re-opens the field). The post-extract registration
+  // block below detects _prelimEngineOwnedConfig and reuses it.
+  let _prelimEngineOwnedConfig = null;
+  if(step.type === 'static' && !isAreaStep && getConfiguredEngineType() === ENGINE_KIND.WFG4 && state.snappedPx && EngineRegistry?.registerFieldConfig){
+    try {
+      const _vpPre = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+      const _cwPre = (_vpPre.width ?? _vpPre.w) || 1;
+      const _chPre = (_vpPre.height ?? _vpPre.h) || 1;
+      const _normBoxPre = normalizeBox(state.snappedPx, _cwPre, _chPre);
+      const _rawBoxPre = { x: state.snappedPx.x, y: state.snappedPx.y, w: state.snappedPx.w, h: state.snappedPx.h, canvasW: _cwPre, canvasH: _chPre };
+      _prelimEngineOwnedConfig = await EngineRegistry.registerFieldConfig(ENGINE_KIND.WFG4, {
+        step,
+        normBox: _normBoxPre,
+        page: state.pageNum,
+        rawBox: _rawBoxPre,
+        viewport: _vpPre,
+        tokens: state.tokensByPage[state.pageNum] || tokens || [],
+        profile: state.profile,
+        geometryId: state.activeGeometryId || currentGeometryId(),
+        wfg4Surface: state.wfg4?.configSurface || null
+      });
+      if(_prelimEngineOwnedConfig && _prelimEngineOwnedConfig.wfg4Config){
+        step.wfg4Config = _prelimEngineOwnedConfig.wfg4Config;
+      }
+    } catch(_prelimErr){
+      console.warn('[wfg4] prelim registerFieldConfig failed', _prelimErr);
+    }
+  }
   if(step.kind === 'landmark'){
     value = (state.snappedText || '').trim();
     raw = value;
@@ -19606,9 +19637,11 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     wfg4Surface: state.wfg4?.configSurface || null,
     precomputedStructuralMap: getWrokitVisionPrecomputedForPage(state.pageNum)
   };
-  const engineOwnedConfig = EngineRegistry?.registerFieldConfig
-    ? await Promise.resolve(EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload))
-    : {};
+  const engineOwnedConfig = (_prelimEngineOwnedConfig && activeConfigEngine === ENGINE_KIND.WFG4)
+    ? _prelimEngineOwnedConfig
+    : (EngineRegistry?.registerFieldConfig
+        ? await Promise.resolve(EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload))
+        : {});
   const areaBoxForStep = isAreaStep
     ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }
     : getAreaSelection(areaKey);
