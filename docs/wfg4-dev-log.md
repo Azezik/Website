@@ -36,6 +36,50 @@
 ### Out of scope (intentionally untouched)
 - PDF text-layer extraction, OCR backend selection, localized OCR fallback, token-gating, readout backend behavior, and the localization→readout contract were not modified. The hard localization gate in `extractScalar` still owns the `needsReview` decision.
 
+## 2026-04-06 — Phase: WFG4 structural visibility audit + config overlay hook
+
+### Summary
+- Added a **config-mode structural debug overlay path** for WFG4, using the existing `WFG4 Debug Mode` toggle when in config mode.
+- Overlay draws the structural artifacts that are actually captured/used today: structural capture region, neighborhood patch box, field bbox, detected lines, enclosing container, and anchor offset rays.
+- Added runtime structural debug payload plumbing (`structuralDebug`) from `structuralRefineBox` through localization results so run-mode overlaying can be added without re-instrumenting OpenCV internals later.
+
+### Files Modified
+- `invoice-wizard.js`
+- `engines/wfg4/wfg4-opencv.js`
+- `engines/wfg4/wfg4-localization.js`
+- `docs/wfg4-dev-log.md`
+
+### Details
+- `invoice-wizard.js`
+  - New `state.wfg4.structuralOverlay` flag.
+  - `wfg4-debug-toggle` behavior is now mode-aware:
+    - config mode → toggles structural overlay painting
+    - run mode → retains existing debug pause/review behavior.
+  - Added `paintWfg4StructuralOverlay(...)` and related helpers:
+    - reads current step/profile `wfg4Config`
+    - draws:
+      - structural capture region (`structuralContext.captureRegion`)
+      - neighborhood box (`visualReference.patches.neighborhood.box`)
+      - field bbox (`wfg4Config.bbox`)
+      - detected horizontal/vertical lines (`structuralContext.lines`)
+      - enclosing container (`structuralContext.container`)
+      - anchor distance rays (`anchors.distAbove/distBelow/distLeft/distRight`)
+  - `drawOverlay()` now paints this overlay in config mode when enabled.
+- `engines/wfg4/wfg4-opencv.js`
+  - `structuralRefineBox` now returns a `debug` object with:
+    - local analysis region
+    - detected lines
+    - detected containers
+    - matched runtime container (if found)
+- `engines/wfg4/wfg4-localization.js`
+  - Added `structuralDebug` to localization return payload and degraded/failed payload shapes for consistency.
+
+### Scope / Non-Behavior Changes
+- No extraction behavior changes were introduced.
+- No changes to PDF text-layer logic.
+- No changes to token source selection logic.
+- No changes to readout contract behavior.
+
 
 
 ### Summary

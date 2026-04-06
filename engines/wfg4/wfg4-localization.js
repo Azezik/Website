@@ -61,6 +61,7 @@
       refineScore: 0,
       usedStructural: false,
       structuralAdjustments: [],
+      structuralDebug: null,
       fallbackUsed: false,
       attempts: attempts || [],
       reason: reason || 'localization_failed'
@@ -287,6 +288,7 @@
     // Structural refinement (only as controlled fallback when geometric localization failed,
     // or as refinement boost when it succeeded).
     let structuralAdjustments = [];
+    let structuralDebug = null;
     let usedStructural = false;
     const structuralCtx = ref?.structuralContext || null;
     const structBaseBox = localized || predictedBox;
@@ -315,6 +317,7 @@
           structuralAdjustments = structResult.adjustments || [];
           usedStructural = true;
         }
+        structuralDebug = structResult.debug || null;
       } catch(_e){ /* best-effort */ } finally {
         if(rtGray) rtGray.delete();
         if(rtRgba) rtRgba.delete();
@@ -344,6 +347,7 @@
           refineScore,
           usedStructural: false,
           structuralAdjustments: [],
+          structuralDebug: null,
           fallbackUsed: true,
           attempts: attemptsLog,
           reason: 'degraded_fallback_predicted_box'
@@ -410,6 +414,7 @@
       refineScore,
       usedStructural,
       structuralAdjustments,
+      structuralDebug,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
       // legacy keys for backward compatibility
