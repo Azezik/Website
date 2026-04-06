@@ -5,7 +5,7 @@
     root.WFG4Types = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function(){
-  const WFG4_SCHEMA_VERSION = 'wfg4/v0-phase3';
+  const WFG4_SCHEMA_VERSION = 'wfg4/v0-phase3-structural';
   const WFG4_NORMALIZATION_VERSION = 'wfg4-canonical-working-v1';
 
   const DEFAULTS = {
@@ -21,7 +21,20 @@
     minInlierRatio: 0.35,
     refinePadRatio: 0.3,
     refineMinPadPx: 20,
-    minTemplateScore: 0.42
+    minTemplateScore: 0.42,
+    // structural anchoring defaults (Phase 3 extension)
+    structuralExpandRatio: 0.5,
+    cannyThreshold1: 50,
+    cannyThreshold2: 150,
+    houghLineThreshold: 40,
+    houghMinLineLength: 30,
+    houghMaxLineGap: 10,
+    contourMinArea: 200,
+    containerOverlapThreshold: 0.7,
+    anchorMaxSearchDist: 80,
+    structuralSnapMaxPx: 8,
+    structuralWeightWhenOrbWeak: 0.6,
+    orbWeakConfidenceThreshold: 0.4
   };
 
   function clamp(value, min, max){

@@ -144,6 +144,74 @@
           descriptors: CvOps.serializeDescriptors(neighborhoodFeatures.descriptors)
         } : null
       };
+
+      // --- Structural context capture (Phase 3 extension) ---
+      const structExpandPad = Math.round(Math.max(canonicalBox.w, canonicalBox.h) * (DEFAULTS.structuralExpandRatio || 0.5));
+      const structBox = Types.expandBox
+        ? Types.expandBox(canonicalBox, structExpandPad, { width: pageCanvas.width, height: pageCanvas.height })
+        : canonicalBox;
+      const structCropCanvas = CvOps.cropCanvas(pageCanvas, structBox);
+
+      if(structCropCanvas){
+        let structMat = null;
+        let structGray = null;
+        try {
+          structMat = cv.imread(structCropCanvas);
+          structGray = new cv.Mat();
+          cv.cvtColor(structMat, structGray, cv.COLOR_RGBA2GRAY);
+
+          const lines = CvOps.detectEdgesAndLines(structGray, {
+            cannyThreshold1: DEFAULTS.cannyThreshold1,
+            cannyThreshold2: DEFAULTS.cannyThreshold2,
+            houghLineThreshold: DEFAULTS.houghLineThreshold,
+            houghMinLineLength: DEFAULTS.houghMinLineLength,
+            houghMaxLineGap: DEFAULTS.houghMaxLineGap
+          });
+
+          const containers = CvOps.detectContainers(structGray, {
+            cannyThreshold1: DEFAULTS.cannyThreshold1,
+            cannyThreshold2: DEFAULTS.cannyThreshold2,
+            contourMinArea: DEFAULTS.contourMinArea
+          });
+
+          // offset lines and containers from crop-local to page coordinates
+          const sox = Math.round(structBox.x);
+          const soy = Math.round(structBox.y);
+          for(const hl of lines.horizontal){ hl.yMid += soy; hl.x1 += sox; hl.x2 += sox; hl.y1 += soy; hl.y2 += soy; }
+          for(const vl of lines.vertical){ vl.xMid += sox; vl.x1 += sox; vl.x2 += sox; vl.y1 += soy; vl.y2 += soy; }
+          for(const c of containers){ c.x += sox; c.y += soy; }
+
+          const enclosingContainer = CvOps.findEnclosingContainer(canonicalBox, containers, DEFAULTS.containerOverlapThreshold);
+          const anchorOffsets = CvOps.computeAnchorOffsets(canonicalBox, lines, enclosingContainer);
+
+          packet.structuralContext = {
+            lines: {
+              horizontal: lines.horizontal.slice(0, 20),
+              vertical: lines.vertical.slice(0, 20)
+            },
+            container: enclosingContainer ? {
+              x: enclosingContainer.x,
+              y: enclosingContainer.y,
+              w: enclosingContainer.w,
+              h: enclosingContainer.h
+            } : null,
+            anchors: anchorOffsets,
+            captureRegion: structBox,
+            captureStatus: 'ok'
+          };
+        } catch(structErr){
+          packet.structuralContext = {
+            captureStatus: 'structural_capture_failed',
+            captureError: String(structErr?.message || structErr || 'unknown')
+          };
+        } finally {
+          if(structMat) structMat.delete();
+          if(structGray) structGray.delete();
+        }
+      } else {
+        packet.structuralContext = { captureStatus: 'structural_crop_failed' };
+      }
+
       packet.visualReference.captureStatus = 'ok';
     } catch(err){
       packet.visualReference.captureStatus = 'feature_capture_failed';

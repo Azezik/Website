@@ -279,6 +279,229 @@
     };
   }
 
+  // --- Structural detection functions (Phase 3 extension) ---
+
+  function detectEdgesAndLines(grayMat, opts){
+    const cv = root.cv;
+    const o = opts || {};
+    const edges = new cv.Mat();
+    cv.Canny(grayMat, edges, o.cannyThreshold1 || 50, o.cannyThreshold2 || 150);
+
+    const lines = new cv.Mat();
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180,
+      o.houghLineThreshold || 40,
+      o.houghMinLineLength || 30,
+      o.houghMaxLineGap || 10);
+
+    const horizontal = [];
+    const vertical = [];
+    for(let i = 0; i < lines.rows; i++){
+      const x1 = lines.data32S[i * 4];
+      const y1 = lines.data32S[i * 4 + 1];
+      const x2 = lines.data32S[i * 4 + 2];
+      const y2 = lines.data32S[i * 4 + 3];
+      const dx = Math.abs(x2 - x1);
+      const dy = Math.abs(y2 - y1);
+      if(dy < 5 && dx > 10){
+        horizontal.push({ x1, y1, x2, y2, yMid: (y1 + y2) / 2 });
+      } else if(dx < 5 && dy > 10){
+        vertical.push({ x1, y1, x2, y2, xMid: (x1 + x2) / 2 });
+      }
+    }
+
+    edges.delete();
+    lines.delete();
+    return { horizontal, vertical };
+  }
+
+  function detectContainers(grayMat, opts){
+    const cv = root.cv;
+    const o = opts || {};
+    const edges = new cv.Mat();
+    cv.Canny(grayMat, edges, o.cannyThreshold1 || 50, o.cannyThreshold2 || 150);
+
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+
+    const rects = [];
+    for(let i = 0; i < contours.size(); i++){
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if(area < (o.contourMinArea || 200)){ cnt.delete(); continue; }
+      const approx = new cv.Mat();
+      const peri = cv.arcLength(cnt, true);
+      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+      if(approx.rows === 4){
+        const br = cv.boundingRect(approx);
+        rects.push({ x: br.x, y: br.y, w: br.width, h: br.height, area });
+      }
+      approx.delete();
+      cnt.delete();
+    }
+
+    contours.delete();
+    hierarchy.delete();
+    edges.delete();
+
+    rects.sort((a, b) => a.area - b.area);
+    return rects;
+  }
+
+  function findEnclosingContainer(bbox, containers, overlapThreshold){
+    const thresh = overlapThreshold || 0.7;
+    const bx1 = bbox.x, by1 = bbox.y, bx2 = bbox.x + bbox.w, by2 = bbox.y + bbox.h;
+    const bArea = bbox.w * bbox.h;
+    let best = null;
+    for(const c of containers){
+      const cx1 = c.x, cy1 = c.y, cx2 = c.x + c.w, cy2 = c.y + c.h;
+      const ix1 = Math.max(bx1, cx1), iy1 = Math.max(by1, cy1);
+      const ix2 = Math.min(bx2, cx2), iy2 = Math.min(by2, cy2);
+      if(ix1 >= ix2 || iy1 >= iy2) continue;
+      const iArea = (ix2 - ix1) * (iy2 - iy1);
+      if(bArea > 0 && (iArea / bArea) >= thresh){
+        if(!best || c.area < best.area) best = c;
+      }
+    }
+    return best;
+  }
+
+  function computeAnchorOffsets(bbox, lines, container){
+    const bTop = bbox.y;
+    const bBottom = bbox.y + bbox.h;
+    const bLeft = bbox.x;
+    const bRight = bbox.x + bbox.w;
+    const maxDist = 9999;
+
+    let nearestAbove = maxDist, nearestBelow = maxDist;
+    let nearestLeft = maxDist, nearestRight = maxDist;
+
+    for(const hl of lines.horizontal){
+      if(hl.x1 > bRight || hl.x2 < bLeft) continue;
+      const dist = bTop - hl.yMid;
+      if(dist > 0 && dist < nearestAbove) nearestAbove = dist;
+      const distBelow = hl.yMid - bBottom;
+      if(distBelow > 0 && distBelow < nearestBelow) nearestBelow = distBelow;
+    }
+
+    for(const vl of lines.vertical){
+      if(vl.y1 > bBottom || vl.y2 < bTop) continue;
+      const dist = bLeft - vl.xMid;
+      if(dist > 0 && dist < nearestLeft) nearestLeft = dist;
+      const distRight = vl.xMid - bRight;
+      if(distRight > 0 && distRight < nearestRight) nearestRight = distRight;
+    }
+
+    const anchors = {
+      distAbove: nearestAbove < maxDist ? nearestAbove : null,
+      distBelow: nearestBelow < maxDist ? nearestBelow : null,
+      distLeft: nearestLeft < maxDist ? nearestLeft : null,
+      distRight: nearestRight < maxDist ? nearestRight : null
+    };
+
+    if(container){
+      anchors.containerOffset = {
+        top: bbox.y - container.y,
+        left: bbox.x - container.x,
+        bottom: (container.y + container.h) - (bbox.y + bbox.h),
+        right: (container.x + container.w) - (bbox.x + bbox.w)
+      };
+      anchors.relativePosition = {
+        xRatio: container.w > 0 ? (bbox.x - container.x) / container.w : 0,
+        yRatio: container.h > 0 ? (bbox.y - container.y) / container.h : 0,
+        wRatio: container.w > 0 ? bbox.w / container.w : 1,
+        hRatio: container.h > 0 ? bbox.h / container.h : 1
+      };
+    }
+
+    return anchors;
+  }
+
+  function structuralRefineBox(projectedBox, structuralCtx, runtimeGray, opts){
+    const cv = root.cv;
+    const o = opts || {};
+    if(!structuralCtx || !runtimeGray || !projectedBox) return { ok: false, box: projectedBox, adjustments: [] };
+
+    const snapMax = o.structuralSnapMaxPx || 8;
+    const searchDist = o.anchorMaxSearchDist || 80;
+    const adjustments = [];
+    let box = { x: projectedBox.x, y: projectedBox.y, w: projectedBox.w, h: projectedBox.h, page: projectedBox.page || 1 };
+
+    // extract local region for structural analysis
+    const pad = Math.max(searchDist, Math.round(Math.max(box.w, box.h) * 0.6));
+    const bounds = { width: runtimeGray.cols, height: runtimeGray.rows };
+    const Types = root.WFG4Types || {};
+    const localBox = Types.expandBox ? Types.expandBox(box, pad, bounds) : box;
+
+    const roi = runtimeGray.roi(new cv.Rect(
+      clamp(Math.round(localBox.x), 0, runtimeGray.cols - 1),
+      clamp(Math.round(localBox.y), 0, runtimeGray.rows - 1),
+      clamp(Math.round(localBox.w), 1, runtimeGray.cols - Math.round(localBox.x)),
+      clamp(Math.round(localBox.h), 1, runtimeGray.rows - Math.round(localBox.y))
+    ));
+
+    const localLines = detectEdgesAndLines(roi, o);
+    const localContainers = detectContainers(roi, o);
+
+    // offset lines/containers to page coordinates
+    const ox = Math.round(localBox.x);
+    const oy = Math.round(localBox.y);
+    for(const hl of localLines.horizontal){ hl.yMid += oy; hl.x1 += ox; hl.x2 += ox; hl.y1 += oy; hl.y2 += oy; }
+    for(const vl of localLines.vertical){ vl.xMid += ox; vl.x1 += ox; vl.x2 += ox; vl.y1 += oy; vl.y2 += oy; }
+    for(const c of localContainers){ c.x += ox; c.y += oy; }
+
+    roi.delete();
+
+    // snap to container boundaries if config had a container
+    if(structuralCtx.container && structuralCtx.anchors?.containerOffset){
+      const co = structuralCtx.anchors.containerOffset;
+      const rp = structuralCtx.anchors.relativePosition;
+      const rtContainer = findEnclosingContainer(box, localContainers, o.containerOverlapThreshold || 0.7);
+      if(rtContainer && rp){
+        const newX = rtContainer.x + rp.xRatio * rtContainer.w;
+        const newY = rtContainer.y + rp.yRatio * rtContainer.h;
+        const dx = newX - box.x;
+        const dy = newY - box.y;
+        if(Math.abs(dx) <= searchDist && Math.abs(dy) <= searchDist){
+          box.x = newX;
+          box.y = newY;
+          adjustments.push('container_snap');
+        }
+      }
+    }
+
+    // snap edges to nearest lines using config-time anchor offsets
+    const anchors = structuralCtx.anchors || {};
+    if(anchors.distAbove !== null && anchors.distAbove !== undefined){
+      for(const hl of localLines.horizontal){
+        const candidateY = hl.yMid + anchors.distAbove;
+        const shift = candidateY - box.y;
+        if(Math.abs(shift) <= snapMax && hl.x1 <= box.x + box.w && hl.x2 >= box.x){
+          box.y = candidateY;
+          adjustments.push('snap_above');
+          break;
+        }
+      }
+    }
+    if(anchors.distLeft !== null && anchors.distLeft !== undefined){
+      for(const vl of localLines.vertical){
+        const candidateX = vl.xMid + anchors.distLeft;
+        const shift = candidateX - box.x;
+        if(Math.abs(shift) <= snapMax && vl.y1 <= box.y + box.h && vl.y2 >= box.y){
+          box.x = candidateX;
+          adjustments.push('snap_left');
+          break;
+        }
+      }
+    }
+
+    return {
+      ok: adjustments.length > 0,
+      box,
+      adjustments
+    };
+  }
+
   return {
     hasCv,
     dataUrlToCanvas,
@@ -291,6 +514,11 @@
     matchFeatures,
     estimateTransform,
     projectPoints,
-    localTemplateRefine
+    localTemplateRefine,
+    detectEdgesAndLines,
+    detectContainers,
+    findEnclosingContainer,
+    computeAnchorOffsets,
+    structuralRefineBox
   };
 });
