@@ -73,8 +73,21 @@
       phase3Ready: true
     };
 
-    if(!CvOps.hasCv?.() || !pageEntry?.artifacts?.displayDataUrl){
-      packet.visualReference.captureStatus = 'cv_or_artifact_unavailable';
+    const cvReadyInfo = CvOps.ensureCvReady
+      ? await CvOps.ensureCvReady({
+          timeoutMs: payload.cvReadyTimeoutMs || 12000,
+          pollMs: payload.cvReadyPollMs || 75,
+          autoLoad: true
+        })
+      : { ok: CvOps.hasCv?.() };
+    if(!CvOps.hasCv?.()){
+      packet.visualReference.captureStatus = 'cv_unavailable';
+      packet.visualReference.captureError = cvReadyInfo?.source || 'opencv_runtime_unavailable';
+      return packet;
+    }
+
+    if(!pageEntry?.artifacts?.displayDataUrl){
+      packet.visualReference.captureStatus = 'artifact_missing';
       return packet;
     }
 
