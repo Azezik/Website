@@ -7,10 +7,73 @@
 })(typeof self !== 'undefined' ? self : this, function(root){
   const Types = root.WFG4Types || {};
   const clamp = Types.clamp || ((v,min,max)=>Math.max(min,Math.min(max,v)));
+  const DEFAULT_OPENCV_JS_URL = 'https://docs.opencv.org/4.x/opencv.js';
+  let cvScriptLoadPromise = null;
 
   function hasCv(){
     const cv = root.cv;
     return !!(cv && typeof cv.imread === 'function' && typeof cv.ORB === 'function');
+  }
+
+  function wait(ms){
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  function loadCvScript(opts = {}){
+    if(hasCv()) return Promise.resolve({ ok:true, source:'already_loaded' });
+    if(typeof document === 'undefined'){
+      return Promise.resolve({ ok:false, source:'no_document' });
+    }
+    if(cvScriptLoadPromise) return cvScriptLoadPromise;
+    const scriptUrl = String(opts.scriptUrl || DEFAULT_OPENCV_JS_URL || '').trim();
+    if(!scriptUrl){
+      return Promise.resolve({ ok:false, source:'missing_script_url' });
+    }
+    const existing = document.querySelector('script[data-wfg4-opencv="true"]');
+    if(existing){
+      cvScriptLoadPromise = Promise.resolve({ ok:true, source:'existing_tag' });
+      return cvScriptLoadPromise;
+    }
+    cvScriptLoadPromise = new Promise(resolve => {
+      const s = document.createElement('script');
+      s.src = scriptUrl;
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      s.dataset.wfg4Opencv = 'true';
+      s.onload = () => resolve({ ok:true, source:'loaded', scriptUrl });
+      s.onerror = () => resolve({ ok:false, source:'load_error', scriptUrl });
+      document.head?.appendChild(s);
+    });
+    return cvScriptLoadPromise;
+  }
+
+  async function ensureCvReady(opts = {}){
+    if(hasCv()) return { ok:true, ready:true, source:'already_ready' };
+    const timeoutMs = Math.max(200, Number(opts.timeoutMs || 12000));
+    const pollMs = Math.max(25, Number(opts.pollMs || 75));
+    const autoLoad = opts.autoLoad !== false;
+    if(autoLoad){
+      await loadCvScript(opts);
+    }
+    const cv = root.cv;
+    if(cv && typeof cv.then === 'function'){
+      try {
+        await Promise.race([
+          cv,
+          wait(timeoutMs)
+        ]);
+      } catch(_err){
+        // fall through to polling; final status determined below
+      }
+    }
+    const start = Date.now();
+    while((Date.now() - start) < timeoutMs){
+      if(hasCv()){
+        return { ok:true, ready:true, source:'runtime_ready' };
+      }
+      await wait(pollMs);
+    }
+    return { ok:false, ready:false, source:'timeout_or_unavailable' };
   }
 
   function dataUrlToCanvas(dataUrl){
@@ -503,7 +566,10 @@
   }
 
   return {
+    DEFAULT_OPENCV_JS_URL,
     hasCv,
+    loadCvScript,
+    ensureCvReady,
     dataUrlToCanvas,
     cropCanvas,
     orbDetect,

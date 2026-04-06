@@ -333,3 +333,22 @@ This feature makes localization behavior observable and measurable without chang
 - Whether the final OCR crop matches what the user expects (refined vs user-corrected delta)
 - Scale and offset drift between config-time and run-time surfaces
 - Per-field localization confidence vs readout confidence correlation
+
+## 2026-04-06 — Phase: OpenCV readiness + explicit capture failure statuses
+
+### Summary
+- Fixed ambiguous config-time WFG4 visual-reference capture failure mode when OpenCV.js is unavailable.
+- Added OpenCV runtime bootstrap/readiness wait in the WFG4 OpenCV adapter before capture.
+- Split visual-reference capture failure statuses into explicit values:
+  - `cv_unavailable`
+  - `artifact_missing`
+
+### Files Modified
+- `engines/wfg4/wfg4-opencv.js`
+- `engines/wfg4/wfg4-registration.js`
+- `docs/wfg4-dev-log.md` (this entry)
+
+### Notes
+- WFG4 config-time capture now attempts to load OpenCV.js from `https://docs.opencv.org/4.x/opencv.js` and waits for runtime readiness.
+- Capture no longer collapses CV runtime absence and missing artifacts into one status string.
+- If OpenCV remains unavailable after readiness wait, capture exits explicitly with `captureStatus: "cv_unavailable"` and does not pretend visual-reference capture succeeded.

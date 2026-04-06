@@ -13684,6 +13684,15 @@ function syncWfg4SurfaceContext(mode){
     }
     return;
   }
+  if(window.WFG4OpenCv?.ensureCvReady){
+    Promise.resolve(
+      window.WFG4OpenCv.ensureCvReady({
+        timeoutMs: 15000,
+        pollMs: 75,
+        autoLoad: true
+      })
+    ).catch(err => console.warn('[wfg4] OpenCV bootstrap failed', err));
+  }
   const surface = captureWfg4SurfaceForMode(mode);
   if(!surface) return;
   state.wfg4 = state.wfg4 || { configSurface: null, runSurface: null };
