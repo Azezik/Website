@@ -308,37 +308,57 @@
 
   function localTemplateRefine(runtimeGray, refPatchGray, projectedBox, minScore){
     const cv = root.cv;
-    if(!runtimeGray || !refPatchGray || !projectedBox) return { ok:false, box:projectedBox, score:0 };
-    const searchPad = Math.max(20, Math.round(Math.max(projectedBox.w, projectedBox.h) * 0.3));
+    if(!runtimeGray || !refPatchGray || !projectedBox) return { ok:false, box:projectedBox, score:0, scale:1 };
+    // Wider search pad helps when projection is slightly off due to scale drift.
+    const searchPad = Math.max(24, Math.round(Math.max(projectedBox.w, projectedBox.h) * 0.45));
     const x = clamp(Math.round(projectedBox.x - searchPad), 0, Math.max(0, runtimeGray.cols - 2));
     const y = clamp(Math.round(projectedBox.y - searchPad), 0, Math.max(0, runtimeGray.rows - 2));
-    const w = clamp(Math.round(projectedBox.w + (searchPad * 2)), refPatchGray.cols + 1, runtimeGray.cols - x);
-    const h = clamp(Math.round(projectedBox.h + (searchPad * 2)), refPatchGray.rows + 1, runtimeGray.rows - y);
-    if(w <= refPatchGray.cols || h <= refPatchGray.rows) return { ok:false, box:projectedBox, score:0 };
-
+    const w = clamp(Math.round(projectedBox.w + (searchPad * 2)), 4, runtimeGray.cols - x);
+    const h = clamp(Math.round(projectedBox.h + (searchPad * 2)), 4, runtimeGray.rows - y);
     const roi = runtimeGray.roi(new cv.Rect(x, y, w, h));
-    const resultCols = w - refPatchGray.cols + 1;
-    const resultRows = h - refPatchGray.rows + 1;
-    const result = new cv.Mat(resultRows, resultCols, cv.CV_32FC1);
-    cv.matchTemplate(roi, refPatchGray, result, cv.TM_CCOEFF_NORMED);
-    const mm = cv.minMaxLoc(result);
 
-    const bestBox = {
-      x: x + mm.maxLoc.x,
-      y: y + mm.maxLoc.y,
-      w: refPatchGray.cols,
-      h: refPatchGray.rows,
-      page: projectedBox.page || 1
-    };
-
+    // Multi-scale template refinement: tries a small ladder of scales so that
+    // when the run document differs in zoom / DPI / scan resolution from the
+    // config-time canonical surface, the field patch can still be located
+    // precisely. Without this, single-scale matchTemplate degrades sharply at
+    // even ~10% scale drift.
+    const scales = [0.80, 0.88, 0.94, 1.00, 1.06, 1.13, 1.22, 1.32];
+    let best = { ok:false, box:projectedBox, score:0, scale:1 };
+    for(const s of scales){
+      const sw = Math.max(4, Math.round(refPatchGray.cols * s));
+      const sh = Math.max(4, Math.round(refPatchGray.rows * s));
+      if(sw >= w || sh >= h) continue;
+      const scaled = new cv.Mat();
+      try {
+        cv.resize(refPatchGray, scaled, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+        const resultCols = w - sw + 1;
+        const resultRows = h - sh + 1;
+        const result = new cv.Mat(resultRows, resultCols, cv.CV_32FC1);
+        cv.matchTemplate(roi, scaled, result, cv.TM_CCOEFF_NORMED);
+        const mm = cv.minMaxLoc(result);
+        const score = Number(mm.maxVal || 0);
+        if(score > best.score){
+          best = {
+            ok: false,
+            box: {
+              x: x + mm.maxLoc.x,
+              y: y + mm.maxLoc.y,
+              w: sw,
+              h: sh,
+              page: projectedBox.page || 1
+            },
+            score,
+            scale: s
+          };
+        }
+        result.delete();
+      } catch(_e){ /* skip this scale */ } finally {
+        scaled.delete();
+      }
+    }
     roi.delete();
-    result.delete();
-
-    return {
-      ok: mm.maxVal >= (minScore || 0.42),
-      box: bestBox,
-      score: Number(mm.maxVal || 0)
-    };
+    best.ok = best.score >= (minScore || 0.42);
+    return best;
   }
 
   // --- Structural detection functions (Phase 3 extension) ---
@@ -410,20 +430,32 @@
     return rects;
   }
 
-  function findEnclosingContainer(bbox, containers, overlapThreshold){
+  function findEnclosingContainer(bbox, containers, overlapThreshold, refSizeHint){
     const thresh = overlapThreshold || 0.7;
     const bx1 = bbox.x, by1 = bbox.y, bx2 = bbox.x + bbox.w, by2 = bbox.y + bbox.h;
-    const bArea = bbox.w * bbox.h;
+    const bArea = Math.max(1, bbox.w * bbox.h);
     let best = null;
+    let bestScore = -Infinity;
     for(const c of containers){
       const cx1 = c.x, cy1 = c.y, cx2 = c.x + c.w, cy2 = c.y + c.h;
       const ix1 = Math.max(bx1, cx1), iy1 = Math.max(by1, cy1);
       const ix2 = Math.min(bx2, cx2), iy2 = Math.min(by2, cy2);
       if(ix1 >= ix2 || iy1 >= iy2) continue;
       const iArea = (ix2 - ix1) * (iy2 - iy1);
-      if(bArea > 0 && (iArea / bArea) >= thresh){
-        if(!best || c.area < best.area) best = c;
+      if((iArea / bArea) < thresh) continue;
+      // Disambiguate using a closeness-of-fit score: prefer containers whose
+      // size matches an optional reference size hint, otherwise prefer the
+      // smallest enclosing container. This avoids snapping a single cell to
+      // its enclosing table.
+      let score;
+      const cArea = Math.max(1, c.w * c.h);
+      if(refSizeHint && refSizeHint.area > 0){
+        const ratio = Math.min(cArea, refSizeHint.area) / Math.max(cArea, refSizeHint.area);
+        score = ratio - (Math.abs(c.w - refSizeHint.w) + Math.abs(c.h - refSizeHint.h)) / 1000;
+      } else {
+        score = -cArea;
       }
+      if(score > bestScore){ bestScore = score; best = c; }
     }
     return best;
   }
@@ -516,17 +548,25 @@
 
     // snap to container boundaries if config had a container
     if(structuralCtx.container && structuralCtx.anchors?.containerOffset){
-      const co = structuralCtx.anchors.containerOffset;
+      const cfgC = structuralCtx.container;
+      const refSizeHint = { w: cfgC.w, h: cfgC.h, area: cfgC.w * cfgC.h };
       const rp = structuralCtx.anchors.relativePosition;
-      const rtContainer = findEnclosingContainer(box, localContainers, o.containerOverlapThreshold || 0.7);
+      const rtContainer = findEnclosingContainer(box, localContainers, o.containerOverlapThreshold || 0.7, refSizeHint);
       if(rtContainer && rp){
         const newX = rtContainer.x + rp.xRatio * rtContainer.w;
         const newY = rtContainer.y + rp.yRatio * rtContainer.h;
+        // Re-derive width/height from the runtime container so that when the
+        // run document is scaled differently, the field box scales with the
+        // container instead of staying at the config-time pixel size.
+        const newW = Math.max(2, (rp.wRatio || (box.w / Math.max(1, cfgC.w))) * rtContainer.w);
+        const newH = Math.max(2, (rp.hRatio || (box.h / Math.max(1, cfgC.h))) * rtContainer.h);
         const dx = newX - box.x;
         const dy = newY - box.y;
         if(Math.abs(dx) <= searchDist && Math.abs(dy) <= searchDist){
           box.x = newX;
           box.y = newY;
+          box.w = newW;
+          box.h = newH;
           adjustments.push('container_snap');
         }
       }
@@ -552,6 +592,28 @@
         if(Math.abs(shift) <= snapMax && vl.y1 <= box.y + box.h && vl.y2 >= box.y){
           box.x = candidateX;
           adjustments.push('snap_left');
+          break;
+        }
+      }
+    }
+    if(anchors.distBelow !== null && anchors.distBelow !== undefined){
+      for(const hl of localLines.horizontal){
+        const candidateBottom = hl.yMid - anchors.distBelow;
+        const candidateH = candidateBottom - box.y;
+        if(candidateH > 4 && Math.abs(candidateH - box.h) <= snapMax && hl.x1 <= box.x + box.w && hl.x2 >= box.x){
+          box.h = candidateH;
+          adjustments.push('snap_below');
+          break;
+        }
+      }
+    }
+    if(anchors.distRight !== null && anchors.distRight !== undefined){
+      for(const vl of localLines.vertical){
+        const candidateRight = vl.xMid - anchors.distRight;
+        const candidateW = candidateRight - box.x;
+        if(candidateW > 4 && Math.abs(candidateW - box.w) <= snapMax && vl.y1 <= box.y + box.h && vl.y2 >= box.y){
+          box.w = candidateW;
+          adjustments.push('snap_right');
           break;
         }
       }

@@ -76,6 +76,7 @@
     let refMat=null, runMat=null, refGray=null, runGray=null, refFeatures=null, runFeatures=null, matrix=null;
     let localized = null, orbProjectedBox = null, postRefineBox = null;
     let transformModel='none', inliers=0, inlierRatio=0, matchCount=0, refineScore=0, usedRefine=false;
+    let fieldDescriptorCount = 0, refineScale = 1, fieldVerified = false;
     try {
       refMat = cv.imread(refNeighborhoodCanvas);
       runMat = cv.imread(runtimeSearchCanvas);
@@ -112,13 +113,29 @@
         const refFieldMat = cv.imread(refFieldCanvas);
         const refFieldGray = new cv.Mat();
         cv.cvtColor(refFieldMat, refFieldGray, cv.COLOR_RGBA2GRAY);
+        // Diagnostic: how many ORB features the field patch itself carries.
+        // Weak field-patch descriptor counts indicate that matching is being
+        // driven almost entirely by neighborhood context, which is the
+        // failure mode the user reported (right region, wrong target inside).
+        try {
+          const fpFeats = CvOps.orbDetect(refFieldGray, DEFAULTS.maxOrbFeatures || 300);
+          fieldDescriptorCount = Number(fpFeats?.keypoints?.size?.() || 0);
+          fpFeats.keypoints?.delete?.();
+          fpFeats.descriptors?.delete?.();
+        } catch(_e){ fieldDescriptorCount = 0; }
+
         const fullRuntimeRgba = cv.imread(runtimeCanvas);
         const fullRuntimeGray = new cv.Mat();
         cv.cvtColor(fullRuntimeRgba, fullRuntimeGray, cv.COLOR_RGBA2GRAY);
+        // Multi-scale template refinement = field-level identification under
+        // cross-zoom/scale drift. Resists weak field descriptors by relying on
+        // direct intensity correlation of the field patch itself.
         const refined = CvOps.localTemplateRefine(fullRuntimeGray, refFieldGray, localized, DEFAULTS.minTemplateScore || 0.42);
         if(refined.ok){
           localized = { ...refined.box, page };
           usedRefine = true;
+          fieldVerified = true;
+          refineScale = refined.scale || 1;
           postRefineBox = { ...localized };
         }
         refineScore = refined.score || 0;
@@ -137,6 +154,9 @@
         transformModel,
         usedRefine,
         refineScore,
+        refineScale,
+        fieldDescriptorCount,
+        fieldVerified,
         localized,
         orbProjectedBox,
         postRefineBox,
@@ -227,6 +247,10 @@
         inliers: res.inliers || 0,
         inlierRatio: res.inlierRatio || 0,
         transformModel: res.transformModel || 'none',
+        fieldDescriptorCount: res.fieldDescriptorCount || 0,
+        fieldVerified: !!res.fieldVerified,
+        refineScore: res.refineScore || 0,
+        refineScale: res.refineScale || 1,
         reason: res.reason || null
       });
       _EL?.engineLog('wfg4-run', 'localize.attempt', {
@@ -338,9 +362,13 @@
     // Confidence
     const orbScore = Math.min(1, (matchCount / 30));
     const inlierScore = Math.min(1, inlierRatio);
-    const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.2 : 0;
+    // Re-weight: field-level (template) verification is the strongest signal
+    // that we identified the actual target inside the neighborhood, not just
+    // the surrounding area. Neighborhood-only matches are downweighted.
+    const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.30 : 0;
+    const fieldVerifiedBoost = best?.fieldVerified ? 0.10 : 0;
     const structuralBoost = usedStructural ? 0.1 : 0;
-    const baseConfidence = (orbScore * 0.4) + (inlierScore * 0.4) + refineBoost + structuralBoost;
+    const baseConfidence = (orbScore * 0.30) + (inlierScore * 0.30) + refineBoost + fieldVerifiedBoost + structuralBoost;
     const localizationConfidence = Math.max(0.05, Math.min(0.98, baseConfidence));
 
     // bboxSource

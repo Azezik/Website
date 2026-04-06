@@ -274,8 +274,14 @@
         try {
           containerMap = CvOps.detectContainers(gray, {}) || null;
         } catch(_e){ containerMap = null; }
-        if(Array.isArray(containerMap?.containers)){
-          candidateRegions = containerMap.containers
+        // detectContainers returns an Array<{x,y,w,h,area}>; previous code looked
+        // up `.containers` and silently produced zero candidates, which made the
+        // retry-C global-scan localization path effectively dead.
+        const containerArr = Array.isArray(containerMap)
+          ? containerMap
+          : (Array.isArray(containerMap?.containers) ? containerMap.containers : []);
+        if(containerArr.length){
+          candidateRegions = containerArr
             .slice()
             .sort((a,b) => (b.w * b.h) - (a.w * a.h))
             .slice(0, 12)
@@ -283,7 +289,7 @@
         }
         globalScan = {
           lineCount: Array.isArray(lineMap?.horizontal) ? (lineMap.horizontal.length + (lineMap.vertical?.length || 0)) : 0,
-          containerCount: Array.isArray(containerMap?.containers) ? containerMap.containers.length : 0,
+          containerCount: containerArr.length,
           candidateRegions,
           generatedAt: new Date().toISOString()
         };
