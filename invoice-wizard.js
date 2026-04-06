@@ -10131,6 +10131,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           tokens: engineResult?.tokens || [],
           method: engineResult?.method || fieldEngineType,
           engineUsed: fieldEngineType,
+          tokenSource: engineResult?.tokenSource || engineResult?.extractionMeta?.tokenSourceResolved || fieldSpec?.runtime?.tokenSource || null,
+          needsReview: !!engineResult?.needsReview,
+          lowConfidence: !!engineResult?.lowConfidence,
           extractionMeta: engineResult?.extractionMeta || null
         };
       }
@@ -20643,6 +20646,15 @@ function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
       refineScore: localization.refineScore ?? null,
       usedStructural: localization.usedStructural ?? false,
       reason: localization.reason || null,
+      localizationStatus: meta.localizationStatus || (localization.status || null),
+      bboxSource: meta.bboxSource || localization.bboxSource || null,
+      fallbackUsed: !!(meta.fallbackUsed ?? localization.fallbackUsed),
+      attempts: Array.isArray(localization.attempts) ? localization.attempts : [],
+      tokenSourceResolved: meta.tokenSourceResolved || entry.tokenSource || null,
+      predictedBox: stages.predictedBox || null,
+      projectedBox: stages.projectedBox || null,
+      refinedBoxDetail: stages.refinedBox || null,
+      finalReadoutBox: stages.finalReadoutBox || null,
       userCorrectedBbox: null
     });
   }
@@ -20668,6 +20680,21 @@ function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
     const refVsProjected = wfg4DebugBboxDelta(fd.referenceBbox, fd.orbProjectedBbox);
     return {
       fieldKey: fd.fieldKey,
+      localizationStatus: fd.localizationStatus || null,
+      bboxSource: fd.bboxSource || null,
+      fallbackUsed: !!fd.fallbackUsed,
+      tokenSourceResolved: fd.tokenSourceResolved || null,
+      localizationConfidence: fd.localizationConfidence ?? null,
+      readoutConfidence: fd.readoutConfidence ?? null,
+      matchCount: fd.matchCount ?? null,
+      inliers: fd.inliers ?? null,
+      inlierRatio: fd.inlierRatio ?? null,
+      transformModel: fd.transformModel || null,
+      reason: fd.reason || null,
+      attempts: fd.attempts || [],
+      predictedBox: fd.predictedBox || null,
+      projectedBox: fd.projectedBox || null,
+      finalReadoutBox: fd.finalReadoutBox || null,
       referenceBbox: fd.referenceBbox,
       orbProjectedBbox: fd.orbProjectedBbox,
       refinedBbox: fd.refinedBbox,
@@ -20798,10 +20825,16 @@ function wfg4DebugRenderFieldList(fieldDataList){
     row.style.cssText = 'margin-bottom:4px;padding:3px 0;border-bottom:1px solid #334155;';
     const locConf = fd.localizationConfidence != null ? fd.localizationConfidence.toFixed(3) : '—';
     const readConf = fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(3) : '—';
+    const statusColor = fd.localizationStatus === 'success' ? '#22c55e'
+      : (fd.localizationStatus === 'degraded_fallback' ? '#f59e0b' : '#ef4444');
+    const statusText = fd.localizationStatus || 'unknown';
+    const srcText = fd.bboxSource || '—';
+    const reasonText = fd.reason ? ` ${fd.reason}` : '';
     row.innerHTML = `<span style="color:#60a5fa;font-weight:600;">${fd.fieldKey}</span> `
       + `<span style="color:#a3e635;">→ "${(fd.value || '').substring(0, 30)}"</span> `
-      + `<span style="color:#94a3b8;">loc:${locConf} read:${readConf}</span> `
-      + `<span style="color:#fbbf24;">${fd.transformModel || ''}</span>`;
+      + `<span style="color:${statusColor};font-weight:600;">[${statusText}${fd.fallbackUsed ? ' FB' : ''}]</span> `
+      + `<span style="color:#94a3b8;">loc:${locConf} read:${readConf} src:${srcText}</span> `
+      + `<span style="color:#fbbf24;">${fd.transformModel || ''}${reasonText}</span>`;
     els.wfg4DebugFieldList.appendChild(row);
   }
 }

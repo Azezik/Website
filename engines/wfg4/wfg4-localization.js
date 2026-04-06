@@ -33,76 +33,49 @@
     return points.map(p => ({ x: p.x + offset.x, y: p.y + offset.y }));
   }
 
-  async function localizeFieldVisual(payload = {}){
-    const fieldSpec = payload.fieldSpec || {};
-    const ref = fieldSpec.wfg4Config || payload.wfg4Config || null;
-    const surface = payload.wfg4Surface || null;
-    const page = fieldSpec.page || ref?.page || 1;
-    const pageEntry = getPageEntry(surface, page);
-    const predictedBox = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
+  const STATUS = (Types.LOCALIZATION_STATUS || { SUCCESS:'success', FAILED:'failed', DEGRADED_FALLBACK:'degraded_fallback' });
+  const BBOX_SRC = (Types.BBOX_SOURCE || {
+    LOCALIZED_PROJECTED: 'localized_projected',
+    LOCALIZED_REFINED: 'localized_refined',
+    PREDICTED_FALLBACK: 'predicted_fallback',
+    STRUCTURAL_FALLBACK: 'structural_fallback',
+    LEGACY_BOX: 'legacy_box'
+  });
 
-    if(!ref || !pageEntry || !predictedBox){
-      return {
-        ok:false,
-        localizedBox: payload.boxPx || null,
-        localizationConfidence: 0.1,
-        reason: 'missing_reference_or_surface'
-      };
-    }
+  function failedResult(predictedBox, boxPx, reason, attempts){
+    return {
+      ok: false,
+      status: STATUS.FAILED,
+      localizedBox: null,
+      predictedBox: predictedBox || boxPx || null,
+      projectedBox: null,
+      refinedBox: null,
+      finalReadoutBox: null,
+      bboxSource: null,
+      localizationConfidence: 0.05,
+      transformModel: 'none',
+      matchCount: 0,
+      inliers: 0,
+      inlierRatio: 0,
+      usedRefine: false,
+      refineScore: 0,
+      usedStructural: false,
+      structuralAdjustments: [],
+      fallbackUsed: false,
+      attempts: attempts || [],
+      reason: reason || 'localization_failed'
+    };
+  }
 
-    if(!CvOps.hasCv?.() || !ref?.visualReference?.patches?.neighborhood?.dataUrl){
-      return {
-        ok:false,
-        localizedBox: predictedBox,
-        localizationConfidence: 0.15,
-        reason: 'cv_or_reference_patch_unavailable'
-      };
-    }
-
-    const runtimeCanvas = await CvOps.dataUrlToCanvas(pageEntry.artifacts?.displayDataUrl || null);
-    const refNeighborhoodCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.neighborhood.dataUrl);
-    const refFieldCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.field?.dataUrl || null);
-    if(!runtimeCanvas || !refNeighborhoodCanvas){
-      return {
-        ok:false,
-        localizedBox: predictedBox,
-        localizationConfidence: 0.15,
-        reason: 'canvas_decode_failed'
-      };
-    }
-
-    const cv = root.cv;
-    const pad = Math.max(DEFAULTS.searchWindowMinPadPx || 40, Math.round(Math.max(predictedBox.w, predictedBox.h) * (DEFAULTS.searchWindowPadRatio || 0.35)));
-    const searchBox = Types.expandBox
-      ? Types.expandBox(predictedBox, pad, { width: runtimeCanvas.width, height: runtimeCanvas.height })
-      : predictedBox;
+  async function attemptOnWindow(ctx, searchBox, label){
+    const { cv, runtimeCanvas, refNeighborhoodCanvas, refFieldCanvas, ref, page, predictedBox } = ctx;
     const runtimeSearchCanvas = CvOps.cropCanvas(runtimeCanvas, searchBox);
     if(!runtimeSearchCanvas){
-      return {
-        ok:false,
-        localizedBox: predictedBox,
-        localizationConfidence: 0.1,
-        reason: 'search_window_crop_failed'
-      };
+      return { ok:false, reason:'search_window_crop_failed', label, matchCount:0, inliers:0, inlierRatio:0, transformModel:'none' };
     }
-
-    let refMat = null;
-    let runMat = null;
-    let refGray = null;
-    let runGray = null;
-    let refFeatures = null;
-    let runFeatures = null;
-    let matrix = null;
-    let localized = predictedBox;
-    let orbProjectedBox = null;
-    let postRefineBox = null;
-    let transformModel = 'none';
-    let inliers = 0;
-    let inlierRatio = 0;
-    let matchCount = 0;
-    let refineScore = 0;
-    let usedRefine = false;
-
+    let refMat=null, runMat=null, refGray=null, runGray=null, refFeatures=null, runFeatures=null, matrix=null;
+    let localized = null, orbProjectedBox = null, postRefineBox = null;
+    let transformModel='none', inliers=0, inlierRatio=0, matchCount=0, refineScore=0, usedRefine=false;
     try {
       refMat = cv.imread(refNeighborhoodCanvas);
       runMat = cv.imread(runtimeSearchCanvas);
@@ -110,12 +83,10 @@
       runGray = new cv.Mat();
       cv.cvtColor(refMat, refGray, cv.COLOR_RGBA2GRAY);
       cv.cvtColor(runMat, runGray, cv.COLOR_RGBA2GRAY);
-
       refFeatures = CvOps.orbDetect(refGray, DEFAULTS.maxOrbFeatures || 300);
       runFeatures = CvOps.orbDetect(runGray, DEFAULTS.maxOrbFeatures || 300);
       const matches = CvOps.matchFeatures(refFeatures.descriptors, runFeatures.descriptors, DEFAULTS.ratioTest || 0.78);
       matchCount = matches.length;
-
       const transform = CvOps.estimateTransform(refFeatures.keypoints, runFeatures.keypoints, matches, {
         minGoodMatchesForHomography: DEFAULTS.minGoodMatchesForHomography,
         minGoodMatchesForAffine: DEFAULTS.minGoodMatchesForAffine,
@@ -130,14 +101,10 @@
 
       if(transform.ok && matrix){
         const refBboxInNeighborhood = ref.visualReference?.patches?.neighborhood?.bboxWithinPatch || ref.bbox;
-        const srcCorners = Types.boxToCorners
-          ? Types.boxToCorners(refBboxInNeighborhood)
-          : [];
+        const srcCorners = Types.boxToCorners ? Types.boxToCorners(refBboxInNeighborhood) : [];
         const projectedInSearch = CvOps.projectPoints(matrix, transformModel, srcCorners);
         const projectedOnPage = addOffset(projectedInSearch, { x: searchBox.x, y: searchBox.y });
-        localized = Types.cornersToBox
-          ? Types.cornersToBox(projectedOnPage, page)
-          : predictedBox;
+        localized = Types.cornersToBox ? Types.cornersToBox(projectedOnPage, page) : predictedBox;
         orbProjectedBox = localized ? { ...localized } : null;
       }
 
@@ -145,7 +112,6 @@
         const refFieldMat = cv.imread(refFieldCanvas);
         const refFieldGray = new cv.Mat();
         cv.cvtColor(refFieldMat, refFieldGray, cv.COLOR_RGBA2GRAY);
-
         const fullRuntimeRgba = cv.imread(runtimeCanvas);
         const fullRuntimeGray = new cv.Mat();
         cv.cvtColor(fullRuntimeRgba, fullRuntimeGray, cv.COLOR_RGBA2GRAY);
@@ -156,89 +122,28 @@
           postRefineBox = { ...localized };
         }
         refineScore = refined.score || 0;
-
         fullRuntimeGray.delete();
         fullRuntimeRgba.delete();
         refFieldGray.delete();
         refFieldMat.delete();
       }
 
-      // --- Structural anchor refinement (Phase 3 extension) ---
-      let structuralAdjustments = [];
-      let usedStructural = false;
-      const structuralCtx = ref?.structuralContext || null;
-      const orbConfidence = Math.min(1, (matchCount / 30) * 0.5 + inlierRatio * 0.5);
-      const orbIsWeak = !matrix || orbConfidence < (DEFAULTS.orbWeakConfidenceThreshold || 0.4);
-
-      if(structuralCtx?.captureStatus === 'ok' && localized){
-        let rtGray = null;
-        let rtRgba = null;
-        try {
-          rtRgba = cv.imread(runtimeCanvas);
-          rtGray = new cv.Mat();
-          cv.cvtColor(rtRgba, rtGray, cv.COLOR_RGBA2GRAY);
-
-          const structResult = CvOps.structuralRefineBox(localized, structuralCtx, rtGray, {
-            structuralSnapMaxPx: orbIsWeak ? (DEFAULTS.structuralSnapMaxPx || 8) * 2 : (DEFAULTS.structuralSnapMaxPx || 8),
-            anchorMaxSearchDist: DEFAULTS.anchorMaxSearchDist,
-            containerOverlapThreshold: DEFAULTS.containerOverlapThreshold,
-            cannyThreshold1: DEFAULTS.cannyThreshold1,
-            cannyThreshold2: DEFAULTS.cannyThreshold2,
-            houghLineThreshold: DEFAULTS.houghLineThreshold,
-            houghMinLineLength: DEFAULTS.houghMinLineLength,
-            houghMaxLineGap: DEFAULTS.houghMaxLineGap,
-            contourMinArea: DEFAULTS.contourMinArea
-          });
-          if(structResult.ok){
-            localized = structResult.box;
-            structuralAdjustments = structResult.adjustments || [];
-            usedStructural = true;
-          }
-        } catch(e){
-          // structural refinement is best-effort; fall through
-        } finally {
-          if(rtGray) rtGray.delete();
-          if(rtRgba) rtRgba.delete();
-        }
-      }
-
-      const orbScore = Math.min(1, (matchCount / 30));
-      const inlierScore = Math.min(1, inlierRatio);
-      const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.2 : 0;
-      const structuralBoost = usedStructural ? 0.1 : 0;
-      const baseConfidence = (orbScore * 0.4) + (inlierScore * 0.4) + refineBoost + structuralBoost;
-      const localizationConfidence = Math.max(0.05, Math.min(0.98, baseConfidence));
-
       return {
-        ok: !!(matrix || usedStructural),
-        localizedBox: localized || predictedBox,
-        predictedBox: predictedBox || null,
-        orbProjectedBox: orbProjectedBox || null,
-        postRefineBox: postRefineBox || (usedStructural ? localized : null),
-        localizationConfidence,
-        transformModel,
+        ok: !!matrix,
+        label,
         matchCount,
         inliers,
         inlierRatio,
+        transformModel,
         usedRefine,
         refineScore,
-        usedStructural,
-        structuralAdjustments,
-        reason: matrix ? null : (usedStructural ? 'structural_fallback' : 'insufficient_geometric_consensus')
+        localized,
+        orbProjectedBox,
+        postRefineBox,
+        reason: matrix ? null : 'insufficient_geometric_consensus'
       };
     } catch(err){
-      return {
-        ok:false,
-        localizedBox: predictedBox,
-        localizationConfidence: 0.12,
-        transformModel,
-        matchCount,
-        inliers,
-        inlierRatio,
-        usedRefine,
-        refineScore,
-        reason: `localization_error:${String(err?.message || err || 'unknown')}`
-      };
+      return { ok:false, label, matchCount, inliers, inlierRatio, transformModel, reason: `localization_error:${String(err?.message || err || 'unknown')}` };
     } finally {
       if(matrix) matrix.delete();
       if(refFeatures?.keypoints) refFeatures.keypoints.delete();
@@ -250,6 +155,209 @@
       if(refGray) refGray.delete();
       if(runGray) runGray.delete();
     }
+  }
+
+  function clampBoxToBounds(box, bounds){
+    return Types.expandBox ? Types.expandBox(box, 0, bounds) : box;
+  }
+
+  async function localizeFieldVisual(payload = {}){
+    const fieldSpec = payload.fieldSpec || {};
+    const ref = fieldSpec.wfg4Config || payload.wfg4Config || null;
+    const surface = payload.wfg4Surface || null;
+    const page = fieldSpec.page || ref?.page || 1;
+    const pageEntry = getPageEntry(surface, page);
+    const predictedBox = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
+    const allowDegradedFallback = !!(payload.allowDegradedFallback ?? DEFAULTS.allowDegradedFallback);
+
+    if(!ref || !pageEntry || !predictedBox){
+      return failedResult(predictedBox, payload.boxPx, 'missing_reference_or_surface', []);
+    }
+
+    if(!CvOps.hasCv?.() || !ref?.visualReference?.patches?.neighborhood?.dataUrl){
+      return failedResult(predictedBox, payload.boxPx, 'cv_or_reference_patch_unavailable', []);
+    }
+
+    const runtimeCanvas = await CvOps.dataUrlToCanvas(pageEntry.artifacts?.displayDataUrl || null);
+    const refNeighborhoodCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.neighborhood.dataUrl);
+    const refFieldCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.field?.dataUrl || null);
+    if(!runtimeCanvas || !refNeighborhoodCanvas){
+      return failedResult(predictedBox, payload.boxPx, 'canvas_decode_failed', []);
+    }
+
+    const cv = root.cv;
+    const bounds = { width: runtimeCanvas.width, height: runtimeCanvas.height };
+    const basePad = Math.max(DEFAULTS.searchWindowMinPadPx || 40, Math.round(Math.max(predictedBox.w, predictedBox.h) * (DEFAULTS.searchWindowPadRatio || 0.35)));
+    const widenMult = DEFAULTS.widenedSearchWindowMultiplier || 2.0;
+    const maxAttempts = DEFAULTS.maxLocalizationAttemptsPerField || 4;
+    const maxMs = DEFAULTS.maxLocalizationMsPerField || 2500;
+
+    const windows = [];
+    windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
+    windows.push({ label:'B_widened',   box: clampBoxToBounds(Types.expandBox(predictedBox, Math.round(basePad * widenMult), bounds), bounds) });
+    const globalScan = pageEntry.globalScan || null;
+    const topCandidates = Array.isArray(globalScan?.candidateRegions) ? globalScan.candidateRegions.slice(0, DEFAULTS.globalScanTopCandidates || 3) : [];
+    for(let i=0; i<topCandidates.length; i++){
+      const cand = topCandidates[i];
+      if(!cand) continue;
+      const candBox = { x: cand.x, y: cand.y, w: Math.max(predictedBox.w, cand.w || 0), h: Math.max(predictedBox.h, cand.h || 0), page };
+      windows.push({ label:`C_globalScan_${i}`, box: clampBoxToBounds(Types.expandBox(candBox, basePad, bounds), bounds) });
+    }
+
+    const ctx = { cv, runtimeCanvas, refNeighborhoodCanvas, refFieldCanvas, ref, page, predictedBox };
+    const attemptsLog = [];
+    const startedAt = Date.now();
+    let best = null;
+
+    for(let i=0; i<windows.length && i<maxAttempts; i++){
+      if((Date.now() - startedAt) > maxMs){
+        attemptsLog.push({ label: windows[i].label, skipped:true, reason:'time_budget_exhausted' });
+        break;
+      }
+      const res = await attemptOnWindow(ctx, windows[i].box, windows[i].label);
+      attemptsLog.push({
+        label: res.label,
+        ok: !!res.ok,
+        matchCount: res.matchCount || 0,
+        inliers: res.inliers || 0,
+        inlierRatio: res.inlierRatio || 0,
+        transformModel: res.transformModel || 'none',
+        reason: res.reason || null
+      });
+      if(res.ok && res.localized){
+        best = res;
+        break;
+      }
+      if(!best || (res.matchCount || 0) > (best.matchCount || 0)){
+        best = res;
+      }
+    }
+
+    // Consolidate best attempt.
+    let localized = best?.localized || null;
+    let orbProjectedBox = best?.orbProjectedBox || null;
+    let postRefineBox = best?.postRefineBox || null;
+    let transformModel = best?.transformModel || 'none';
+    let inliers = best?.inliers || 0;
+    let inlierRatio = best?.inlierRatio || 0;
+    let matchCount = best?.matchCount || 0;
+    let refineScore = best?.refineScore || 0;
+    let usedRefine = !!best?.usedRefine;
+    let attemptsWon = !!(best && best.ok && localized);
+
+    // Structural refinement (only as controlled fallback when geometric localization failed,
+    // or as refinement boost when it succeeded).
+    let structuralAdjustments = [];
+    let usedStructural = false;
+    const structuralCtx = ref?.structuralContext || null;
+    const structBaseBox = localized || predictedBox;
+    if(structuralCtx?.captureStatus === 'ok' && structBaseBox){
+      let rtGray = null;
+      let rtRgba = null;
+      try {
+        rtRgba = cv.imread(runtimeCanvas);
+        rtGray = new cv.Mat();
+        cv.cvtColor(rtRgba, rtGray, cv.COLOR_RGBA2GRAY);
+        const orbConfidence = Math.min(1, (matchCount / 30) * 0.5 + inlierRatio * 0.5);
+        const orbIsWeak = !attemptsWon || orbConfidence < (DEFAULTS.orbWeakConfidenceThreshold || 0.4);
+        const structResult = CvOps.structuralRefineBox(structBaseBox, structuralCtx, rtGray, {
+          structuralSnapMaxPx: orbIsWeak ? (DEFAULTS.structuralSnapMaxPx || 8) * 2 : (DEFAULTS.structuralSnapMaxPx || 8),
+          anchorMaxSearchDist: DEFAULTS.anchorMaxSearchDist,
+          containerOverlapThreshold: DEFAULTS.containerOverlapThreshold,
+          cannyThreshold1: DEFAULTS.cannyThreshold1,
+          cannyThreshold2: DEFAULTS.cannyThreshold2,
+          houghLineThreshold: DEFAULTS.houghLineThreshold,
+          houghMinLineLength: DEFAULTS.houghMinLineLength,
+          houghMaxLineGap: DEFAULTS.houghMaxLineGap,
+          contourMinArea: DEFAULTS.contourMinArea
+        });
+        if(structResult.ok){
+          localized = structResult.box;
+          structuralAdjustments = structResult.adjustments || [];
+          usedStructural = true;
+        }
+      } catch(_e){ /* best-effort */ } finally {
+        if(rtGray) rtGray.delete();
+        if(rtRgba) rtRgba.delete();
+      }
+    }
+
+    // Localization status gate.
+    const localizationSucceeded = attemptsWon; // geometric consensus achieved
+    if(!localizationSucceeded && !usedStructural){
+      if(allowDegradedFallback){
+        return {
+          ok: false,
+          status: STATUS.DEGRADED_FALLBACK,
+          localizedBox: predictedBox,
+          predictedBox,
+          projectedBox: null,
+          refinedBox: null,
+          finalReadoutBox: predictedBox,
+          bboxSource: BBOX_SRC.PREDICTED_FALLBACK,
+          localizationConfidence: 0.12,
+          transformModel,
+          matchCount,
+          inliers,
+          inlierRatio,
+          usedRefine,
+          refineScore,
+          usedStructural: false,
+          structuralAdjustments: [],
+          fallbackUsed: true,
+          attempts: attemptsLog,
+          reason: 'degraded_fallback_predicted_box'
+        };
+      }
+      return failedResult(
+        predictedBox,
+        payload.boxPx,
+        attemptsLog.length ? `all_attempts_failed:${attemptsLog[attemptsLog.length-1].reason || 'insufficient_geometric_consensus'}` : 'no_attempts_run',
+        attemptsLog
+      );
+    }
+
+    // Confidence
+    const orbScore = Math.min(1, (matchCount / 30));
+    const inlierScore = Math.min(1, inlierRatio);
+    const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.2 : 0;
+    const structuralBoost = usedStructural ? 0.1 : 0;
+    const baseConfidence = (orbScore * 0.4) + (inlierScore * 0.4) + refineBoost + structuralBoost;
+    const localizationConfidence = Math.max(0.05, Math.min(0.98, baseConfidence));
+
+    // bboxSource
+    let bboxSource;
+    if(localizationSucceeded && usedRefine) bboxSource = BBOX_SRC.LOCALIZED_REFINED;
+    else if(localizationSucceeded) bboxSource = BBOX_SRC.LOCALIZED_PROJECTED;
+    else if(usedStructural) bboxSource = BBOX_SRC.STRUCTURAL_FALLBACK;
+    else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
+
+    const finalBox = localized || predictedBox;
+    return {
+      ok: true,
+      status: (localizationSucceeded || usedStructural) ? STATUS.SUCCESS : STATUS.FAILED,
+      localizedBox: finalBox,
+      predictedBox,
+      projectedBox: orbProjectedBox,
+      refinedBox: postRefineBox,
+      finalReadoutBox: finalBox,
+      bboxSource,
+      localizationConfidence,
+      transformModel,
+      matchCount,
+      inliers,
+      inlierRatio,
+      usedRefine,
+      refineScore,
+      usedStructural,
+      structuralAdjustments,
+      fallbackUsed: !localizationSucceeded && usedStructural,
+      attempts: attemptsLog,
+      // legacy keys for backward compatibility
+      orbProjectedBox,
+      postRefineBox,
+      reason: localizationSucceeded ? null : (usedStructural ? 'structural_fallback' : 'insufficient_geometric_consensus')
+    };
   }
 
   return {

@@ -8,6 +8,15 @@
   const Types = root.WFG4Types || {};
   const Registration = root.WFG4Registration || {};
   const Localization = root.WFG4Localization || {};
+  const CvOps = root.WFG4OpenCv || {};
+  const LOCALIZATION_STATUS = Types.LOCALIZATION_STATUS || { SUCCESS:'success', FAILED:'failed', DEGRADED_FALLBACK:'degraded_fallback' };
+  const BBOX_SOURCE = Types.BBOX_SOURCE || {
+    LOCALIZED_PROJECTED: 'localized_projected',
+    LOCALIZED_REFINED: 'localized_refined',
+    PREDICTED_FALLBACK: 'predicted_fallback',
+    STRUCTURAL_FALLBACK: 'structural_fallback',
+    LEGACY_BOX: 'legacy_box'
+  };
 
   const WFG4_SCHEMA_VERSION = Types.WFG4_SCHEMA_VERSION || 'wfg4/v0-phase3';
   const MAX_WORKING_EDGE = 1600;
@@ -241,6 +250,50 @@
       normalized = normalizeWithCanvasFallback(canvas, working);
     }
 
+    // P2: lightweight per-page global scan artifact (deterministic, inspectable).
+    let globalScan = null;
+    try {
+      const cv = (typeof window !== 'undefined' ? window.cv : null);
+      if(cv && normalized.grayDataUrl && CvOps.detectEdgesAndLines && CvOps.detectContainers){
+        // Use canonical display canvas already rendered to grayscale.
+        const workCanvas = document.createElement('canvas');
+        workCanvas.width = working.width;
+        workCanvas.height = working.height;
+        const wctx = workCanvas.getContext('2d', { willReadFrequently: true });
+        const img = new Image();
+        // Synchronous-ish: skip globalScan if image not decodable inline.
+        // Fall back to edge mat path using canvas source.
+        wctx.drawImage(canvas, 0, 0, working.width, working.height);
+        const srcMat = cv.imread(workCanvas);
+        const gray = new cv.Mat();
+        cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+        let lineMap = null, containerMap = null, candidateRegions = [];
+        try {
+          lineMap = CvOps.detectEdgesAndLines(gray, {}) || null;
+        } catch(_e){ lineMap = null; }
+        try {
+          containerMap = CvOps.detectContainers(gray, {}) || null;
+        } catch(_e){ containerMap = null; }
+        if(Array.isArray(containerMap?.containers)){
+          candidateRegions = containerMap.containers
+            .slice()
+            .sort((a,b) => (b.w * b.h) - (a.w * a.h))
+            .slice(0, 12)
+            .map(c => ({ x: c.x, y: c.y, w: c.w, h: c.h, source: 'container' }));
+        }
+        globalScan = {
+          lineCount: Array.isArray(lineMap?.horizontal) ? (lineMap.horizontal.length + (lineMap.vertical?.length || 0)) : 0,
+          containerCount: Array.isArray(containerMap?.containers) ? containerMap.containers.length : 0,
+          candidateRegions,
+          generatedAt: new Date().toISOString()
+        };
+        gray.delete();
+        srcMat.delete();
+        // Suppress unused-image warning
+        void img;
+      }
+    } catch(_e){ globalScan = null; }
+
     return {
       pageIndex,
       pageNumber,
@@ -259,6 +312,7 @@
         grayDataUrl: normalized.grayDataUrl || null,
         edgeDataUrl: normalized.edgeDataUrl || null
       },
+      globalScan,
       diagnostics: normalized.diagnostics || {}
     };
   }
@@ -335,21 +389,66 @@
     const rawTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
     const allTokens = mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
 
+    const allowDegradedFallback = !!(payload.allowDegradedFallback ?? fieldSpec.allowDegradedFallback ?? (Types.DEFAULTS && Types.DEFAULTS.allowDegradedFallback));
     const localized = Localization.localizeFieldVisual
       ? await Localization.localizeFieldVisual({
           ...payload,
           wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null,
-          boxPx: boxPx || null
+          boxPx: boxPx || null,
+          allowDegradedFallback
         })
-      : { ok:false, localizedBox: boxPx || null, localizationConfidence: 0.1, reason: 'localization_module_missing' };
+      : { ok:false, status: LOCALIZATION_STATUS.FAILED, localizedBox: null, localizationConfidence: 0.1, reason: 'localization_module_missing', attempts: [] };
 
-    const finalBox = localized.localizedBox || boxPx;
+    const localizationStatus = localized.status || (localized.ok ? LOCALIZATION_STATUS.SUCCESS : LOCALIZATION_STATUS.FAILED);
+    const fallbackUsed = !!localized.fallbackUsed;
+    const bboxSource = localized.bboxSource || (localized.ok ? BBOX_SOURCE.LOCALIZED_PROJECTED : BBOX_SOURCE.PREDICTED_FALLBACK);
+    const runtimeTokenSource = fieldSpec?.runtime?.tokenSource || payload.runtime?.tokenSource || null;
+    const tokenSourceResolved = runtimeTokenSource || null;
+
     const debugBboxStages = {
+      predictedBox: localized.predictedBox || (boxPx ? { ...boxPx } : null),
+      projectedBox: localized.projectedBox || localized.orbProjectedBox || null,
+      refinedBox: localized.refinedBox || localized.postRefineBox || null,
+      finalReadoutBox: null,
+      // legacy aliases (preserve existing debug UI)
       referenceBbox: boxPx ? { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, page: boxPx.page } : null,
-      orbProjectedBbox: localized.orbProjectedBox || null,
-      refinedBbox: localized.postRefineBox || null,
-      ocrCropBbox: finalBox ? { x: finalBox.x, y: finalBox.y, w: finalBox.w, h: finalBox.h, page: finalBox.page } : null
+      orbProjectedBbox: localized.projectedBox || localized.orbProjectedBox || null,
+      refinedBbox: localized.refinedBox || localized.postRefineBox || null,
+      ocrCropBbox: null
     };
+
+    const buildMeta = (extra) => ({
+      schema: WFG4_SCHEMA_VERSION,
+      fieldKey: fieldSpec.fieldKey || null,
+      localization: localized,
+      localizationStatus,
+      fallbackUsed,
+      bboxSource,
+      tokenSourceResolved,
+      debugBboxStages,
+      ...extra
+    });
+
+    // P1 HARD GATE: localization failed and no controlled fallback → no readout.
+    if(localizationStatus === LOCALIZATION_STATUS.FAILED){
+      return {
+        value: '',
+        raw: '',
+        confidence: 0.05,
+        boxPx: null,
+        tokens: [],
+        method: 'wfg4-localization-failed',
+        engine: 'wfg4',
+        lowConfidence: true,
+        needsReview: true,
+        tokenSource: tokenSourceResolved,
+        extractionMeta: buildMeta({ reason: localized.reason || 'localization_failed' })
+      };
+    }
+
+    const finalBox = localized.finalReadoutBox || localized.localizedBox || (localizationStatus === LOCALIZATION_STATUS.DEGRADED_FALLBACK ? boxPx : null);
+    debugBboxStages.finalReadoutBox = finalBox ? { x: finalBox.x, y: finalBox.y, w: finalBox.w, h: finalBox.h, page: finalBox.page } : null;
+    debugBboxStages.ocrCropBbox = debugBboxStages.finalReadoutBox;
     if(!finalBox){
       return {
         value: '',
@@ -360,12 +459,9 @@
         method: 'wfg4-no-box',
         engine: 'wfg4',
         lowConfidence: true,
-        extractionMeta: {
-          schema: WFG4_SCHEMA_VERSION,
-          reason: 'missing_box',
-          localization: localized,
-          debugBboxStages
-        }
+        needsReview: true,
+        tokenSource: tokenSourceResolved,
+        extractionMeta: buildMeta({ reason: 'missing_box' })
       };
     }
 
@@ -395,13 +491,9 @@
         method: 'wfg4-localized-empty',
         engine: 'wfg4',
         lowConfidence: true,
-        extractionMeta: {
-          schema: WFG4_SCHEMA_VERSION,
-          fieldKey: fieldSpec.fieldKey || null,
-          reason: 'no_token_in_localized_scope',
-          localization: localized,
-          debugBboxStages
-        }
+        needsReview: true,
+        tokenSource: tokenSourceResolved,
+        extractionMeta: buildMeta({ reason: 'no_token_in_localized_scope' })
       };
     }
 
@@ -415,18 +507,15 @@
       tokens: winner.scoped,
       method: winner.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box',
       engine: 'wfg4',
-      extractionMeta: {
-        schema: WFG4_SCHEMA_VERSION,
-        fieldKey: fieldSpec.fieldKey || null,
+      tokenSource: tokenSourceResolved,
+      extractionMeta: buildMeta({
         usedPad: winner.pad,
         scopedTokenCount: winner.scoped.length,
-        localization: localized,
         readout: {
           confidence: readConfidence,
           source: 'localized-token-read-assist'
-        },
-        debugBboxStages
-      }
+        }
+      })
     };
   }
 

@@ -34,7 +34,27 @@
     anchorMaxSearchDist: 80,
     structuralSnapMaxPx: 8,
     structuralWeightWhenOrbWeak: 0.6,
-    orbWeakConfidenceThreshold: 0.4
+    orbWeakConfidenceThreshold: 0.4,
+    // Stabilization (P1/P2): hard localization gate + bounded retries
+    allowDegradedFallback: false,
+    maxLocalizationAttemptsPerField: 4,
+    maxLocalizationMsPerField: 2500,
+    widenedSearchWindowMultiplier: 2.0,
+    globalScanTopCandidates: 3
+  };
+
+  const LOCALIZATION_STATUS = {
+    SUCCESS: 'success',
+    FAILED: 'failed',
+    DEGRADED_FALLBACK: 'degraded_fallback'
+  };
+
+  const BBOX_SOURCE = {
+    LOCALIZED_PROJECTED: 'localized_projected',
+    LOCALIZED_REFINED: 'localized_refined',
+    PREDICTED_FALLBACK: 'predicted_fallback',
+    STRUCTURAL_FALLBACK: 'structural_fallback',
+    LEGACY_BOX: 'legacy_box'
   };
 
   function clamp(value, min, max){
