@@ -482,3 +482,44 @@ console.table(last.fields.map(f => ({
   reason: f.reason
 })));
 ```
+
+## 2026-04-06 — Phase: Config-time order-of-operations fix (pre-register WFG4 before extract)
+
+### Confirmed root cause
+In the wizard confirm handler (`invoice-wizard.js` `els.confirmBtn` click), the call sequence for static fields was:
+
+1. `extractFieldValue(step, tokens, ...)` — invoked WFG4 `extractScalar` via `EngineRegistry`. At this point `step.wfg4Config` did **not** yet exist, so `WFG4Localization.localizeFieldVisual` returned `failedResult(..., 'missing_reference_or_surface', [])` and `WFG4Engine.extractScalar` hit its hard `needs_review` gate (`method: 'wfg4-localization-failed'`).
+2. `EngineRegistry.registerFieldConfig(WFG4, ...)` — only now built the visual reference packet (ORB descriptors, neighborhood patch, structural context).
+3. `upsertFieldInProfile(...)` — persisted the field with the freshly-built `wfg4Config`.
+
+This is exactly the dev-log/log pattern the user described: a `localize.result: failed (missing_reference_or_surface)` event followed shortly after by `registration.result: ok` and `field.persisted`. Re-opening the field ("reload into the WFG4-rendered view") then succeeded because the second pass was reading the already-persisted `wfg4Config`.
+
+### Fix
+Pre-register the WFG4 visual reference packet *before* `extractFieldValue` runs at config confirm time, attach it to `step.wfg4Config`, and reuse the resulting `engineOwnedConfig` for the post-extract `upsertFieldInProfile` instead of registering a second time.
+
+- `invoice-wizard.js` (confirm handler around line 19541): added a `_prelimEngineOwnedConfig` step that runs only when the active engine is WFG4 and a box has been drawn. It computes `normBox` / `rawBox` from `state.snappedPx` (which in config mode is the user-drawn truth, identical to `storedBoxPx` computed later), calls `EngineRegistry.registerFieldConfig(WFG4, payload)`, mutates `step.wfg4Config`, and is then reused by the existing `engineOwnedConfig` block instead of running registration twice.
+
+### Why this is the minimal fix
+- Restores the documented invariant: WFG4 localization receives a real reference packet every time `extractScalar` is called, including the first config-time invocation.
+- Does not change WFG4 localization, OpenCV bootstrap, structural fallback, OCR fallback, or run-mode dispatch (run mode already threads `wfg4Config` through `fieldSpec` in `extractStaticFields`, line ~20547).
+- Preserves the existing legacy/AI/Wrokit-Vision paths unchanged (the prelim block is gated on `getConfiguredEngineType() === ENGINE_KIND.WFG4`).
+- No reordering of `upsertFieldInProfile`, no schema changes, no surface-normalization changes.
+
+### Files Modified
+- `invoice-wizard.js`
+- `docs/wfg4-dev-log.md` (this entry)
+
+### Expected behavioral improvements
+- Config-time confirm of a WFG4 static field now produces `localize.result: success` and `field.result: pass` on the **first** attempt instead of `missing_reference_or_surface` followed by a redo.
+- The "first confirm fails / second confirm succeeds" UI flicker for WFG4 fields disappears.
+- Per-field visual reference packets are still persisted exactly as before via the existing `upsertFieldInProfile` path; no double registration cost (the post-extract block reuses the prelim result).
+- Run-mode behavior is unchanged (it was already correct per the 2026-04-06 Phase 3 audit fix that added `wfg4Config: spec.wfg4Config || null` to the run-mode `fieldSpec`).
+
+### Out of scope (intentionally not changed)
+The user also flagged: localization-success-but-`no_token_in_localized_scope`, cross-format normalization drift (PDF↔image bbox-y-rescale 1.5–3.6), heavy reliance on `structural_fallback`, and hybrid OCR/PDF token gating after WFG4 localization. These were reviewed in code:
+- Run-mode `fieldSpec.wfg4Config` threading is correct (line ~20547).
+- `WFG4Engine.mapTokensToCanonical` correctly scales viewport-space tokens to canonical-working-space using `pageEntry.scale.workingFromOriginal{X,Y}`, and `captureWfg4SurfaceForMode` feeds `pageVp.width/height` (PDF) or `imgCanvas.width/height` (image) as the `original` dimensions, which matches the token coordinate space in both branches.
+- Tesseract fallback for empty-text-layer PDFs is already mitigated by the on-demand page render in `readImageTokensForPageWithBBox`.
+- Structural fallback over-reliance is a localization-quality concern (algorithmic), not a correctness bug; the hard localization gate in `extractScalar` already prevents it from masking failures.
+
+These are not race conditions or readiness bugs and would require algorithmic redesign (multi-scale ORB, surface-coordinate unification, or token-source normalization) explicitly outside the "do not redesign" constraint.
