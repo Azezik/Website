@@ -804,12 +804,20 @@ function getProfileEngineType(profile){
 
 function resolveFieldEngineType(fieldSpec){
   const configuredEngine = getConfiguredEngineType();
-  if(isRunMode() && (
-    configuredEngine === ENGINE_KIND.WROKIT_VISION
-    || configuredEngine === ENGINE_KIND.AI_ALGO
-    || configuredEngine === ENGINE_KIND.WFG4
-  )){
-    return configuredEngine;
+  if(isRunMode()){
+    // Prefer the stored per-field engine type (set at config time and carried in fieldSpec).
+    // Fall back to the current dropdown only when the field has no explicit engine type
+    // stored (e.g. legacy wizards created before per-field engineType was introduced).
+    const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
+    const effectiveEngine = (fieldEngine !== ENGINE_KIND.LEGACY) ? fieldEngine : configuredEngine;
+    if(
+      effectiveEngine === ENGINE_KIND.WROKIT_VISION
+      || effectiveEngine === ENGINE_KIND.AI_ALGO
+      || effectiveEngine === ENGINE_KIND.WFG4
+    ){
+      return effectiveEngine;
+    }
+    return ENGINE_KIND.LEGACY;
   }
   const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
   if(fieldEngine !== ENGINE_KIND.LEGACY || String(fieldSpec?.engineType || '').toLowerCase() === ENGINE_KIND.LEGACY){
@@ -12486,6 +12494,7 @@ function cleanupDoc(){
     state.wfg4.configSurface = null;
     state.wfg4.runSurface = null;
   }
+  state.wfg4RenderedPages = null;
   clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   updateWfg4DebugWatermark();
@@ -12616,6 +12625,22 @@ async function prepareRunDocument(file){
     state.tokensByPage[i] = mergedTokens;
     await buildKeywordIndexForPage(i, mergedTokens, vp);
     if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
+    // WFG4: els.pdfCanvas is not rendered in run mode, so capture each page into
+    // a temp canvas now while we have the pdf.js page object available.
+    // captureWfg4SurfaceForMode will use these instead of the blank pdfCanvas.
+    if(getConfiguredEngineType() === ENGINE_KIND.WFG4){
+      const pageW = Math.max(1, Math.round(vp.width));
+      const pageH = Math.max(1, Math.round(vp.height));
+      const tmp = document.createElement('canvas');
+      tmp.width = pageW;
+      tmp.height = pageH;
+      const tctx = tmp.getContext('2d');
+      if(tctx){
+        try { await page.render({ canvasContext: tctx, viewport: vp }).promise; } catch(_e){}
+      }
+      state.wfg4RenderedPages = state.wfg4RenderedPages || {};
+      state.wfg4RenderedPages[i] = tmp;
+    }
     totalH += vp.height;
   }
   state.pageRenderReady = state.pageViewports.map(()=>true);
@@ -13655,13 +13680,21 @@ function captureWfg4SurfaceForMode(mode){
       const pageVp = state.pageViewports[i] || {};
       const pageW = Math.max(1, Math.round(pageVp.width || pageVp.w || 1));
       const pageH = Math.max(1, Math.round(pageVp.height || pageVp.h || 1));
-      const offY = Math.max(0, Math.round(state.pageOffsets?.[i] || 0));
       const tmp = document.createElement('canvas');
       tmp.width = pageW;
       tmp.height = pageH;
       const tctx = tmp.getContext('2d');
-      if(tctx && src){
-        try { tctx.drawImage(src, 0, offY, pageW, pageH, 0, 0, pageW, pageH); } catch(_err){}
+      if(tctx){
+        // In run mode, els.pdfCanvas is blank (not rendered for speed). Use the
+        // pre-rendered page canvas captured during prepareRunDocument if available.
+        const preRendered = state.wfg4RenderedPages && state.wfg4RenderedPages[i + 1];
+        if(preRendered){
+          try { tctx.drawImage(preRendered, 0, 0, pageW, pageH); } catch(_err){}
+        } else if(src){
+          // Config mode: pdfCanvas is rendered; copy the relevant vertical slice.
+          const offY = Math.max(0, Math.round(state.pageOffsets?.[i] || 0));
+          try { tctx.drawImage(src, 0, offY, pageW, pageH, 0, 0, pageW, pageH); } catch(_err){}
+        }
       }
       pages.push({ pageIndex: i, pageNumber: i + 1, width: pageW, height: pageH, canvas: tmp });
     }
@@ -20511,7 +20544,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             const matches = state.keywordIndexByPage?.[targetPage];
             return Array.isArray(matches) ? matches.length : null;
           })();
-          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope, configBox: spec.configBox || spec.rawBox || null, rawBox: spec.rawBox || null, wfg4Config: spec.wfg4Config || null, runtime: { tokenSource: state.currentTokenSourceByPage?.[targetPage] || null, resolverReason: null, keywordMatchCount: pageKeywordMatches } };
+          const fieldSpec = { fieldKey: spec.fieldKey, engineType: spec.engineType || null, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope, configBox: spec.configBox || spec.rawBox || null, rawBox: spec.rawBox || null, wfg4Config: spec.wfg4Config || null, runtime: { tokenSource: state.currentTokenSourceByPage?.[targetPage] || null, resolverReason: null, keywordMatchCount: pageKeywordMatches } };
           if(areaScope){ fieldSpec.areaBoxPx = areaScope.box; fieldSpec.areaScope = areaScope; }
           state.snappedPx = null; state.snappedText = '';
           fieldSpec.runtime = { ...(fieldSpec.runtime || {}), tokenSource: fieldSpec.runtime?.tokenSource || state.currentTokenSourceByPage?.[targetPage] || null };
