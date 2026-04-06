@@ -73,3 +73,38 @@
 - Find the area visually first.
 - Then optionally read within that localized area using OCR, PDF text, or form data.
 - Hidden/non-visual text must never drive where WFG4 localizes a field.
+
+## 2026-04-06 — Phase 3A / 3B / 3C (Visual reference packet + OpenCV localization + localized readout)
+
+### Summary
+- Added Phase 3 config-time visual reference packet capture for WFG4 static fields, storing canonical bbox metadata plus local patch and expanded neighborhood patch artifacts with ORB keypoints/descriptors.
+- Added browser-only OpenCV.js runtime localization for WFG4: ORB feature extraction, BFMatcher ratio-test matching, RANSAC-based transform estimation (homography-first with affine fallback), bbox projection, and local template refinement.
+- Updated WFG4 extraction flow so readout happens only after visual localization; token/PDF/AcroForm/OCR sources are now read-assist for the already-localized region.
+- Added explicit localization diagnostics/confidence in `extractionMeta.localization`, separate from readout confidence.
+
+### Files Modified
+- `document-dashboard.html`
+- `invoice-wizard.js`
+- `engines/core/wfg4-engine.js`
+- `docs/wfg4-dev-log.md`
+
+### Files Added
+- `engines/wfg4/wfg4-types.js`
+- `engines/wfg4/wfg4-opencv.js`
+- `engines/wfg4/wfg4-registration.js`
+- `engines/wfg4/wfg4-localization.js`
+
+### Key Architectural Decisions
+- Kept Phase 3 storage bounded to local scope (field patch + expanded neighborhood) and did not persist page-level descriptors to avoid profile/storage bloat in v1.
+- Implemented a hybrid localization strategy that is still bbox-first: neighborhood-to-search-window registration around predicted canonical location, then local refinement.
+- Established transform gating thresholds for projection: homography requires >=10 good matches and >=8 inliers; affine fallback requires >=6 good matches and >=5 inliers; both require inlier ratio >=0.35.
+- Preserved existing run orchestration and profile contracts by extending only engine-owned `wfg4Config` and the existing `extractScalar` payload/result path.
+
+### Assumptions
+- OpenCV.js runtime includes ORB/BFMatcher/findHomography/estimateAffinePartial2D APIs in the target browser bundle.
+- Runtime canonical surface artifacts (`displayDataUrl`) remain available for reference/runtime patch decoding.
+
+### Risks / Uncertainties
+- Descriptor serialization can still add profile size for many fields; bounded local packets reduce but do not eliminate payload growth.
+- On low-texture regions, geometric consensus may be weak; localization falls back to predicted bbox with low localization confidence.
+- Template refinement currently assumes limited scale drift around the projected box; larger scale variance may require multi-scale refinement in a later phase.
