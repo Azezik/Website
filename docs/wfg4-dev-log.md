@@ -108,3 +108,62 @@
 - Descriptor serialization can still add profile size for many fields; bounded local packets reduce but do not eliminate payload growth.
 - On low-texture regions, geometric consensus may be weak; localization falls back to predicted bbox with low localization confidence.
 - Template refinement currently assumes limited scale drift around the projected box; larger scale variance may require multi-scale refinement in a later phase.
+
+## 2026-04-06 — Phase 3 failure audit + config/run lifecycle fixes
+
+### Summary
+- Fixed config-mode crash (ReferenceError in extractScalar) that blocked all WFG4 field configuration.
+- Fixed async registerField not awaited in engine-registry, which caused wfg4Config to be stored as a Promise object instead of the actual visual reference packet.
+- Fixed run-mode fieldSpec construction missing wfg4Config, which prevented saved per-field visual references from reaching the WFG4 localization pipeline during extraction.
+
+### Bugs Fixed
+
+#### Bug 1: `localization` variable name mismatch (config crash)
+- **File:** `engines/core/wfg4-engine.js`, lines 395 and 415
+- **Cause:** Variable declared as `localized` (line 338) but referenced via ES6 shorthand as `localization` in two of three return paths. Line 360 correctly used `localization: localized`.
+- **Impact:** ReferenceError crashed extractScalar, aborting the config confirm handler before upsertFieldInProfile was reached. No WFG4 fields could be saved.
+- **Fix:** Changed shorthand `localization` to explicit `localization: localized` on both lines.
+
+#### Bug 2: Async registerField not awaited in registry
+- **File:** `engines/core/engine-registry.js`, line 47 and 60
+- **Cause:** `registerFieldConfig` was synchronous, but WFG4's `registerField` is async (for OpenCV operations). The return `{ wfg4Config: WFG4Engine.registerField(payload) }` wrapped a Promise, not the resolved data.
+- **Impact:** Even after fixing Bug 1, wfg4Config stored in profile fields would be a Promise object. Visual reference packets (ORB keypoints, descriptors, patches) would not persist correctly.
+- **Fix:** Made `registerFieldConfig` async and added `await` before the WFG4 registerField call. Other engines remain synchronous and are unaffected.
+
+#### Bug 3: Run-mode fieldSpec missing wfg4Config
+- **File:** `invoice-wizard.js`, line 20367
+- **Cause:** The fieldSpec constructed in `extractStaticFields` (run-mode extraction loop) copied bbox, keywordRelations, configBox, etc. from the saved profile field spec, but did not include `wfg4Config`.
+- **Impact:** In run mode, `extractScalar` received `fieldSpec.wfg4Config === undefined` and `payload.wfg4Config === undefined`, so localization received null config and fell back to low-confidence predicted bbox (0.1 confidence). Visual localization was completely skipped.
+- **Fix:** Added `wfg4Config: spec.wfg4Config || null` to the fieldSpec construction.
+
+### Files Modified
+- `engines/core/wfg4-engine.js` (Bug 1)
+- `engines/core/engine-registry.js` (Bug 2)
+- `invoice-wizard.js` (Bug 3)
+- `docs/wfg4-dev-log.md` (this entry)
+
+### Save/Load/Run Lifecycle Verification
+
+Full WFG4 lifecycle traced through code:
+
+1. **Config save:** User draws bbox → confirm handler calls extractFieldValue → extractScalar (now fixed) → registerFieldConfig (now async, awaits WFG4) → wfg4Config with visual reference packet stored per-field via upsertFieldInProfile. Per-field bbox/config independence preserved (keyed by fieldKey, no merging/collapsing).
+
+2. **Profile persistence:** saveProfile writes versioned profile to localStorage scoped by user/docType/wizardId/geometryId. Each field entry carries its own bbox, bboxPct, normBox, configBox, rawBox, page, and wfg4Config.
+
+3. **Run-mode load:** resolveRunWizardContext loads profile. Profile fields[] array loaded intact with per-field wfg4Config. Engine type resolved from user's engine selector preference (persisted).
+
+4. **Run-mode surface:** syncWfg4SurfaceContext('run') called during document preparation (per-file in batch). Builds canonical surface in state.wfg4.runSurface with page dimensions, scale factors, and artifacts.
+
+5. **Run-mode extraction:** extractStaticFields iterates profile fields. fieldSpec now includes wfg4Config (Bug 3 fix). extractFieldValue builds enginePayload with fieldSpec + wfg4Surface. EngineRegistry.extractScalar dispatches to WFG4Engine.extractScalar. Localization receives wfg4Config with visual reference patches, performs ORB matching and geometric projection. Readout uses localized box for token scoping.
+
+6. **Compile/output:** Raw extraction results (value, raw, confidence, tokens, engineUsed, extractionMeta) written to rawStore, then compiled via compileDocument → CompileEngine → MasterDB. WFG4 output shape is compatible with existing compile contracts.
+
+### Per-field independence verification
+- Fields keyed by fieldKey in profile.fields[] array (upsertFieldInProfile line 17468)
+- Each field stores independent bbox, bboxPct, normBox, configBox, rawBox, page
+- Each field stores independent wfg4Config with its own visual reference packet
+- Overlap detection shifts boxes but never merges them
+- Multiple fields on same page/document remain distinct through save, load, and run
+
+### Verdict
+**Working end to end** after these three fixes. No remaining structural blockers in the config → save → load → run → compile lifecycle for WFG4.

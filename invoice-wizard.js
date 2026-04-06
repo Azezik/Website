@@ -20364,7 +20364,7 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             const matches = state.keywordIndexByPage?.[targetPage];
             return Array.isArray(matches) ? matches.length : null;
           })();
-          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope, configBox: spec.configBox || spec.rawBox || null, rawBox: spec.rawBox || null, runtime: { tokenSource: state.currentTokenSourceByPage?.[targetPage] || null, resolverReason: null, keywordMatchCount: pageKeywordMatches } };
+          const fieldSpec = { fieldKey: spec.fieldKey, regex: spec.regex, landmark: spec.landmark, bbox: bboxArr, page: targetPage, type: spec.type, anchorMetrics: spec.anchorMetrics || null, keywordRelations, configMask, tokenScope: areaScope ? 'area' : undefined, useSuppliedTokensOnly: !!areaScope, tokensScoped: !!areaScope, configBox: spec.configBox || spec.rawBox || null, rawBox: spec.rawBox || null, wfg4Config: spec.wfg4Config || null, runtime: { tokenSource: state.currentTokenSourceByPage?.[targetPage] || null, resolverReason: null, keywordMatchCount: pageKeywordMatches } };
           if(areaScope){ fieldSpec.areaBoxPx = areaScope.box; fieldSpec.areaScope = areaScope; }
           state.snappedPx = null; state.snappedText = '';
           fieldSpec.runtime = { ...(fieldSpec.runtime || {}), tokenSource: fieldSpec.runtime?.tokenSource || state.currentTokenSourceByPage?.[targetPage] || null };

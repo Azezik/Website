@@ -392,7 +392,7 @@
           schema: WFG4_SCHEMA_VERSION,
           fieldKey: fieldSpec.fieldKey || null,
           reason: 'no_token_in_localized_scope',
-          localization
+          localization: localized
         }
       };
     }
@@ -412,7 +412,7 @@
         fieldKey: fieldSpec.fieldKey || null,
         usedPad: winner.pad,
         scopedTokenCount: winner.scoped.length,
-        localization,
+        localization: localized,
         readout: {
           confidence: readConfidence,
           source: 'localized-token-read-assist'
