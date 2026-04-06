@@ -18850,8 +18850,44 @@ function getTesseractWordBBox(word){
 }
 
 async function readImageTokensForPageWithBBox(pageNum, canvasEl=null){
-  const canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || els.imgCanvas;
+  let canvas = canvasEl || getPdfBitmapCanvas(pageNum-1)?.canvas || null;
+
+  // Run-mode PDF fallback: if the main pdfCanvas was never rendered (run mode
+  // skips renderAllPages for speed) and we still have a loaded PDF document,
+  // render the requested page to a temporary off-screen canvas so Tesseract
+  // receives valid pixel data instead of a blank/missing source.
+  if(!canvas && !state.isImage && state.pdf){
+    try {
+      const page = await state.pdf.getPage(pageNum);
+      const vp = state.pageViewports[pageNum-1] || page.getViewport({ scale: BASE_PDF_SCALE });
+      const tmp = document.createElement('canvas');
+      tmp.width = vp.width;
+      tmp.height = vp.height;
+      await page.render({ canvasContext: tmp.getContext('2d'), viewport: vp }).promise;
+      canvas = tmp;
+      logStaticDebug(`ocr-fallback-render page=${pageNum}`, { w: tmp.width, h: tmp.height });
+    } catch(renderErr){
+      console.warn('OCR fallback: on-demand PDF page render failed', renderErr);
+      logStaticDebug(`ocr-fallback-render-failed page=${pageNum}`, { error: renderErr?.message || renderErr });
+    }
+  }
+
+  // Last resort for images: use the img element
+  if(!canvas){ canvas = els.imgCanvas; }
   if(!canvas){ return []; }
+
+  // Guard: skip Tesseract if source is clearly unreadable (0×0 canvas, or
+  // <img> without a loaded src).  Prevents "Error attempting to read image".
+  const isImg = canvas.tagName === 'IMG';
+  if(isImg && (!canvas.src || !canvas.naturalWidth)){
+    logStaticDebug(`ocr-skip-invalid-img page=${pageNum}`, { src: !!canvas.src, naturalWidth: canvas.naturalWidth });
+    return [];
+  }
+  if(!isImg && (canvas.width <= 0 || canvas.height <= 0)){
+    logStaticDebug(`ocr-skip-empty-canvas page=${pageNum}`, { w: canvas.width, h: canvas.height });
+    return [];
+  }
+
   const opts = { tessedit_pageseg_mode: 6, oem: 1 };
   // Tesseract.js returns bounding boxes in the image's natural/intrinsic pixel
   // coordinate space.  When the image is displayed at a scaled-down size (e.g.
