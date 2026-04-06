@@ -383,3 +383,102 @@ The script is now served from the same origin as the app, so no cross-origin req
 - Browser loads `vendor/opencv/4.10.0/opencv.js` with no CORS error.
 - `window.cv` becomes defined; `typeof cv.ORB === "function"` and `typeof cv.imread === "function"` hold once Emscripten runtime initializes.
 - Config-time `captureVisualReferencePacket` succeeds: `wfg4Config.visualReference.patches` is populated and `captureStatus` is no longer `cv_unavailable`.
+
+---
+
+## Stabilization: Visual-First Localization Gate (branch `claude/stabilize-wfg4-extraction-TSdIC`)
+
+### What changed
+- **`engines/wfg4/wfg4-types.js`** — added `LOCALIZATION_STATUS` (`success` / `failed` / `degraded_fallback`) and `BBOX_SOURCE` enums (`localized_projected`, `localized_refined`, `predicted_fallback`, `structural_fallback`, `legacy_box`). New DEFAULTS: `allowDegradedFallback` (off by default), `maxLocalizationAttemptsPerField`, `maxLocalizationMsPerField`, `widenedSearchWindowMultiplier`, `globalScanTopCandidates`.
+- **`engines/wfg4/wfg4-localization.js`** — rewritten around a per-window `attemptOnWindow(ctx, searchBox, label)` helper. `localizeFieldVisual` now runs a **bounded multi-attempt strategy**: (A) predicted window → (B) widened predicted window → (C) top global-scan candidate windows, capped by attempts and wall-clock budget. Each attempt's `{matchCount, inliers, inlierRatio, transformModel, reason}` is recorded in the returned `attempts[]`. Result now carries `status`, `predictedBox`, `projectedBox`, `refinedBox`, `finalReadoutBox`, `bboxSource`, `fallbackUsed`. When no attempt achieves geometric consensus and structural refinement cannot anchor, returns `status: 'failed'` (or `degraded_fallback` only when explicitly enabled).
+- **`engines/core/wfg4-engine.js`** —
+  - `normalizePage` now computes a **lightweight per-page `globalScan` artifact** (line count, container count, top-N container candidate regions) using `WFG4OpenCv.detectEdgesAndLines` and `detectContainers`, stored on the page entry and consumed by localization retry C.
+  - `extractScalar` now enforces a **hard localization gate**. If `localizationStatus === 'failed'`, normal crop/readout is **skipped**; the function returns an explicit `needs_review` record (`value: ''`, `needsReview: true`, `method: 'wfg4-localization-failed'`) with full diagnostics in `extractionMeta`.
+  - All extraction result metadata now includes: `localizationStatus`, `fallbackUsed`, `bboxSource`, `tokenSourceResolved`, and separated `debugBboxStages` (`predictedBox`, `projectedBox`, `refinedBox`, `finalReadoutBox`) alongside legacy aliases for UI compatibility.
+- **`invoice-wizard.js`** —
+  - `extractFieldValue` now threads `tokenSource`, `needsReview`, and `lowConfidence` out of engine results (fixes `tokenSource: null` loss in raw records).
+  - `wfg4DebugCollectFieldData` and `wfg4DebugBuildLogEntry` include `localizationStatus`, `bboxSource`, `fallbackUsed`, `tokenSourceResolved`, `attempts[]`, and the new separated bbox stages.
+  - Debug field list row now shows localization status badge + fallback flag + bboxSource + failure reason.
+
+### How runtime now works
+1. Ingest → canonical surface creation (`prepareDocumentSurface`).
+2. Global page understanding: per-page `globalScan` computed once from the canonical gray mat.
+3. Prediction: `resolvePredictedBox` from `wfg4Config.bboxNorm` / `bbox`.
+4. Visual matching: attempt A (predicted window) → B (widened) → C (top global-scan candidates). Each attempt: ORB detect → BF match → RANSAC homography/affine → optional template refine.
+5. Structural refinement as either boost (after success) or controlled anchor (after all geometric attempts fail, **only** when `structuralContext.captureStatus === 'ok'`).
+6. Localization validation gate: `status === failed` → engine returns `needs_review` without reading tokens. `status === success` → readout proceeds with the chosen `finalReadoutBox` and labeled `bboxSource`.
+7. Raw extraction entry persists: `localizationStatus`, `fallbackUsed`, `bboxSource`, `matchCount`, `inliers`, `inlierRatio`, `transformModel`, `localizationConfidence`, `reason`, `tokenSourceResolved`, and the per-attempt log.
+
+### Module interactions
+```
+invoice-wizard.js  extractFieldValue()
+        │
+        ▼
+WFG4Engine.extractScalar (core/wfg4-engine.js)
+        │     (hard gate on localization status)
+        ▼
+WFG4Localization.localizeFieldVisual (wfg4/wfg4-localization.js)
+        │     (uses pageEntry.globalScan candidates for retry C)
+        ▼
+WFG4OpenCv  orbDetect / matchFeatures / estimateTransform / localTemplateRefine / structuralRefineBox
+```
+
+### Future improvements
+- Move `globalScan` computation to a web worker to avoid main-thread cost on multi-page docs.
+- Cache per-document localization attempts keyed by `(geometryId, fieldKey)` for faster retries on re-extract.
+- Add a multi-scale pass (attempt D) for docs where scale-normalization is off by more than the RANSAC tolerance.
+- Surface attempts[] inspection in the debug panel as an expandable row.
+
+### Verification
+
+Run under `npm run dev` (or whichever dev server the wizard is served from) and load a problematic doc with WFG4 debug mode active.
+
+- **Bad doc (no geometric consensus) — before**: extraction appeared to succeed, output field populated from nearest token under the predicted box; `localization.reason` was `insufficient_geometric_consensus` but masked.
+- **Bad doc — after**:
+  ```json
+  {
+    "fieldKey": "invoice_number",
+    "value": "",
+    "needsReview": true,
+    "tokenSource": "pdfjs",
+    "extractionMeta": {
+      "localizationStatus": "failed",
+      "fallbackUsed": false,
+      "bboxSource": "predicted_fallback",
+      "localization": {
+        "status": "failed",
+        "attempts": [
+          { "label": "A_predicted", "matchCount": 0, "inliers": 0, "inlierRatio": 0, "transformModel": "none", "reason": "insufficient_geometric_consensus" },
+          { "label": "B_widened",   "matchCount": 2, "inliers": 0, "inlierRatio": 0, "transformModel": "none", "reason": "insufficient_geometric_consensus" },
+          { "label": "C_globalScan_0", "matchCount": 1, "inliers": 0, "inlierRatio": 0, "transformModel": "none", "reason": "insufficient_geometric_consensus" }
+        ],
+        "reason": "all_attempts_failed:insufficient_geometric_consensus"
+      }
+    }
+  }
+  ```
+- **Good doc**: unchanged behavior (`localizationStatus: "success"`, `bboxSource: "localized_refined"` or `"localized_projected"`).
+- **Debug log** (`localStorage.wfg4_debug_log`): each field entry now contains `localizationStatus`, `bboxSource`, `fallbackUsed`, `attempts`, `tokenSourceResolved`, and separated bbox stages.
+
+Quick smoke test:
+```bash
+node -c engines/wfg4/wfg4-types.js
+node -c engines/wfg4/wfg4-localization.js
+node -c engines/core/wfg4-engine.js
+node -c invoice-wizard.js
+```
+
+In-browser console after one run:
+```js
+const log = JSON.parse(localStorage.getItem('wfg4_debug_log') || '[]');
+const last = log[log.length - 1];
+console.table(last.fields.map(f => ({
+  fieldKey: f.fieldKey,
+  status: f.localizationStatus,
+  src: f.bboxSource,
+  fallback: f.fallbackUsed,
+  matches: f.matchCount,
+  inliers: f.inliers,
+  reason: f.reason
+})));
+```
