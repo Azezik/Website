@@ -170,11 +170,15 @@
     const predictedBox = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? DEFAULTS.allowDegradedFallback);
 
+    const _EL = root.EngineLog || null;
+    const _fk = fieldSpec.fieldKey || '';
     if(!ref || !pageEntry || !predictedBox){
+      _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.FAILED, reason: 'missing_reference_or_surface', attemptsTried: 0 });
       return failedResult(predictedBox, payload.boxPx, 'missing_reference_or_surface', []);
     }
 
     if(!CvOps.hasCv?.() || !ref?.visualReference?.patches?.neighborhood?.dataUrl){
+      _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.FAILED, reason: 'cv_or_reference_patch_unavailable', attemptsTried: 0 });
       return failedResult(predictedBox, payload.boxPx, 'cv_or_reference_patch_unavailable', []);
     }
 
@@ -182,6 +186,7 @@
     const refNeighborhoodCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.neighborhood.dataUrl);
     const refFieldCanvas = await CvOps.dataUrlToCanvas(ref.visualReference.patches.field?.dataUrl || null);
     if(!runtimeCanvas || !refNeighborhoodCanvas){
+      _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.FAILED, reason: 'canvas_decode_failed', attemptsTried: 0 });
       return failedResult(predictedBox, payload.boxPx, 'canvas_decode_failed', []);
     }
 
@@ -221,6 +226,16 @@
         matchCount: res.matchCount || 0,
         inliers: res.inliers || 0,
         inlierRatio: res.inlierRatio || 0,
+        transformModel: res.transformModel || 'none',
+        reason: res.reason || null
+      });
+      _EL?.engineLog('wfg4-run', 'localize.attempt', {
+        fieldKey: _fk,
+        attempt: res.label,
+        ok: !!res.ok,
+        matchCount: res.matchCount || 0,
+        inliers: res.inliers || 0,
+        inlierRatio: Number((res.inlierRatio || 0).toFixed(3)),
         transformModel: res.transformModel || 'none',
         reason: res.reason || null
       });
@@ -286,6 +301,7 @@
     const localizationSucceeded = attemptsWon; // geometric consensus achieved
     if(!localizationSucceeded && !usedStructural){
       if(allowDegradedFallback){
+        _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.DEGRADED_FALLBACK, reason: 'degraded_fallback_predicted_box', attemptsTried: attemptsLog.length, matchCount, inliers });
         return {
           ok: false,
           status: STATUS.DEGRADED_FALLBACK,
@@ -309,10 +325,12 @@
           reason: 'degraded_fallback_predicted_box'
         };
       }
+      const _allFailReason = attemptsLog.length ? ('all_attempts_failed:' + (attemptsLog[attemptsLog.length-1].reason || 'insufficient_geometric_consensus')) : 'no_attempts_run';
+      _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.FAILED, reason: _allFailReason, attemptsTried: attemptsLog.length, matchCount, inliers });
       return failedResult(
         predictedBox,
         payload.boxPx,
-        attemptsLog.length ? `all_attempts_failed:${attemptsLog[attemptsLog.length-1].reason || 'insufficient_geometric_consensus'}` : 'no_attempts_run',
+        _allFailReason,
         attemptsLog
       );
     }
@@ -333,9 +351,22 @@
     else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
 
     const finalBox = localized || predictedBox;
+    const _finalStatus = (localizationSucceeded || usedStructural) ? STATUS.SUCCESS : STATUS.FAILED;
+    _EL?.engineLog('wfg4-run', 'localize.result', {
+      fieldKey: _fk,
+      status: _finalStatus,
+      bboxSource,
+      attemptsTried: attemptsLog.length,
+      matchCount,
+      inliers,
+      usedRefine,
+      usedStructural,
+      fallbackUsed: !localizationSucceeded && usedStructural,
+      localizationConfidence: Number(localizationConfidence.toFixed(3))
+    });
     return {
       ok: true,
-      status: (localizationSucceeded || usedStructural) ? STATUS.SUCCESS : STATUS.FAILED,
+      status: _finalStatus,
       localizedBox: finalBox,
       predictedBox,
       projectedBox: orbProjectedBox,

@@ -80,20 +80,31 @@
           autoLoad: true
         })
       : { ok: CvOps.hasCv?.() };
+    const _EL = root.EngineLog || null;
+    const _fk = packet.fieldKey || '';
+    _EL?.engineLog('wfg4-cfg', 'opencv.ready', {
+      fieldKey: _fk,
+      ok: !!CvOps.hasCv?.(),
+      cvReadyOk: !!(cvReadyInfo && cvReadyInfo.ok),
+      source: (cvReadyInfo && cvReadyInfo.source) || null
+    });
     if(!CvOps.hasCv?.()){
       packet.visualReference.captureStatus = 'cv_unavailable';
       packet.visualReference.captureError = cvReadyInfo?.source || 'opencv_runtime_unavailable';
+      _EL?.engineLog('wfg4-cfg', 'registration.result', { fieldKey: _fk, status: 'cv_unavailable' });
       return packet;
     }
 
     if(!pageEntry?.artifacts?.displayDataUrl){
       packet.visualReference.captureStatus = 'artifact_missing';
+      _EL?.engineLog('wfg4-cfg', 'registration.result', { fieldKey: _fk, status: 'artifact_missing' });
       return packet;
     }
 
     const pageCanvas = await CvOps.dataUrlToCanvas(pageEntry.artifacts.displayDataUrl);
     if(!pageCanvas){
       packet.visualReference.captureStatus = 'page_canvas_decode_failed';
+      _EL?.engineLog('wfg4-cfg', 'registration.result', { fieldKey: _fk, status: 'page_canvas_decode_failed' });
       return packet;
     }
 
@@ -240,6 +251,18 @@
       if(neighborhoodGray) neighborhoodGray.delete();
     }
 
+    const _captureStatus = (packet.visualReference && packet.visualReference.captureStatus) || 'unknown';
+    const _hasNeighborhood = !!(packet.visualReference && packet.visualReference.patches && packet.visualReference.patches.neighborhood);
+    const _hasField = !!(packet.visualReference && packet.visualReference.patches && packet.visualReference.patches.field);
+    const _hasFeatures = !!(packet.visualReference && packet.visualReference.features && packet.visualReference.features.neighborhood);
+    _EL?.engineLog('wfg4-cfg', 'registration.result', {
+      fieldKey: _fk,
+      status: _captureStatus,
+      hasNeighborhoodPatch: _hasNeighborhood,
+      hasFieldPatch: _hasField,
+      hasFeatures: _hasFeatures,
+      structuralStatus: (packet.structuralContext && packet.structuralContext.captureStatus) || null
+    });
     return packet;
   }
 

@@ -7662,6 +7662,13 @@ function ensureProfile(requestedWizardId, requestedGeometryId = null){
   state.profile.masterDbConfig = buildMasterDbConfigFromProfile(state.profile, templateConfig, template);
   ensureConfiguredFlag(state.profile);
   hydrateFingerprintsFromProfile(state.profile);
+  window.EngineLog?.engineLog('engine', 'wizard.save', {
+    wizardId: state.profile.wizardId || null,
+    engine: state.profile.engineType || null,
+    source: 'initWizardProfile',
+    fieldCount: (state.profile.fields || []).length,
+    withEngineType: (state.profile.fields || []).filter(function(f){ return !!f.engineType; }).length
+  });
   profileStore.saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
@@ -13709,6 +13716,17 @@ function syncWfg4SurfaceContext(mode){
       .catch(err => console.warn('[wfg4] canonical display swap failed', err));
   } else {
     state.wfg4.runSurface = surface;
+    (function(){
+      var _fp = surface && Array.isArray(surface.pages) && surface.pages[0];
+      window.EngineLog?.engineLog('wfg4-run', 'surface.build', {
+        source: 'syncWfg4SurfaceContext',
+        sourceType: surface.isImage ? 'image' : 'pdf',
+        pageCount: surface.pageCount || 0,
+        cvAvailable: !!(surface.diagnostics && surface.diagnostics.cvAvailable),
+        width: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.width) || 0,
+        height: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.height) || 0
+      });
+    })();
   }
 }
 
@@ -17609,6 +17627,15 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
   if(extras.wfg4Config){
     entry.wfg4Config = clonePlain(extras.wfg4Config);
   }
+  window.EngineLog?.engineLog('wfg4-cfg', 'field.persisted', {
+    fieldKey: entry.fieldKey || null,
+    engine: entry.engineType || null,
+    hasNormBox: !!(entry.normBox),
+    hasWfg4Config: !!(entry.wfg4Config),
+    hasConfigBox: !!(entry.configBox),
+    wfg4CaptureStatus: (entry.wfg4Config && entry.wfg4Config.visualReference && entry.wfg4Config.visualReference.captureStatus) || null,
+    canvasSize: (entry.wfg4Config && entry.wfg4Config.surfaceSize) || null
+  });
   if(step.type === 'static'){
     entry.pageRole = inferPageRole(step, page);
     entry.pageIndex = (page || 1) - 1;
@@ -17696,6 +17723,20 @@ function upsertFieldInProfile(step, normBox, value, confidence, page, extras={},
     previousSnapshot: prevGeomSnapshot,
     note: `field=${step.fieldKey || ''}`
   });
+  (function(){
+    var _fields = (state.profile && state.profile.fields) || [];
+    var _withNormBox = _fields.filter(function(f){ return !!(f.normBox); }).length;
+    var _withWfg4Config = _fields.filter(function(f){ return !!(f.wfg4Config); }).length;
+    window.EngineLog?.engineLog('wfg4-cfg', 'profile.saved', {
+      wizardId: (state.profile && state.profile.wizardId) || null,
+      engine: (state.profile && state.profile.engineType) || null,
+      source: 'upsertFieldInProfile',
+      fieldCount: _fields.length,
+      withNormBox: _withNormBox,
+      withWfg4Config: _withWfg4Config,
+      mismatch: _withNormBox !== _withWfg4Config
+    });
+  })();
   profileStore.saveProfile(state.username, state.docType, state.profile);
   if(isSkinV2){
     persistPatternBundle(state.profile);
@@ -20418,6 +20459,18 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       extractStaticFields: async ({ profile: profileForRun }) => {
         const includeLineItems = profileForRun?.masterDbConfig?.includeLineItems !== false;
         logDocStage('static-extract', 'start');
+        (function(){
+          var _fields = (profileForRun && profileForRun.fields) || [];
+          var _withWfg4Config = _fields.filter(function(f){ return !!(f.wfg4Config); }).length;
+          window.EngineLog?.engineLog('engine', 'profile.load', {
+            wizardId: (profileForRun && profileForRun.wizardId) || null,
+            profileEngine: (profileForRun && profileForRun.engineType) || null,
+            fieldCount: _fields.length,
+            withWfg4Config: _withWfg4Config,
+            isImage: !!state.isImage,
+            fields: _fields.map(function(f){ return { fieldKey: f.fieldKey, engine: f.engineType || null, hasWfg4Config: !!(f.wfg4Config) }; })
+          });
+        })();
         for(const spec of (profileForRun.fields || [])){
           const isAreaField = spec.isArea || spec.fieldType === 'areabox';
           const isSubordinateField = isExplicitSubordinate(spec);
@@ -20470,12 +20523,29 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           // ensureTesseractTokensForPageWithBBox caches results, so cost is one
           // Tesseract call per page across all fields on that page.
           if(!result?.value && !state.isImage && (state.tokensByPage[targetPage] || []).length > 0){
+            const _specEngine = normalizeEngineType(spec.engineType || '');
+            if(_specEngine !== ENGINE_KIND.LEGACY){
+              window.EngineLog?.engineLog('legacy', 'fallback.enter', {
+                fieldKey: spec.fieldKey,
+                expectedEngine: _specEngine,
+                page: targetPage,
+                reason: 'empty-result-pdf-tesseract-retry'
+              });
+            }
             const tessRes = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'tesseract', mode: 'run' });
             if(tessRes.tokenCount > 0){
               fieldSpec.runtime = { ...(fieldSpec.runtime || {}), tokenSource: tessRes.tokenSource || 'tesseract-bbox', resolverReason: tessRes.resolverReason || null, keywordMatchCount: fieldSpec.runtime?.keywordMatchCount ?? null };
               if(Array.isArray(state.keywordIndexByPage?.[targetPage])) state.keywordIndexByPage[targetPage] = null;
               const tessResult = await extractFieldValue(fieldSpec, tessRes.tokens, targetViewport);
               if(tessResult?.value){ result = tessResult; }
+            }
+            if(_specEngine !== ENGINE_KIND.LEGACY){
+              window.EngineLog?.engineLog('legacy', 'fallback.exit', {
+                fieldKey: spec.fieldKey,
+                expectedEngine: _specEngine,
+                gotValue: !!(result && result.value),
+                tokenSource: result?.tokenSource || null
+              });
             }
           }
           const value = result?.value || '';
