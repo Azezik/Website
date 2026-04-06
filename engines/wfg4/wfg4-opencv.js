@@ -7,7 +7,7 @@
 })(typeof self !== 'undefined' ? self : this, function(root){
   const Types = root.WFG4Types || {};
   const clamp = Types.clamp || ((v,min,max)=>Math.max(min,Math.min(max,v)));
-  const DEFAULT_OPENCV_JS_URL = 'https://docs.opencv.org/4.x/opencv.js';
+  const DEFAULT_OPENCV_JS_URL = 'vendor/opencv/4.10.0/opencv.js';
   let cvScriptLoadPromise = null;
 
   function hasCv(){
@@ -38,7 +38,6 @@
       const s = document.createElement('script');
       s.src = scriptUrl;
       s.async = true;
-      s.crossOrigin = 'anonymous';
       s.dataset.wfg4Opencv = 'true';
       s.onload = () => resolve({ ok:true, source:'loaded', scriptUrl });
       s.onerror = () => resolve({ ok:false, source:'load_error', scriptUrl });

@@ -352,3 +352,34 @@ This feature makes localization behavior observable and measurable without chang
 - WFG4 config-time capture now attempts to load OpenCV.js from `https://docs.opencv.org/4.x/opencv.js` and waits for runtime readiness.
 - Capture no longer collapses CV runtime absence and missing artifacts into one status string.
 - If OpenCV remains unavailable after readiness wait, capture exits explicitly with `captureStatus: "cv_unavailable"` and does not pretend visual-reference capture succeeded.
+
+## 2026-04-06 — Phase: OpenCV runtime integration fix
+
+### Summary
+Fix OpenCV.js loading to enable WFG4 visual reference capture.
+
+### Root Cause
+`wfg4-opencv.js` loaded OpenCV.js from `https://docs.opencv.org/4.x/opencv.js`. That host does not serve a CORS-allowing `Access-Control-Allow-Origin` header, so the browser blocked the cross-origin script. `window.cv` never became defined, `ensureCvReady()` timed out, and config-time visual reference capture exited with `captureStatus: "cv_unavailable"`.
+
+### Fix
+- Vendored OpenCV.js 4.10.0 (standard UMD/Emscripten browser build from `@techstark/opencv-js`) into the repo at `vendor/opencv/4.10.0/opencv.js`, matching the existing `vendor/<lib>/<version>/<file>` pattern used by pdf.js and pdf-lib.
+- Changed `DEFAULT_OPENCV_JS_URL` in `engines/wfg4/wfg4-opencv.js` from the cross-origin docs.opencv.org URL to the same-origin `vendor/opencv/4.10.0/opencv.js`. Removed the now-unnecessary `crossOrigin="anonymous"` attribute from the dynamic script tag.
+- Added an early `<script async data-wfg4-opencv="true" src="vendor/opencv/4.10.0/opencv.js">` tag in `document-dashboard.html` immediately after the existing `wfg4-opencv.js` include. This starts the Emscripten runtime fetch/compile early so `window.cv` is ready (or close to ready) by the time config-time capture runs, without blocking UI rendering. The existing `loadCvScript` helper detects the preloaded tag via its `data-wfg4-opencv` marker and short-circuits to the polling path in `ensureCvReady`.
+
+### Files Changed
+- `vendor/opencv/4.10.0/opencv.js` (new, vendored asset)
+- `engines/wfg4/wfg4-opencv.js` (`DEFAULT_OPENCV_JS_URL`, `loadCvScript` attribute cleanup)
+- `document-dashboard.html` (added async preload script tag next to `engines/wfg4/wfg4-opencv.js`)
+
+### Why This Resolves CORS
+The script is now served from the same origin as the app, so no cross-origin request is made and no `Access-Control-Allow-Origin` header is required. No external runtime dependency on `docs.opencv.org`.
+
+### Lifecycle / Architecture Preservation
+- Preload is `async`, so it does not block UI.
+- `ensureCvReady()` remains the single readiness gate and continues to be awaited before `captureVisualReferencePacket(...)`.
+- WFG4 modularity, `cv_unavailable` vs `artifact_missing` status split, canonical surface generation, and registration flow are unchanged.
+
+### Expected Runtime Behavior
+- Browser loads `vendor/opencv/4.10.0/opencv.js` with no CORS error.
+- `window.cv` becomes defined; `typeof cv.ORB === "function"` and `typeof cv.imread === "function"` hold once Emscripten runtime initializes.
+- Config-time `captureVisualReferencePacket` succeeds: `wfg4Config.visualReference.patches` is populated and `captureStatus` is no longer `cv_unavailable`.
