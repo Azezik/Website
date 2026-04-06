@@ -2087,6 +2087,14 @@ function setExtractionLoading(isLoading){
   state.isExtracting = shouldShow;
   els.wizardRunOverlay.classList.toggle('is-active', shouldShow && allowOverlay);
   els.wizardRunOverlay.setAttribute('aria-hidden', shouldShow && allowOverlay ? 'false' : 'true');
+  // Inline display override beats CSS class specificity. Used to guarantee
+  // the loading GIF cannot remain visible during WFG4 debug pause regardless
+  // of any other code paths that may toggle the .is-active class.
+  if(debugSuppress){
+    els.wizardRunOverlay.style.display = 'none';
+  } else {
+    els.wizardRunOverlay.style.display = '';
+  }
   if(!shouldShow){
     state.extractionTrigger = null;
   }
@@ -20464,10 +20472,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             drawOverlay();
           }
 
-          // Force-hide loading overlay so user can interact with debug view
+          // Force-hide loading overlay so user can interact with debug view.
+          // Inline display:none beats CSS class specificity and guarantees
+          // the loading GIF cannot remain visible during the debug pause.
           if(els.wizardRunOverlay){
             els.wizardRunOverlay.classList.remove('is-active');
             els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
+            els.wizardRunOverlay.style.display = 'none';
           }
           state.isExtracting = false;
 
@@ -20744,6 +20755,9 @@ function wfg4DebugHidePanel(){
   if(els.wfg4DebugCorrectionPanel) els.wfg4DebugCorrectionPanel.style.display = 'none';
   state.wfg4.debugPending = null;
   state.wfg4.debugCorrectionState = null;
+  // Note: do NOT restore wizardRunOverlay inline display here. The next
+  // setExtractionLoading() call will recompute debugSuppress and restore
+  // it as needed. This keeps lifecycle control in one place.
 }
 
 function wfg4DebugLogEntry(verdict){
