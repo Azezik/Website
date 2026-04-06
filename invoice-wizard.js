@@ -16511,6 +16511,11 @@ function drawOverlay(options = {}){
   if(state.graphLearning?.active){
     paintGraphLearningOverlay(overlayCtx, scaleX, scaleY);
   }
+  // WFG4 debug overlays must survive any drawOverlay() redraws.
+  if(state.wfg4?.debugPending?.fieldDataList?.length){
+    try { wfg4DebugPaintOverlays(overlayCtx, state.wfg4.debugPending.fieldDataList, scaleX, scaleY); }
+    catch(e){ console.warn('[wfg4-debug] overlay repaint failed', e); }
+  }
   updateWfg4DebugWatermark();
 }
 
@@ -20466,10 +20471,27 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           const debugFieldData = wfg4DebugCollectFieldData(rawEntries, activeProfile.fields || []);
           const runSurface = state.wfg4.runSurface || null;
 
-          // Render document into viewer so user can see the overlays
-          if(runSurface?.pages?.length && els.pdfCanvas){
-            await renderWfg4CanonicalIntoViewer(runSurface);
+          // Render document into the visible viewport so user can see overlays.
+          // Run mode normally skips PDF canvas rendering for speed and the
+          // canonical-surface dataUrls captured by syncWfg4SurfaceContext('run')
+          // are blank because they were copied from a 0×0 pdfCanvas. Force a
+          // real render here so els.pdfCanvas / els.imgCanvas show actual pixels.
+          try {
+            if(state.isImage){
+              if(els.imgCanvas){
+                els.imgCanvas.style.display = 'block';
+                els.pdfCanvas.style.display = 'none';
+                const cssScale = (typeof PDF_CSS_SCALE === 'number' ? PDF_CSS_SCALE : 1);
+                sizeOverlayTo(els.imgCanvas.width * cssScale, els.imgCanvas.height * cssScale);
+              }
+            } else if(state.pdf && els.pdfCanvas){
+              els.imgCanvas.style.display = 'none';
+              els.pdfCanvas.style.display = 'block';
+              await renderAllPages();
+            }
             drawOverlay();
+          } catch(renderErr){
+            console.warn('[wfg4-debug] viewport render failed', renderErr);
           }
 
           // Force-hide loading overlay so user can interact with debug view.
