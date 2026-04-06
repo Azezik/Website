@@ -10083,8 +10083,8 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         enginePayload.precomputedStructuralMap = getPreferredWrokitVisionPrecomputedForPage(fieldSpec.page || state.pageNum || 1, Array.isArray(tokens) ? tokens : [], viewportPx || null);
       }
       const engineResult = EngineRegistry?.extractScalar
-        ? EngineRegistry.extractScalar(fieldEngineType, enginePayload)
-        : (AIExtractionEngine?.extractScalar ? AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox }) : null);
+        ? await EngineRegistry.extractScalar(fieldEngineType, enginePayload)
+        : (AIExtractionEngine?.extractScalar ? await AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox }) : null);
       if(engineResult){
         return {
           value: engineResult?.value || '',
@@ -19439,7 +19439,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     precomputedStructuralMap: getWrokitVisionPrecomputedForPage(state.pageNum)
   };
   const engineOwnedConfig = EngineRegistry?.registerFieldConfig
-    ? EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload)
+    ? await Promise.resolve(EngineRegistry.registerFieldConfig(activeConfigEngine, engineConfigPayload))
     : {};
   const areaBoxForStep = isAreaStep
     ? { areaId: areaKey || step.fieldKey, bboxPct: pct, normBox, page: state.pageNum, rawBox: rawBoxData }

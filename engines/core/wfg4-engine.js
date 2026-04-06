@@ -1,11 +1,15 @@
 (function(root, factory){
   if(typeof module === 'object' && module.exports){
-    module.exports = factory();
+    module.exports = factory(root);
   } else {
-    root.WFG4Engine = factory();
+    root.WFG4Engine = factory(root);
   }
-})(typeof self !== 'undefined' ? self : this, function(){
-  const WFG4_SCHEMA_VERSION = 'wfg4/v0-phase2';
+})(typeof self !== 'undefined' ? self : this, function(root){
+  const Types = root.WFG4Types || {};
+  const Registration = root.WFG4Registration || {};
+  const Localization = root.WFG4Localization || {};
+
+  const WFG4_SCHEMA_VERSION = Types.WFG4_SCHEMA_VERSION || 'wfg4/v0-phase3';
   const MAX_WORKING_EDGE = 1600;
 
   function cleanText(text){
@@ -77,9 +81,6 @@
       } catch(_err){
         return null;
       }
-    }
-    if(source.dataUrl){
-      return null;
     }
     return null;
   }
@@ -277,7 +278,7 @@
 
     return {
       schema: WFG4_SCHEMA_VERSION,
-      phase: 'phase2-canonical-surface',
+      phase: 'phase3-visual-localization',
       mode: payload.mode || 'unknown',
       fileName: payload.fileName || '',
       mimeType: payload.mimeType || '',
@@ -286,7 +287,7 @@
       wizardId: payload.wizardId || null,
       pageCount: normalizedPages.length,
       activePage: Number.isFinite(payload.activePage) ? payload.activePage : 1,
-      coordinateSpace: 'wfg4-canonical-working-v1',
+      coordinateSpace: Types.WFG4_NORMALIZATION_VERSION || 'wfg4-canonical-working-v1',
       pages: normalizedPages,
       diagnostics: {
         cvAvailable: !!(typeof window !== 'undefined' && window.cv && typeof window.cv.imread === 'function'),
@@ -296,45 +297,18 @@
     };
   }
 
-  function registerField(payload = {}){
-    const normBox = payload.normBox || {};
-    const viewport = payload.viewport || {};
-    const wfg4Surface = payload.wfg4Surface || null;
-    const pageIdx = Math.max(0, (payload.page || 1) - 1);
-    const pageMeta = Array.isArray(wfg4Surface?.pages) ? (wfg4Surface.pages[pageIdx] || null) : null;
-    const workingDims = pageMeta?.dimensions?.working || {
-      width: viewport.width || viewport.w || 0,
-      height: viewport.height || viewport.h || 0
-    };
+  async function registerField(payload = {}){
+    if(Registration.captureVisualReferencePacket){
+      return Registration.captureVisualReferencePacket(payload);
+    }
     return {
       schema: WFG4_SCHEMA_VERSION,
       method: 'bbox-first-canonical-surface',
       engineType: 'wfg4',
-      coordinateSpace: wfg4Surface?.coordinateSpace || 'wfg4-canonical-working-v1',
+      coordinateSpace: Types.WFG4_NORMALIZATION_VERSION || 'wfg4-canonical-working-v1',
       page: payload.page || 1,
-      geometryId: payload.geometryId || null,
       fieldKey: payload.step?.fieldKey || null,
-      surfaceSize: {
-        width: Number(workingDims.width || 0),
-        height: Number(workingDims.height || 0)
-      },
-      bbox: {
-        x0: normBox.x0n,
-        y0: normBox.y0n,
-        x1: (normBox.x0n || 0) + (normBox.wN || 0),
-        y1: (normBox.y0n || 0) + (normBox.hN || 0)
-      },
-      viewport: {
-        width: viewport.width || viewport.w || 0,
-        height: viewport.height || viewport.h || 0
-      },
-      rawBox: payload.rawBox ? {
-        x: payload.rawBox.x,
-        y: payload.rawBox.y,
-        w: payload.rawBox.w,
-        h: payload.rawBox.h
-      } : null,
-      phase2Ready: true
+      phase3Ready: false
     };
   }
 
@@ -355,12 +329,22 @@
     }));
   }
 
-  function extractScalar(payload = {}){
+  async function extractScalar(payload = {}){
     const fieldSpec = payload.fieldSpec || {};
     const boxPx = payload.boxPx || null;
     const rawTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
     const allTokens = mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
-    if(!boxPx){
+
+    const localized = Localization.localizeFieldVisual
+      ? await Localization.localizeFieldVisual({
+          ...payload,
+          wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null,
+          boxPx: boxPx || null
+        })
+      : { ok:false, localizedBox: boxPx || null, localizationConfidence: 0.1, reason: 'localization_module_missing' };
+
+    const finalBox = localized.localizedBox || boxPx;
+    if(!finalBox){
       return {
         value: '',
         raw: '',
@@ -370,15 +354,19 @@
         method: 'wfg4-no-box',
         engine: 'wfg4',
         lowConfidence: true,
-        extractionMeta: { schema: WFG4_SCHEMA_VERSION, reason: 'missing_box' }
+        extractionMeta: {
+          schema: WFG4_SCHEMA_VERSION,
+          reason: 'missing_box',
+          localization: localized
+        }
       };
     }
 
     const pads = [0, 4, 8];
     let winner = null;
     for(const pad of pads){
-      const scoped = tokensInBox(allTokens, pad ? expandBox(boxPx, pad) : boxPx, 0.2);
-      const candidate = pickBestToken(scoped, boxPx);
+      const scoped = tokensInBox(allTokens, pad ? expandBox(finalBox, pad) : finalBox, 0.2);
+      const candidate = pickBestToken(scoped, finalBox);
       if(candidate?.tok?.text){
         winner = {
           token: candidate.tok,
@@ -394,35 +382,41 @@
       return {
         value: '',
         raw: '',
-        confidence: 0.1,
-        boxPx,
+        confidence: Math.max(0.08, (localized.localizationConfidence || 0) * 0.4),
+        boxPx: finalBox,
         tokens: [],
-        method: 'wfg4-placeholder-empty',
+        method: 'wfg4-localized-empty',
         engine: 'wfg4',
         lowConfidence: true,
         extractionMeta: {
           schema: WFG4_SCHEMA_VERSION,
           fieldKey: fieldSpec.fieldKey || null,
-          reason: 'no_token_in_scope'
+          reason: 'no_token_in_localized_scope',
+          localization
         }
       };
     }
 
     const value = cleanText(winner.token.text || winner.token.raw || '');
-    const confidence = Math.max(0.15, Math.min(0.75, 0.2 + (winner.score * 0.55)));
+    const readConfidence = Math.max(0.15, Math.min(0.85, 0.2 + (winner.score * 0.55)));
     return {
       value,
       raw: value,
-      confidence,
-      boxPx,
+      confidence: readConfidence,
+      boxPx: finalBox,
       tokens: winner.scoped,
-      method: winner.pad ? 'wfg4-micro-expansion-placeholder' : 'wfg4-in-box-placeholder',
+      method: winner.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box',
       engine: 'wfg4',
       extractionMeta: {
         schema: WFG4_SCHEMA_VERSION,
         fieldKey: fieldSpec.fieldKey || null,
         usedPad: winner.pad,
-        scopedTokenCount: winner.scoped.length
+        scopedTokenCount: winner.scoped.length,
+        localization,
+        readout: {
+          confidence: readConfidence,
+          source: 'localized-token-read-assist'
+        }
       }
     };
   }
