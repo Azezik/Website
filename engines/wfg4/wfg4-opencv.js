@@ -519,6 +519,12 @@
     const snapMax = o.structuralSnapMaxPx || 8;
     const searchDist = o.anchorMaxSearchDist || 80;
     const adjustments = [];
+    const debug = {
+      localRegion: null,
+      lines: { horizontal: [], vertical: [] },
+      containers: [],
+      matchedContainer: null
+    };
     let box = { x: projectedBox.x, y: projectedBox.y, w: projectedBox.w, h: projectedBox.h, page: projectedBox.page || 1 };
 
     // extract local region for structural analysis
@@ -533,6 +539,12 @@
       clamp(Math.round(localBox.w), 1, runtimeGray.cols - Math.round(localBox.x)),
       clamp(Math.round(localBox.h), 1, runtimeGray.rows - Math.round(localBox.y))
     ));
+    debug.localRegion = {
+      x: clamp(Math.round(localBox.x), 0, runtimeGray.cols - 1),
+      y: clamp(Math.round(localBox.y), 0, runtimeGray.rows - 1),
+      w: clamp(Math.round(localBox.w), 1, runtimeGray.cols - Math.round(localBox.x)),
+      h: clamp(Math.round(localBox.h), 1, runtimeGray.rows - Math.round(localBox.y))
+    };
 
     const localLines = detectEdgesAndLines(roi, o);
     const localContainers = detectContainers(roi, o);
@@ -543,6 +555,9 @@
     for(const hl of localLines.horizontal){ hl.yMid += oy; hl.x1 += ox; hl.x2 += ox; hl.y1 += oy; hl.y2 += oy; }
     for(const vl of localLines.vertical){ vl.xMid += ox; vl.x1 += ox; vl.x2 += ox; vl.y1 += oy; vl.y2 += oy; }
     for(const c of localContainers){ c.x += ox; c.y += oy; }
+    debug.lines.horizontal = localLines.horizontal.slice(0, 80);
+    debug.lines.vertical = localLines.vertical.slice(0, 80);
+    debug.containers = localContainers.slice(0, 80);
 
     roi.delete();
 
@@ -553,6 +568,7 @@
       const rp = structuralCtx.anchors.relativePosition;
       const rtContainer = findEnclosingContainer(box, localContainers, o.containerOverlapThreshold || 0.7, refSizeHint);
       if(rtContainer && rp){
+        debug.matchedContainer = { x: rtContainer.x, y: rtContainer.y, w: rtContainer.w, h: rtContainer.h };
         const newX = rtContainer.x + rp.xRatio * rtContainer.w;
         const newY = rtContainer.y + rp.yRatio * rtContainer.h;
         // Re-derive width/height from the runtime container so that when the
@@ -622,7 +638,8 @@
     return {
       ok: adjustments.length > 0,
       box,
-      adjustments
+      adjustments,
+      debug
     };
   }
 

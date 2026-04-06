@@ -857,6 +857,7 @@ function syncExtractionEngineUI(){
   if(els.wfg4DebugToggleLabel) els.wfg4DebugToggleLabel.style.display = isWfg4 ? 'flex' : 'none';
   if(!isWfg4 && els.wfg4DebugToggle) els.wfg4DebugToggle.checked = false;
   if(!isWfg4) state.wfg4.debugMode = false;
+  if(!isWfg4) state.wfg4.structuralOverlay = false;
 }
 
 function normalizeWizardId(raw){
@@ -1949,6 +1950,7 @@ let state = {
     configDisplayActive: false,
     rawConfigLayout: null,
     debugMode: false,
+    structuralOverlay: false,
     debugPending: null,
     debugLog: [],
     debugCorrectionState: null
@@ -15591,6 +15593,127 @@ function isWfg4ConfigCanonicalDisplayActive(){
     && !!state.wfg4?.configSurface;
 }
 
+function isWfg4StructuralOverlayActive(){
+  return isWfg4ConfigCanonicalDisplayActive() && !!state.wfg4?.structuralOverlay;
+}
+
+function getCurrentWfg4ConfigDebugPacket(){
+  if(!isWfg4StructuralOverlayActive()) return null;
+  const step = state.steps?.[state.stepIdx] || null;
+  const direct = step?.wfg4Config || null;
+  if(direct) return direct;
+  const fieldKey = step?.fieldKey || null;
+  if(!fieldKey) return null;
+  const profileField = (state.profile?.fields || []).find(f => f && f.fieldKey === fieldKey);
+  return profileField?.wfg4Config || null;
+}
+
+function paintWfg4StructuralOverlay(ctx, scaleX, scaleY){
+  if(!ctx || !isWfg4StructuralOverlayActive()) return;
+  const packet = getCurrentWfg4ConfigDebugPacket();
+  if(!packet) return;
+  const structural = packet.structuralContext || {};
+  const lines = structural.lines || {};
+  const capture = structural.captureRegion || null;
+  const fieldBox = packet.bbox || null;
+  const neighborhood = packet.visualReference?.patches?.neighborhood?.box || null;
+  const container = structural.container || null;
+  const anchors = structural.anchors || {};
+  const page = Number(fieldBox?.page || packet.page || state.pageNum || 1);
+  const offY = ((state.pageOffsets[(page || 1) - 1] || 0) / scaleY);
+
+  const drawRect = (box, color, lineWidth = 1.5, dash = []) => {
+    if(!box) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash(dash);
+    ctx.strokeRect((box.x || 0) / scaleX, ((box.y || 0) / scaleY) + offY, Math.max(1, (box.w || 1) / scaleX), Math.max(1, (box.h || 1) / scaleY));
+    ctx.restore();
+  };
+
+  ctx.save();
+  ctx.font = '10px "IBM Plex Mono", monospace';
+
+  drawRect(capture, 'rgba(248,113,113,0.85)', 1.3, [7, 4]);     // structural capture
+  drawRect(neighborhood, 'rgba(56,189,248,0.9)', 1.2, [4, 4]);   // ORB neighborhood patch
+  drawRect(container, 'rgba(132,204,22,0.9)', 1.5, []);          // enclosing container
+  drawRect(fieldBox, 'rgba(251,191,36,0.95)', 2.0, []);          // configured field box
+
+  const hLines = Array.isArray(lines.horizontal) ? lines.horizontal : [];
+  const vLines = Array.isArray(lines.vertical) ? lines.vertical : [];
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(34,197,94,0.7)';
+  for(const ln of hLines){
+    ctx.beginPath();
+    ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
+    ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(168,85,247,0.7)';
+  for(const ln of vLines){
+    ctx.beginPath();
+    ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
+    ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
+    ctx.stroke();
+  }
+
+  if(fieldBox){
+    const centerX = ((fieldBox.x || 0) + (fieldBox.w || 0) * 0.5) / scaleX;
+    const centerY = (((fieldBox.y || 0) + (fieldBox.h || 0) * 0.5) / scaleY) + offY;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const drawAnchor = (distance, axis, color) => {
+      if(distance === null || distance === undefined) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      if(axis === 'up'){
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX, centerY - (Number(distance) / scaleY));
+      } else if(axis === 'down'){
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX, centerY + (Number(distance) / scaleY));
+      } else if(axis === 'left'){
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX - (Number(distance) / scaleX), centerY);
+      } else if(axis === 'right'){
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX + (Number(distance) / scaleX), centerY);
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+    drawAnchor(anchors.distAbove, 'up', 'rgba(14,165,233,0.9)');
+    drawAnchor(anchors.distBelow, 'down', 'rgba(14,165,233,0.9)');
+    drawAnchor(anchors.distLeft, 'left', 'rgba(251,146,60,0.9)');
+    drawAnchor(anchors.distRight, 'right', 'rgba(251,146,60,0.9)');
+  }
+
+  const legendX = 8;
+  const legendY = 14;
+  ctx.fillStyle = 'rgba(15,23,42,0.82)';
+  ctx.fillRect(4, 4, 320, 62);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillText('WFG4 Structural Debug Overlay', legendX, legendY);
+  ctx.fillStyle = '#fda4af';
+  ctx.fillText('red=detection region', legendX, legendY + 12);
+  ctx.fillStyle = '#67e8f9';
+  ctx.fillText('cyan=neighborhood patch', legendX + 130, legendY + 12);
+  ctx.fillStyle = '#a3e635';
+  ctx.fillText('green lines=H/V edges, lime=container', legendX, legendY + 24);
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillText('yellow=field bbox, dashed rays=anchor offsets', legendX, legendY + 36);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}`, legendX, legendY + 50);
+  ctx.restore();
+}
+
 function ensureWfg4DebugWatermarkElement(){
   if(els.wfg4DebugWatermark) return els.wfg4DebugWatermark;
   if(!els.viewer) return null;
@@ -16657,6 +16780,10 @@ function drawOverlay(options = {}){
   }
   if(state.graphLearning?.active){
     paintGraphLearningOverlay(overlayCtx, scaleX, scaleY);
+  }
+  if(isWfg4StructuralOverlayActive()){
+    try { paintWfg4StructuralOverlay(overlayCtx, scaleX, scaleY); }
+    catch(e){ console.warn('[wfg4-debug] structural overlay repaint failed', e); }
   }
   // WFG4 debug overlays must survive any drawOverlay() redraws.
   if(state.wfg4?.debugPending?.fieldDataList?.length){
@@ -19500,7 +19627,14 @@ els.extractionEngineSelect?.addEventListener('change', ()=>{
   drawOverlay();
 });
 els.wfg4DebugToggle?.addEventListener('change', ()=>{
-  state.wfg4.debugMode = !!els.wfg4DebugToggle.checked;
+  const enabled = !!els.wfg4DebugToggle.checked;
+  if(isConfigMode()){
+    state.wfg4.structuralOverlay = enabled;
+    console.info('[wfg4-debug] structural overlay', enabled ? 'ON' : 'OFF');
+    drawOverlay();
+    return;
+  }
+  state.wfg4.debugMode = enabled;
   console.info('[wfg4-debug] debug mode', state.wfg4.debugMode ? 'ON' : 'OFF');
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
