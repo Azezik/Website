@@ -66,15 +66,21 @@
 
   function extractScalar(engineType, payload = {}){
     const kind = normalizeEngineType(engineType);
+    const _EL = root.EngineLog || null;
+    const _fk = payload?.fieldSpec?.fieldKey || '';
     if(kind === ENGINE_KIND.AI_ALGO && root.AIExtractionEngine?.extractScalar){
+      _EL?.engineLog('dispatch', 'registry.route', { fieldKey: _fk, requested: kind, routedTo: 'ai_algo' });
       return root.AIExtractionEngine.extractScalar(payload);
     }
     if(kind === ENGINE_KIND.WROKIT_VISION && root.WrokitVisionEngine?.extractScalar){
+      _EL?.engineLog('dispatch', 'registry.route', { fieldKey: _fk, requested: kind, routedTo: 'wrokit_vision' });
       return root.WrokitVisionEngine.extractScalar(payload);
     }
     if(kind === ENGINE_KIND.WFG4 && root.WFG4Engine?.extractScalar){
+      _EL?.engineLog('dispatch', 'registry.route', { fieldKey: _fk, requested: kind, routedTo: 'wfg4' });
       return root.WFG4Engine.extractScalar(payload);
     }
+    _EL?.engineLog('dispatch', 'registry.route', { fieldKey: _fk, requested: kind, routedTo: 'none', warn: 'no_handler_matched' });
     return null;
   }
 

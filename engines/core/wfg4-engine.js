@@ -330,7 +330,7 @@
     const sourcePages = pagesInput.length ? pagesInput : [fallbackPage];
     const normalizedPages = sourcePages.map(page => normalizePage(page, { maxWorkingEdge: payload.maxWorkingEdge || MAX_WORKING_EDGE }));
 
-    return {
+    const _surf = {
       schema: WFG4_SCHEMA_VERSION,
       phase: 'phase3-visual-localization',
       mode: payload.mode || 'unknown',
@@ -349,6 +349,19 @@
         generatedAt: new Date().toISOString()
       }
     };
+    if(_surf.mode === 'run'){
+      const _fp = _surf.pages && _surf.pages[0];
+      (root.EngineLog || null)?.engineLog('wfg4-run', 'surface.build', {
+        mode: _surf.mode,
+        sourceType: _surf.isImage ? 'image' : 'pdf',
+        pageCount: _surf.pageCount,
+        cvAvailable: !!_surf.diagnostics.cvAvailable,
+        width: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.width) || 0,
+        height: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.height) || 0,
+        wizardId: _surf.wizardId || null
+      });
+    }
+    return _surf;
   }
 
   async function registerField(payload = {}){
@@ -388,6 +401,16 @@
     const boxPx = payload.boxPx || null;
     const rawTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
     const allTokens = mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
+    const _EL = root.EngineLog || null;
+    const _fk = fieldSpec.fieldKey || '';
+    const _surfReady = !!(payload.wfg4Surface && Array.isArray(payload.wfg4Surface.pages) && payload.wfg4Surface.pages.length > 0);
+    _EL?.engineLog('wfg4-run', 'engine.enter', {
+      fieldKey: _fk,
+      page: fieldSpec.page || null,
+      hasWfg4Config: !!(fieldSpec.wfg4Config || payload.wfg4Config),
+      surfaceReady: _surfReady,
+      tokenCount: rawTokens.length
+    });
 
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? fieldSpec.allowDegradedFallback ?? (Types.DEFAULTS && Types.DEFAULTS.allowDegradedFallback));
     const localized = Localization.localizeFieldVisual
@@ -402,6 +425,16 @@
     const localizationStatus = localized.status || (localized.ok ? LOCALIZATION_STATUS.SUCCESS : LOCALIZATION_STATUS.FAILED);
     const fallbackUsed = !!localized.fallbackUsed;
     const bboxSource = localized.bboxSource || (localized.ok ? BBOX_SOURCE.LOCALIZED_PROJECTED : BBOX_SOURCE.PREDICTED_FALLBACK);
+    _EL?.engineLog('wfg4-run', 'localize.result', {
+      fieldKey: _fk,
+      status: localizationStatus,
+      bboxSource: bboxSource || null,
+      fallbackUsed: fallbackUsed,
+      attemptsTried: Array.isArray(localized.attempts) ? localized.attempts.length : 0,
+      matchCount: localized.matchCount || 0,
+      inliers: localized.inliers || 0,
+      reason: localized.reason || null
+    });
     const runtimeTokenSource = fieldSpec?.runtime?.tokenSource || payload.runtime?.tokenSource || null;
     const tokenSourceResolved = runtimeTokenSource || null;
 
@@ -431,6 +464,8 @@
 
     // P1 HARD GATE: localization failed and no controlled fallback → no readout.
     if(localizationStatus === LOCALIZATION_STATUS.FAILED){
+      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsReview', reason: localized.reason || 'localization_failed' });
+      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource: null, fallbackUsed: false, value: '', needsReview: true, method: 'wfg4-localization-failed' });
       return {
         value: '',
         raw: '',
@@ -450,6 +485,8 @@
     debugBboxStages.finalReadoutBox = finalBox ? { x: finalBox.x, y: finalBox.y, w: finalBox.w, h: finalBox.h, page: finalBox.page } : null;
     debugBboxStages.ocrCropBbox = debugBboxStages.finalReadoutBox;
     if(!finalBox){
+      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsReview', reason: 'missing_box' });
+      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource, fallbackUsed, value: '', needsReview: true, method: 'wfg4-no-box' });
       return {
         value: '',
         raw: '',
@@ -482,6 +519,8 @@
     }
 
     if(!winner){
+      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsReview', reason: 'no_token_in_localized_scope', bboxSource });
+      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource, fallbackUsed, value: '', needsReview: true, method: 'wfg4-localized-empty' });
       return {
         value: '',
         raw: '',
@@ -499,13 +538,27 @@
 
     const value = cleanText(winner.token.text || winner.token.raw || '');
     const readConfidence = Math.max(0.15, Math.min(0.85, 0.2 + (winner.score * 0.55)));
+    const _method = winner.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box';
+    _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'pass', bboxSource });
+    _EL?.engineLog('wfg4-run', 'field.result', {
+      fieldKey: _fk,
+      engineUsed: 'wfg4',
+      localizationStatus,
+      bboxSource,
+      fallbackUsed,
+      value: value,
+      needsReview: false,
+      method: _method,
+      tokenSource: tokenSourceResolved,
+      confidence: readConfidence
+    });
     return {
       value,
       raw: value,
       confidence: readConfidence,
       boxPx: finalBox,
       tokens: winner.scoped,
-      method: winner.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box',
+      method: _method,
       engine: 'wfg4',
       tokenSource: tokenSourceResolved,
       extractionMeta: buildMeta({
