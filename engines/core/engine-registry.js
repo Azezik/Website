@@ -44,7 +44,7 @@
     return null;
   }
 
-  function registerFieldConfig(engineType, payload = {}){
+  async function registerFieldConfig(engineType, payload = {}){
     const kind = normalizeEngineType(engineType);
     if(kind === ENGINE_KIND.AI_ALGO){
       return root.AIExtractionEngine?.registerField
@@ -58,7 +58,7 @@
     }
     if(kind === ENGINE_KIND.WFG4){
       return root.WFG4Engine?.registerField
-        ? { wfg4Config: root.WFG4Engine.registerField(payload) }
+        ? { wfg4Config: await root.WFG4Engine.registerField(payload) }
         : {};
     }
     return {};
