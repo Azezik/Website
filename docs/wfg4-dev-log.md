@@ -1,4 +1,42 @@
-## 2026-04-05 — Phase 2A / 2B (Canonical Surface + Config Display Substitution)
+## 2026-04-06 — Phase: Localization quality (field identification + cross-quality robustness)
+
+### Weaknesses found (no readout/PDF/OCR/token changes)
+1. **Dead global-scan retry path.** `WFG4Engine.normalizePage` consumed `containerMap.containers`, but `WFG4OpenCv.detectContainers` returns a flat `Array<{x,y,w,h,area}>`. Result: `globalScan.candidateRegions` was always empty, so localization retry **C** never had any global candidates to try. The only attempts that ever ran were A (predicted) and B (widened).
+2. **Single-scale template refinement.** `localTemplateRefine` ran `cv.matchTemplate` at exactly the config-time field-patch resolution. When the run document differed in zoom / DPI / scan resolution, even ~10% scale drift dropped TM_CCOEFF_NORMED below the gate, so `usedRefine` silently went false and the bbox stayed at the raw projected location — close-but-not-correct, exactly the symptom reported.
+3. **Field-level identification was implicit.** The pipeline matched ORB on the **neighborhood** patch and then projected the field bbox using the neighborhood transform. Nothing actually verified that the projected box landed on the *real field target* inside that neighborhood; the only field-level signal was the (single-scale) template score which was failing under quality drift.
+4. **Structural snap was top-left only.** `structuralRefineBox` adjusted `box.x`/`box.y` from container snap and snap_above/snap_left, but never re-derived `w`/`h` from the runtime container and never produced snap_right / snap_below. So when the same template rendered larger or smaller, the field box stayed at config-time pixel size and only its top-left moved.
+5. **Container disambiguation was naive.** `findEnclosingContainer` always picked the smallest enclosing container by raw area. With nested containers (cell inside row inside table) this picked unstable winners under noise instead of the container whose size actually matched the config-time field's enclosing container.
+6. **No diagnostic for weak field patches.** There was no observable signal for "this field patch has almost no ORB descriptors so matching is being dominated by neighborhood." That made it impossible to tell field-vs-neighborhood matching apart from the debug log.
+
+### Code changes
+- `engines/core/wfg4-engine.js` — fixed `globalScan` consumer to read `detectContainers`' Array result correctly. Retry C now actually receives candidate regions.
+- `engines/wfg4/wfg4-opencv.js`
+  - `localTemplateRefine`: rewritten as **multi-scale** template refinement. Tries a ladder of scales `[0.80, 0.88, 0.94, 1.00, 1.06, 1.13, 1.22, 1.32]` against a wider search ROI (pad ratio 0.45 vs 0.30). Returns `{ ok, box, score, scale }`.
+  - `findEnclosingContainer`: accepts an optional `refSizeHint = { w, h, area }` and disambiguates by closeness-of-fit to the config-time container size, not just smallest area.
+  - `structuralRefineBox`: when container snap fires, also re-derives `box.w`/`box.h` from the runtime container's size × `wRatio`/`hRatio`, so the field box scales with the document. Adds `snap_right` and `snap_below` line snaps using `distRight`/`distBelow` anchors. Passes the config-time container as a size hint into `findEnclosingContainer`.
+- `engines/wfg4/wfg4-localization.js`
+  - `attemptOnWindow` now measures and reports `fieldDescriptorCount` (ORB keypoints on the reference field patch itself) and `fieldVerified` (true when multi-scale template refinement passed). Both are persisted into the per-attempt log.
+  - `attemptOnWindow` records the winning `refineScale` for cross-quality diagnostics.
+  - Confidence weighting rebalanced: ORB raw count and inlier ratio are 0.30/0.30 (down from 0.40/0.40), template refine boost increased to 0.30 (up from 0.20), and a `+0.10` `fieldVerifiedBoost` is added when multi-scale refinement successfully locks the field patch. Net effect: a successful neighborhood match alone is no longer sufficient to ride high confidence — the **field target inside the neighborhood** has to be verified.
+
+### How field identification now works
+1. ORB on the reference **neighborhood** patch matches the run document search window (predicted → widened → top global-scan candidates).
+2. RANSAC homography/affine produces a transform; the configured field bbox (in neighborhood-local coordinates) is projected into the run page. This is "right neighborhood".
+3. The **reference field patch itself** is then matched against the run page using **multi-scale** `cv.matchTemplate`, centered on the projected box but with ±45% search padding. The best scale + offset wins. This is "right field inside the neighborhood".
+4. If field-level template lock succeeds, `fieldVerified = true`, the bbox snaps to the template-matched position **at the matched scale** (so the box itself rescales to match the run document's zoom), and confidence picks up the `+0.30 * score` refine boost plus the `+0.10` field-verified boost.
+5. Structural refinement runs after geometric matching: container snap also rescales w/h via the stored `wRatio`/`hRatio`; snap_right and snap_below tighten the box to runtime grid lines; container disambiguation prefers containers whose size matches the config-time container (avoids snapping a cell to its enclosing table).
+6. The per-field debug log now exposes `fieldDescriptorCount`, `fieldVerified`, `refineScale`, and `refineScore` per attempt, so weak field patches and cross-quality scale drift are observable.
+
+### Expected improvements
+- **Same template, different scan quality:** field-verified template matching uses intensity correlation, which degrades much more gracefully under sharpness/AA/compression drift than ORB feature counts. Confidence stays meaningful instead of collapsing onto neighborhood-only scores.
+- **Same template, different zoom / render scale:** the multi-scale ladder tolerates ~±32% scale drift in either direction. The matched scale is recorded per attempt so cross-zoom can be diagnosed. Container snap also rescales the box's `w`/`h` instead of leaving it at config-time pixel size.
+- **Right neighborhood, slightly wrong field box:** field-level template lock + container/line snaps now actively re-anchor the box inside the matched neighborhood. The projected box from neighborhood ORB is treated as a *prior*, not the answer.
+- **Visually weak fields that previously fell back structurally:** `fieldDescriptorCount` is now observable, and the global-scan retry C path actually receives candidates (was dead before), giving low-texture fields a real geometric retry instead of jumping straight to structural fallback.
+
+### Out of scope (intentionally untouched)
+- PDF text-layer extraction, OCR backend selection, localized OCR fallback, token-gating, readout backend behavior, and the localization→readout contract were not modified. The hard localization gate in `extractScalar` still owns the `needsReview` decision.
+
+
 
 ### Summary
 - Implemented real WFG4 canonical surface generation in `WFG4Engine.prepareDocumentSurface(...)` using OpenCV.js operations (resize, grayscale, Gaussian denoise, Canny edges) with browser-safe fallback behavior.
