@@ -276,3 +276,60 @@ Extended WFG4 Phase 3 with field-level structural intelligence to improve bbox l
 - Fields inside form boxes should maintain position relative to container edges even when ORB matches shift slightly
 - Low-texture fields (e.g., numeric cells in tables) that produce weak ORB matches now have a structural fallback path
 - Overall localization confidence is more granular with the structural component factored in
+
+## 2026-04-06 — Phase: WFG4 debug visualization mode
+
+### Summary
+Added a global WFG4 Debug Mode toggle that enables run-time visualization and validation of the full localization pipeline. When enabled, the system pauses after field extraction, renders color-coded bbox overlays for every localization stage, and allows the user to mark results as GOOD or BAD (with optional per-field bbox correction). All debug sessions are logged with structured per-field localization metadata and derived metrics for offline analysis.
+
+### Purpose
+Determine whether WFG4 is:
+- localizing the wrong region
+- localizing correctly but extracting from the wrong crop
+- or both
+
+This feature makes localization behavior observable and measurable without changing any extraction or localization algorithms.
+
+### Files Modified
+- `document-dashboard.html` — added WFG4 Debug Mode toggle (checkbox next to engine selector) and debug review panel with GOOD/BAD buttons and correction UI
+- `invoice-wizard.js` — added debug state management, batch guard (1 file only), debug pause after static field extraction, overlay rendering (4-color bbox stages per field), field data list display, GOOD/BAD verdict flow, correction mode (per-field bbox redraw), structured debug log persistence (localStorage)
+- `engines/core/wfg4-engine.js` — extended `extractScalar` to capture `debugBboxStages` (reference, ORB-projected, refined, OCR crop bboxes) in extractionMeta on all return paths
+- `engines/wfg4/wfg4-localization.js` — exposed intermediate bbox snapshots: `orbProjectedBox` (after ORB transform projection), `postRefineBox` (after template refinement), `predictedBox` (config-time reference) in localization return payload
+- `docs/wfg4-dev-log.md` — this entry
+
+### Feature Details
+
+**Global toggle:**
+- Checkbox labeled "WFG4 Debug Mode" appears next to extraction engine dropdown only when WFG4 engine is selected
+- Default: OFF. Only applies in run mode. Does not affect config mode.
+- When ON: batch processing restricted to 1 file at a time
+
+**Debug overlay (4-color bbox visualization):**
+- BLUE (dashed) — Reference bbox from config time
+- YELLOW (dashed) — ORB-projected bbox after geometric transform
+- GREEN (dashed) — Final refined bbox after template + structural refinement
+- RED (solid) — Actual OCR/readout crop box used for extraction
+- Each field also displays: extracted value, localization confidence, readout confidence
+
+**User validation:**
+- GOOD: logs debug entry with verdict, proceeds with normal extraction
+- BAD: enters correction mode — user redraws bbox per field in order, corrections logged as `userCorrectedBbox`
+
+**Debug log structure (per run):**
+- File metadata: fileName, fileType, fileSize, rendered dimensions, canonical surface dimensions
+- Per-field: all 4 bbox stages, userCorrectedBbox (if BAD), derived deltas (projected vs refined, refined vs user, reference vs projected, bbox size differences)
+- Persisted to localStorage under `wfg4_debug_log` (capped at 200 entries)
+
+### Architectural Rules Preserved
+- No changes to WFG4 extraction logic or localization algorithms
+- No changes to ORB matching, structural refinement, or template matching
+- No changes to config mode, profile persistence, or compile/output contracts
+- Debug mode is fully isolated behind toggle — when OFF, run flow is completely unchanged
+- Overlay rendering is additive (painted on top of existing overlay after `drawOverlay`)
+
+### Insights This Feature Captures
+- Whether ORB projection is landing in the correct region (reference vs projected delta)
+- Whether structural refinement is helping or hurting (projected vs refined delta)
+- Whether the final OCR crop matches what the user expects (refined vs user-corrected delta)
+- Scale and offset drift between config-time and run-time surfaces
+- Per-field localization confidence vs readout confidence correlation

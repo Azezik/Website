@@ -37,6 +37,10 @@
           <option value="wfg4">WFG4 (Phase 1)</option>
         </select>
       </label>
+      <label class="toggle-inline" id="wfg4-debug-toggle-label" style="display:none;align-items:center;gap:6px;margin-left:8px;">
+        <input type="checkbox" id="wfg4-debug-toggle" />
+        <span style="font-size:12px;font-weight:600;color:#f59e0b;">WFG4 Debug Mode</span>
+      </label>
       <button id="logout-btn" class="btn ghost" type="button">Logout</button>
     </div>
 
@@ -1637,6 +1641,24 @@
         <img id="imgCanvas" class="docCanvas" style="display:none" />
         <canvas id="overlayCanvas" class="overlay"></canvas>
         <div id="overlayHud" class="overlay-hud"></div>
+      </div>
+
+      <div id="wfg4DebugPanel" style="display:none;padding:12px;margin:8px 0;border:2px solid #f59e0b;border-radius:6px;background:#1a1a2e;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+          <span style="font-weight:700;color:#f59e0b;font-size:14px;">WFG4 Debug — Field Overlay Review</span>
+          <span id="wfg4DebugStatus" style="font-size:12px;color:#94a3b8;"></span>
+        </div>
+        <div id="wfg4DebugFieldList" style="max-height:180px;overflow-y:auto;font-size:11px;color:#cbd5e1;margin-bottom:10px;font-family:'IBM Plex Mono',monospace;"></div>
+        <div style="display:flex;gap:8px;">
+          <button id="wfg4DebugGoodBtn" class="btn" style="background:#22c55e;color:#000;font-weight:700;">GOOD</button>
+          <button id="wfg4DebugBadBtn" class="btn" style="background:#ef4444;color:#fff;font-weight:700;">BAD</button>
+        </div>
+        <div id="wfg4DebugCorrectionPanel" style="display:none;margin-top:10px;padding:8px;border:1px solid #f59e0b;border-radius:4px;">
+          <div style="font-size:12px;color:#f59e0b;margin-bottom:6px;">Correction Mode — redraw bbox for each field</div>
+          <div id="wfg4DebugCorrectionPrompt" style="font-size:12px;color:#e2e8f0;margin-bottom:6px;"></div>
+          <button id="wfg4DebugCorrectionConfirmBtn" class="btn" style="font-size:11px;">Confirm Corrected Box</button>
+          <button id="wfg4DebugCorrectionDoneBtn" class="btn primary" style="font-size:11px;display:none;">Finish Corrections</button>
+        </div>
       </div>
 
       <div class="actions">
