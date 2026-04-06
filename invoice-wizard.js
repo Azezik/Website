@@ -2080,7 +2080,8 @@ let loginHydrated = false;
 let extractionOverlayCount = 0;
 function setExtractionLoading(isLoading){
   if(!els.wizardRunOverlay) return;
-  const allowOverlay = state.extractionTrigger === 'drop' && isRunMode();
+  const debugSuppress = !!(state.wfg4 && state.wfg4.debugMode && getConfiguredEngineType && getConfiguredEngineType() === ENGINE_KIND.WFG4);
+  const allowOverlay = !debugSuppress && state.extractionTrigger === 'drop' && isRunMode();
   extractionOverlayCount = Math.max(0, extractionOverlayCount + (isLoading ? 1 : -1));
   const shouldShow = extractionOverlayCount > 0;
   state.isExtracting = shouldShow;
@@ -20462,6 +20463,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             await renderWfg4CanonicalIntoViewer(runSurface);
             drawOverlay();
           }
+
+          // Force-hide loading overlay so user can interact with debug view
+          if(els.wizardRunOverlay){
+            els.wizardRunOverlay.classList.remove('is-active');
+            els.wizardRunOverlay.setAttribute('aria-hidden', 'true');
+          }
+          state.isExtracting = false;
 
           // Pause: show debug panel and wait for user verdict
           await new Promise(resolve => {
