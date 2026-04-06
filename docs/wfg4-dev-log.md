@@ -211,3 +211,68 @@ Modified `readImageTokensForPageWithBBox` in `invoice-wizard.js` to:
 - PDFs that fail both PDF.js text extraction AND PDF.js canvas rendering (corrupt or encrypted) will still return zero tokens gracefully (no crash, but no extraction).
 - On-demand page rendering adds a per-page rendering cost for text-layer-empty PDFs; this is bounded by `ensureTesseractTokensForPageWithBBox` caching (one render + one OCR call per page).
 - Very large pages may produce large temporary canvases; this is the same memory profile as `renderAllPages` but scoped to one page at a time.
+
+## 2026-04-06 — Phase: WFG4 structural field anchoring
+
+### Summary
+Extended WFG4 Phase 3 with field-level structural intelligence to improve bbox localization stability. At config time, each field now captures structural context (edges, lines, contours, containers, anchor offsets) from the canonical surface using OpenCV. At runtime, after ORB-based transform and initial bbox projection, structural data is used for local refinement — snapping to detected edges/lines and re-anchoring within detected containers.
+
+### Added Capabilities
+
+**Config-time structural context capture** (in `wfg4-registration.js`):
+- Canny edge detection + HoughLinesP to find horizontal/vertical lines near the field bbox
+- Contour detection to identify rectangular containers enclosing the bbox
+- Anchor offset computation: distance to nearest horizontal line above/below, vertical line left/right
+- Container-relative positioning: offset from container edges and proportional position within container
+- All stored under `structuralContext` in the per-field `wfg4Config` packet
+
+**Runtime structural refinement** (in `wfg4-localization.js`):
+- After ORB-based transform + template refinement, performs local structural analysis around projected bbox
+- Detects lines and containers in runtime search region
+- Snaps bbox to container boundaries using stored relative position (when config had a container)
+- Snaps bbox edges to nearest lines using stored anchor offsets
+- When ORB confidence is weak, doubles structural snap tolerance for more aggressive correction
+- Structural refinement contributes to localization confidence score (+0.1 boost)
+- Can produce `ok: true` even when ORB consensus fails (`structural_fallback` reason)
+
+**New OpenCV operations** (in `wfg4-opencv.js`):
+- `detectEdgesAndLines()`: Canny + HoughLinesP, classifies lines as horizontal/vertical
+- `detectContainers()`: Canny + findContours + approxPolyDP, identifies rectangular contours
+- `findEnclosingContainer()`: finds smallest container with sufficient overlap
+- `computeAnchorOffsets()`: measures distances from bbox to nearby lines and container edges
+- `structuralRefineBox()`: runtime entry point that applies container snap + line snap adjustments
+
+### How Structural Refinement Integrates with ORB Pipeline
+1. ORB matching + RANSAC transform estimation runs first (unchanged)
+2. Bbox projection via homography/affine runs second (unchanged)
+3. Local template refinement via matchTemplate runs third (unchanged)
+4. **NEW**: Structural refinement runs fourth — adjusts the already-projected bbox using edge/line/container anchors
+5. If ORB produced a valid transform, structural refinement applies conservative snapping (±8px)
+6. If ORB confidence is weak (below 0.4), structural refinement applies wider tolerance (±16px) and can independently produce a valid localization result
+7. Final confidence score now incorporates structural boost alongside ORB and template scores
+
+### Files Modified
+- `engines/wfg4/wfg4-types.js` — added structural anchoring defaults, updated schema version
+- `engines/wfg4/wfg4-opencv.js` — added 5 structural detection/refinement functions
+- `engines/wfg4/wfg4-registration.js` — extended config-time capture with structural context
+- `engines/wfg4/wfg4-localization.js` — added post-ORB structural refinement step
+- `docs/wfg4-dev-log.md` — this entry
+
+### Architectural Rules Preserved
+- WFG4 localization remains visual-first: all structural data comes from rendered canonical surface
+- PDF text layer / OCR / AcroForm data does not influence localization or structural analysis
+- Non-visual sources remain read-assist only, used after localization determines the target region
+- No changes to save/load/run lifecycle, compile/MasterDB flow, or orchestration contracts
+
+### Performance Considerations
+- Structural analysis runs on a local ROI crop (not full page), bounded by field size + padding
+- Canny + HoughLinesP + findContours are fast OpenCV operations (~1-3ms per field on typical regions)
+- Lines and containers are capped (20 each) in persisted config to bound storage
+- Runtime structural refinement only fires when `structuralContext.captureStatus === 'ok'`
+- If OpenCV is unavailable, structural path is cleanly skipped (graceful fallback to ORB-only)
+
+### Expected Improvement in Localization Stability
+- Fields near table lines/grid borders should snap to correct cell boundaries across document variants
+- Fields inside form boxes should maintain position relative to container edges even when ORB matches shift slightly
+- Low-texture fields (e.g., numeric cells in tables) that produce weak ORB matches now have a structural fallback path
+- Overall localization confidence is more granular with the structural component factored in

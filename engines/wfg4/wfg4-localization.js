@@ -159,13 +159,54 @@
         refFieldMat.delete();
       }
 
-      const structuralScore = Math.min(1, (matchCount / 30));
+      // --- Structural anchor refinement (Phase 3 extension) ---
+      let structuralAdjustments = [];
+      let usedStructural = false;
+      const structuralCtx = ref?.structuralContext || null;
+      const orbConfidence = Math.min(1, (matchCount / 30) * 0.5 + inlierRatio * 0.5);
+      const orbIsWeak = !matrix || orbConfidence < (DEFAULTS.orbWeakConfidenceThreshold || 0.4);
+
+      if(structuralCtx?.captureStatus === 'ok' && localized){
+        let rtGray = null;
+        let rtRgba = null;
+        try {
+          rtRgba = cv.imread(runtimeCanvas);
+          rtGray = new cv.Mat();
+          cv.cvtColor(rtRgba, rtGray, cv.COLOR_RGBA2GRAY);
+
+          const structResult = CvOps.structuralRefineBox(localized, structuralCtx, rtGray, {
+            structuralSnapMaxPx: orbIsWeak ? (DEFAULTS.structuralSnapMaxPx || 8) * 2 : (DEFAULTS.structuralSnapMaxPx || 8),
+            anchorMaxSearchDist: DEFAULTS.anchorMaxSearchDist,
+            containerOverlapThreshold: DEFAULTS.containerOverlapThreshold,
+            cannyThreshold1: DEFAULTS.cannyThreshold1,
+            cannyThreshold2: DEFAULTS.cannyThreshold2,
+            houghLineThreshold: DEFAULTS.houghLineThreshold,
+            houghMinLineLength: DEFAULTS.houghMinLineLength,
+            houghMaxLineGap: DEFAULTS.houghMaxLineGap,
+            contourMinArea: DEFAULTS.contourMinArea
+          });
+          if(structResult.ok){
+            localized = structResult.box;
+            structuralAdjustments = structResult.adjustments || [];
+            usedStructural = true;
+          }
+        } catch(e){
+          // structural refinement is best-effort; fall through
+        } finally {
+          if(rtGray) rtGray.delete();
+          if(rtRgba) rtRgba.delete();
+        }
+      }
+
+      const orbScore = Math.min(1, (matchCount / 30));
       const inlierScore = Math.min(1, inlierRatio);
       const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.2 : 0;
-      const localizationConfidence = Math.max(0.05, Math.min(0.98, (structuralScore * 0.45) + (inlierScore * 0.45) + refineBoost));
+      const structuralBoost = usedStructural ? 0.1 : 0;
+      const baseConfidence = (orbScore * 0.4) + (inlierScore * 0.4) + refineBoost + structuralBoost;
+      const localizationConfidence = Math.max(0.05, Math.min(0.98, baseConfidence));
 
       return {
-        ok: !!matrix,
+        ok: !!(matrix || usedStructural),
         localizedBox: localized || predictedBox,
         localizationConfidence,
         transformModel,
@@ -174,7 +215,9 @@
         inlierRatio,
         usedRefine,
         refineScore,
-        reason: matrix ? null : 'insufficient_geometric_consensus'
+        usedStructural,
+        structuralAdjustments,
+        reason: matrix ? null : (usedStructural ? 'structural_fallback' : 'insufficient_geometric_consensus')
       };
     } catch(err){
       return {
