@@ -902,6 +902,15 @@ function isRunMode(){ return state.mode === ModeEnum.RUN; }
 function guardInteractive(label){
   // Learning mode needs full overlay/canvas access regardless of wizard mode
   if(state.learningActive) return false;
+  // WFG4 debug review/correction needs overlay sizing, draw, sync, and scroll
+  // to work so the document and bbox overlays are visible and interactive.
+  // Pointer drawing (pointerdown/move/up) is restricted to correction mode only.
+  if(state.wfg4?.debugPending){
+    const isPointerDraw = label === 'overlay.pointerdown' || label === 'overlay.pointermove' || label === 'overlay.pointerup';
+    if(!isPointerDraw) return false;                     // allow sync/size/draw/scroll
+    if(state.wfg4.debugCorrectionState) return false;   // allow drawing only in correction
+    return true;                                         // block drawing during review
+  }
   const blocked = modeController?.guardInteractive ? modeController.guardInteractive(label) : false;
   if(blocked) return true;
   if(isRunMode()){
@@ -20686,59 +20695,89 @@ function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
 function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
   if(!ctx) return;
   const colors = {
-    reference: 'rgba(59,130,246,0.8)',
-    orbProjected: 'rgba(234,179,8,0.8)',
-    refined: 'rgba(34,197,94,0.8)',
-    ocrCrop: 'rgba(239,68,68,0.8)'
+    reference:   'rgba(59,130,246,0.9)',   // BLUE
+    orbProjected:'rgba(234,179,8,0.9)',    // YELLOW
+    refined:     'rgba(34,197,94,0.9)',    // GREEN
+    ocrCrop:     'rgba(239,68,68,0.95)'   // RED
   };
   const labels = {
-    reference: 'REF',
+    reference:    'REF',
     orbProjected: 'ORB',
-    refined: 'REFN',
-    ocrCrop: 'OCR'
+    refined:      'REFN',
+    ocrCrop:      'OCR'
   };
   const dashes = {
-    reference: [6, 3],
+    reference:    [6, 3],
     orbProjected: [4, 4],
-    refined: [8, 2],
-    ocrCrop: []
+    refined:      [8, 2],
+    ocrCrop:      []
   };
+  // Small inward pixel offsets per stage so overlapping boxes remain
+  // visually distinguishable when ORB/refine fall back to the same region.
+  const insets = { reference: 0, orbProjected: 4, refined: 8, ocrCrop: 0 };
+
   ctx.save();
-  ctx.font = '10px "IBM Plex Mono", monospace';
+  ctx.font = 'bold 10px "IBM Plex Mono", monospace';
+
   for(const fd of fieldDataList){
     const page = fd.referenceBbox?.page || fd.ocrCropBbox?.page || 1;
     const offPx = (state.pageOffsets[(page||1)-1] || 0) / scaleY;
+
+    // Anchor box used as fallback for null stages and for label placement
+    const anchorBox = fd.referenceBbox || fd.ocrCropBbox || null;
+
     const stages = [
-      { key: 'reference', box: fd.referenceBbox },
-      { key: 'orbProjected', box: fd.orbProjectedBbox },
-      { key: 'refined', box: fd.refinedBbox },
-      { key: 'ocrCrop', box: fd.ocrCropBbox }
+      { key: 'reference',    box: fd.referenceBbox,    fallback: false },
+      { key: 'orbProjected', box: fd.orbProjectedBbox, fallback: fd.orbProjectedBbox == null },
+      { key: 'refined',      box: fd.refinedBbox,      fallback: fd.refinedBbox == null },
+      { key: 'ocrCrop',      box: fd.ocrCropBbox,      fallback: false }
     ];
+
     for(const st of stages){
-      if(!st.box) continue;
-      const x = (st.box.x ?? 0) / scaleX;
-      const y = ((st.box.y ?? 0) / scaleY) + offPx;
-      const w = (st.box.w ?? 0) / scaleX;
-      const h = (st.box.h ?? 0) / scaleY;
+      // For null ORB/refine stages, draw a fallback indicator at the anchor
+      // position with reduced opacity so the user can see "no separate bbox"
+      const drawBox = st.box || (st.fallback ? anchorBox : null);
+      if(!drawBox) continue;
+
+      const ins = (insets[st.key] || 0) / scaleX;  // inset in CSS-px
+      const bx = (drawBox.x ?? 0) / scaleX + ins;
+      const by = ((drawBox.y ?? 0) / scaleY) + offPx + ins;
+      const bw = Math.max(2, (drawBox.w ?? 0) / scaleX - ins * 2);
+      const bh = Math.max(2, (drawBox.h ?? 0) / scaleY - ins * 2);
+
+      const alpha = st.fallback ? 0.35 : 1;
+      ctx.globalAlpha = alpha;
       ctx.strokeStyle = colors[st.key];
-      ctx.lineWidth = st.key === 'ocrCrop' ? 2 : 1.5;
+      ctx.lineWidth = st.key === 'ocrCrop' ? 2.5 : 1.5;
       ctx.setLineDash(dashes[st.key]);
-      ctx.strokeRect(x, y, w, h);
+      ctx.strokeRect(bx, by, bw, bh);
+
+      // Stage label above the box
+      const labelSuffix = st.fallback ? '(≈)' : '';
       ctx.fillStyle = colors[st.key];
-      ctx.fillText(labels[st.key], x + 2, y - 3);
+      ctx.fillText(labels[st.key] + labelSuffix, bx + 2, by - 3);
     }
-    const labelBox = fd.ocrCropBbox || fd.refinedBbox || fd.referenceBbox;
-    if(labelBox){
-      const lx = (labelBox.x ?? 0) / scaleX + (labelBox.w ?? 0) / scaleX + 4;
-      const ly = ((labelBox.y ?? 0) / scaleY) + offPx + 10;
-      ctx.fillStyle = '#e2e8f0';
+    ctx.globalAlpha = 1;
+
+    // Metrics label to the right of the anchor box
+    if(anchorBox){
+      const lx = (anchorBox.x ?? 0) / scaleX + (anchorBox.w ?? 0) / scaleX + 4;
+      const ly = ((anchorBox.y ?? 0) / scaleY) + offPx + 10;
+      ctx.font = 'bold 10px "IBM Plex Mono", monospace';
+      ctx.fillStyle = '#f1f5f9';
       ctx.fillText(`${fd.fieldKey}`, lx, ly);
+      ctx.font = '9px "IBM Plex Mono", monospace';
       ctx.fillStyle = '#94a3b8';
       ctx.fillText(`val: ${(fd.value || '').substring(0, 20)}`, lx, ly + 12);
-      ctx.fillText(`loc: ${fd.localizationConfidence != null ? fd.localizationConfidence.toFixed(2) : '—'}  read: ${fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(2) : '—'}`, lx, ly + 24);
+      ctx.fillText(
+        `loc:${fd.localizationConfidence != null ? fd.localizationConfidence.toFixed(2) : '—'} `
+        + `read:${fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(2) : '—'}`,
+        lx, ly + 22
+      );
     }
   }
   ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 
