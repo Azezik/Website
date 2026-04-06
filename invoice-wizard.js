@@ -10138,18 +10138,93 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         ? await EngineRegistry.extractScalar(fieldEngineType, enginePayload)
         : (AIExtractionEngine?.extractScalar ? await AIExtractionEngine.extractScalar({ fieldSpec, tokens: Array.isArray(tokens) ? tokens : [], boxPx: resolvedBox }) : null);
       if(engineResult){
+        let readoutAugmented = engineResult;
+        // Localization-authoritative readout: WFG4 (or any engine) may return
+        // a successfully localized box with no token matched by the initially
+        // supplied token stream (empty PDF text layer, zero OCR tokens on an
+        // image surface, mismatched stream, etc.). The localized bbox is the
+        // truth; the readout backend just needs to be tried on that bbox.
+        // This is the source-agnostic OCR readout pass, used for both PDFs
+        // and images.
+        if(engineResult?.needsLocalizedReadout && engineResult?.boxPx){
+          try {
+            const targetPage = Math.max(1, Number(engineResult.boxPx.page || fieldSpec.page || state.pageNum || 1) || 1);
+            const tessTokens = await ensureTesseractTokensForPageWithBBox(targetPage);
+            const normalized = normalizeTesseractTokensForPage(tessTokens, targetPage) || [];
+            const scoped = tokensInBox(normalized, engineResult.boxPx, { minOverlap: 0.2 });
+            let pick = null;
+            let pickScore = -1;
+            for(const tok of scoped){
+              const text = String(tok.text || tok.raw || '').trim();
+              if(!text) continue;
+              const conf = Number.isFinite(tok.confidence) ? tok.confidence : 0.5;
+              if(conf > pickScore){ pick = { tok, text, conf }; pickScore = conf; }
+            }
+            if(pick){
+              const readConf = Math.max(0.2, Math.min(0.85, 0.3 + (pick.conf * 0.5)));
+              readoutAugmented = {
+                ...engineResult,
+                value: pick.text,
+                raw: pick.text,
+                confidence: readConf,
+                tokens: scoped,
+                method: 'wfg4-localized-readout-tesseract',
+                tokenSource: 'tesseract-bbox',
+                needsReview: false,
+                lowConfidence: false,
+                extractionMeta: {
+                  ...(engineResult.extractionMeta || {}),
+                  readoutBackend: 'tesseract-localized',
+                  tokenSourceResolved: 'tesseract-bbox'
+                }
+              };
+              window.EngineLog?.engineLog('wfg4-run', 'readout.localized', {
+                fieldKey: fieldSpec.fieldKey || null,
+                backend: 'tesseract',
+                value: pick.text,
+                tokenCount: scoped.length
+              });
+            } else {
+              // Truly nothing readable inside the localized box — only now
+              // is this a real needs_review, but the localization itself is
+              // still trusted.
+              readoutAugmented = {
+                ...engineResult,
+                method: 'wfg4-localized-readout-empty',
+                needsReview: true,
+                lowConfidence: true,
+                confidence: 0.08,
+                extractionMeta: {
+                  ...(engineResult.extractionMeta || {}),
+                  readoutBackend: 'tesseract-localized',
+                  readoutResult: 'empty'
+                }
+              };
+            }
+          } catch(readoutErr){
+            window.EngineLog?.engineLog('wfg4-run', 'readout.localized.error', {
+              fieldKey: fieldSpec.fieldKey || null,
+              error: String(readoutErr?.message || readoutErr)
+            });
+            readoutAugmented = {
+              ...engineResult,
+              needsReview: true,
+              lowConfidence: true
+            };
+          }
+        }
         return {
-          value: engineResult?.value || '',
-          raw: engineResult?.raw || engineResult?.value || '',
-          confidence: engineResult?.confidence || 0,
-          boxPx: engineResult?.boxPx || resolvedBox,
-          tokens: engineResult?.tokens || [],
-          method: engineResult?.method || fieldEngineType,
+          value: readoutAugmented?.value || '',
+          raw: readoutAugmented?.raw || readoutAugmented?.value || '',
+          confidence: readoutAugmented?.confidence || 0,
+          boxPx: readoutAugmented?.boxPx || resolvedBox,
+          tokens: readoutAugmented?.tokens || [],
+          method: readoutAugmented?.method || fieldEngineType,
           engineUsed: fieldEngineType,
-          tokenSource: engineResult?.tokenSource || engineResult?.extractionMeta?.tokenSourceResolved || fieldSpec?.runtime?.tokenSource || null,
-          needsReview: !!engineResult?.needsReview,
-          lowConfidence: !!engineResult?.lowConfidence,
-          extractionMeta: engineResult?.extractionMeta || null
+          tokenSource: readoutAugmented?.tokenSource || readoutAugmented?.extractionMeta?.tokenSourceResolved || fieldSpec?.runtime?.tokenSource || null,
+          needsReview: !!readoutAugmented?.needsReview,
+          lowConfidence: !!readoutAugmented?.lowConfidence,
+          extractionMeta: readoutAugmented?.extractionMeta || null
         };
       }
     }
@@ -20588,7 +20663,13 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
           // Tesseract which reads the rendered bitmap and sees both labels and values.
           // ensureTesseractTokensForPageWithBBox caches results, so cost is one
           // Tesseract call per page across all fields on that page.
-          if(!result?.value && !state.isImage && (state.tokensByPage[targetPage] || []).length > 0){
+          // Source-agnostic empty-result retry: after a localized readout
+          // attempt, if there is still no value and we have not already read
+          // from Tesseract, retry using Tesseract-derived tokens for this
+          // page. This keeps PDF text-layer as a preferred but non-privileged
+          // readout backend and ensures image sources get symmetric retry.
+          const _alreadyTess = (result?.tokenSource || '').toLowerCase().includes('tesseract');
+          if(!result?.value && !_alreadyTess){
             const _specEngine = normalizeEngineType(spec.engineType || '');
             if(_specEngine !== ENGINE_KIND.LEGACY){
               window.EngineLog?.engineLog('legacy', 'fallback.enter', {

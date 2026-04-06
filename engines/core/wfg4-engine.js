@@ -519,20 +519,27 @@
     }
 
     if(!winner){
-      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsReview', reason: 'no_token_in_localized_scope', bboxSource });
-      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource, fallbackUsed, value: '', needsReview: true, method: 'wfg4-localized-empty' });
+      // Localization is authoritative: the field location is real. Token
+      // scoping failure here means the current readout backend (PDF text
+      // layer tokens or pre-fetched OCR tokens) did not cover the localized
+      // region. The pipeline should attempt a localized readout on finalBox
+      // using an image/OCR backend regardless of source type. We hand that
+      // responsibility to the caller via `needsLocalizedReadout`.
+      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsLocalizedReadout', reason: 'no_token_in_localized_scope', bboxSource });
+      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource, fallbackUsed, value: '', needsReview: false, method: 'wfg4-localized-needs-readout' });
       return {
         value: '',
         raw: '',
-        confidence: Math.max(0.08, (localized.localizationConfidence || 0) * 0.4),
+        confidence: 0,
         boxPx: finalBox,
         tokens: [],
-        method: 'wfg4-localized-empty',
+        method: 'wfg4-localized-needs-readout',
         engine: 'wfg4',
-        lowConfidence: true,
-        needsReview: true,
+        lowConfidence: false,
+        needsReview: false,
+        needsLocalizedReadout: true,
         tokenSource: tokenSourceResolved,
-        extractionMeta: buildMeta({ reason: 'no_token_in_localized_scope' })
+        extractionMeta: buildMeta({ reason: 'no_token_in_localized_scope_pending_readout' })
       };
     }
 
