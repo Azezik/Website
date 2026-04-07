@@ -251,7 +251,9 @@
     }
 
     // P2: lightweight per-page global scan artifact (deterministic, inspectable).
+    // Phase 1: also produce a normalized PageStructure from the same gray mat.
     let globalScan = null;
+    let pageStructure = null;
     try {
       const cv = (typeof window !== 'undefined' ? window.cv : null);
       if(cv && normalized.grayDataUrl && CvOps.detectEdgesAndLines && CvOps.detectContainers){
@@ -293,12 +295,25 @@
           candidateRegions,
           generatedAt: new Date().toISOString()
         };
+        // Phase 1: build normalized PageStructure from the same gray mat.
+        // buildPageStructure re-uses the already-open gray mat so there is no
+        // extra CV allocation.  Both config and runtime paths share this code
+        // path through prepareDocumentSurface / normalizePage.
+        try {
+          if(CvOps.buildPageStructure){
+            pageStructure = CvOps.buildPageStructure(
+              gray,
+              { width: working.width, height: working.height },
+              {}
+            );
+          }
+        } catch(_e2){ pageStructure = null; }
         gray.delete();
         srcMat.delete();
         // Suppress unused-image warning
         void img;
       }
-    } catch(_e){ globalScan = null; }
+    } catch(_e){ globalScan = null; pageStructure = null; }
 
     return {
       pageIndex,
@@ -319,6 +334,7 @@
         edgeDataUrl: normalized.edgeDataUrl || null
       },
       globalScan,
+      pageStructure,
       diagnostics: normalized.diagnostics || {}
     };
   }
