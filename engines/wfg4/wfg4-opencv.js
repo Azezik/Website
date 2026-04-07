@@ -629,6 +629,226 @@
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // buildConstellation — Phase 2 constellation construction (config time)
+  //
+  // Given a normalized field bbox and a PageStructure (Phase 1), selects a
+  // small (3–6 object), spatially-distributed set of structural objects that
+  // collectively constrain the field's geometry.  Uses 8-sector coverage
+  // selection so that the chosen members are distributed around the field
+  // rather than clustered on one side.
+  //
+  // Input:
+  //   fieldBboxNorm — { x0, y0, x1, y1 } in 0..1 page-normalized coords
+  //   pageStructure — PageStructure produced by buildPageStructure()
+  //   opts          — optional overrides (minMembers, maxMembers, minDistN,
+  //                   nearbyThresholdN, separatorWeight, rowBandWeight,
+  //                   regionWeight)
+  //
+  // Returns: constellation object, or null on bad input.
+  // ---------------------------------------------------------------------------
+  function buildConstellation(fieldBboxNorm, pageStructure, opts){
+    if(!fieldBboxNorm || !pageStructure) return null;
+    var o = opts || {};
+
+    // Field geometry in normalized coords
+    var fxN  = Number(fieldBboxNorm.x0 || 0);
+    var fyN  = Number(fieldBboxNorm.y0 || 0);
+    var fx1N = Number(fieldBboxNorm.x1 || 0);
+    var fy1N = Number(fieldBboxNorm.y1 || 0);
+    var fwN  = Math.max(0, fx1N - fxN);
+    var fhN  = Math.max(0, fy1N - fyN);
+    var fcxN = fxN + fwN / 2;
+    var fcyN = fyN + fhN / 2;
+
+    var minMembers       = typeof o.minMembers === 'number'       ? o.minMembers       : 3;
+    var maxMembers       = typeof o.maxMembers === 'number'       ? o.maxMembers       : 6;
+    var minDistN         = typeof o.minDistN === 'number'         ? o.minDistN         : 0.01;
+    var nearbyThreshN    = typeof o.nearbyThresholdN === 'number' ? o.nearbyThresholdN : 0.15;
+    var wSeparator       = typeof o.separatorWeight === 'number'  ? o.separatorWeight  : 3;
+    var wRowBand         = typeof o.rowBandWeight === 'number'    ? o.rowBandWeight    : 2;
+    var wRegion          = typeof o.regionWeight === 'number'     ? o.regionWeight     : 1;
+
+    var objects  = Array.isArray(pageStructure.structuralObjects) ? pageStructure.structuralObjects : [];
+    var regions  = Array.isArray(pageStructure.regions)           ? pageStructure.regions           : [];
+    var rowBands = Array.isArray(pageStructure.rowBands)          ? pageStructure.rowBands          : [];
+
+    // ----- Owning region: smallest region that encloses ≥70% of field bbox -----
+    var owningRegion = null;
+    var bestOwnerArea = Infinity;
+    for(var ri = 0; ri < regions.length; ri++){
+      var reg = regions[ri];
+      var ox0 = Math.max(fxN, reg.xN),  oy0 = Math.max(fyN, reg.yN);
+      var ox1 = Math.min(fx1N, reg.xN + reg.wN), oy1 = Math.min(fy1N, reg.yN + reg.hN);
+      if(ox1 <= ox0 || oy1 <= oy0) continue;
+      var overlapN = (ox1 - ox0) * (oy1 - oy0);
+      var fieldArea = Math.max(1e-10, fwN * fhN);
+      if(overlapN / fieldArea >= 0.7 && reg.areaN < bestOwnerArea){
+        bestOwnerArea = reg.areaN;
+        owningRegion = reg;
+      }
+    }
+    var owningRegionGeom = owningRegion
+      ? { xN: owningRegion.xN, yN: owningRegion.yN, wN: owningRegion.wN, hN: owningRegion.hN }
+      : null;
+
+    // ----- 8-sector helper -----
+    // In a y-down coordinate system (screen/page coords):
+    //   N = upward on page (dy < 0), S = downward, E = right, W = left
+    var SECTORS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    function getSector(dx, dy){
+      var deg = Math.atan2(dy, dx) * 180 / Math.PI; // [-180, 180]
+      if(deg > -22.5  && deg <=  22.5)  return 'E';
+      if(deg >  22.5  && deg <=  67.5)  return 'SE';
+      if(deg >  67.5  && deg <= 112.5)  return 'S';
+      if(deg > 112.5  && deg <= 157.5)  return 'SW';
+      if(deg >  157.5 || deg <= -157.5) return 'W';
+      if(deg > -157.5 && deg <= -112.5) return 'NW';
+      if(deg > -112.5 && deg <=  -67.5) return 'N';
+      return 'NE'; // -67.5 < deg <= -22.5
+    }
+
+    // Distance score: prefer objects 0.05..0.30 page-diagonals away
+    function distanceScore(distN){
+      if(distN < 0.03) return 0.15;
+      if(distN < 0.05) return 0.55;
+      if(distN <= 0.30) return 1.00;
+      if(distN <= 0.50) return 0.65;
+      return 0.25;
+    }
+
+    // ----- Score every structural object; keep best per sector -----
+    var typeWeights = { separator: wSeparator, row_band: wRowBand, region: wRegion };
+    var sectorBest  = {}; // sector -> { obj, score, distN, sector }
+
+    for(var oi = 0; oi < objects.length; oi++){
+      var obj = objects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - fcxN;
+      var dy = g.cyN - fcyN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      if(distN < minDistN) continue;
+
+      var sector = getSector(dx, dy);
+      var score  = (typeWeights[obj.type] || 1) * distanceScore(distN);
+
+      if(!sectorBest[sector] || score > sectorBest[sector].score){
+        sectorBest[sector] = { obj: obj, score: score, distN: distN, sector: sector };
+      }
+    }
+
+    // Collect sector winners, sort best-first, cap at maxMembers
+    var candidates = [];
+    for(var si = 0; si < SECTORS.length; si++){
+      var sc = SECTORS[si];
+      if(sectorBest[sc]) candidates.push(sectorBest[sc]);
+    }
+    candidates.sort(function(a, b){ return b.score - a.score; });
+    var selected = candidates.slice(0, maxMembers);
+    // Warn callers (via member count) if fewer than minMembers could be found —
+    // but don't error; caller must tolerate partial constellations.
+
+    // ----- Build members array -----
+    var members = [];
+    for(var mi = 0; mi < selected.length; mi++){
+      var cand = selected[mi];
+      members.push({
+        objId:  cand.obj.id,
+        type:   cand.obj.type,
+        ref:    cand.obj.ref,
+        geom:   cand.obj.geom,
+        sector: cand.sector,
+        distN:  cand.distN
+      });
+    }
+
+    // ----- Object↔object relations between every pair of members -----
+    // Thresholds for alignment classification (fraction of page dimensions)
+    var yAlignThreshN = 0.02; // centers within 2% page-height → horizontally aligned
+    var xAlignThreshN = 0.02; // centers within 2% page-width  → vertically aligned
+
+    var relations = [];
+    for(var ai = 0; ai < members.length; ai++){
+      for(var bi = ai + 1; bi < members.length; bi++){
+        var ma = members[ai], mb = members[bi];
+        var ga = ma.geom,    gb = mb.geom;
+        var rdx = gb.cxN - ga.cxN;   // positive → b is right of a
+        var rdy = gb.cyN - ga.cyN;   // positive → b is below a (y-down)
+        var rdistN = Math.sqrt(rdx * rdx + rdy * rdy);
+
+        // Primary spatial order of b relative to a
+        var hOrder = Math.abs(rdx) < xAlignThreshN ? 'same_h'   : (rdx > 0 ? 'right_of' : 'left_of');
+        var vOrder = Math.abs(rdy) < yAlignThreshN ? 'same_v'   : (rdy > 0 ? 'below'    : 'above');
+
+        // Dominant axis
+        var alignment;
+        if(Math.abs(rdy) < yAlignThreshN)      alignment = 'horizontal';
+        else if(Math.abs(rdx) < xAlignThreshN) alignment = 'vertical';
+        else                                    alignment = 'diagonal';
+
+        // Containment: does a's box contain b's center, or vice versa?
+        var bCxInA = gb.cxN >= ga.xN && gb.cxN <= ga.xN + ga.wN;
+        var bCyInA = gb.cyN >= ga.yN && gb.cyN <= ga.yN + ga.hN;
+        var aCxInB = ga.cxN >= gb.xN && ga.cxN <= gb.xN + gb.wN;
+        var aCyInB = ga.cyN >= gb.yN && ga.cyN <= gb.yN + gb.hN;
+        var containment = 'none';
+        if(bCxInA && bCyInA)      containment = 'from_contains_to';
+        else if(aCxInB && aCyInB) containment = 'to_contains_from';
+
+        relations.push({
+          fromId:      ma.objId,
+          toId:        mb.objId,
+          distN:       rdistN,
+          alignment:   alignment,
+          hOrder:      hOrder,
+          vOrder:      vOrder,
+          containment: containment
+        });
+      }
+    }
+
+    // ----- Nearby row bands and separators -----
+    // Include row bands whose mean y is within nearbyThreshN of the field,
+    // or whose y range overlaps the field's y range.
+    var nearbyRowBands   = [];
+    var nearbySeparators = [];
+    for(var rbi = 0; rbi < rowBands.length; rbi++){
+      var rb = rowBands[rbi];
+      // Distance from band mean-y to nearest field edge (0 if overlapping)
+      var distToField = 0;
+      if(rb.yN < fyN)       distToField = fyN - rb.yN;
+      else if(rb.yN > fy1N) distToField = rb.yN - fy1N;
+      if(distToField > nearbyThreshN) continue;
+      var rbEntry = {
+        id:        rb.id,
+        yN:        rb.yN,
+        x1N:       rb.x1N,
+        x2N:       rb.x2N,
+        spanN:     rb.spanN,
+        lineCount: rb.lineCount,
+        isSeparator: rb.isSeparator
+      };
+      if(rb.isSeparator) nearbySeparators.push(rbEntry);
+      else               nearbyRowBands.push(rbEntry);
+    }
+
+    return {
+      schema:            'wfg4/constellation/v1',
+      id:                null,               // set by caller (e.g. fieldKey)
+      owningRegion:      owningRegion
+        ? { id: owningRegion.id, geom: owningRegionGeom }
+        : null,
+      regionGeomNorm:    owningRegionGeom,
+      coarsePagePosition: { xN: fcxN, yN: fcyN },
+      memberCount:       members.length,
+      members:           members,
+      relations:         relations,
+      nearbyRowBands:    nearbyRowBands,
+      nearbySeparators:  nearbySeparators
+    };
+  }
+
   function structuralRefineBox(projectedBox, structuralCtx, runtimeGray, opts){
     const cv = root.cv;
     const o = opts || {};
@@ -782,6 +1002,7 @@
     findEnclosingContainer,
     computeAnchorOffsets,
     structuralRefineBox,
-    buildPageStructure
+    buildPageStructure,
+    buildConstellation
   };
 });

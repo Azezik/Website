@@ -187,6 +187,89 @@ with structural metadata — no competing model is introduced.
 - [x] Debug overlay can consume `pageEntry.pageStructure.structuralObjects`
       in future without code changes.
 
+## Phase 2 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `buildConstellation(fieldBboxNorm, pageStructure, opts)` (≈185 lines).
+- Pure geometry function — no OpenCV calls. Operates on the `PageStructure`
+  produced by Phase 1.
+- **8-sector coverage selection**: assigns every structural object to a
+  directional sector (N/NE/E/SE/S/SW/W/NW from the field center); keeps the
+  best-scored object per sector, then takes the top `maxMembers` (default 6)
+  by score. Sectors with no candidate are left empty — partial constellations
+  are valid.
+- **Scoring**: `type_weight × distance_score`. Type weights: separator=3,
+  row_band=2, region=1. Distance score peaks at 0.05..0.30 page-diagonals.
+- **Owning region**: smallest region (by normalized area) enclosing ≥70% of
+  the field bbox.
+- **Object↔object relations** for all member pairs: normalized center-to-center
+  distance, alignment class (`horizontal`/`vertical`/`diagonal`), horizontal
+  ordering (`left_of`/`right_of`/`same_h`), vertical ordering (`above`/
+  `below`/`same_v`), containment (`none`/`from_contains_to`/`to_contains_from`).
+- **Nearby row bands / separators**: all bands whose mean-y is within 15% of
+  page height from the field (configurable via `opts.nearbyThresholdN`).
+- Exported via the module return object.
+
+**`engines/wfg4/wfg4-registration.js`**
+- After the existing structural context capture block, calls
+  `CvOps.buildConstellation()` using `packet.bboxNorm` and
+  `pageEntry.pageStructure` (Phase 1 result, already on the page entry).
+- Sets `constellation.id = 'const-<fieldKey>'`.
+- Stores result as `packet.constellation`. Fails gracefully to `null` on
+  any error or if page structure is unavailable.
+- Existing `structuralContext`, `visualReference`, `bbox`, `bboxNorm` are
+  untouched.
+
+### Constellation schema produced
+
+```
+{
+  schema: 'wfg4/constellation/v1',
+  id: 'const-<fieldKey>',
+  owningRegion: { id, geom: { xN, yN, wN, hN } } | null,
+  regionGeomNorm: { xN, yN, wN, hN } | null,
+  coarsePagePosition: { xN, yN },
+  memberCount: Number,
+  members: [
+    { objId, type, ref, geom: { xN, yN, wN, hN, cxN, cyN },
+      sector, distN }
+  ],
+  relations: [
+    { fromId, toId, distN, alignment, hOrder, vOrder, containment }
+  ],
+  nearbyRowBands:  [ { id, yN, x1N, x2N, spanN, lineCount, isSeparator } ],
+  nearbySeparators:[ { id, yN, x1N, x2N, spanN, lineCount, isSeparator } ]
+}
+```
+
+### Design decisions made during implementation
+
+- 8-sector selection with stability weighting: consistent with plan (justification
+  in Phase 2 plan section).
+- `alignThreshN = 0.02` for both axes (2% of page dimension) for horizontal/
+  vertical alignment classification.
+- `nearbyThresholdN = 0.15` default (15% page height) for nearby bands.
+- Type weights (separator=3, row_band=2, region=1) reflect structural
+  informativeness for reconstruction.
+- `memberCount` field added for quick partial-match detection without iterating
+  the array.
+
+### Fixes / deviations
+
+- None. Phase 2 is additive only. No existing behavior changed.
+
+### Completion criteria met
+
+- [x] Each config packet carries a `constellation` block (or `null` if page
+      structure unavailable).
+- [x] Constellation is built from the shared `pageEntry.pageStructure` — no
+      separate CV pass.
+- [x] Schema is JSON-serializable; no Mat or canvas refs.
+- [x] Existing localization contract and `structuralContext` untouched.
+- [x] Graceful null on missing inputs (no throw in production path).
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and

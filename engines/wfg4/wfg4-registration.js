@@ -240,6 +240,35 @@
         packet.structuralContext = { captureStatus: 'structural_crop_failed' };
       }
 
+      // --- Phase 2: constellation construction ---
+      // buildConstellation is pure geometry: it reads pageEntry.pageStructure
+      // (computed by normalizePage / Phase 1) and packet.bboxNorm.  No CV ops
+      // are required here, so it runs even if structural context capture above
+      // encountered errors.
+      try {
+        const _ps = pageEntry?.pageStructure || null;
+        if(_ps && CvOps.buildConstellation){
+          const _constellation = CvOps.buildConstellation(
+            {
+              x0: packet.bboxNorm.x0,
+              y0: packet.bboxNorm.y0,
+              x1: packet.bboxNorm.x1,
+              y1: packet.bboxNorm.y1
+            },
+            _ps,
+            {}
+          );
+          if(_constellation){
+            _constellation.id = 'const-' + (packet.fieldKey || 'field');
+          }
+          packet.constellation = _constellation || null;
+        } else {
+          packet.constellation = null;
+        }
+      } catch(_constErr){
+        packet.constellation = null;
+      }
+
       packet.visualReference.captureStatus = 'ok';
     } catch(err){
       packet.visualReference.captureStatus = 'feature_capture_failed';
