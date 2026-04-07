@@ -15781,15 +15781,105 @@ function isWfg4StructuralOverlayActive(){
   return isWfg4ConfigCanonicalDisplayActive() && !!state.wfg4?.structuralOverlay;
 }
 
+function getWfg4LiveSelectionBoxForPage(page){
+  const b = state.snappedPx || state.selectionPx || null;
+  if(!b) return null;
+  const p = Number(b.page || 1);
+  if(Number(page || 1) !== p) return null;
+  return {
+    x: Number(b.x || 0),
+    y: Number(b.y || 0),
+    w: Number(b.w || 0),
+    h: Number(b.h || 0),
+    page: p
+  };
+}
+
+function buildWfg4LivePreviewPacket(packet, liveBox){
+  if(!packet || !liveBox) return packet || null;
+  const baseBox = packet.bbox || null;
+  if(!baseBox) return packet;
+  const bw = Math.max(1, Number(baseBox.w || 1));
+  const bh = Math.max(1, Number(baseBox.h || 1));
+  const sx = Math.max(0.1, Number(liveBox.w || 0) / bw);
+  const sy = Math.max(0.1, Number(liveBox.h || 0) / bh);
+  const tx = Number(liveBox.x || 0) - Number(baseBox.x || 0) * sx;
+  const ty = Number(liveBox.y || 0) - Number(baseBox.y || 0) * sy;
+  const drift = Math.hypot(Number(liveBox.x || 0) - Number(baseBox.x || 0), Number(liveBox.y || 0) - Number(baseBox.y || 0));
+  const sizeDelta = Math.max(
+    Math.abs(Number(liveBox.w || 0) - Number(baseBox.w || 0)),
+    Math.abs(Number(liveBox.h || 0) - Number(baseBox.h || 0))
+  );
+  if(drift < 1.5 && sizeDelta < 1.5) return packet;
+
+  const transformPoint = (x, y) => ({
+    x: (Number(x || 0) * sx) + tx,
+    y: (Number(y || 0) * sy) + ty
+  });
+  const transformRect = (box) => {
+    if(!box) return box;
+    const p1 = transformPoint(box.x, box.y);
+    return {
+      ...box,
+      x: p1.x,
+      y: p1.y,
+      w: Math.max(1, Number(box.w || 0) * sx),
+      h: Math.max(1, Number(box.h || 0) * sy)
+    };
+  };
+  const transformLine = (ln) => {
+    if(!ln) return ln;
+    const p1 = transformPoint(ln.x1, ln.y1);
+    const p2 = transformPoint(ln.x2, ln.y2);
+    const out = { ...ln, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+    if(Number.isFinite(ln.xMid)) out.xMid = (p1.x + p2.x) * 0.5;
+    if(Number.isFinite(ln.yMid)) out.yMid = (p1.y + p2.y) * 0.5;
+    return out;
+  };
+
+  const preview = clonePlain(packet);
+  preview.bbox = { ...liveBox };
+  const structural = preview.structuralContext || null;
+  if(structural){
+    if(structural.captureRegion) structural.captureRegion = transformRect(structural.captureRegion);
+    if(structural.container) structural.container = transformRect(structural.container);
+    if(structural.lines?.horizontal){
+      structural.lines.horizontal = structural.lines.horizontal.map(transformLine);
+    }
+    if(structural.lines?.vertical){
+      structural.lines.vertical = structural.lines.vertical.map(transformLine);
+    }
+    if(structural.anchors){
+      if(Number.isFinite(structural.anchors.distAbove)) structural.anchors.distAbove *= sy;
+      if(Number.isFinite(structural.anchors.distBelow)) structural.anchors.distBelow *= sy;
+      if(Number.isFinite(structural.anchors.distLeft)) structural.anchors.distLeft *= sx;
+      if(Number.isFinite(structural.anchors.distRight)) structural.anchors.distRight *= sx;
+    }
+  }
+  if(preview.visualReference?.patches?.neighborhood?.box){
+    preview.visualReference.patches.neighborhood.box = transformRect(preview.visualReference.patches.neighborhood.box);
+  }
+  preview.previewFromLiveSelection = true;
+  return preview;
+}
+
 function getCurrentWfg4ConfigDebugPacket(){
   if(!isWfg4StructuralOverlayActive()) return null;
   const step = state.steps?.[state.stepIdx] || null;
   const direct = step?.wfg4Config || null;
-  if(direct) return direct;
+  if(direct){
+    const page = Number(direct?.page || direct?.bbox?.page || state.pageNum || 1);
+    const liveBox = getWfg4LiveSelectionBoxForPage(page);
+    return liveBox ? buildWfg4LivePreviewPacket(direct, liveBox) : direct;
+  }
   const fieldKey = step?.fieldKey || null;
   if(!fieldKey) return null;
   const profileField = (state.profile?.fields || []).find(f => f && f.fieldKey === fieldKey);
-  return profileField?.wfg4Config || null;
+  const basePacket = profileField?.wfg4Config || null;
+  if(!basePacket) return null;
+  const page = Number(basePacket?.page || basePacket?.bbox?.page || state.pageNum || 1);
+  const liveBox = getWfg4LiveSelectionBoxForPage(page);
+  return liveBox ? buildWfg4LivePreviewPacket(basePacket, liveBox) : basePacket;
 }
 
 function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
@@ -15832,6 +15922,40 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   // Local alias names preserved so the rest of the function reads cleanly.
   const scaleX = 1 / W2C_X;
   const scaleY = 1 / W2C_Y;
+  const pageFrame = {
+    x: 0,
+    y: 0,
+    w: Number(working.width || 0),
+    h: Number(working.height || 0)
+  };
+
+  // In config mode users can redraw the active bbox before pressing Confirm.
+  // step.wfg4Config / profile.wfg4Config still points to the last confirmed
+  // packet, so structural layers may lag behind the live selection. Detect
+  // this and avoid rendering stale structures in the wrong place.
+  const liveBox = (() => {
+    const b = state.snappedPx || state.selectionPx || null;
+    if(!b || Number(b.page || 1) !== page) return null;
+    return {
+      x: Number(b.x || 0),
+      y: Number(b.y || 0),
+      w: Number(b.w || 0),
+      h: Number(b.h || 0),
+      page
+    };
+  })();
+  const stalePacket = (() => {
+    if(!fieldBox || !liveBox) return false;
+    const fx = Number(fieldBox.x || 0) + Number(fieldBox.w || 0) * 0.5;
+    const fy = Number(fieldBox.y || 0) + Number(fieldBox.h || 0) * 0.5;
+    const lx = Number(liveBox.x || 0) + Number(liveBox.w || 0) * 0.5;
+    const ly = Number(liveBox.y || 0) + Number(liveBox.h || 0) * 0.5;
+    const drift = Math.hypot(lx - fx, ly - fy);
+    const packetDiag = Math.hypot(Number(fieldBox.w || 0), Number(fieldBox.h || 0));
+    const liveDiag = Math.hypot(Number(liveBox.w || 0), Number(liveBox.h || 0));
+    const baseDiag = Math.max(packetDiag, liveDiag, 1);
+    return drift > Math.max(24, baseDiag * 0.55);
+  })();
 
   const drawRect = (box, color, lineWidth = 1.5, dash = []) => {
     if(!box) return;
@@ -15845,31 +15969,39 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
 
   ctx.save();
   ctx.font = '10px "IBM Plex Mono", monospace';
+  drawRect(pageFrame, 'rgba(148,163,184,0.85)', 1, [3, 3]);           // page bounds (for scale sanity)
+  if(stalePacket && liveBox){
+    drawRect(liveBox, 'rgba(251,191,36,0.95)', 2.2, []);               // live user box
+  }
 
-  drawRect(capture, 'rgba(248,113,113,0.85)', 1.3, [7, 4]);     // structural capture
-  drawRect(neighborhood, 'rgba(56,189,248,0.9)', 1.2, [4, 4]);   // ORB neighborhood patch
-  drawRect(container, 'rgba(132,204,22,0.9)', 1.5, []);          // enclosing container
-  drawRect(fieldBox, 'rgba(251,191,36,0.95)', 2.0, []);          // configured field box
+  if(!stalePacket){
+    drawRect(capture, 'rgba(248,113,113,0.85)', 1.3, [7, 4]);     // structural capture
+    drawRect(neighborhood, 'rgba(56,189,248,0.9)', 1.2, [4, 4]);   // ORB neighborhood patch
+    drawRect(container, 'rgba(132,204,22,0.9)', 1.5, []);          // enclosing container
+    drawRect(fieldBox, 'rgba(251,191,36,0.95)', 2.0, []);          // configured field box
+  }
 
   const hLines = Array.isArray(lines.horizontal) ? lines.horizontal : [];
   const vLines = Array.isArray(lines.vertical) ? lines.vertical : [];
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(34,197,94,0.7)';
-  for(const ln of hLines){
-    ctx.beginPath();
-    ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
-    ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
-    ctx.stroke();
-  }
-  ctx.strokeStyle = 'rgba(168,85,247,0.7)';
-  for(const ln of vLines){
-    ctx.beginPath();
-    ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
-    ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
-    ctx.stroke();
+  if(!stalePacket){
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(34,197,94,0.7)';
+    for(const ln of hLines){
+      ctx.beginPath();
+      ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
+      ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(168,85,247,0.7)';
+    for(const ln of vLines){
+      ctx.beginPath();
+      ctx.moveTo((ln.x1 || 0) / scaleX, ((ln.y1 || 0) / scaleY) + offY);
+      ctx.lineTo((ln.x2 || 0) / scaleX, ((ln.y2 || 0) / scaleY) + offY);
+      ctx.stroke();
+    }
   }
 
-  if(fieldBox){
+  if(fieldBox && !stalePacket){
     const centerX = ((fieldBox.x || 0) + (fieldBox.w || 0) * 0.5) / scaleX;
     const centerY = (((fieldBox.y || 0) + (fieldBox.h || 0) * 0.5) / scaleY) + offY;
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
@@ -15922,6 +16054,10 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   ctx.fillText('yellow=field bbox, dashed rays=anchor offsets', legendX, legendY + 36);
   ctx.fillStyle = '#cbd5e1';
   ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}`, legendX, legendY + 50);
+  if(stalePacket){
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 62);
+  }
   ctx.restore();
 }
 
