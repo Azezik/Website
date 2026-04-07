@@ -108,6 +108,17 @@
         const projectedInSearch = CvOps.projectPoints(matrix, transformModel, srcCorners);
         const projectedOnPage = addOffset(projectedInSearch, { x: searchBox.x, y: searchBox.y });
         localized = Types.cornersToBox ? Types.cornersToBox(projectedOnPage, page) : predictedBox;
+        if(localized && isScaleOutlier(localized, predictedBox)){
+          return {
+            ok: false,
+            label,
+            matchCount,
+            inliers,
+            inlierRatio,
+            transformModel,
+            reason: 'scale_guard_rejected_projected_box'
+          };
+        }
         orbProjectedBox = localized ? { ...localized } : null;
       }
 
@@ -134,7 +145,19 @@
         // direct intensity correlation of the field patch itself.
         const refined = CvOps.localTemplateRefine(fullRuntimeGray, refFieldGray, localized, DEFAULTS.minTemplateScore || 0.42);
         if(refined.ok){
-          localized = { ...refined.box, page };
+          const refinedBox = { ...refined.box, page };
+          if(isScaleOutlier(refinedBox, predictedBox)){
+            return {
+              ok: false,
+              label,
+              matchCount,
+              inliers,
+              inlierRatio,
+              transformModel,
+              reason: 'scale_guard_rejected_refined_box'
+            };
+          }
+          localized = refinedBox;
           usedRefine = true;
           fieldVerified = true;
           refineScale = refined.scale || 1;
@@ -181,6 +204,29 @@
 
   function clampBoxToBounds(box, bounds){
     return Types.expandBox ? Types.expandBox(box, 0, bounds) : box;
+  }
+
+  function computeScaleDelta(box, refBox){
+    if(!box || !refBox) return null;
+    const bw = Math.max(1, Number(box.w || 1));
+    const bh = Math.max(1, Number(box.h || 1));
+    const rw = Math.max(1, Number(refBox.w || 1));
+    const rh = Math.max(1, Number(refBox.h || 1));
+    return { wRatio: bw / rw, hRatio: bh / rh, areaRatio: (bw * bh) / (rw * rh) };
+  }
+
+  function isScaleOutlier(box, refBox){
+    const d = computeScaleDelta(box, refBox);
+    if(!d) return false;
+    const minSideRatio = Number(DEFAULTS.localizationMinSideRatio || 0.45);
+    const maxSideRatio = Number(DEFAULTS.localizationMaxSideRatio || 2.2);
+    const minAreaRatio = Number(DEFAULTS.localizationMinAreaRatio || 0.20);
+    const maxAreaRatio = Number(DEFAULTS.localizationMaxAreaRatio || 4.2);
+    return (
+      d.wRatio < minSideRatio || d.wRatio > maxSideRatio ||
+      d.hRatio < minSideRatio || d.hRatio > maxSideRatio ||
+      d.areaRatio < minAreaRatio || d.areaRatio > maxAreaRatio
+    );
   }
 
   async function localizeFieldVisual(payload = {}){
@@ -320,6 +366,15 @@
       topPartial:    structMatches[0] ? structMatches[0].partial    : null,
       topCoverage:   structMatches[0] ? structMatches[0].memberCoverage : 0,
       topRelationConsistency: structMatches[0] ? structMatches[0].relationConsistencyRatio : 0
+    });
+    _EL?.engineLog('wfg4-run', 'scale.baseline', {
+      fieldKey: _fk,
+      predictedW: Math.round(predictedBox.w || 0),
+      predictedH: Math.round(predictedBox.h || 0),
+      minSideRatio: Number(DEFAULTS.localizationMinSideRatio || 0.45),
+      maxSideRatio: Number(DEFAULTS.localizationMaxSideRatio || 2.2),
+      minAreaRatio: Number(DEFAULTS.localizationMinAreaRatio || 0.20),
+      maxAreaRatio: Number(DEFAULTS.localizationMaxAreaRatio || 4.2)
     });
 
     // Phase 7: refine-only mode.  When at least one accepted Phase 5 match
