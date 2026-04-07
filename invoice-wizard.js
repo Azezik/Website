@@ -10140,6 +10140,54 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     }
   }
 
+  function resolveWfg4PinnedRunBox(fieldSpec, surface){
+    if(!fieldSpec || !surface || !Array.isArray(surface.pages)) return null;
+    const cfg = fieldSpec.wfg4Config || null;
+    const bboxNorm = cfg?.bboxNorm || null;
+    if(!bboxNorm) return null;
+    const page = Number(cfg?.page || fieldSpec.page || 1) || 1;
+    const pageIdx = Math.max(0, page - 1);
+    const pageEntry = surface.pages[pageIdx] || null;
+    const working = pageEntry?.dimensions?.working || null;
+    const w = Number(working?.width || 0);
+    const h = Number(working?.height || 0);
+    if(!(w > 0) || !(h > 0)) return null;
+    const x0 = Number(bboxNorm.x0);
+    const y0 = Number(bboxNorm.y0);
+    const x1 = Number(bboxNorm.x1);
+    const y1 = Number(bboxNorm.y1);
+    if(!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return null;
+    return {
+      x: x0 * w,
+      y: y0 * h,
+      w: Math.max(1, (x1 - x0) * w),
+      h: Math.max(1, (y1 - y0) * h),
+      page
+    };
+  }
+
+  function computeBoxDrift(a, b){
+    if(!a || !b) return null;
+    const aw = Math.max(1, Number(a.w || 1));
+    const ah = Math.max(1, Number(a.h || 1));
+    const bw = Math.max(1, Number(b.w || 1));
+    const bh = Math.max(1, Number(b.h || 1));
+    const acx = Number(a.x || 0) + aw / 2;
+    const acy = Number(a.y || 0) + ah / 2;
+    const bcx = Number(b.x || 0) + bw / 2;
+    const bcy = Number(b.y || 0) + bh / 2;
+    const dx = Math.abs(acx - bcx);
+    const dy = Math.abs(acy - bcy);
+    return {
+      centerDx: dx,
+      centerDy: dy,
+      dxNorm: dx / Math.max(aw, bw),
+      dyNorm: dy / Math.max(ah, bh),
+      wRatio: aw / bw,
+      hRatio: ah / bh
+    };
+  }
+
   async function extractFieldValue(fieldSpec, tokens, viewportPx, options = {}){
   const captureFrame = options?.captureFrame || null;
   const ftype = fieldSpec.type || 'static';
@@ -10149,7 +10197,11 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     // P1 CaptureFrame: when a frame is provided, its working-space box is
     // the authoritative readout geometry. Engines and downstream OCR crops
     // must not re-read state.snappedPx directly.
-    let resolvedBox = captureFrame ? captureFrame.userBoxWorkingPx : (state.snappedPx || null);
+    const wfg4Surface = state.wfg4?.[isRunMode() ? 'runSurface' : 'configSurface'] || null;
+    const pinnedWfg4Box = (!captureFrame && fieldEngineType === ENGINE_KIND.WFG4)
+      ? resolveWfg4PinnedRunBox(fieldSpec, wfg4Surface)
+      : null;
+    let resolvedBox = captureFrame ? captureFrame.userBoxWorkingPx : (pinnedWfg4Box || state.snappedPx || null);
     if(!resolvedBox && fieldSpec.bbox){
       const viewportDims = getViewportDimensions(viewportPx);
       const rawBox = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
@@ -10169,6 +10221,26 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         }
       }
       const _isConfigModeNow = isConfigMode();
+      if(!captureFrame && pinnedWfg4Box && fieldSpec.bbox){
+        const fallbackViewportBox = applyTransform(toPx(viewportPx, {
+          x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page
+        }));
+        const drift = computeBoxDrift(pinnedWfg4Box, fallbackViewportBox);
+        if(drift){
+          const severeDrift = drift.dxNorm > 0.35
+            || drift.dyNorm > 0.35
+            || drift.wRatio > 1.75
+            || drift.wRatio < 0.57
+            || drift.hRatio > 1.75
+            || drift.hRatio < 0.57;
+          window.EngineLog?.engineLog('wfg4-run', 'box.space_guard', {
+            fieldKey: fieldSpec.fieldKey || null,
+            severeDrift,
+            drift,
+            chosen: 'wfg4_pinned_box'
+          });
+        }
+      }
       const enginePayload = {
         fieldSpec,
         tokens: Array.isArray(tokens) ? tokens : [],
@@ -10176,7 +10248,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         viewport: viewportPx,
         profile: state.profile,
         geometryId: state.activeGeometryId || currentGeometryId(),
-        wfg4Surface: state.wfg4?.[isRunMode() ? 'runSurface' : 'configSurface'] || null,
+        wfg4Surface,
         // P1 fix (scanned-PDF / image config bug): in config mode, the user's
         // literal bbox is the source of truth. Tell the engine NOT to run
         // runtime structural re-localization (which can shift the readout box
@@ -10219,11 +10291,26 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
             const scoped = tokensInBox(normalized, engineResult.boxPx, { minOverlap: 0.2 });
             let pick = null;
             let pickScore = -1;
+            const bx = Number(engineResult.boxPx.x || 0);
+            const by = Number(engineResult.boxPx.y || 0);
+            const bw = Math.max(1, Number(engineResult.boxPx.w || 1));
+            const bh = Math.max(1, Number(engineResult.boxPx.h || 1));
+            const centerX = bx + bw / 2;
+            const centerY = by + bh / 2;
+            const maxDist = Math.max(1, Math.sqrt((bw * bw) + (bh * bh)) / 2);
             for(const tok of scoped){
               const text = String(tok.text || tok.raw || '').trim();
               if(!text) continue;
               const conf = Number.isFinite(tok.confidence) ? tok.confidence : 0.5;
-              if(conf > pickScore){ pick = { tok, text, conf }; pickScore = conf; }
+              const tx = Number(tok.x || 0) + (Number(tok.w || 0) / 2);
+              const ty = Number(tok.y || 0) + (Number(tok.h || 0) / 2);
+              const dist = Math.sqrt(((tx - centerX) * (tx - centerX)) + ((ty - centerY) * (ty - centerY)));
+              const proximity = Math.max(0, 1 - (dist / maxDist));
+              const weighted = (conf * 0.75) + (proximity * 0.25);
+              if(weighted > pickScore){
+                pick = { tok, text, conf, proximity, weighted };
+                pickScore = weighted;
+              }
             }
             if(pick){
               const readConf = Math.max(0.2, Math.min(0.85, 0.3 + (pick.conf * 0.5)));
@@ -10247,7 +10334,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
                 fieldKey: fieldSpec.fieldKey || null,
                 backend: 'tesseract',
                 value: pick.text,
-                tokenCount: scoped.length
+                tokenCount: scoped.length,
+                weightedScore: Number((pick.weighted || 0).toFixed(3)),
+                proximity: Number((pick.proximity || 0).toFixed(3))
               });
             } else {
               // Truly nothing readable inside the localized box — only now
