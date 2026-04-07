@@ -322,8 +322,42 @@
       topRelationConsistency: structMatches[0] ? structMatches[0].relationConsistencyRatio : 0
     });
 
+    // Phase 7: refine-only mode.  When at least one accepted Phase 5 match
+    // produced a Phase 6 reconstruction, ORB/template are restricted to a
+    // tight precision-refine pass around the reconstructed box(es).  ORB no
+    // longer determines field identity; the reconstructed box is the
+    // primary localizer and ORB output is accepted only if its drift is
+    // within a small bound.  Repeated-constellation output is governed by
+    // `repeatedConstellationPolicy` ('single' or 'multi').
+    const refineOnlyMode = structReconstructions.length > 0;
+    const repeatedPolicy = DEFAULTS.repeatedConstellationPolicy || 'single';
+    const refinePadPx    = Math.max(
+      DEFAULTS.structuralRefinePadPx || 18,
+      Math.round(Math.max(predictedBox.w, predictedBox.h) * (DEFAULTS.structuralRefinePadRatio || 0.12))
+    );
+    const refineMaxDriftPx = Math.max(
+      DEFAULTS.structuralRefineMaxDriftPx || 12,
+      Math.round(Math.max(predictedBox.w, predictedBox.h) * (DEFAULTS.structuralRefineMaxDriftRatio || 0.10))
+    );
+
     const windows = [];
-    if(hasViableStructCandidates){
+    if(refineOnlyMode){
+      // One tight refine window per accepted reconstruction (single = 1).
+      const reconList = repeatedPolicy === 'multi'
+        ? structReconstructions
+        : structReconstructions.slice(0, 1);
+      const cap = Math.min(reconList.length, Math.max(1, maxAttempts));
+      for(let ri = 0; ri < cap; ri++){
+        const rb = reconList[ri].reconstructedBoxPx;
+        const refineBox = { x: rb.x, y: rb.y, w: rb.w, h: rb.h, page };
+        windows.push({
+          label: `R_refine_${ri}`,
+          box:   clampBoxToBounds(Types.expandBox(refineBox, refinePadPx, bounds), bounds),
+          reconstructionRank: ri,
+          reconstructedBoxPx: rb
+        });
+      }
+    } else if(hasViableStructCandidates){
       // Structural windows are primary; reserve at least 1 slot for ORB fallback.
       // Prefer Phase 5 accepted matches (sorted by relation-graph finalScore);
       // fall back to Phase 4 raw viable candidates if Phase 5 produced none.
@@ -423,13 +457,41 @@
     let usedRefine = !!best?.usedRefine;
     let attemptsWon = !!(best && best.ok && localized);
 
-    // Phase 6: if ORB produced nothing but we have a top structural
-    // reconstruction, adopt the reconstructed box as the localized box.
-    // This wires reconstruction into the existing localization contract
-    // (Phase 7 will fully demote ORB; here it remains a refine-only path).
+    // Phase 7: refine-only mode.
+    // The reconstructed box is the authoritative localized box.  ORB output
+    // is accepted only as a small precision correction within
+    // `refineMaxDriftPx` of the reconstructed center.  Anything beyond
+    // that bound is discarded — ORB cannot relocate the field.
     let usedStructuralReconstruction = false;
+    let preRefineBox  = null;
+    let postRefineBox2 = null; // Phase 7 final refined box (vs Phase 6 internal postRefineBox)
+    let refineDriftPx = 0;
+    let refineWithinBound = false;
     const topReconstruction = structReconstructions.length > 0 ? structReconstructions[0] : null;
-    if(!attemptsWon && topReconstruction && topReconstruction.reconstructedBoxPx){
+    if(refineOnlyMode && topReconstruction && topReconstruction.reconstructedBoxPx){
+      const reconBox = { ...topReconstruction.reconstructedBoxPx, page };
+      preRefineBox = { ...reconBox };
+      // Default: reconstruction wins.
+      localized = reconBox;
+      usedStructuralReconstruction = true;
+      // Optional precision correction from ORB.
+      if(attemptsWon && best && best.localized){
+        const rcx = reconBox.x + reconBox.w / 2;
+        const rcy = reconBox.y + reconBox.h / 2;
+        const ocx = best.localized.x + best.localized.w / 2;
+        const ocy = best.localized.y + best.localized.h / 2;
+        refineDriftPx = Math.sqrt((ocx - rcx) * (ocx - rcx) + (ocy - rcy) * (ocy - rcy));
+        if(refineDriftPx <= refineMaxDriftPx){
+          localized      = { ...best.localized };
+          postRefineBox2 = { ...localized };
+          refineWithinBound = true;
+        } else {
+          // Drift too large — ORB tried to relocate the field. Reject.
+          attemptsWon = false;
+        }
+      }
+    } else if(!attemptsWon && topReconstruction && topReconstruction.reconstructedBoxPx){
+      // No refine-only mode (defensive): keep the Phase 6 adoption path.
       localized = { ...topReconstruction.reconstructedBoxPx, page };
       usedStructuralReconstruction = true;
     }
@@ -537,7 +599,55 @@
     else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
 
     const finalBox = localized || predictedBox;
+
+    // Phase 7: per-instance output for repeated constellations.
+    // When policy = 'multi', emit one instance per accepted reconstruction
+    // (top first). Single-mode collapses to a single-element array for
+    // schema continuity but does not change downstream consumers that read
+    // `finalReadoutBox` only.
+    let instances = null;
+    if(usedStructuralReconstruction && structReconstructions.length > 0){
+      const list = (repeatedPolicy === 'multi') ? structReconstructions : structReconstructions.slice(0, 1);
+      instances = list.map((r, idx) => ({
+        rank:               idx,
+        matchRank:          r.matchRank,
+        bbox:               { ...r.reconstructedBoxPx, page },
+        transformModel:     r.transformModel,
+        correspondencesUsed:r.correspondencesUsed,
+        usedRowSnap:        r.usedRowSnap
+      }));
+    }
+
+    // Phase 7 diagnostics summary.
+    const selectedConstellation = (acceptedStructMatches[0] && structReconstructions[0]) ? {
+      matchRank:                acceptedStructMatches[0].rank,
+      anchorObjId:              acceptedStructMatches[0].anchorObjId,
+      anchorType:               acceptedStructMatches[0].anchorType,
+      finalScore:               acceptedStructMatches[0].finalScore,
+      memberCoverage:           acceptedStructMatches[0].memberCoverage,
+      relationConsistencyRatio: acceptedStructMatches[0].relationConsistencyRatio,
+      partial:                  acceptedStructMatches[0].partial,
+      transformModel:           structReconstructions[0].transformModel,
+      correspondencesUsed:      structReconstructions[0].correspondencesUsed,
+      usedRowSnap:              structReconstructions[0].usedRowSnap
+    } : null;
+    const pageStructureSummary = rtPageStructure ? {
+      regionCount:          (rtPageStructure.regions          || []).length,
+      rowBandCount:         (rtPageStructure.rowBands         || []).length,
+      structuralObjectCount:(rtPageStructure.structuralObjects|| []).length
+    } : null;
+    const fieldLevelConstellation = ref?.structuralIdentity?.miniConstellation || null;
     const _finalStatus = (localizationSucceeded || usedStructural || usedStructuralReconstruction) ? STATUS.SUCCESS : STATUS.FAILED;
+    _EL?.engineLog('wfg4-run', 'struct.refine', {
+      fieldKey: _fk,
+      refineOnlyMode,
+      usedStructuralReconstruction,
+      refineWithinBound,
+      refineDriftPx: Number(refineDriftPx.toFixed(2)),
+      refineMaxDriftPx,
+      repeatedPolicy,
+      instanceCount: instances ? instances.length : 0
+    });
     _EL?.engineLog('wfg4-run', 'localize.result', {
       fieldKey: _fk,
       status: _finalStatus,
@@ -572,6 +682,17 @@
       structuralCandidates,
       structuralMatches: structMatches,
       structuralMatchDebug: structMatchDebug,
+      structuralReconstructions: structReconstructions,
+      instances,
+      selectedConstellation,
+      pageStructureSummary,
+      fieldLevelConstellation,
+      preRefineBox,
+      postRefineBoxPhase7: postRefineBox2,
+      refineDriftPx,
+      refineWithinBound,
+      refineOnlyMode,
+      repeatedConstellationPolicy: repeatedPolicy,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
       // legacy keys for backward compatibility
