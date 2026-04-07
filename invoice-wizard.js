@@ -19761,11 +19761,54 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   // block below detects _prelimEngineOwnedConfig and reuses it.
   let _prelimEngineOwnedConfig = null;
   if(step.type === 'static' && !isAreaStep && getConfiguredEngineType() === ENGINE_KIND.WFG4 && state.snappedPx && EngineRegistry?.registerFieldConfig){
+    // P0 readiness gate: wait up to ~3s for the WFG4 config surface and its
+    // pageEntry artifacts/pageStructure to be fully populated before invoking
+    // registerFieldConfig. Previously the prelim call could silently return a
+    // packet with `captureStatus: artifact_missing` or `cv_unavailable`,
+    // which the catch below swallowed — producing the multi-click UX where
+    // the first confirm "does nothing" and a second click succeeds.
     try {
+      const _gateDeadline = Date.now() + 3000;
+      const _pageIdx = Math.max(0, (state.pageNum || 1) - 1);
+      const _surfaceReady = () => {
+        const _pg = state.wfg4?.configSurface?.pages?.[_pageIdx];
+        return !!(_pg && _pg.dimensions?.working?.width && _pg.artifacts?.displayDataUrl);
+      };
+      while(!_surfaceReady() && Date.now() < _gateDeadline){
+        await new Promise(r => setTimeout(r, 50));
+      }
+      if(window.WFG4OpenCv?.ensureCvReady){
+        try { await window.WFG4OpenCv.ensureCvReady({ timeoutMs: 2000, pollMs: 75, autoLoad: true }); }
+        catch(_cvErr){ console.warn('[wfg4] ensureCvReady at confirm failed', _cvErr); }
+      }
+      if(!_surfaceReady()){
+        console.warn('[wfg4] config surface not ready after 3s gate; proceeding with degraded capture', {
+          page: state.pageNum,
+          hasSurface: !!state.wfg4?.configSurface,
+          pagesLen: state.wfg4?.configSurface?.pages?.length || 0
+        });
+      }
+    } catch(_gateErr){
+      console.warn('[wfg4] readiness gate threw', _gateErr);
+    }
+    try {
+      // P0 coordinate-space unification: prefer the working-surface dimensions
+      // for normBox computation so downstream `resolveCanonicalBox`
+      // (wfg4-registration.js) recovers the same pixel rectangle the user
+      // drew, even when the viewport and the aspect-preserving working
+      // surface have slightly different dimensions. Falls back to viewport
+      // dims when the working surface is not yet populated.
+      const _pgEntry = state.wfg4?.configSurface?.pages?.[state.pageNum-1] || null;
+      const _workingDims = _pgEntry?.dimensions?.working || null;
       const _vpPre = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const _cwPre = (_vpPre.width ?? _vpPre.w) || 1;
-      const _chPre = (_vpPre.height ?? _vpPre.h) || 1;
-      const _normBoxPre = normalizeBox(state.snappedPx, _cwPre, _chPre);
+      const _vpW = (_vpPre.width ?? _vpPre.w) || 1;
+      const _vpH = (_vpPre.height ?? _vpPre.h) || 1;
+      // normBox ratios are identical under aspect-preserving scaling, but
+      // using working dims here matches resolveCanonicalBox on the
+      // registration side exactly, which is what we want.
+      const _cwPre = (_workingDims?.width) || _vpW;
+      const _chPre = (_workingDims?.height) || _vpH;
+      const _normBoxPre = normalizeBox(state.snappedPx, _vpW, _vpH);
       const _rawBoxPre = { x: state.snappedPx.x, y: state.snappedPx.y, w: state.snappedPx.w, h: state.snappedPx.h, canvasW: _cwPre, canvasH: _chPre };
       _prelimEngineOwnedConfig = await EngineRegistry.registerFieldConfig(ENGINE_KIND.WFG4, {
         step,
@@ -19779,6 +19822,15 @@ els.confirmBtn?.addEventListener('click', async ()=>{
         wfg4Surface: state.wfg4?.configSurface || null
       });
       if(_prelimEngineOwnedConfig && _prelimEngineOwnedConfig.wfg4Config){
+        // P0: inspect captureStatus and surface it to the user instead of
+        // silently proceeding with a packet that has no visual reference.
+        const _capStatus = _prelimEngineOwnedConfig.wfg4Config?.visualReference?.captureStatus || null;
+        if(_capStatus && _capStatus !== 'ok'){
+          console.warn('[wfg4] prelim packet captureStatus non-ok', {
+            captureStatus: _capStatus,
+            captureError: _prelimEngineOwnedConfig.wfg4Config?.visualReference?.captureError || null
+          });
+        }
         step.wfg4Config = _prelimEngineOwnedConfig.wfg4Config;
       }
     } catch(_prelimErr){
@@ -19835,7 +19887,10 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   // working pixel space of state.pageViewports[pageNum-1].
   try {
     const _wfg4Pages = state.wfg4?.configSurface?.pages || [];
-    const _wfg4Dims = _wfg4Pages[state.pageNum-1]?.dimensions || null;
+    const _wfg4PageEntry = _wfg4Pages[state.pageNum-1] || null;
+    const _wfg4Dims = _wfg4PageEntry?.dimensions || null;
+    const _wfg4Scale = _wfg4PageEntry?.scale || null;
+    const _prelimStatus = _prelimEngineOwnedConfig?.wfg4Config?.visualReference?.captureStatus || null;
     const _displayNode = (typeof getActiveDisplaySurfaceNode === 'function') ? getActiveDisplaySurfaceNode() : null;
     const _displayRect = _displayNode?.getBoundingClientRect?.() || null;
     const _sourceType = state.isImage ? 'image'
@@ -19845,7 +19900,12 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       pageNum: state.pageNum,
       displayCanvas: _displayNode ? { pxW: _displayNode.width, pxH: _displayNode.height, cssW: _displayRect?.width, cssH: _displayRect?.height } : null,
       wfg4SurfaceDims: _wfg4Dims,
+      wfg4SurfaceScale: _wfg4Scale,
+      prelimCaptureStatus: _prelimStatus,
       viewport: { w: canvasW, h: canvasH },
+      viewportVsWorkingAspectDelta: (_wfg4Dims?.working?.width && canvasW)
+        ? Math.abs((canvasW / canvasH) - (_wfg4Dims.working.width / _wfg4Dims.working.height))
+        : null,
       bboxDisplaySpace: state.snappedCss ? { ...state.snappedCss } : null,
       storedBoxPx: { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h, page: storedBoxPx.page },
       normBox,

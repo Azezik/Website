@@ -422,7 +422,19 @@
     const fieldSpec = payload.fieldSpec || {};
     const boxPx = payload.boxPx || null;
     const rawTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
-    const allTokens = mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
+    // P0 coordinate-space unification: `mapTokensToCanonical` promotes tokens
+    // from viewport into working-surface space via workingFromOriginalX/Y. In
+    // run mode that is correct (Phase 6 produces a working-space reconstructed
+    // box, so tokens must match). In config-mode-authoritative, however, the
+    // box is the user's literal bbox in viewport space, so promoting tokens
+    // while leaving the box in viewport space is a space mismatch that causes
+    // token scoping to fail, `needsLocalizedReadout` to fire unconditionally,
+    // and wrong-target extraction on any surface where working ≠ viewport.
+    // Keep tokens in viewport space when the box is viewport-space.
+    const _configAuth = !!payload.configMode && !!boxPx;
+    const allTokens = _configAuth
+      ? rawTokens
+      : mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
     const _EL = root.EngineLog || null;
     const _fk = fieldSpec.fieldKey || '';
     const _surfReady = !!(payload.wfg4Surface && Array.isArray(payload.wfg4Surface.pages) && payload.wfg4Surface.pages.length > 0);
@@ -440,7 +452,7 @@
     // can shift the readout box to a different page region (manifesting as
     // "wrong-target text" on scanned PDFs and images, and as multi-click /
     // delayed confirm because of async surface/packet readiness races).
-    const configModeAuthoritative = !!payload.configMode && !!boxPx;
+    const configModeAuthoritative = _configAuth;
     const localized = configModeAuthoritative
       ? {
           ok: true,
