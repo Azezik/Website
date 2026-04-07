@@ -269,6 +269,32 @@
         packet.constellation = null;
       }
 
+      // --- Phase 3: field-level structural identity ---
+      // computeFieldStructuralIdentity is pure geometry; it reads packet.bboxNorm,
+      // pageEntry.pageStructure (Phase 1), and packet.constellation (Phase 2).
+      // The existing pixel bbox and structuralContext remain the authoritative
+      // base representation — structuralIdentity is additive metadata only.
+      try {
+        const _ps2 = pageEntry?.pageStructure || null;
+        if(_ps2 && CvOps.computeFieldStructuralIdentity){
+          packet.structuralIdentity = CvOps.computeFieldStructuralIdentity(
+            {
+              x0: packet.bboxNorm.x0,
+              y0: packet.bboxNorm.y0,
+              x1: packet.bboxNorm.x1,
+              y1: packet.bboxNorm.y1
+            },
+            _ps2,
+            packet.constellation || null,
+            {}
+          ) || null;
+        } else {
+          packet.structuralIdentity = null;
+        }
+      } catch(_siErr){
+        packet.structuralIdentity = null;
+      }
+
       packet.visualReference.captureStatus = 'ok';
     } catch(err){
       packet.visualReference.captureStatus = 'feature_capture_failed';

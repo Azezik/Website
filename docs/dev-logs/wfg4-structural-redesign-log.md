@@ -270,6 +270,94 @@ with structural metadata — no competing model is introduced.
 - [x] Existing localization contract and `structuralContext` untouched.
 - [x] Graceful null on missing inputs (no throw in production path).
 
+## Phase 3 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `computeFieldStructuralIdentity(fieldBboxNorm, pageStructure, constellation, opts)`
+  (≈215 lines). Pure geometry, no OpenCV calls.
+- **bbox relative to constellation frame** (`bboxRelConstellation`): when an
+  owning region is available, uses its geom as the frame; otherwise derives a
+  frame from the bounding box of all constellation member centers with a 2%
+  margin. Stores `cxRatio`, `cyRatio`, `wRatio`, `hRatio`, `x0Ratio`,
+  `y0Ratio`, and the frame geometry.
+- **bbox relative to row** (`bboxRelRow`): finds the row band whose mean-y is
+  closest to the field center and that overlaps the field's y range (or is
+  within 2× field height). Stores `xInBandRatio`, `wInBandRatio`, and signed
+  `distFromBandYN`.
+- **Nearby object distances** (`nearbyObjects`): all structural objects within
+  25% page-diagonal, sorted by distance, capped at 8. Stores signed `dxN`,
+  `dyN`, and scalar `distN`.
+- **Row overlap map** (`rowOverlaps`): for every row band intersecting the
+  field both vertically and horizontally, stores `vOverlapRatio` and
+  `hOverlapRatio`.
+- **Field-level mini-constellation** (`miniConstellation`): up to 6 labeled
+  members: `containing_row`, `adjacent_row_above`, `adjacent_row_below`,
+  `separator_above`, `separator_below`, `slot_value_band`. Object↔bbox
+  relations stored for each member (dist, dxN, dyN, four signed edge offsets).
+
+**`engines/wfg4/wfg4-registration.js`**
+- After the Phase 2 constellation block, calls
+  `CvOps.computeFieldStructuralIdentity()` with `packet.bboxNorm`,
+  `pageEntry.pageStructure`, and `packet.constellation`.
+- Stores result as `packet.structuralIdentity`. Fails gracefully to `null`.
+- Existing pixel bbox and `structuralContext` are the authoritative base
+  representation — `structuralIdentity` is additive metadata.
+
+### Schema produced (`packet.structuralIdentity`)
+
+```
+{
+  schema: 'wfg4/field-structural-identity/v1',
+  bboxRelConstellation: {
+    cxRatio, cyRatio, wRatio, hRatio,
+    x0Ratio, y0Ratio,
+    frameGeom: { xN, yN, wN, hN }
+  } | null,
+  containingBandId: String | null,
+  bboxRelRow: {
+    bandId, xInBandRatio, wInBandRatio, distFromBandYN
+  } | null,
+  nearbyObjects: [
+    { objId, type, distN, dxN, dyN }
+  ],
+  rowOverlaps: [
+    { bandId, isSeparator, vOverlapRatio, hOverlapRatio }
+  ],
+  miniConstellation: {
+    members:   [ { label, id, geom } ],
+    relations: [ { label, memberId, distN, dxN, dyN,
+                   distFromTopN, distFromBottomN,
+                   distFromLeftN, distFromRightN } ]
+  }
+}
+```
+
+### Design decisions
+
+- Constellation frame fallback (member-center bounding box + 2% margin):
+  ensures `bboxRelConstellation` is always populated when any members exist,
+  even without an owning region.
+- Slot/value band detection: looks for a row band overlapping the field's y
+  range whose x-span is < 50% of page width OR lies within the field's x range
+  — approximates a column divider without requiring explicit slot detection.
+- `nearbyDistThresh = 0.25` (25% page-diagonal) configurable via
+  `opts.nearbyDistThresh`.
+
+### Fixes / deviations
+
+- None. Purely additive.
+
+### Completion criteria met
+
+- [x] `bboxRelConstellation` populated (or null with explanation).
+- [x] `bboxRelRow` populated when a containing row band is found.
+- [x] `nearbyObjects` distances normalized and capped.
+- [x] `miniConstellation` contains all 6 member types where detectable.
+- [x] Existing pixel bbox and `structuralContext` untouched.
+- [x] Backwards-compatible: loaders that don't know `structuralIdentity` ignore it.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and

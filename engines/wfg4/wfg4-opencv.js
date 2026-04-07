@@ -630,6 +630,334 @@
   }
 
   // ---------------------------------------------------------------------------
+  // computeFieldStructuralIdentity — Phase 3 field-level structural identity
+  //
+  // Given the field bbox (normalized), the Phase 1 PageStructure, and the
+  // Phase 2 Constellation, computes:
+  //   • bbox relative to the constellation frame (cx, cy, w, h as ratios)
+  //   • bbox relative to the containing row band (if one can be identified)
+  //   • distances to nearby structural objects (normalized)
+  //   • overlap relationships with row bands and slot-like areas
+  //   • a field-level mini-constellation: containing row, nearest separator,
+  //     adjacent rows above/below, relevant slot/value band (if detectable)
+  //   • object↔bbox relationships for each mini-constellation member
+  //
+  // Input:
+  //   fieldBboxNorm  — { x0, y0, x1, y1 } 0..1 page-normalized
+  //   pageStructure  — Phase 1 PageStructure
+  //   constellation  — Phase 2 Constellation (may be null)
+  //   opts           — optional overrides
+  //
+  // Returns: structuralIdentity object, or null on bad input.
+  // ---------------------------------------------------------------------------
+  function computeFieldStructuralIdentity(fieldBboxNorm, pageStructure, constellation, opts){
+    if(!fieldBboxNorm || !pageStructure) return null;
+    var o = opts || {};
+
+    // Field geometry
+    var fxN  = Number(fieldBboxNorm.x0 || 0);
+    var fyN  = Number(fieldBboxNorm.y0 || 0);
+    var fx1N = Number(fieldBboxNorm.x1 || 0);
+    var fy1N = Number(fieldBboxNorm.y1 || 0);
+    var fwN  = Math.max(0, fx1N - fxN);
+    var fhN  = Math.max(0, fy1N - fyN);
+    var fcxN = fxN + fwN / 2;
+    var fcyN = fyN + fhN / 2;
+
+    var rowBands = Array.isArray(pageStructure.rowBands)          ? pageStructure.rowBands          : [];
+    var objects  = Array.isArray(pageStructure.structuralObjects) ? pageStructure.structuralObjects : [];
+
+    // ---- (A) bbox relative to constellation frame ----
+    // The constellation frame is defined by its owningRegion when available,
+    // otherwise by the bounding box of all member geometries.
+    var bboxRelConstellation = null;
+    if(constellation){
+      var frameXN, frameYN, frameWN, frameHN;
+      if(constellation.regionGeomNorm){
+        var rg = constellation.regionGeomNorm;
+        frameXN = rg.xN; frameYN = rg.yN; frameWN = rg.wN; frameHN = rg.hN;
+      } else if(Array.isArray(constellation.members) && constellation.members.length){
+        // Derive frame from bounding box of member centers
+        var minCx = Infinity, minCy = Infinity, maxCx = -Infinity, maxCy = -Infinity;
+        for(var mi = 0; mi < constellation.members.length; mi++){
+          var mg = constellation.members[mi].geom;
+          if(!mg) continue;
+          if(mg.cxN < minCx) minCx = mg.cxN;
+          if(mg.cxN > maxCx) maxCx = mg.cxN;
+          if(mg.cyN < minCy) minCy = mg.cyN;
+          if(mg.cyN > maxCy) maxCy = mg.cyN;
+        }
+        if(minCx < Infinity){
+          // Add a small margin around the member centers
+          var margin = 0.02;
+          frameXN = Math.max(0, minCx - margin);
+          frameYN = Math.max(0, minCy - margin);
+          frameWN = Math.min(1, maxCx + margin) - frameXN;
+          frameHN = Math.min(1, maxCy + margin) - frameYN;
+        }
+      }
+      if(typeof frameWN === 'number' && frameWN > 0 && typeof frameHN === 'number' && frameHN > 0){
+        bboxRelConstellation = {
+          // center position as ratio of constellation frame
+          cxRatio: frameWN > 0 ? (fcxN - frameXN) / frameWN : 0.5,
+          cyRatio: frameHN > 0 ? (fcyN - frameYN) / frameHN : 0.5,
+          // size as ratio of constellation frame
+          wRatio:  frameWN > 0 ? fwN / frameWN : fwN,
+          hRatio:  frameHN > 0 ? fhN / frameHN : fhN,
+          // top-left also useful for reconstruction
+          x0Ratio: frameWN > 0 ? (fxN - frameXN) / frameWN : 0,
+          y0Ratio: frameHN > 0 ? (fyN - frameYN) / frameHN : 0,
+          frameGeom: { xN: frameXN, yN: frameYN, wN: frameWN, hN: frameHN }
+        };
+      }
+    }
+
+    // ---- (B) Containing row band ----
+    // The row band whose mean-y is closest to the field center y, and whose
+    // y range overlaps the field vertically.
+    var containingBand = null;
+    var bestBandDist = Infinity;
+    for(var rbi = 0; rbi < rowBands.length; rbi++){
+      var rb = rowBands[rbi];
+      // Row band overlaps field vertically if its y range intersects [fyN, fy1N]
+      var bandTop = Math.min(rb.y1N, rb.y2N);
+      var bandBot = Math.max(rb.y1N, rb.y2N);
+      var overlaps = bandBot >= fyN && bandTop <= fy1N;
+      var nearField = Math.abs(rb.yN - fcyN) < (fhN * 2 + 0.05);
+      if(!overlaps && !nearField) continue;
+      var distToBand = Math.abs(rb.yN - fcyN);
+      if(distToBand < bestBandDist){
+        bestBandDist = distToBand;
+        containingBand = rb;
+      }
+    }
+
+    // ---- bbox relative to containing row band ----
+    var bboxRelRow = null;
+    if(containingBand){
+      // Row bands have a well-defined y (mean) but limited height.
+      // Express field position relative to row band's x-span.
+      var rbW = Math.max(1e-6, containingBand.x2N - containingBand.x1N);
+      bboxRelRow = {
+        bandId:     containingBand.id,
+        xInBandRatio: rbW > 0 ? (fcxN - containingBand.x1N) / rbW : 0.5,
+        wInBandRatio: rbW > 0 ? fwN / rbW : fwN,
+        distFromBandYN: fcyN - containingBand.yN  // signed: positive → field below band
+      };
+    }
+
+    // ---- (C) Distances to nearby structural objects (normalized) ----
+    var nearbyDistThresh = typeof o.nearbyDistThresh === 'number' ? o.nearbyDistThresh : 0.25;
+    var nearbyObjects = [];
+    for(var oi = 0; oi < objects.length; oi++){
+      var obj = objects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - fcxN;
+      var dy = g.cyN - fcyN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      if(distN < 0.005 || distN > nearbyDistThresh) continue;
+      nearbyObjects.push({
+        objId: obj.id,
+        type:  obj.type,
+        distN: distN,
+        dxN:   dx,
+        dyN:   dy
+      });
+    }
+    // Keep up to 8, sorted by distance
+    nearbyObjects.sort(function(a, b){ return a.distN - b.distN; });
+    if(nearbyObjects.length > 8) nearbyObjects = nearbyObjects.slice(0, 8);
+
+    // ---- (D) Overlap with row bands / slot-like areas ----
+    var rowOverlaps = [];
+    for(var rbi2 = 0; rbi2 < rowBands.length; rbi2++){
+      var rb2 = rowBands[rbi2];
+      // Vertical overlap: field y range vs band y range (use ±halfLineWidth=0.005)
+      var bandHalfH = Math.max(0.005, (rb2.y2N - rb2.y1N) / 2);
+      var bandMidY  = rb2.yN;
+      var overlapTop    = Math.max(fyN,  bandMidY - bandHalfH);
+      var overlapBottom = Math.min(fy1N, bandMidY + bandHalfH);
+      if(overlapBottom <= overlapTop) continue;
+      // Horizontal overlap: field x range vs band x span
+      var hOverlapLeft  = Math.max(fxN,  rb2.x1N);
+      var hOverlapRight = Math.min(fx1N, rb2.x2N);
+      if(hOverlapRight <= hOverlapLeft) continue;
+      var vOverlapRatio = fhN > 0 ? (overlapBottom - overlapTop) / fhN : 0;
+      var hOverlapRatio = fwN > 0 ? (hOverlapRight - hOverlapLeft) / fwN : 0;
+      rowOverlaps.push({
+        bandId:        rb2.id,
+        isSeparator:   rb2.isSeparator,
+        vOverlapRatio: vOverlapRatio,
+        hOverlapRatio: hOverlapRatio
+      });
+    }
+
+    // ---- (E) Field-level mini-constellation ----
+    // Members: containing row, nearest separator above, nearest separator below,
+    // adjacent row above, adjacent row below, and nearest slot/value band
+    // (a row band that partially overlaps the field horizontally but is not
+    // the containing band — this approximates a value column boundary).
+
+    var miniMembers = [];
+    var miniRelations = [];
+
+    function addMiniObj(label, rbOrObj, geom){
+      if(!rbOrObj) return;
+      miniMembers.push({ label: label, id: rbOrObj.id, geom: geom });
+    }
+
+    // Field pseudo-object for relation computation
+    var fieldGeom = { xN: fxN, yN: fyN, wN: fwN, hN: fhN, cxN: fcxN, cyN: fcyN };
+
+    // Containing row
+    if(containingBand){
+      var cbGeom = {
+        xN: containingBand.x1N, yN: containingBand.yN,
+        wN: containingBand.x2N - containingBand.x1N, hN: 0,
+        cxN: (containingBand.x1N + containingBand.x2N) / 2,
+        cyN: containingBand.yN
+      };
+      addMiniObj('containing_row', containingBand, cbGeom);
+    }
+
+    // Adjacent rows: closest row band above and below the field
+    var closestAbove = null, closestBelow = null;
+    var distAbove = Infinity, distBelow = Infinity;
+    for(var rbi3 = 0; rbi3 < rowBands.length; rbi3++){
+      var rb3 = rowBands[rbi3];
+      if(containingBand && rb3.id === containingBand.id) continue;
+      if(rb3.yN < fyN){
+        var d = fyN - rb3.yN;
+        if(d < distAbove){ distAbove = d; closestAbove = rb3; }
+      } else if(rb3.yN > fy1N){
+        var d2 = rb3.yN - fy1N;
+        if(d2 < distBelow){ distBelow = d2; closestBelow = rb3; }
+      }
+    }
+    if(closestAbove){
+      var abGeom = {
+        xN: closestAbove.x1N, yN: closestAbove.yN,
+        wN: closestAbove.x2N - closestAbove.x1N, hN: 0,
+        cxN: (closestAbove.x1N + closestAbove.x2N) / 2, cyN: closestAbove.yN
+      };
+      addMiniObj('adjacent_row_above', closestAbove, abGeom);
+    }
+    if(closestBelow){
+      var blGeom = {
+        xN: closestBelow.x1N, yN: closestBelow.yN,
+        wN: closestBelow.x2N - closestBelow.x1N, hN: 0,
+        cxN: (closestBelow.x1N + closestBelow.x2N) / 2, cyN: closestBelow.yN
+      };
+      addMiniObj('adjacent_row_below', closestBelow, blGeom);
+    }
+
+    // Nearest separator above and below
+    var nearSepAbove = null, nearSepBelow = null;
+    var dSepAbove = Infinity, dSepBelow = Infinity;
+    for(var rbi4 = 0; rbi4 < rowBands.length; rbi4++){
+      var rb4 = rowBands[rbi4];
+      if(!rb4.isSeparator) continue;
+      if(rb4.yN <= fcyN){
+        var ds = fcyN - rb4.yN;
+        if(ds < dSepAbove){ dSepAbove = ds; nearSepAbove = rb4; }
+      } else {
+        var ds2 = rb4.yN - fcyN;
+        if(ds2 < dSepBelow){ dSepBelow = ds2; nearSepBelow = rb4; }
+      }
+    }
+    if(nearSepAbove){
+      var saGeom = {
+        xN: nearSepAbove.x1N, yN: nearSepAbove.yN,
+        wN: nearSepAbove.x2N - nearSepAbove.x1N, hN: 0,
+        cxN: (nearSepAbove.x1N + nearSepAbove.x2N) / 2, cyN: nearSepAbove.yN
+      };
+      addMiniObj('separator_above', nearSepAbove, saGeom);
+    }
+    if(nearSepBelow){
+      var sbGeom = {
+        xN: nearSepBelow.x1N, yN: nearSepBelow.yN,
+        wN: nearSepBelow.x2N - nearSepBelow.x1N, hN: 0,
+        cxN: (nearSepBelow.x1N + nearSepBelow.x2N) / 2, cyN: nearSepBelow.yN
+      };
+      addMiniObj('separator_below', nearSepBelow, sbGeom);
+    }
+
+    // Slot/value band: a row band that overlaps the field's y range AND whose
+    // x-span does NOT fully cover the field's x range — suggesting a column
+    // boundary / slot divider near the field.
+    var slotBand = null;
+    var bestSlotScore = -1;
+    for(var rbi5 = 0; rbi5 < rowBands.length; rbi5++){
+      var rb5 = rowBands[rbi5];
+      if(containingBand && rb5.id === containingBand.id) continue;
+      // Must overlap field y range
+      if(rb5.yN < fyN - fhN || rb5.yN > fy1N + fhN) continue;
+      // Partial x overlap with field
+      var hOvL = Math.max(fxN, rb5.x1N), hOvR = Math.min(fx1N, rb5.x2N);
+      if(hOvR <= hOvL) continue;
+      // x span should NOT fully contain the field (otherwise it's just another row)
+      var isSlotCandidate = rb5.spanN < 0.5 || (rb5.x1N > fxN - 0.02 && rb5.x2N < fx1N + 0.02);
+      if(!isSlotCandidate) continue;
+      var slotScore = (hOvR - hOvL) / Math.max(1e-6, fwN);
+      if(slotScore > bestSlotScore){ bestSlotScore = slotScore; slotBand = rb5; }
+    }
+    if(slotBand){
+      var svGeom = {
+        xN: slotBand.x1N, yN: slotBand.yN,
+        wN: slotBand.x2N - slotBand.x1N, hN: 0,
+        cxN: (slotBand.x1N + slotBand.x2N) / 2, cyN: slotBand.yN
+      };
+      addMiniObj('slot_value_band', slotBand, svGeom);
+    }
+
+    // Object↔bbox relations for each mini member (field bbox as the reference)
+    for(var mmi = 0; mmi < miniMembers.length; mmi++){
+      var mm = miniMembers[mmi];
+      var mg = mm.geom;
+      if(!mg) continue;
+      var mdx = mg.cxN - fcxN;
+      var mdy = mg.cyN - fcyN;
+      var mdistN = Math.sqrt(mdx * mdx + mdy * mdy);
+      miniRelations.push({
+        label:     mm.label,
+        memberId:  mm.id,
+        distN:     mdistN,
+        dxN:       mdx,
+        dyN:       mdy,
+        // Signed offsets from field edges to member center
+        distFromTopN:    mg.cyN - fyN,
+        distFromBottomN: mg.cyN - fy1N,
+        distFromLeftN:   mg.cxN - fxN,
+        distFromRightN:  mg.cxN - fx1N
+      });
+    }
+
+    return {
+      schema: 'wfg4/field-structural-identity/v1',
+
+      // (A) Bbox relative to constellation frame
+      bboxRelConstellation: bboxRelConstellation,
+
+      // (B) Bbox relative to containing row band
+      containingBandId: containingBand ? containingBand.id : null,
+      bboxRelRow:       bboxRelRow,
+
+      // (C) Normalized distances to nearby structural objects
+      nearbyObjects: nearbyObjects,
+
+      // (D) Row band overlap map
+      rowOverlaps: rowOverlaps,
+
+      // (E) Field-level mini-constellation
+      miniConstellation: {
+        members:   miniMembers,
+        relations: miniRelations
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // buildConstellation — Phase 2 constellation construction (config time)
   //
   // Given a normalized field bbox and a PageStructure (Phase 1), selects a
@@ -1003,6 +1331,7 @@
     computeAnchorOffsets,
     structuralRefineBox,
     buildPageStructure,
-    buildConstellation
+    buildConstellation,
+    computeFieldStructuralIdentity
   };
 });
