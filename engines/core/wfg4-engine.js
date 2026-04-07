@@ -50,20 +50,85 @@
     });
   }
 
-  function scoreToken(tok, centerX, centerY){
-    const cx = (tok.x || 0) + ((tok.w || 0) / 2);
-    const cy = (tok.y || 0) + ((tok.h || 0) / 2);
-    const dist = Math.abs(cx - centerX) + Math.abs(cy - centerY);
-    return Math.max(0, 1 - (dist / 600));
+  function uniqueTokens(tokens){
+    const seen = new Set();
+    const out = [];
+    for(const tok of (Array.isArray(tokens) ? tokens : [])){
+      if(!tok) continue;
+      const text = String(tok.text || tok.raw || '').trim();
+      if(!text) continue;
+      const key = [
+        text,
+        Math.round(Number(tok.x || 0)),
+        Math.round(Number(tok.y || 0)),
+        Math.round(Number(tok.w || 0)),
+        Math.round(Number(tok.h || 0)),
+        Number(tok.page || 0)
+      ].join('|');
+      if(seen.has(key)) continue;
+      seen.add(key);
+      out.push(tok);
+    }
+    return out;
   }
 
-  function pickBestToken(tokens, box){
-    if(!Array.isArray(tokens) || !tokens.length || !box) return null;
-    const centerX = (box.x || 0) + (box.w || 0) / 2;
-    const centerY = (box.y || 0) + (box.h || 0) / 2;
-    return tokens
-      .map(tok => ({ tok, score: scoreToken(tok, centerX, centerY) }))
-      .sort((a,b)=> b.score - a.score)[0] || null;
+  function sortTokensReadingOrder(tokens){
+    const ordered = uniqueTokens(tokens).slice().sort((a, b) => {
+      const ay = Number(a.y || 0);
+      const by = Number(b.y || 0);
+      if(Math.abs(ay - by) > 2) return ay - by;
+      return Number(a.x || 0) - Number(b.x || 0);
+    });
+    if(!ordered.length) return [];
+    const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
+    const medianH = heights.length
+      ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)]
+      : 12;
+    const bandTol = Math.max(3, medianH * 0.6);
+    const rows = [];
+    for(const tok of ordered){
+      const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
+      let row = rows.find(r => Math.abs(cy - r.cy) <= bandTol);
+      if(!row){
+        row = { cy, toks: [] };
+        rows.push(row);
+      }
+      row.toks.push(tok);
+      row.cy = (row.cy * (row.toks.length - 1) + cy) / row.toks.length;
+    }
+    rows.sort((a,b)=> a.cy - b.cy);
+    for(const r of rows){
+      r.toks.sort((a,b)=> Number(a.x || 0) - Number(b.x || 0));
+    }
+    return rows.flatMap(r => r.toks);
+  }
+
+  function aggregateTokenText(tokens){
+    const ordered = sortTokensReadingOrder(tokens);
+    if(!ordered.length) return '';
+    const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
+    const medianH = heights.length
+      ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)]
+      : 12;
+    const newLineTol = Math.max(5, medianH * 0.9);
+    const lines = [];
+    let line = [];
+    let lineCy = null;
+    for(const tok of ordered){
+      const text = String(tok.text || tok.raw || '').trim();
+      if(!text) continue;
+      const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
+      if(line.length && lineCy !== null && Math.abs(cy - lineCy) > newLineTol){
+        lines.push(line.join(' '));
+        line = [text];
+        lineCy = cy;
+      } else {
+        line.push(text);
+        lineCy = lineCy === null ? cy : ((lineCy * (line.length - 1) + cy) / line.length);
+      }
+    }
+    if(line.length) lines.push(line.join(' '));
+    return cleanText(lines.join(' ').replace(/\s+/g, ' '));
   }
 
   function toCanvasFromSource(source){
@@ -563,22 +628,17 @@
     }
 
     const pads = [0, 4, 8];
-    let winner = null;
+    let readout = null;
     for(const pad of pads){
       const scoped = tokensInBox(allTokens, pad ? expandBox(finalBox, pad) : finalBox, 0.2);
-      const candidate = pickBestToken(scoped, finalBox);
-      if(candidate?.tok?.text){
-        winner = {
-          token: candidate.tok,
-          pad,
-          score: candidate.score,
-          scoped
-        };
-        if(candidate.score >= 0.6) break;
+      const aggregated = aggregateTokenText(scoped);
+      if(aggregated){
+        readout = { text: aggregated, pad, scoped };
+        if(pad === 0) break;
       }
     }
 
-    if(!winner){
+    if(!readout){
       // Localization is authoritative: the field location is real. Token
       // scoping failure here means the current readout backend (PDF text
       // layer tokens or pre-fetched OCR tokens) did not cover the localized
@@ -603,9 +663,13 @@
       };
     }
 
-    const value = cleanText(winner.token.text || winner.token.raw || '');
-    const readConfidence = Math.max(0.15, Math.min(0.85, 0.2 + (winner.score * 0.55)));
-    const _method = winner.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box';
+    const value = cleanText(readout.text || '');
+    const densityBoost = Math.min(0.2, Math.max(0, (readout.scoped.length - 1) * 0.02));
+    const readConfidence = Math.max(
+      0.25,
+      Math.min(0.9, 0.55 + (Number(localized.localizationConfidence || 0) * 0.25) + densityBoost)
+    );
+    const _method = readout.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box';
     _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'pass', bboxSource });
     _EL?.engineLog('wfg4-run', 'field.result', {
       fieldKey: _fk,
@@ -624,23 +688,16 @@
       raw: value,
       confidence: readConfidence,
       boxPx: finalBox,
-      tokens: winner.scoped,
+      tokens: readout.scoped,
       method: _method,
       engine: 'wfg4',
       tokenSource: tokenSourceResolved,
       extractionMeta: buildMeta({
-        usedPad: winner.pad,
-        scopedTokenCount: winner.scoped.length,
+        usedPad: readout.pad,
+        scopedTokenCount: readout.scoped.length,
         readout: {
           confidence: readConfidence,
-          source: 'localized-token-read-assist',
-          winnerTokenBBox: winner?.token ? {
-            x: Number(winner.token.x || 0),
-            y: Number(winner.token.y || 0),
-            w: Number(winner.token.w || 0),
-            h: Number(winner.token.h || 0),
-            page: Number(winner.token.page || finalBox.page || 1)
-          } : null
+          source: 'localized-full-box-aggregation'
         }
       })
     };
