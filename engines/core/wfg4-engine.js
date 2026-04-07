@@ -435,14 +435,40 @@
     });
 
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? fieldSpec.allowDegradedFallback ?? (Types.DEFAULTS && Types.DEFAULTS.allowDegradedFallback));
-    const localized = Localization.localizeFieldVisual
-      ? await Localization.localizeFieldVisual({
-          ...payload,
-          wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null,
-          boxPx: boxPx || null,
-          allowDegradedFallback
-        })
-      : { ok:false, status: LOCALIZATION_STATUS.FAILED, localizedBox: null, localizationConfidence: 0.1, reason: 'localization_module_missing', attempts: [] };
+    // P1 fix: at config-confirm time the user's literal bbox is the
+    // authoritative geometry. Skip runtime structural re-localization, which
+    // can shift the readout box to a different page region (manifesting as
+    // "wrong-target text" on scanned PDFs and images, and as multi-click /
+    // delayed confirm because of async surface/packet readiness races).
+    const configModeAuthoritative = !!payload.configMode && !!boxPx;
+    const localized = configModeAuthoritative
+      ? {
+          ok: true,
+          status: LOCALIZATION_STATUS.SUCCESS,
+          localizedBox: { ...boxPx },
+          finalReadoutBox: { ...boxPx },
+          localizationConfidence: 1.0,
+          bboxSource: BBOX_SOURCE.LITERAL_USER_BOX || 'literal_user_box',
+          reason: 'config_mode_literal_bbox',
+          attempts: [],
+          fallbackUsed: false
+        }
+      : (Localization.localizeFieldVisual
+        ? await Localization.localizeFieldVisual({
+            ...payload,
+            wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null,
+            boxPx: boxPx || null,
+            allowDegradedFallback
+          })
+        : { ok:false, status: LOCALIZATION_STATUS.FAILED, localizedBox: null, localizationConfidence: 0.1, reason: 'localization_module_missing', attempts: [] });
+    if(configModeAuthoritative){
+      _EL?.engineLog('wfg4-config', 'literal-bbox-authoritative', {
+        fieldKey: _fk,
+        boxPx: { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, page: boxPx.page },
+        surfaceReady: _surfReady,
+        tokenCount: rawTokens.length
+      });
+    }
 
     const localizationStatus = localized.status || (localized.ok ? LOCALIZATION_STATUS.SUCCESS : LOCALIZATION_STATUS.FAILED);
     const fallbackUsed = !!localized.fallbackUsed;

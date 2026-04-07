@@ -10123,6 +10123,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
           runtimeMaps = runtimeMapCache[runtimeCacheKey] || null;
         }
       }
+      const _isConfigModeNow = isConfigMode();
       const enginePayload = {
         fieldSpec,
         tokens: Array.isArray(tokens) ? tokens : [],
@@ -10130,7 +10131,13 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         viewport: viewportPx,
         profile: state.profile,
         geometryId: state.activeGeometryId || currentGeometryId(),
-        wfg4Surface: state.wfg4?.[isRunMode() ? 'runSurface' : 'configSurface'] || null
+        wfg4Surface: state.wfg4?.[isRunMode() ? 'runSurface' : 'configSurface'] || null,
+        // P1 fix (scanned-PDF / image config bug): in config mode, the user's
+        // literal bbox is the source of truth. Tell the engine NOT to run
+        // runtime structural re-localization (which can shift the readout box
+        // to a different region of the page and produce wrong-target OCR on
+        // surfaces without a PDF text layer).
+        configMode: _isConfigModeNow
       };
       if(fieldEngineType === ENGINE_KIND.WROKIT_VISION){
         enginePayload.runtimeMaps = runtimeMaps;
@@ -19822,6 +19829,32 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   const canvasW = (vp.width ?? vp.w) || 1;
   const canvasH = (vp.height ?? vp.h) || 1;
   const normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
+  // P1 fix instrumentation: log every surface/coord-space involved at
+  // confirm-time so any future surface/geometry mismatch is immediately
+  // visible. Single source of truth for config crop = storedBoxPx in the
+  // working pixel space of state.pageViewports[pageNum-1].
+  try {
+    const _wfg4Pages = state.wfg4?.configSurface?.pages || [];
+    const _wfg4Dims = _wfg4Pages[state.pageNum-1]?.dimensions || null;
+    const _displayNode = (typeof getActiveDisplaySurfaceNode === 'function') ? getActiveDisplaySurfaceNode() : null;
+    const _displayRect = _displayNode?.getBoundingClientRect?.() || null;
+    const _sourceType = state.isImage ? 'image'
+      : (state.tokensByPage?.[state.pageNum]?.length ? 'pdf-text-layer' : 'pdf-scanned-or-empty');
+    console.info('[wfg4-config-confirm]', {
+      sourceType: _sourceType,
+      pageNum: state.pageNum,
+      displayCanvas: _displayNode ? { pxW: _displayNode.width, pxH: _displayNode.height, cssW: _displayRect?.width, cssH: _displayRect?.height } : null,
+      wfg4SurfaceDims: _wfg4Dims,
+      viewport: { w: canvasW, h: canvasH },
+      bboxDisplaySpace: state.snappedCss ? { ...state.snappedCss } : null,
+      storedBoxPx: { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h, page: storedBoxPx.page },
+      normBox,
+      cropBoxPx: { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h },
+      activeEngine: getConfiguredEngineType?.(),
+      wfg4ConfigSurfaceReady: !!state.wfg4?.configSurface,
+      wfg4ConfigDisplayActive: !!state.wfg4?.configDisplayActive
+    });
+  } catch(_dbgErr){ /* debug-only */ }
   const pct = { x0: normBox.x0n, y0: normBox.y0n, x1: normBox.x0n + normBox.wN, y1: normBox.y0n + normBox.hN };
   const rawBoxData = { x: storedBoxPx.x, y: storedBoxPx.y, w: storedBoxPx.w, h: storedBoxPx.h, canvasW, canvasH };
   const keywordRelations = (step.type === 'static')
