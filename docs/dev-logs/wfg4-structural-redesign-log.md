@@ -397,6 +397,110 @@ with structural metadata — no competing model is introduced.
 - [x] `structuralCandidates` exposed in debug output on all return paths where it is computed.
 - [x] K default = 5, config via `DEFAULTS.globalScanTopCandidates`.
 
+## Phase 5 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `matchConstellationCandidates(configConstellation, runtimePageStructure, candidates, opts)` (~210 lines). Pure geometry; no OpenCV calls.
+- Promotes Phase 4's coarse anchor shortlist into scored, member-correspondence-
+  bearing matches via a relation-graph scorer.
+- Per candidate:
+  1. Derives `(dxN, dyN)` translation from `cand.estimatedTranslationN`.
+  2. For each config member, predicts the runtime center by applying that
+     translation to the config member center, then chooses the best runtime
+     `structuralObject` of the same type within `memberSearchRadiusN` (default
+     0.08 page-diagonal). Falls back to any-type match at half score if no
+     same-type object exists. Each runtime object is consumed at most once.
+  3. Builds a `memberCorrespondences[]` map and accumulates `matchedCount`
+     and per-member proximity scores; missing members are recorded with
+     `runtimeObjId: null` so partial matches are explicit.
+  4. For every config relation whose endpoints both have correspondences,
+     re-derives `alignment / hOrder / vOrder` from the runtime pair and
+     compares with the config relation. `relationsAgreed / relationsChecked`
+     yields `relationConsistencyRatio`.
+  5. `finalScore = memberAvg * memberWeight + relationConsistencyRatio *
+     relationWeight + anchorBoost`. When no relations are checkable (single
+     member matches), it falls back to pure member coverage so partial
+     matches still survive. `anchorBoost` is a small additive lift from the
+     Phase 4 candidate score (capped at 0.15).
+- Default weights: `memberWeight=0.55`, `relationWeight=0.45`,
+  `acceptThreshold=0.35`, `alignThreshN=0.02`, `maxMatches=5`.
+- Returns `{ matches: [ConstellationMatch], debug }` sorted by `finalScore`
+  desc; the result preserves *every* candidate (not just the best one) so
+  Phase 6/7 can opt into repeated-match emission via search policy.
+- Each `ConstellationMatch` carries `rank, candidateRank, anchorObjId,
+  anchorType, centerN, estimatedTranslationN, memberCorrespondences,
+  matchedMemberCount, totalMemberCount, memberCoverage,
+  relationConsistencyRatio, relationsChecked, relationsAgreed, partial,
+  finalScore, accepted`.
+- Exported via the module return object.
+
+**`engines/wfg4/wfg4-localization.js`**
+- After the existing Phase 4 `selectConstellationCandidates()` call, invokes
+  `matchConstellationCandidates()` with the runtime `pageEntry.pageStructure`,
+  the config `constellation`, and the Phase 4 shortlist.
+- Stores `structMatches`, `structMatchDebug`, and `acceptedStructMatches`.
+- Promotes `hasViableStructCandidates = true` whenever Phase 5 produces at
+  least one accepted match (so a non-viable Phase 4 anchor can still be
+  rescued by relation-graph evidence).
+- Window builder now prefers Phase 5 accepted matches as the source for the
+  primary `D_struct_*` windows; if Phase 5 accepted nothing, it falls back
+  to Phase 4 raw viable candidates (preserving Phase 4 behavior). ORB on the
+  predicted box remains the last reserved fallback window.
+- New engine-log event `struct.matches` exposes match count, accepted count,
+  top score, top partial flag, top coverage, and top relation-consistency
+  ratio for diagnostics.
+- `structuralMatches` and `structuralMatchDebug` added to both the
+  degraded-fallback and main success/failure return objects.
+
+### Design decisions
+
+- Member-search radius `0.08` page-diagonal: tight enough that candidates
+  near the wrong region don't false-match members from elsewhere on the
+  page, loose enough to absorb realistic scale/render drift between config
+  and runtime layouts.
+- Type-mismatch penalty (effective distance ×2 instead of hard reject):
+  preserves matchability when row-band/separator classification flips
+  between config and runtime, while still preferring exact-type pairs.
+- `memberWeight=0.55 / relationWeight=0.45`: relation consistency is the
+  signal that distinguishes "found the right structural pattern" from
+  "found a similar set of objects in the wrong arrangement", but coverage
+  must dominate slightly so single-member-rich constellations are still
+  rankable when relation count is low.
+- Anchor boost capped at 0.15: lets the Phase 4 anchor quality act as a
+  tiebreaker without overpowering the relation-graph evidence.
+- Relation-less fallback to pure member coverage: necessary because
+  constellations with only 1–2 matched members yield zero checkable
+  relations, and partial-match support is mandatory per the plan.
+- Repeated-constellation support: every candidate above `acceptThreshold`
+  is returned and ranked. Phase 6/7 will decide whether to consume only the
+  top match or emit one reconstruction per accepted match based on search
+  policy. Phase 5 itself does not commit to single-vs-multi output.
+- Defaults exposed via `DEFAULTS.constellationAcceptThreshold` and
+  `DEFAULTS.constellationMemberSearchRadiusN` so they can be tuned without
+  touching the matcher.
+
+### Fixes / deviations
+
+- None. Phase 5 is additive. The Phase 4 fallback path is preserved exactly:
+  if Phase 5 produces no accepted matches, the runtime falls back to the
+  Phase 4 viable list, and if there are no viable Phase 4 candidates either,
+  the legacy ORB-first window order runs untouched. ORB remains a
+  refine-only / last-resort fallback as required.
+
+### Completion criteria met
+
+- [x] Matcher emits scored selections with member-correspondence map.
+- [x] Partial matches accepted (missing members recorded explicitly,
+      relation-less fallback to coverage-only scoring).
+- [x] Repeated constellations supported (all accepted matches returned,
+      ranked, ready for Phase 6/7 multi-instance policy).
+- [x] Debug surface (`struct.matches` log + `structuralMatches` /
+      `structuralMatchDebug` on returns) shows score breakdown.
+- [x] ORB still gated as refine-only / last-window fallback.
+- [x] Existing field-level localization contract untouched.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and

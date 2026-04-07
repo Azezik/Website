@@ -227,6 +227,9 @@
     const configConstellation = ref?.constellation         || null;
     let structCandidates         = [];
     let hasViableStructCandidates = false;
+    let structMatches            = [];
+    let structMatchDebug         = null;
+    let acceptedStructMatches    = [];
     if(rtPageStructure && configConstellation && CvOps.selectConstellationCandidates){
       try {
         structCandidates = CvOps.selectConstellationCandidates(
@@ -236,21 +239,58 @@
         hasViableStructCandidates = structCandidates.some(c => c.viable && c.anchorObjId !== null);
       } catch(_e){ structCandidates = []; }
     }
+
+    // Phase 5: constellation-level structural matching.
+    // Promotes Phase 4's coarse anchor shortlist to scored, member-correspondence-
+    // bearing matches via a relation-graph scorer that tolerates partial matches
+    // and supports repeated constellations.  Accepted matches drive the search
+    // window order; if no candidate is accepted we fall back to Phase 4's raw
+    // viable list, and if even those are absent we keep the legacy ORB-first path.
+    if(rtPageStructure && configConstellation && structCandidates.length && CvOps.matchConstellationCandidates){
+      try {
+        const matchRes = CvOps.matchConstellationCandidates(
+          configConstellation, rtPageStructure, structCandidates,
+          {
+            acceptThreshold:     DEFAULTS.constellationAcceptThreshold     || 0.35,
+            memberSearchRadiusN: DEFAULTS.constellationMemberSearchRadiusN || 0.08,
+            maxMatches:          DEFAULTS.globalScanTopCandidates          || 5
+          }
+        ) || { matches: [], debug: null };
+        structMatches         = matchRes.matches || [];
+        structMatchDebug      = matchRes.debug   || null;
+        acceptedStructMatches = structMatches.filter(m => m.accepted);
+        if(acceptedStructMatches.length > 0) hasViableStructCandidates = true;
+      } catch(_e){ structMatches = []; structMatchDebug = { error: String(_e?.message || _e) }; }
+    }
+
     _EL?.engineLog('wfg4-run', 'struct.candidates', {
       fieldKey: _fk,
       candidateCount: structCandidates.length,
       viableCount: structCandidates.filter(c => c.viable).length,
       hasViable: hasViableStructCandidates
     });
+    _EL?.engineLog('wfg4-run', 'struct.matches', {
+      fieldKey: _fk,
+      matchCount:    structMatches.length,
+      acceptedCount: acceptedStructMatches.length,
+      topScore:      structMatches[0] ? structMatches[0].finalScore : 0,
+      topPartial:    structMatches[0] ? structMatches[0].partial    : null,
+      topCoverage:   structMatches[0] ? structMatches[0].memberCoverage : 0,
+      topRelationConsistency: structMatches[0] ? structMatches[0].relationConsistencyRatio : 0
+    });
 
     const windows = [];
     if(hasViableStructCandidates){
       // Structural windows are primary; reserve at least 1 slot for ORB fallback.
-      const viableCands    = structCandidates.filter(c => c.viable);
-      const maxStructWin   = Math.min(viableCands.length, Math.max(1, maxAttempts - 1));
+      // Prefer Phase 5 accepted matches (sorted by relation-graph finalScore);
+      // fall back to Phase 4 raw viable candidates if Phase 5 produced none.
+      const sourceList = acceptedStructMatches.length > 0
+        ? acceptedStructMatches
+        : structCandidates.filter(c => c.viable);
+      const maxStructWin   = Math.min(sourceList.length, Math.max(1, maxAttempts - 1));
       const W = runtimeCanvas.width, H = runtimeCanvas.height;
       for(let ci = 0; ci < maxStructWin; ci++){
-        const cand   = viableCands[ci];
+        const cand   = sourceList[ci];
         const shiftX = (cand.estimatedTranslationN.dxN || 0) * W;
         const shiftY = (cand.estimatedTranslationN.dyN || 0) * H;
         const translatedBox = {
@@ -395,6 +435,8 @@
           structuralAdjustments: [],
           structuralDebug: null,
           structuralCandidates,
+          structuralMatches: structMatches,
+          structuralMatchDebug: structMatchDebug,
           fallbackUsed: true,
           attempts: attemptsLog,
           reason: 'degraded_fallback_predicted_box'
@@ -463,6 +505,8 @@
       structuralAdjustments,
       structuralDebug,
       structuralCandidates,
+      structuralMatches: structMatches,
+      structuralMatchDebug: structMatchDebug,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
       // legacy keys for backward compatibility
