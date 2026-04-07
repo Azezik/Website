@@ -12821,7 +12821,7 @@ async function prepareRunDocument(file){
       // Keep URL alive while imgCanvas is active; cleanupDoc handles revocation.
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
-      syncWfg4SurfaceContext('run');
+      await syncWfg4SurfaceContext('run');
       return { type:'image' };
     } catch(err){
       console.error('Image load failed in run mode', err);
@@ -12877,7 +12877,7 @@ async function prepareRunDocument(file){
   state.numPages = state.pdf.numPages;
   state.viewport = state.pageViewports[0] || { w:0, h:0, scale };
   state.overlayPinned = false;
-  syncWfg4SurfaceContext('run');
+  await syncWfg4SurfaceContext('run');
   return { type:'pdf' };
 }
 
@@ -13948,7 +13948,7 @@ function captureWfg4SurfaceForMode(mode){
   }
 }
 
-function syncWfg4SurfaceContext(mode){
+async function syncWfg4SurfaceContext(mode){
   const isWfg4 = getConfiguredEngineType() === ENGINE_KIND.WFG4;
   if(!isWfg4){
     if(mode === 'config' && state.wfg4?.configDisplayActive){
@@ -13956,14 +13956,18 @@ function syncWfg4SurfaceContext(mode){
     }
     return;
   }
+  let cvReadyResult = null;
   if(window.WFG4OpenCv?.ensureCvReady){
-    Promise.resolve(
-      window.WFG4OpenCv.ensureCvReady({
+    try {
+      cvReadyResult = await window.WFG4OpenCv.ensureCvReady({
         timeoutMs: 15000,
         pollMs: 75,
         autoLoad: true
-      })
-    ).catch(err => console.warn('[wfg4] OpenCV bootstrap failed', err));
+      });
+    } catch(err){
+      console.warn('[wfg4] OpenCV bootstrap failed', err);
+      cvReadyResult = { ok: false, ready: false, source: 'bootstrap_error' };
+    }
   }
   const surface = captureWfg4SurfaceForMode(mode);
   if(!surface) return;
@@ -13999,12 +14003,15 @@ function syncWfg4SurfaceContext(mode){
         source: 'syncWfg4SurfaceContext',
         sourceType: surface.isImage ? 'image' : 'pdf',
         pageCount: surface.pageCount || 0,
+        cvReady: !!(cvReadyResult && cvReadyResult.ok && cvReadyResult.ready),
+        cvReadySource: cvReadyResult?.source || null,
         cvAvailable: !!(surface.diagnostics && surface.diagnostics.cvAvailable),
         width: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.width) || 0,
         height: (_fp && _fp.dimensions && _fp.dimensions.working && _fp.dimensions.working.height) || 0
       });
     })();
   }
+  return surface;
 }
 
 

@@ -206,6 +206,23 @@
     return Types.expandBox ? Types.expandBox(box, 0, bounds) : box;
   }
 
+  function enforceReadoutFloor(localizedBox, predictedBox, bounds){
+    if(!localizedBox || !predictedBox) return localizedBox || predictedBox || null;
+    const minSideRatio = Number(DEFAULTS.readoutMinSideRatio || 0.92);
+    const targetW = Math.max(Number(localizedBox.w || 1), Number(predictedBox.w || 1) * minSideRatio);
+    const targetH = Math.max(Number(localizedBox.h || 1), Number(predictedBox.h || 1) * minSideRatio);
+    const cx = Number(localizedBox.x || 0) + (Number(localizedBox.w || 1) / 2);
+    const cy = Number(localizedBox.y || 0) + (Number(localizedBox.h || 1) / 2);
+    const floored = {
+      x: cx - (targetW / 2),
+      y: cy - (targetH / 2),
+      w: targetW,
+      h: targetH,
+      page: localizedBox.page || predictedBox.page || 1
+    };
+    return clampBoxToBounds(floored, bounds);
+  }
+
   function computeScaleDelta(box, refBox){
     if(!box || !refBox) return null;
     const bw = Math.max(1, Number(box.w || 1));
@@ -653,7 +670,7 @@
     else if(usedStructuralReconstruction) bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
     else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
 
-    const finalBox = localized || predictedBox;
+    const finalBox = enforceReadoutFloor(localized || predictedBox, predictedBox, bounds);
 
     // Phase 7: per-instance output for repeated constellations.
     // When policy = 'multi', emit one instance per accepted reconstruction

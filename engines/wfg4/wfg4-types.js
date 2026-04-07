@@ -40,7 +40,11 @@
     maxLocalizationAttemptsPerField: 4,
     maxLocalizationMsPerField: 2500,
     widenedSearchWindowMultiplier: 2.0,
-    globalScanTopCandidates: 3
+    globalScanTopCandidates: 3,
+    // Readout box floor: avoid over-shrinking runtime localization below
+    // the configured bbox footprint. This keeps OCR coverage anchored to
+    // what the user selected, while still allowing moderate adaptation.
+    readoutMinSideRatio: 0.92
   };
 
   const LOCALIZATION_STATUS = {
