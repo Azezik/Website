@@ -511,6 +511,124 @@
     return anchors;
   }
 
+  // ---------------------------------------------------------------------------
+  // buildPageStructure — Phase 1 structural prepass
+  //
+  // Produces a normalized PageStructure from a full-page gray mat.  This is
+  // the single shared implementation used by both config-time (via pageEntry
+  // stored on the surface) and runtime flows.  It replaces ad-hoc per-call
+  // detectEdgesAndLines / detectContainers invocations for page-level use.
+  //
+  // Returned schema: 'wfg4/page-structure/v1'
+  // All geometry in .geom / *N fields is normalized to [0, 1] page coords.
+  // ---------------------------------------------------------------------------
+  function buildPageStructure(grayMat, surfaceSize, opts){
+    var o = opts || {};
+    var W = Math.max(1, Number((surfaceSize && surfaceSize.width) ? surfaceSize.width : (grayMat ? grayMat.cols : 1)));
+    var H = Math.max(1, Number((surfaceSize && surfaceSize.height) ? surfaceSize.height : (grayMat ? grayMat.rows : 1)));
+
+    // Row-band clustering gap: at least 10px or 2% of page height
+    var rowBandGapPx = Math.max(10, Math.round(H * 0.02));
+    // A horizontal band is classified as a separator when its x-span
+    // covers ≥ 25% of page width (configurable via opts)
+    var separatorSpanThreshold = (typeof o.separatorSpanThreshold === 'number') ? o.separatorSpanThreshold : 0.25;
+
+    var rawLines = detectEdgesAndLines(grayMat, o);
+    var rawContainers = detectContainers(grayMat, o);
+
+    // --- Regions (rectangular containers), normalized ---
+    var regions = [];
+    for(var ci = 0; ci < rawContainers.length; ci++){
+      var c = rawContainers[ci];
+      var cArea = c.area || (c.w * c.h);
+      regions.push({
+        id: 'r' + ci,
+        xPx: c.x, yPx: c.y, wPx: c.w, hPx: c.h, areaPx: cArea,
+        xN: c.x / W, yN: c.y / H, wN: c.w / W, hN: c.h / H,
+        areaN: cArea / (W * H)
+      });
+    }
+
+    // --- Row bands: cluster nearby horizontal lines by yMid ---
+    var hLines = rawLines.horizontal.slice().sort(function(a, b){ return a.yMid - b.yMid; });
+    var bandGroups = [];
+    for(var li = 0; li < hLines.length; li++){
+      var hl = hLines[li];
+      var last = bandGroups.length ? bandGroups[bandGroups.length - 1] : null;
+      if(last && (hl.yMid - last.yMax) <= rowBandGapPx){
+        last.lines.push(hl);
+        last.yMax = hl.yMid;
+      } else {
+        bandGroups.push({ lines: [hl], yMax: hl.yMid });
+      }
+    }
+
+    var rowBands = [];
+    for(var bi = 0; bi < bandGroups.length; bi++){
+      var grp = bandGroups[bi];
+      var ySum = 0;
+      var y1Px = Infinity, y2Px = -Infinity;
+      var x1Px = Infinity, x2Px = -Infinity;
+      for(var k = 0; k < grp.lines.length; k++){
+        var gl = grp.lines[k];
+        ySum += gl.yMid;
+        if(gl.yMid < y1Px) y1Px = gl.yMid;
+        if(gl.yMid > y2Px) y2Px = gl.yMid;
+        if(gl.x1 < x1Px) x1Px = gl.x1;
+        if(gl.x2 > x2Px) x2Px = gl.x2;
+      }
+      var yPx = ySum / grp.lines.length;
+      var spanN = Math.max(0, x2Px - x1Px) / W;
+      rowBands.push({
+        id: 'rb' + bi,
+        yPx: yPx, y1Px: y1Px, y2Px: y2Px,
+        yN: yPx / H, y1N: y1Px / H, y2N: y2Px / H,
+        x1Px: x1Px, x2Px: x2Px,
+        x1N: x1Px / W, x2N: x2Px / W,
+        spanN: spanN,
+        lineCount: grp.lines.length,
+        isSeparator: spanN >= separatorSpanThreshold
+      });
+    }
+
+    // --- Unified structural object list (for Phase 2+ constellation use) ---
+    var soId = 0;
+    var structuralObjects = [];
+    for(var ri2 = 0; ri2 < regions.length; ri2++){
+      var r = regions[ri2];
+      structuralObjects.push({
+        id: 'so' + (soId++),
+        type: 'region',
+        ref: r.id,
+        geom: {
+          xN: r.xN, yN: r.yN, wN: r.wN, hN: r.hN,
+          cxN: r.xN + r.wN / 2, cyN: r.yN + r.hN / 2
+        }
+      });
+    }
+    for(var rbi2 = 0; rbi2 < rowBands.length; rbi2++){
+      var rb = rowBands[rbi2];
+      structuralObjects.push({
+        id: 'so' + (soId++),
+        type: rb.isSeparator ? 'separator' : 'row_band',
+        ref: rb.id,
+        geom: {
+          xN: rb.x1N, yN: rb.y1N,
+          wN: Math.max(0, rb.x2N - rb.x1N), hN: Math.max(0, rb.y2N - rb.y1N),
+          cxN: (rb.x1N + rb.x2N) / 2, cyN: rb.yN
+        }
+      });
+    }
+
+    return {
+      schema: 'wfg4/page-structure/v1',
+      surfaceSize: { width: W, height: H },
+      regions: regions,
+      rowBands: rowBands,
+      structuralObjects: structuralObjects
+    };
+  }
+
   function structuralRefineBox(projectedBox, structuralCtx, runtimeGray, opts){
     const cv = root.cv;
     const o = opts || {};
@@ -663,6 +781,7 @@
     detectContainers,
     findEnclosingContainer,
     computeAnchorOffsets,
-    structuralRefineBox
+    structuralRefineBox,
+    buildPageStructure
   };
 });

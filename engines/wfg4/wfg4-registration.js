@@ -70,7 +70,11 @@
         neighborhoodScale: DEFAULTS.localNeighborhoodScale || 2.2,
         patches: {}
       },
-      phase3Ready: true
+      phase3Ready: true,
+      // Phase 1: carry the pre-computed page-level PageStructure.
+      // This is computed once in normalizePage() (wfg4-engine.js) and stored
+      // on pageEntry so that both config and runtime share one code path.
+      pageStructure: pageEntry?.pageStructure || null
     };
 
     const cvReadyInfo = CvOps.ensureCvReady

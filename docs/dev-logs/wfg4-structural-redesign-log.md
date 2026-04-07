@@ -132,6 +132,61 @@ with structural metadata — no competing model is introduced.
 - **Done when:** End-to-end run uses structural pipeline with refine as
   precision-only; diagnostics complete; multi-instance switch tested.
 
+## Phase 1 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `buildPageStructure(grayMat, surfaceSize, opts)` (≈110 lines).
+- Calls existing `detectEdgesAndLines()` and `detectContainers()` internally
+  — no new CV operations introduced, just promotion to a structured return.
+- Builds `regions[]` (normalized containers), `rowBands[]` (horizontal line
+  clusters, gap ≤ max(10px, 2% page height)), and `structuralObjects[]`
+  (unified list for Phase 2+ constellation use).
+- Row bands with x-span ≥ 25% of page width are tagged `isSeparator: true`.
+- All geometry stored in both pixel (`Px`) and normalized (`N`, 0..1) forms.
+- Exported via the module return object.
+
+**`engines/core/wfg4-engine.js`**
+- In `normalizePage()`: declared `pageStructure = null` alongside
+  `globalScan`, then called `CvOps.buildPageStructure(gray, ...)` using the
+  same gray mat already created for `globalScan` — no extra CV allocation.
+- `pageStructure` added to the returned page entry object.
+- Both config-time and runtime surfaces flow through `normalizePage()`, so
+  a single code path produces identical-shape `PageStructure` for both.
+
+**`engines/wfg4/wfg4-registration.js`**
+- Added `pageStructure: pageEntry?.pageStructure || null` to the config
+  packet immediately after `phase3Ready: true`.
+- No new computation — reads the value already placed on `pageEntry` by
+  `normalizePage()`.
+
+### Design decisions made during implementation
+
+- Row-band gap threshold: `max(10px, 2% of page height)` — small enough to
+  separate adjacent form rows, large enough to cluster noisy duplicates.
+- Separator span threshold: 0.25 (25% of page width) — configurable via
+  `opts.separatorSpanThreshold` if needed.
+- `buildPageStructure` re-uses the two existing detector calls rather than
+  running a third pass; raw line/container data from `globalScan` is not
+  cached between the two because `globalScan` only stores aggregate counts,
+  not the raw arrays. The extra detector cost is negligible (same gray mat).
+
+### Fixes / deviations
+
+- None. Phase 1 is additive only. All existing behavior is preserved.
+  `globalScan` remains unchanged for backward compatibility.
+
+### Completion criteria met
+
+- [x] `buildPageStructure` callable from both config and runtime paths
+      through the same `normalizePage()` → `pageEntry.pageStructure` chain.
+- [x] `PageStructure` JSON-serializable (plain objects, no Mat refs).
+- [x] Existing `structuralContext`, `globalScan`, and localization contract
+      untouched.
+- [x] Debug overlay can consume `pageEntry.pageStructure.structuralObjects`
+      in future without code changes.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and
