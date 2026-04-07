@@ -10099,12 +10099,57 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   return { cleaned, patchedText: null };
 }
 
-  async function extractFieldValue(fieldSpec, tokens, viewportPx){
+  /**
+   * P1 CaptureFrame: run Tesseract directly against a crop from the frame's
+   * offscreen canonical canvas, returning tokens already expressed in the
+   * frame's working pixel space (i.e. in the same space as
+   * captureFrame.userBoxWorkingPx). No coordScale fudging required — the
+   * source pixels and the query box live in the exact same space.
+   */
+  async function ocrBoxFromCaptureFrame(captureFrame, boxInWorking){
+    if(!captureFrame || !boxInWorking) return [];
+    if(!window.TesseractRef && !window.Tesseract) return [];
+    const TesseractLib = window.TesseractRef || window.Tesseract;
+    const crop = captureFrame.cropWorkingImage(boxInWorking);
+    if(!crop) return [];
+    const offsetX = Math.max(0, Math.round(boxInWorking.x));
+    const offsetY = Math.max(0, Math.round(boxInWorking.y));
+    try {
+      const { data } = await TesseractLib.recognize(crop, 'eng', { tessedit_pageseg_mode: 6, oem: 1 });
+      return (data?.words || []).map(w => {
+        const rawText = String(w.text || '').trim();
+        if(!rawText) return null;
+        const { text: corrected, corrections } = applyOcrCorrections(rawText);
+        const bbox = getTesseractWordBBox(w);
+        return {
+          raw: rawText,
+          corrected,
+          text: corrected,
+          correctionsApplied: corrections,
+          confidence: (w.confidence || 0) / 100,
+          x: (bbox.x || 0) + offsetX,
+          y: (bbox.y || 0) + offsetY,
+          w: bbox.w || 0,
+          h: bbox.h || 0,
+          page: captureFrame.pageNum
+        };
+      }).filter(Boolean);
+    } catch(err){
+      console.warn('[wfg4] ocrBoxFromCaptureFrame failed', err);
+      return [];
+    }
+  }
+
+  async function extractFieldValue(fieldSpec, tokens, viewportPx, options = {}){
+  const captureFrame = options?.captureFrame || null;
   const ftype = fieldSpec.type || 'static';
   const spanKey = { docId: state.currentFileId || state.currentFileName || 'doc', pageIndex: (fieldSpec.page||1)-1, fieldKey: fieldSpec.fieldKey || '' };
   const fieldEngineType = resolveFieldEngineType(fieldSpec);
   if(ftype === 'static' && fieldEngineType !== ENGINE_KIND.LEGACY){
-    let resolvedBox = state.snappedPx || null;
+    // P1 CaptureFrame: when a frame is provided, its working-space box is
+    // the authoritative readout geometry. Engines and downstream OCR crops
+    // must not re-read state.snappedPx directly.
+    let resolvedBox = captureFrame ? captureFrame.userBoxWorkingPx : (state.snappedPx || null);
     if(!resolvedBox && fieldSpec.bbox){
       const viewportDims = getViewportDimensions(viewportPx);
       const rawBox = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
@@ -10158,8 +10203,19 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         if(engineResult?.needsLocalizedReadout && engineResult?.boxPx){
           try {
             const targetPage = Math.max(1, Number(engineResult.boxPx.page || fieldSpec.page || state.pageNum || 1) || 1);
-            const tessTokens = await ensureTesseractTokensForPageWithBBox(targetPage);
-            const normalized = normalizeTesseractTokensForPage(tessTokens, targetPage) || [];
+            // P1 CaptureFrame path: when we have a frame, OCR is run directly
+            // against the frame's crop of the offscreen canonical canvas. Both
+            // the crop and engineResult.boxPx live in working pixel space, so
+            // there is no scale translation to get wrong.
+            let tessTokens;
+            if(captureFrame && captureFrame.pageNum === targetPage && captureFrame.getOffscreenCanonicalCanvas()){
+              tessTokens = await ocrBoxFromCaptureFrame(captureFrame, engineResult.boxPx);
+            } else {
+              tessTokens = await ensureTesseractTokensForPageWithBBox(targetPage);
+            }
+            const normalized = (captureFrame && captureFrame.pageNum === targetPage && captureFrame.getOffscreenCanonicalCanvas())
+              ? (tessTokens || [])
+              : (normalizeTesseractTokensForPage(tessTokens, targetPage) || []);
             const scoped = tokensInBox(normalized, engineResult.boxPx, { minOverlap: 0.2 });
             let pick = null;
             let pickScore = -1;
@@ -13828,6 +13884,21 @@ function syncWfg4SurfaceContext(mode){
       state.wfg4.rawConfigLayout = snapshotCurrentLayout();
     }
     state.wfg4.configSurface = surface;
+    // P1 CaptureFrame refactor: build the dedicated offscreen canonical
+    // canvases for the vision engine BEFORE (and independently of) the
+    // on-screen canonical swap. These offscreen canvases become the one and
+    // only pixel surface that the engine / OCR crop / CaptureFrame read from.
+    // See engines/core/wfg4-capture-frame.js.
+    if(window.WFG4CaptureFrame?.buildOffscreenCanonicalCanvases){
+      state.wfg4.canonicalCanvases = state.wfg4.canonicalCanvases || [];
+      Promise.resolve(window.WFG4CaptureFrame.buildOffscreenCanonicalCanvases(surface))
+        .then(results => {
+          const arr = [];
+          (results || []).forEach(r => { if(r) arr[r.idx] = r.canvas; });
+          state.wfg4.canonicalCanvases = arr;
+        })
+        .catch(err => console.warn('[wfg4] offscreen canonical build failed', err));
+    }
     Promise.resolve(renderWfg4CanonicalIntoViewer(surface))
       .then(() => drawOverlay())
       .catch(err => console.warn('[wfg4] canonical display swap failed', err));
@@ -15615,7 +15686,7 @@ function getCurrentWfg4ConfigDebugPacket(){
   return profileField?.wfg4Config || null;
 }
 
-function paintWfg4StructuralOverlay(ctx, scaleX, scaleY){
+function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   if(!ctx || !isWfg4StructuralOverlayActive()) return;
   const packet = getCurrentWfg4ConfigDebugPacket();
   if(!packet) return;
@@ -15627,7 +15698,34 @@ function paintWfg4StructuralOverlay(ctx, scaleX, scaleY){
   const container = structural.container || null;
   const anchors = structural.anchors || {};
   const page = Number(fieldBox?.page || packet.page || state.pageNum || 1);
-  const offY = ((state.pageOffsets[(page || 1) - 1] || 0) / scaleY);
+
+  // P1 CaptureFrame: the overlay no longer reads from getScaleFactors()
+  // (which queries the live DOM's getBoundingClientRect and is a third,
+  // rogue source of truth for scale). Instead we derive the working→css
+  // transform directly from pageEntry.dimensions.working — the frozen
+  // canonical geometry that every other consumer (engine, OCR crop) also
+  // uses. This keeps the overlay and extraction mathematically identical.
+  const pageEntry = state.wfg4?.configSurface?.pages?.[(page || 1) - 1] || null;
+  const working = pageEntry?.dimensions?.working || null;
+  const node = getActiveDisplaySurfaceNode();
+  const rect = node?.getBoundingClientRect?.();
+  if(!working || !node || !rect || !rect.width || !rect.height || !node.width || !node.height) return;
+  // Packet bboxes are in WORKING pixel space. Overlay draws in CSS pixel
+  // space. Single transform: working_px → css_px via the frozen working
+  // dims and the live node rect.
+  const workingToNodeX = node.width / working.width;
+  const workingToNodeY = node.height / working.height;
+  const nodeToCssX     = rect.width / node.width;
+  const nodeToCssY     = rect.height / node.height;
+  const W2C_X = workingToNodeX * nodeToCssX;
+  const W2C_Y = workingToNodeY * nodeToCssY;
+  // pageOffsets are stacked in node-pixel space; convert to css via the
+  // live node→css ratio. This replaces the old `offset / scaleY` read.
+  const pageOffsetNodePx = Number(state.pageOffsets?.[(page || 1) - 1] || 0);
+  const offY = pageOffsetNodePx * nodeToCssY;
+  // Local alias names preserved so the rest of the function reads cleanly.
+  const scaleX = 1 / W2C_X;
+  const scaleY = 1 / W2C_Y;
 
   const drawRect = (box, color, lineWidth = 1.5, dash = []) => {
     if(!box) return;
@@ -19754,6 +19852,13 @@ els.confirmBtn?.addEventListener('click', async ()=>{
   let value = '', boxPx = state.snappedPx;
   let confidence = 0, raw = '', corrections=[];
   let fieldTokens = [];
+  // P1 CaptureFrame refactor: at confirm time, the user box is recorded in
+  // display-viewport space. Build the unifying CaptureFrame that freezes the
+  // display dims, the working dims, the scale transform, and the working-
+  // space version of the user's box. Every downstream consumer (engine, OCR
+  // crop, overlay) must dereference this single object — no more independent
+  // reads of state.pageViewports, state.viewport, or els.pdfCanvas.
+  let captureFrame = null;
   // P1 fix: pre-register engine-owned config (WFG4) BEFORE extractFieldValue, so
   // visual-first localization at config time has a real reference packet to match
   // against (instead of failing with `missing_reference_or_surface` and only
@@ -19791,6 +19896,22 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     } catch(_gateErr){
       console.warn('[wfg4] readiness gate threw', _gateErr);
     }
+    // P1 CaptureFrame construction. Invariant failures are surfaced instead of
+    // silently swallowed so the user is not left guessing why confirm did
+    // nothing. If invariants fail we fall back to display-space boxPx, which
+    // matches the legacy behavior.
+    if(window.WFG4CaptureFrame?.build){
+      const _cfRes = window.WFG4CaptureFrame.build({
+        pageNum: state.pageNum,
+        userBoxDisplayPx: state.snappedPx,
+        state
+      });
+      if(_cfRes && _cfRes.ok){
+        captureFrame = _cfRes.frame;
+      } else {
+        console.warn('[wfg4] CaptureFrame invariants failed', { reasons: _cfRes?.reasons || [] });
+      }
+    }
     try {
       // P0 coordinate-space unification: prefer the working-surface dimensions
       // for normBox computation so downstream `resolveCanonicalBox`
@@ -19798,18 +19919,25 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       // drew, even when the viewport and the aspect-preserving working
       // surface have slightly different dimensions. Falls back to viewport
       // dims when the working surface is not yet populated.
-      const _pgEntry = state.wfg4?.configSurface?.pages?.[state.pageNum-1] || null;
-      const _workingDims = _pgEntry?.dimensions?.working || null;
-      const _vpPre = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-      const _vpW = (_vpPre.width ?? _vpPre.w) || 1;
-      const _vpH = (_vpPre.height ?? _vpPre.h) || 1;
-      // normBox ratios are identical under aspect-preserving scaling, but
-      // using working dims here matches resolveCanonicalBox on the
-      // registration side exactly, which is what we want.
-      const _cwPre = (_workingDims?.width) || _vpW;
-      const _chPre = (_workingDims?.height) || _vpH;
-      const _normBoxPre = normalizeBox(state.snappedPx, _vpW, _vpH);
-      const _rawBoxPre = { x: state.snappedPx.x, y: state.snappedPx.y, w: state.snappedPx.w, h: state.snappedPx.h, canvasW: _cwPre, canvasH: _chPre };
+      // P1 CaptureFrame: unify normBox + rawBox against the frame's working
+      // space. When the frame is available (invariants met) everything is
+      // expressed in working pixels — the one true space. When it is not, we
+      // fall back to viewport dims exactly like the P0 patch did.
+      let _normBoxPre;
+      let _rawBoxPre;
+      let _vpPre;
+      if(captureFrame){
+        _vpPre = { width: captureFrame.working.width, height: captureFrame.working.height };
+        const _ubw = captureFrame.userBoxWorkingPx;
+        _normBoxPre = normalizeBox(_ubw, captureFrame.working.width, captureFrame.working.height);
+        _rawBoxPre = { x: _ubw.x, y: _ubw.y, w: _ubw.w, h: _ubw.h, canvasW: captureFrame.working.width, canvasH: captureFrame.working.height };
+      } else {
+        _vpPre = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        const _vpW = (_vpPre.width ?? _vpPre.w) || 1;
+        const _vpH = (_vpPre.height ?? _vpPre.h) || 1;
+        _normBoxPre = normalizeBox(state.snappedPx, _vpW, _vpH);
+        _rawBoxPre = { x: state.snappedPx.x, y: state.snappedPx.y, w: state.snappedPx.w, h: state.snappedPx.h, canvasW: _vpW, canvasH: _vpH };
+      }
       _prelimEngineOwnedConfig = await EngineRegistry.registerFieldConfig(ENGINE_KIND.WFG4, {
         step,
         normBox: _normBoxPre,
@@ -19841,7 +19969,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     value = (state.snappedText || '').trim();
     raw = value;
   } else if (step.type === 'static' && !isAreaStep){
-    const res = await extractFieldValue(step, tokens, state.viewport);
+    const res = await extractFieldValue(step, tokens, state.viewport, { captureFrame });
     value = res.value;
     if(!value && state.snappedText){
       bumpDebugBlank();
@@ -19856,7 +19984,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     value = (state.snappedText || '').trim();
     raw = value;
   } else if(!isAreaStep){
-    const res = await extractFieldValue(step, tokens, state.viewport);
+    const res = await extractFieldValue(step, tokens, state.viewport, { captureFrame });
     value = res.value;
     if(!value && state.snappedText){
       bumpDebugBlank();
