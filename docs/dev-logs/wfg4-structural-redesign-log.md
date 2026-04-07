@@ -626,6 +626,126 @@ with structural metadata — no competing model is introduced.
 - [x] Existing `STRUCTURAL_FALLBACK` / `PREDICTED_FALLBACK` paths and the
       Phase 4/5 fallbacks are preserved verbatim.
 
+## Phase 7 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-localization.js`**
+- Introduced **refine-only mode**: when `structReconstructions.length > 0`,
+  the runtime localizer takes a different window-builder branch that
+  emits one tight `R_refine_<i>` window per accepted reconstruction
+  (single mode = top reconstruction only). The window is built by padding
+  the reconstructed pixel box by `structuralRefinePadPx` (default `max(18,
+  0.12 * field side)`) — much tighter than the previous `D_struct_*`
+  basePad windows. ORB on the predicted box is *not* appended; the
+  refine-only branch never falls back to neighborhood ORB.
+- **ORB demotion (refine-only mode):**
+  - The reconstructed box becomes the authoritative `localized` box and
+    `usedStructuralReconstruction = true` is set unconditionally.
+  - ORB output is treated as a **precision correction only**. After the
+    window loop, if `best.localized` exists, the center-to-center drift
+    between the ORB box and the reconstructed box is computed. If
+    `refineDriftPx <= refineMaxDriftPx` (default `max(12px, 0.10 * field
+    side)`), the ORB box replaces `localized` as the refined version and
+    `refineWithinBound = true`.
+  - If the drift exceeds the bound, the ORB box is discarded entirely
+    (`attemptsWon = false`) — ORB cannot relocate the field beyond a
+    small precision shift. The reconstructed box remains the localized
+    box.
+- **Repeated-constellation output policy:**
+  - New `DEFAULTS.repeatedConstellationPolicy = 'single' | 'multi'`.
+  - In `'multi'` mode, refine windows are built for every accepted
+    reconstruction, and an `instances[]` array is emitted in the result
+    with one entry per reconstruction (`bbox`, `transformModel`,
+    `correspondencesUsed`, `usedRowSnap`, `matchRank`). In `'single'`
+    mode the array collapses to the top entry for schema continuity but
+    `finalReadoutBox` continues to expose only the top instance.
+- **Diagnostics surface added to result:**
+  - `selectedConstellation` — top accepted match summary (rank, anchor,
+    finalScore, memberCoverage, relationConsistencyRatio, partial,
+    transformModel, correspondencesUsed, usedRowSnap).
+  - `pageStructureSummary` — runtime page-structure counts (regions,
+    rowBands, structuralObjects).
+  - `fieldLevelConstellation` — config-time `structuralIdentity.miniConstellation`.
+  - `structuralReconstructions` — per-instance reconstructions.
+  - `preRefineBox` / `postRefineBoxPhase7` — bbox before and after the
+    Phase 7 ORB precision pass.
+  - `refineDriftPx`, `refineWithinBound`, `refineOnlyMode`,
+    `repeatedConstellationPolicy` — refine-pass diagnostics.
+  - `instances` — repeated-match output (always present when
+    reconstructions exist).
+- New engine-log event `struct.refine` exposes refine-only mode flag,
+  reconstruction adoption flag, drift, drift-bound, and instance count.
+- The Phase 4/5 fallback branch (`hasViableStructCandidates` without
+  reconstructions) and the legacy ORB-first path (`else`) are preserved
+  verbatim. Refine-only mode only fires when at least one Phase 6
+  reconstruction was produced.
+
+### Defaults added
+
+- `structuralRefinePadPx` (default 18 px floor)
+- `structuralRefinePadRatio` (default 0.12 of max field side)
+- `structuralRefineMaxDriftPx` (default 12 px floor)
+- `structuralRefineMaxDriftRatio` (default 0.10 of max field side)
+- `repeatedConstellationPolicy` (default `'single'`)
+
+These are read from `DEFAULTS` with literal fallbacks so the matcher
+behaves identically when the host has not set them yet.
+
+### Design decisions
+
+- **Refine pad floor 18 px / ratio 0.12.** Tight enough that ORB cannot
+  drift to a neighbor row, generous enough to absorb sub-row anti-alias
+  and rendering jitter. Scaled by field side so wide fields get
+  proportionally larger search windows.
+- **Drift bound 12 px / 0.10.** Empirically a "precision correction"
+  for axis-aligned form fields rarely exceeds ~10% of field width;
+  larger drifts indicate ORB matched something else inside the
+  neighborhood (the original failure mode). Hard-rejecting these
+  preserves the structural reconstruction.
+- **No ORB fallback window in refine-only mode.** The plan demands ORB
+  not determine field identity. Adding a "predicted box" fallback would
+  re-introduce the very pathway Phases 1–6 replaced. Field identity is
+  now decided exclusively by the structural pipeline; ORB only tunes
+  the final pixel box.
+- **`single` policy default.** Repeated-constellation extraction is a
+  downstream feature; the safe default for existing callers is single-
+  instance output. Multi-mode is opt-in via DEFAULTS so consumers can
+  enable it without code changes.
+- **`instances` always emitted when reconstructions exist.** Even in
+  single mode, downstream code can introspect the reconstruction
+  metadata uniformly (transform model, row-snap, correspondences) via
+  the same shape used by multi-mode.
+- **Diagnostics are added as additional result fields, not as a wrapper
+  object.** Preserves backwards compatibility — existing consumers that
+  read `localizedBox`, `finalReadoutBox`, `bboxSource`, `confidence`,
+  etc. continue to work unchanged.
+- **Field localization contract preserved.** `localizedBox`,
+  `finalReadoutBox`, `bboxSource`, `predictedBox`, `confidence`,
+  `transformModel`, `attempts[]`, and `reason` retain their previous
+  shapes and meanings. The new fields are strictly additive.
+
+### Fixes / deviations
+
+- None. Phase 7 is additive on top of Phase 6. When no Phase 6
+  reconstruction was produced, refine-only mode does not engage and
+  the Phase 4/5/legacy paths run unchanged. ORB remains the
+  last-resort fallback only for those legacy branches; in refine-only
+  mode it is purely a post-structural precision pass.
+
+### Completion criteria met
+
+- [x] ORB/template restricted to post-structural precision refine in
+      refine-only mode (drift-bounded, never identity-determining).
+- [x] Diagnostics surface complete: page objects (summary), candidates,
+      match scores, selected constellation, field-level constellation,
+      pre-refine and post-refine bboxes, refine drift.
+- [x] Search-policy switch (`repeatedConstellationPolicy`) tested via
+      single/multi branches; `instances[]` emitted accordingly.
+- [x] Existing field localization contract untouched; all new fields
+      additive.
+- [x] PDF/token/OCR contracts not modified.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and
