@@ -629,6 +629,676 @@
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // computeFieldStructuralIdentity — Phase 3 field-level structural identity
+  //
+  // Given the field bbox (normalized), the Phase 1 PageStructure, and the
+  // Phase 2 Constellation, computes:
+  //   • bbox relative to the constellation frame (cx, cy, w, h as ratios)
+  //   • bbox relative to the containing row band (if one can be identified)
+  //   • distances to nearby structural objects (normalized)
+  //   • overlap relationships with row bands and slot-like areas
+  //   • a field-level mini-constellation: containing row, nearest separator,
+  //     adjacent rows above/below, relevant slot/value band (if detectable)
+  //   • object↔bbox relationships for each mini-constellation member
+  //
+  // Input:
+  //   fieldBboxNorm  — { x0, y0, x1, y1 } 0..1 page-normalized
+  //   pageStructure  — Phase 1 PageStructure
+  //   constellation  — Phase 2 Constellation (may be null)
+  //   opts           — optional overrides
+  //
+  // Returns: structuralIdentity object, or null on bad input.
+  // ---------------------------------------------------------------------------
+  function computeFieldStructuralIdentity(fieldBboxNorm, pageStructure, constellation, opts){
+    if(!fieldBboxNorm || !pageStructure) return null;
+    var o = opts || {};
+
+    // Field geometry
+    var fxN  = Number(fieldBboxNorm.x0 || 0);
+    var fyN  = Number(fieldBboxNorm.y0 || 0);
+    var fx1N = Number(fieldBboxNorm.x1 || 0);
+    var fy1N = Number(fieldBboxNorm.y1 || 0);
+    var fwN  = Math.max(0, fx1N - fxN);
+    var fhN  = Math.max(0, fy1N - fyN);
+    var fcxN = fxN + fwN / 2;
+    var fcyN = fyN + fhN / 2;
+
+    var rowBands = Array.isArray(pageStructure.rowBands)          ? pageStructure.rowBands          : [];
+    var objects  = Array.isArray(pageStructure.structuralObjects) ? pageStructure.structuralObjects : [];
+
+    // ---- (A) bbox relative to constellation frame ----
+    // The constellation frame is defined by its owningRegion when available,
+    // otherwise by the bounding box of all member geometries.
+    var bboxRelConstellation = null;
+    if(constellation){
+      var frameXN, frameYN, frameWN, frameHN;
+      if(constellation.regionGeomNorm){
+        var rg = constellation.regionGeomNorm;
+        frameXN = rg.xN; frameYN = rg.yN; frameWN = rg.wN; frameHN = rg.hN;
+      } else if(Array.isArray(constellation.members) && constellation.members.length){
+        // Derive frame from bounding box of member centers
+        var minCx = Infinity, minCy = Infinity, maxCx = -Infinity, maxCy = -Infinity;
+        for(var mi = 0; mi < constellation.members.length; mi++){
+          var mg = constellation.members[mi].geom;
+          if(!mg) continue;
+          if(mg.cxN < minCx) minCx = mg.cxN;
+          if(mg.cxN > maxCx) maxCx = mg.cxN;
+          if(mg.cyN < minCy) minCy = mg.cyN;
+          if(mg.cyN > maxCy) maxCy = mg.cyN;
+        }
+        if(minCx < Infinity){
+          // Add a small margin around the member centers
+          var margin = 0.02;
+          frameXN = Math.max(0, minCx - margin);
+          frameYN = Math.max(0, minCy - margin);
+          frameWN = Math.min(1, maxCx + margin) - frameXN;
+          frameHN = Math.min(1, maxCy + margin) - frameYN;
+        }
+      }
+      if(typeof frameWN === 'number' && frameWN > 0 && typeof frameHN === 'number' && frameHN > 0){
+        bboxRelConstellation = {
+          // center position as ratio of constellation frame
+          cxRatio: frameWN > 0 ? (fcxN - frameXN) / frameWN : 0.5,
+          cyRatio: frameHN > 0 ? (fcyN - frameYN) / frameHN : 0.5,
+          // size as ratio of constellation frame
+          wRatio:  frameWN > 0 ? fwN / frameWN : fwN,
+          hRatio:  frameHN > 0 ? fhN / frameHN : fhN,
+          // top-left also useful for reconstruction
+          x0Ratio: frameWN > 0 ? (fxN - frameXN) / frameWN : 0,
+          y0Ratio: frameHN > 0 ? (fyN - frameYN) / frameHN : 0,
+          frameGeom: { xN: frameXN, yN: frameYN, wN: frameWN, hN: frameHN }
+        };
+      }
+    }
+
+    // ---- (B) Containing row band ----
+    // The row band whose mean-y is closest to the field center y, and whose
+    // y range overlaps the field vertically.
+    var containingBand = null;
+    var bestBandDist = Infinity;
+    for(var rbi = 0; rbi < rowBands.length; rbi++){
+      var rb = rowBands[rbi];
+      // Row band overlaps field vertically if its y range intersects [fyN, fy1N]
+      var bandTop = Math.min(rb.y1N, rb.y2N);
+      var bandBot = Math.max(rb.y1N, rb.y2N);
+      var overlaps = bandBot >= fyN && bandTop <= fy1N;
+      var nearField = Math.abs(rb.yN - fcyN) < (fhN * 2 + 0.05);
+      if(!overlaps && !nearField) continue;
+      var distToBand = Math.abs(rb.yN - fcyN);
+      if(distToBand < bestBandDist){
+        bestBandDist = distToBand;
+        containingBand = rb;
+      }
+    }
+
+    // ---- bbox relative to containing row band ----
+    var bboxRelRow = null;
+    if(containingBand){
+      // Row bands have a well-defined y (mean) but limited height.
+      // Express field position relative to row band's x-span.
+      var rbW = Math.max(1e-6, containingBand.x2N - containingBand.x1N);
+      bboxRelRow = {
+        bandId:     containingBand.id,
+        xInBandRatio: rbW > 0 ? (fcxN - containingBand.x1N) / rbW : 0.5,
+        wInBandRatio: rbW > 0 ? fwN / rbW : fwN,
+        distFromBandYN: fcyN - containingBand.yN  // signed: positive → field below band
+      };
+    }
+
+    // ---- (C) Distances to nearby structural objects (normalized) ----
+    var nearbyDistThresh = typeof o.nearbyDistThresh === 'number' ? o.nearbyDistThresh : 0.25;
+    var nearbyObjects = [];
+    for(var oi = 0; oi < objects.length; oi++){
+      var obj = objects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - fcxN;
+      var dy = g.cyN - fcyN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      if(distN < 0.005 || distN > nearbyDistThresh) continue;
+      nearbyObjects.push({
+        objId: obj.id,
+        type:  obj.type,
+        distN: distN,
+        dxN:   dx,
+        dyN:   dy
+      });
+    }
+    // Keep up to 8, sorted by distance
+    nearbyObjects.sort(function(a, b){ return a.distN - b.distN; });
+    if(nearbyObjects.length > 8) nearbyObjects = nearbyObjects.slice(0, 8);
+
+    // ---- (D) Overlap with row bands / slot-like areas ----
+    var rowOverlaps = [];
+    for(var rbi2 = 0; rbi2 < rowBands.length; rbi2++){
+      var rb2 = rowBands[rbi2];
+      // Vertical overlap: field y range vs band y range (use ±halfLineWidth=0.005)
+      var bandHalfH = Math.max(0.005, (rb2.y2N - rb2.y1N) / 2);
+      var bandMidY  = rb2.yN;
+      var overlapTop    = Math.max(fyN,  bandMidY - bandHalfH);
+      var overlapBottom = Math.min(fy1N, bandMidY + bandHalfH);
+      if(overlapBottom <= overlapTop) continue;
+      // Horizontal overlap: field x range vs band x span
+      var hOverlapLeft  = Math.max(fxN,  rb2.x1N);
+      var hOverlapRight = Math.min(fx1N, rb2.x2N);
+      if(hOverlapRight <= hOverlapLeft) continue;
+      var vOverlapRatio = fhN > 0 ? (overlapBottom - overlapTop) / fhN : 0;
+      var hOverlapRatio = fwN > 0 ? (hOverlapRight - hOverlapLeft) / fwN : 0;
+      rowOverlaps.push({
+        bandId:        rb2.id,
+        isSeparator:   rb2.isSeparator,
+        vOverlapRatio: vOverlapRatio,
+        hOverlapRatio: hOverlapRatio
+      });
+    }
+
+    // ---- (E) Field-level mini-constellation ----
+    // Members: containing row, nearest separator above, nearest separator below,
+    // adjacent row above, adjacent row below, and nearest slot/value band
+    // (a row band that partially overlaps the field horizontally but is not
+    // the containing band — this approximates a value column boundary).
+
+    var miniMembers = [];
+    var miniRelations = [];
+
+    function addMiniObj(label, rbOrObj, geom){
+      if(!rbOrObj) return;
+      miniMembers.push({ label: label, id: rbOrObj.id, geom: geom });
+    }
+
+    // Field pseudo-object for relation computation
+    var fieldGeom = { xN: fxN, yN: fyN, wN: fwN, hN: fhN, cxN: fcxN, cyN: fcyN };
+
+    // Containing row
+    if(containingBand){
+      var cbGeom = {
+        xN: containingBand.x1N, yN: containingBand.yN,
+        wN: containingBand.x2N - containingBand.x1N, hN: 0,
+        cxN: (containingBand.x1N + containingBand.x2N) / 2,
+        cyN: containingBand.yN
+      };
+      addMiniObj('containing_row', containingBand, cbGeom);
+    }
+
+    // Adjacent rows: closest row band above and below the field
+    var closestAbove = null, closestBelow = null;
+    var distAbove = Infinity, distBelow = Infinity;
+    for(var rbi3 = 0; rbi3 < rowBands.length; rbi3++){
+      var rb3 = rowBands[rbi3];
+      if(containingBand && rb3.id === containingBand.id) continue;
+      if(rb3.yN < fyN){
+        var d = fyN - rb3.yN;
+        if(d < distAbove){ distAbove = d; closestAbove = rb3; }
+      } else if(rb3.yN > fy1N){
+        var d2 = rb3.yN - fy1N;
+        if(d2 < distBelow){ distBelow = d2; closestBelow = rb3; }
+      }
+    }
+    if(closestAbove){
+      var abGeom = {
+        xN: closestAbove.x1N, yN: closestAbove.yN,
+        wN: closestAbove.x2N - closestAbove.x1N, hN: 0,
+        cxN: (closestAbove.x1N + closestAbove.x2N) / 2, cyN: closestAbove.yN
+      };
+      addMiniObj('adjacent_row_above', closestAbove, abGeom);
+    }
+    if(closestBelow){
+      var blGeom = {
+        xN: closestBelow.x1N, yN: closestBelow.yN,
+        wN: closestBelow.x2N - closestBelow.x1N, hN: 0,
+        cxN: (closestBelow.x1N + closestBelow.x2N) / 2, cyN: closestBelow.yN
+      };
+      addMiniObj('adjacent_row_below', closestBelow, blGeom);
+    }
+
+    // Nearest separator above and below
+    var nearSepAbove = null, nearSepBelow = null;
+    var dSepAbove = Infinity, dSepBelow = Infinity;
+    for(var rbi4 = 0; rbi4 < rowBands.length; rbi4++){
+      var rb4 = rowBands[rbi4];
+      if(!rb4.isSeparator) continue;
+      if(rb4.yN <= fcyN){
+        var ds = fcyN - rb4.yN;
+        if(ds < dSepAbove){ dSepAbove = ds; nearSepAbove = rb4; }
+      } else {
+        var ds2 = rb4.yN - fcyN;
+        if(ds2 < dSepBelow){ dSepBelow = ds2; nearSepBelow = rb4; }
+      }
+    }
+    if(nearSepAbove){
+      var saGeom = {
+        xN: nearSepAbove.x1N, yN: nearSepAbove.yN,
+        wN: nearSepAbove.x2N - nearSepAbove.x1N, hN: 0,
+        cxN: (nearSepAbove.x1N + nearSepAbove.x2N) / 2, cyN: nearSepAbove.yN
+      };
+      addMiniObj('separator_above', nearSepAbove, saGeom);
+    }
+    if(nearSepBelow){
+      var sbGeom = {
+        xN: nearSepBelow.x1N, yN: nearSepBelow.yN,
+        wN: nearSepBelow.x2N - nearSepBelow.x1N, hN: 0,
+        cxN: (nearSepBelow.x1N + nearSepBelow.x2N) / 2, cyN: nearSepBelow.yN
+      };
+      addMiniObj('separator_below', nearSepBelow, sbGeom);
+    }
+
+    // Slot/value band: a row band that overlaps the field's y range AND whose
+    // x-span does NOT fully cover the field's x range — suggesting a column
+    // boundary / slot divider near the field.
+    var slotBand = null;
+    var bestSlotScore = -1;
+    for(var rbi5 = 0; rbi5 < rowBands.length; rbi5++){
+      var rb5 = rowBands[rbi5];
+      if(containingBand && rb5.id === containingBand.id) continue;
+      // Must overlap field y range
+      if(rb5.yN < fyN - fhN || rb5.yN > fy1N + fhN) continue;
+      // Partial x overlap with field
+      var hOvL = Math.max(fxN, rb5.x1N), hOvR = Math.min(fx1N, rb5.x2N);
+      if(hOvR <= hOvL) continue;
+      // x span should NOT fully contain the field (otherwise it's just another row)
+      var isSlotCandidate = rb5.spanN < 0.5 || (rb5.x1N > fxN - 0.02 && rb5.x2N < fx1N + 0.02);
+      if(!isSlotCandidate) continue;
+      var slotScore = (hOvR - hOvL) / Math.max(1e-6, fwN);
+      if(slotScore > bestSlotScore){ bestSlotScore = slotScore; slotBand = rb5; }
+    }
+    if(slotBand){
+      var svGeom = {
+        xN: slotBand.x1N, yN: slotBand.yN,
+        wN: slotBand.x2N - slotBand.x1N, hN: 0,
+        cxN: (slotBand.x1N + slotBand.x2N) / 2, cyN: slotBand.yN
+      };
+      addMiniObj('slot_value_band', slotBand, svGeom);
+    }
+
+    // Object↔bbox relations for each mini member (field bbox as the reference)
+    for(var mmi = 0; mmi < miniMembers.length; mmi++){
+      var mm = miniMembers[mmi];
+      var mg = mm.geom;
+      if(!mg) continue;
+      var mdx = mg.cxN - fcxN;
+      var mdy = mg.cyN - fcyN;
+      var mdistN = Math.sqrt(mdx * mdx + mdy * mdy);
+      miniRelations.push({
+        label:     mm.label,
+        memberId:  mm.id,
+        distN:     mdistN,
+        dxN:       mdx,
+        dyN:       mdy,
+        // Signed offsets from field edges to member center
+        distFromTopN:    mg.cyN - fyN,
+        distFromBottomN: mg.cyN - fy1N,
+        distFromLeftN:   mg.cxN - fxN,
+        distFromRightN:  mg.cxN - fx1N
+      });
+    }
+
+    return {
+      schema: 'wfg4/field-structural-identity/v1',
+
+      // (A) Bbox relative to constellation frame
+      bboxRelConstellation: bboxRelConstellation,
+
+      // (B) Bbox relative to containing row band
+      containingBandId: containingBand ? containingBand.id : null,
+      bboxRelRow:       bboxRelRow,
+
+      // (C) Normalized distances to nearby structural objects
+      nearbyObjects: nearbyObjects,
+
+      // (D) Row band overlap map
+      rowOverlaps: rowOverlaps,
+
+      // (E) Field-level mini-constellation
+      miniConstellation: {
+        members:   miniMembers,
+        relations: miniRelations
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // selectConstellationCandidates — Phase 4 runtime candidate selection
+  //
+  // Given the config-time constellation (Phase 2) and the runtime PageStructure
+  // (Phase 1, already on pageEntry.pageStructure), identifies up to maxK runtime
+  // structural objects that could serve as anchors for the constellation.
+  //
+  // Scoring is coarse and position-led:
+  //   • position score — how close the runtime object's center is to the
+  //     config constellation's coarsePagePosition (linear decay to 0 at 0.30)
+  //   • type bonus    — +0.25 if the object matches the dominant config member type
+  //
+  // Deduplication: candidates whose centers are within 0.08 page-diagonal are
+  // merged (best score wins).
+  //
+  // A position-prior candidate (zero translation, score=0.15, viable=false)
+  // is appended if no structural anchor is found near the config center.
+  // This lets the runtime fall back to "assume same layout" without treating it
+  // as a real structural match.
+  //
+  // Each candidate carries:
+  //   rank, score, viable (score >= viableScoreThresh && anchorObjId != null),
+  //   anchorObjId, anchorType, centerN, estimatedTranslationN
+  //
+  // Returns: Array<candidate> sorted by score desc (empty array on bad input).
+  // ---------------------------------------------------------------------------
+  function selectConstellationCandidates(configConstellation, runtimePageStructure, opts){
+    if(!configConstellation || !runtimePageStructure) return [];
+    var o = opts || {};
+    var maxK            = typeof o.maxCandidates       === 'number' ? o.maxCandidates       : 5;
+    var viableThresh    = typeof o.viableScoreThresh   === 'number' ? o.viableScoreThresh   : 0.20;
+    var dedupRadiusN    = typeof o.dedupRadiusN        === 'number' ? o.dedupRadiusN        : 0.08;
+    var posDecayAt      = typeof o.posDecayAt          === 'number' ? o.posDecayAt          : 0.30;
+
+    var configCenter  = configConstellation.coarsePagePosition || { xN: 0.5, yN: 0.5 };
+    var configMembers = Array.isArray(configConstellation.members) ? configConstellation.members : [];
+
+    // Dominant member type in the config constellation
+    var cfgTypeCounts = { separator: 0, row_band: 0, region: 0 };
+    for(var mi = 0; mi < configMembers.length; mi++){
+      var t = configMembers[mi].type;
+      cfgTypeCounts[t] = (cfgTypeCounts[t] || 0) + 1;
+    }
+    var domType = 'row_band';
+    var domCount = 0;
+    var tkeys = ['separator', 'row_band', 'region'];
+    for(var ti = 0; ti < tkeys.length; ti++){
+      if((cfgTypeCounts[tkeys[ti]] || 0) > domCount){
+        domCount = cfgTypeCounts[tkeys[ti]];
+        domType  = tkeys[ti];
+      }
+    }
+
+    var rtObjects = Array.isArray(runtimePageStructure.structuralObjects) ? runtimePageStructure.structuralObjects : [];
+
+    // Score every runtime structural object
+    var scored = [];
+    for(var oi = 0; oi < rtObjects.length; oi++){
+      var obj = rtObjects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - configCenter.xN;
+      var dy = g.cyN - configCenter.yN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      var posScore = Math.max(0, 1.0 - distN / Math.max(0.01, posDecayAt));
+      if(posScore < 0.05) continue; // too far to be relevant
+      var typeBonus = (obj.type === domType) ? 0.25 : 0;
+      scored.push({
+        score:                posScore + typeBonus,
+        anchorObjId:          obj.id,
+        anchorType:           obj.type,
+        centerN:              { xN: g.cxN, yN: g.cyN },
+        estimatedTranslationN:{ dxN: g.cxN - configCenter.xN, dyN: g.cyN - configCenter.yN }
+      });
+    }
+    scored.sort(function(a, b){ return b.score - a.score; });
+
+    // Deduplicate: if two candidates are within dedupRadiusN, keep the best
+    var results = [];
+    for(var si = 0; si < scored.length && results.length < maxK; si++){
+      var cand = scored[si];
+      var isDup = false;
+      for(var ri = 0; ri < results.length; ri++){
+        var ex = results[ri];
+        var cdx = cand.centerN.xN - ex.centerN.xN;
+        var cdy = cand.centerN.yN - ex.centerN.yN;
+        if(Math.sqrt(cdx * cdx + cdy * cdy) < dedupRadiusN){ isDup = true; break; }
+      }
+      if(!isDup){
+        results.push({
+          rank:                 results.length,
+          score:                cand.score,
+          viable:               cand.score >= viableThresh,
+          anchorObjId:          cand.anchorObjId,
+          anchorType:           cand.anchorType,
+          centerN:              cand.centerN,
+          estimatedTranslationN:cand.estimatedTranslationN
+        });
+      }
+    }
+
+    // Append a position-prior candidate if no structural anchor is near the config center
+    var priorCovered = results.some(function(r){
+      var pdx = r.centerN.xN - configCenter.xN;
+      var pdy = r.centerN.yN - configCenter.yN;
+      return Math.sqrt(pdx * pdx + pdy * pdy) < 0.05 && r.anchorObjId !== null;
+    });
+    if(!priorCovered && results.length < maxK){
+      results.push({
+        rank:                 results.length,
+        score:                0.15,
+        viable:               false,             // explicitly not a real structural match
+        anchorObjId:          null,
+        anchorType:           'position_prior',
+        centerN:              { xN: configCenter.xN, yN: configCenter.yN },
+        estimatedTranslationN:{ dxN: 0, dyN: 0 }
+      });
+    }
+
+    return results;
+  }
+
+  // ---------------------------------------------------------------------------
+  // buildConstellation — Phase 2 constellation construction (config time)
+  //
+  // Given a normalized field bbox and a PageStructure (Phase 1), selects a
+  // small (3–6 object), spatially-distributed set of structural objects that
+  // collectively constrain the field's geometry.  Uses 8-sector coverage
+  // selection so that the chosen members are distributed around the field
+  // rather than clustered on one side.
+  //
+  // Input:
+  //   fieldBboxNorm — { x0, y0, x1, y1 } in 0..1 page-normalized coords
+  //   pageStructure — PageStructure produced by buildPageStructure()
+  //   opts          — optional overrides (minMembers, maxMembers, minDistN,
+  //                   nearbyThresholdN, separatorWeight, rowBandWeight,
+  //                   regionWeight)
+  //
+  // Returns: constellation object, or null on bad input.
+  // ---------------------------------------------------------------------------
+  function buildConstellation(fieldBboxNorm, pageStructure, opts){
+    if(!fieldBboxNorm || !pageStructure) return null;
+    var o = opts || {};
+
+    // Field geometry in normalized coords
+    var fxN  = Number(fieldBboxNorm.x0 || 0);
+    var fyN  = Number(fieldBboxNorm.y0 || 0);
+    var fx1N = Number(fieldBboxNorm.x1 || 0);
+    var fy1N = Number(fieldBboxNorm.y1 || 0);
+    var fwN  = Math.max(0, fx1N - fxN);
+    var fhN  = Math.max(0, fy1N - fyN);
+    var fcxN = fxN + fwN / 2;
+    var fcyN = fyN + fhN / 2;
+
+    var minMembers       = typeof o.minMembers === 'number'       ? o.minMembers       : 3;
+    var maxMembers       = typeof o.maxMembers === 'number'       ? o.maxMembers       : 6;
+    var minDistN         = typeof o.minDistN === 'number'         ? o.minDistN         : 0.01;
+    var nearbyThreshN    = typeof o.nearbyThresholdN === 'number' ? o.nearbyThresholdN : 0.15;
+    var wSeparator       = typeof o.separatorWeight === 'number'  ? o.separatorWeight  : 3;
+    var wRowBand         = typeof o.rowBandWeight === 'number'    ? o.rowBandWeight    : 2;
+    var wRegion          = typeof o.regionWeight === 'number'     ? o.regionWeight     : 1;
+
+    var objects  = Array.isArray(pageStructure.structuralObjects) ? pageStructure.structuralObjects : [];
+    var regions  = Array.isArray(pageStructure.regions)           ? pageStructure.regions           : [];
+    var rowBands = Array.isArray(pageStructure.rowBands)          ? pageStructure.rowBands          : [];
+
+    // ----- Owning region: smallest region that encloses ≥70% of field bbox -----
+    var owningRegion = null;
+    var bestOwnerArea = Infinity;
+    for(var ri = 0; ri < regions.length; ri++){
+      var reg = regions[ri];
+      var ox0 = Math.max(fxN, reg.xN),  oy0 = Math.max(fyN, reg.yN);
+      var ox1 = Math.min(fx1N, reg.xN + reg.wN), oy1 = Math.min(fy1N, reg.yN + reg.hN);
+      if(ox1 <= ox0 || oy1 <= oy0) continue;
+      var overlapN = (ox1 - ox0) * (oy1 - oy0);
+      var fieldArea = Math.max(1e-10, fwN * fhN);
+      if(overlapN / fieldArea >= 0.7 && reg.areaN < bestOwnerArea){
+        bestOwnerArea = reg.areaN;
+        owningRegion = reg;
+      }
+    }
+    var owningRegionGeom = owningRegion
+      ? { xN: owningRegion.xN, yN: owningRegion.yN, wN: owningRegion.wN, hN: owningRegion.hN }
+      : null;
+
+    // ----- 8-sector helper -----
+    // In a y-down coordinate system (screen/page coords):
+    //   N = upward on page (dy < 0), S = downward, E = right, W = left
+    var SECTORS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    function getSector(dx, dy){
+      var deg = Math.atan2(dy, dx) * 180 / Math.PI; // [-180, 180]
+      if(deg > -22.5  && deg <=  22.5)  return 'E';
+      if(deg >  22.5  && deg <=  67.5)  return 'SE';
+      if(deg >  67.5  && deg <= 112.5)  return 'S';
+      if(deg > 112.5  && deg <= 157.5)  return 'SW';
+      if(deg >  157.5 || deg <= -157.5) return 'W';
+      if(deg > -157.5 && deg <= -112.5) return 'NW';
+      if(deg > -112.5 && deg <=  -67.5) return 'N';
+      return 'NE'; // -67.5 < deg <= -22.5
+    }
+
+    // Distance score: prefer objects 0.05..0.30 page-diagonals away
+    function distanceScore(distN){
+      if(distN < 0.03) return 0.15;
+      if(distN < 0.05) return 0.55;
+      if(distN <= 0.30) return 1.00;
+      if(distN <= 0.50) return 0.65;
+      return 0.25;
+    }
+
+    // ----- Score every structural object; keep best per sector -----
+    var typeWeights = { separator: wSeparator, row_band: wRowBand, region: wRegion };
+    var sectorBest  = {}; // sector -> { obj, score, distN, sector }
+
+    for(var oi = 0; oi < objects.length; oi++){
+      var obj = objects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - fcxN;
+      var dy = g.cyN - fcyN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      if(distN < minDistN) continue;
+
+      var sector = getSector(dx, dy);
+      var score  = (typeWeights[obj.type] || 1) * distanceScore(distN);
+
+      if(!sectorBest[sector] || score > sectorBest[sector].score){
+        sectorBest[sector] = { obj: obj, score: score, distN: distN, sector: sector };
+      }
+    }
+
+    // Collect sector winners, sort best-first, cap at maxMembers
+    var candidates = [];
+    for(var si = 0; si < SECTORS.length; si++){
+      var sc = SECTORS[si];
+      if(sectorBest[sc]) candidates.push(sectorBest[sc]);
+    }
+    candidates.sort(function(a, b){ return b.score - a.score; });
+    var selected = candidates.slice(0, maxMembers);
+    // Warn callers (via member count) if fewer than minMembers could be found —
+    // but don't error; caller must tolerate partial constellations.
+
+    // ----- Build members array -----
+    var members = [];
+    for(var mi = 0; mi < selected.length; mi++){
+      var cand = selected[mi];
+      members.push({
+        objId:  cand.obj.id,
+        type:   cand.obj.type,
+        ref:    cand.obj.ref,
+        geom:   cand.obj.geom,
+        sector: cand.sector,
+        distN:  cand.distN
+      });
+    }
+
+    // ----- Object↔object relations between every pair of members -----
+    // Thresholds for alignment classification (fraction of page dimensions)
+    var yAlignThreshN = 0.02; // centers within 2% page-height → horizontally aligned
+    var xAlignThreshN = 0.02; // centers within 2% page-width  → vertically aligned
+
+    var relations = [];
+    for(var ai = 0; ai < members.length; ai++){
+      for(var bi = ai + 1; bi < members.length; bi++){
+        var ma = members[ai], mb = members[bi];
+        var ga = ma.geom,    gb = mb.geom;
+        var rdx = gb.cxN - ga.cxN;   // positive → b is right of a
+        var rdy = gb.cyN - ga.cyN;   // positive → b is below a (y-down)
+        var rdistN = Math.sqrt(rdx * rdx + rdy * rdy);
+
+        // Primary spatial order of b relative to a
+        var hOrder = Math.abs(rdx) < xAlignThreshN ? 'same_h'   : (rdx > 0 ? 'right_of' : 'left_of');
+        var vOrder = Math.abs(rdy) < yAlignThreshN ? 'same_v'   : (rdy > 0 ? 'below'    : 'above');
+
+        // Dominant axis
+        var alignment;
+        if(Math.abs(rdy) < yAlignThreshN)      alignment = 'horizontal';
+        else if(Math.abs(rdx) < xAlignThreshN) alignment = 'vertical';
+        else                                    alignment = 'diagonal';
+
+        // Containment: does a's box contain b's center, or vice versa?
+        var bCxInA = gb.cxN >= ga.xN && gb.cxN <= ga.xN + ga.wN;
+        var bCyInA = gb.cyN >= ga.yN && gb.cyN <= ga.yN + ga.hN;
+        var aCxInB = ga.cxN >= gb.xN && ga.cxN <= gb.xN + gb.wN;
+        var aCyInB = ga.cyN >= gb.yN && ga.cyN <= gb.yN + gb.hN;
+        var containment = 'none';
+        if(bCxInA && bCyInA)      containment = 'from_contains_to';
+        else if(aCxInB && aCyInB) containment = 'to_contains_from';
+
+        relations.push({
+          fromId:      ma.objId,
+          toId:        mb.objId,
+          distN:       rdistN,
+          alignment:   alignment,
+          hOrder:      hOrder,
+          vOrder:      vOrder,
+          containment: containment
+        });
+      }
+    }
+
+    // ----- Nearby row bands and separators -----
+    // Include row bands whose mean y is within nearbyThreshN of the field,
+    // or whose y range overlaps the field's y range.
+    var nearbyRowBands   = [];
+    var nearbySeparators = [];
+    for(var rbi = 0; rbi < rowBands.length; rbi++){
+      var rb = rowBands[rbi];
+      // Distance from band mean-y to nearest field edge (0 if overlapping)
+      var distToField = 0;
+      if(rb.yN < fyN)       distToField = fyN - rb.yN;
+      else if(rb.yN > fy1N) distToField = rb.yN - fy1N;
+      if(distToField > nearbyThreshN) continue;
+      var rbEntry = {
+        id:        rb.id,
+        yN:        rb.yN,
+        x1N:       rb.x1N,
+        x2N:       rb.x2N,
+        spanN:     rb.spanN,
+        lineCount: rb.lineCount,
+        isSeparator: rb.isSeparator
+      };
+      if(rb.isSeparator) nearbySeparators.push(rbEntry);
+      else               nearbyRowBands.push(rbEntry);
+    }
+
+    return {
+      schema:            'wfg4/constellation/v1',
+      id:                null,               // set by caller (e.g. fieldKey)
+      owningRegion:      owningRegion
+        ? { id: owningRegion.id, geom: owningRegionGeom }
+        : null,
+      regionGeomNorm:    owningRegionGeom,
+      coarsePagePosition: { xN: fcxN, yN: fcyN },
+      memberCount:       members.length,
+      members:           members,
+      relations:         relations,
+      nearbyRowBands:    nearbyRowBands,
+      nearbySeparators:  nearbySeparators
+    };
+  }
+
   function structuralRefineBox(projectedBox, structuralCtx, runtimeGray, opts){
     const cv = root.cv;
     const o = opts || {};
@@ -782,6 +1452,9 @@
     findEnclosingContainer,
     computeAnchorOffsets,
     structuralRefineBox,
-    buildPageStructure
+    buildPageStructure,
+    buildConstellation,
+    computeFieldStructuralIdentity,
+    selectConstellationCandidates
   };
 });

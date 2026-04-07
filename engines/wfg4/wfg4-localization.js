@@ -218,16 +218,62 @@
     const maxAttempts = DEFAULTS.maxLocalizationAttemptsPerField || 4;
     const maxMs = DEFAULTS.maxLocalizationMsPerField || 2500;
 
+    // Phase 4: structural candidate selection.
+    // Runs before the window loop. Viable structural candidates (anchored to a
+    // real runtime structural object) become primary search windows.  ORB on
+    // the predicted box is used only when no viable structural candidate exists
+    // or when all structural windows fail to produce a match.
+    const rtPageStructure    = pageEntry?.pageStructure    || null;
+    const configConstellation = ref?.constellation         || null;
+    let structCandidates         = [];
+    let hasViableStructCandidates = false;
+    if(rtPageStructure && configConstellation && CvOps.selectConstellationCandidates){
+      try {
+        structCandidates = CvOps.selectConstellationCandidates(
+          configConstellation, rtPageStructure,
+          { maxCandidates: DEFAULTS.globalScanTopCandidates || 5 }
+        ) || [];
+        hasViableStructCandidates = structCandidates.some(c => c.viable && c.anchorObjId !== null);
+      } catch(_e){ structCandidates = []; }
+    }
+    _EL?.engineLog('wfg4-run', 'struct.candidates', {
+      fieldKey: _fk,
+      candidateCount: structCandidates.length,
+      viableCount: structCandidates.filter(c => c.viable).length,
+      hasViable: hasViableStructCandidates
+    });
+
     const windows = [];
-    windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
-    windows.push({ label:'B_widened',   box: clampBoxToBounds(Types.expandBox(predictedBox, Math.round(basePad * widenMult), bounds), bounds) });
-    const globalScan = pageEntry.globalScan || null;
-    const topCandidates = Array.isArray(globalScan?.candidateRegions) ? globalScan.candidateRegions.slice(0, DEFAULTS.globalScanTopCandidates || 3) : [];
-    for(let i=0; i<topCandidates.length; i++){
-      const cand = topCandidates[i];
-      if(!cand) continue;
-      const candBox = { x: cand.x, y: cand.y, w: Math.max(predictedBox.w, cand.w || 0), h: Math.max(predictedBox.h, cand.h || 0), page };
-      windows.push({ label:`C_globalScan_${i}`, box: clampBoxToBounds(Types.expandBox(candBox, basePad, bounds), bounds) });
+    if(hasViableStructCandidates){
+      // Structural windows are primary; reserve at least 1 slot for ORB fallback.
+      const viableCands    = structCandidates.filter(c => c.viable);
+      const maxStructWin   = Math.min(viableCands.length, Math.max(1, maxAttempts - 1));
+      const W = runtimeCanvas.width, H = runtimeCanvas.height;
+      for(let ci = 0; ci < maxStructWin; ci++){
+        const cand   = viableCands[ci];
+        const shiftX = (cand.estimatedTranslationN.dxN || 0) * W;
+        const shiftY = (cand.estimatedTranslationN.dyN || 0) * H;
+        const translatedBox = {
+          x: predictedBox.x + shiftX, y: predictedBox.y + shiftY,
+          w: predictedBox.w,          h: predictedBox.h,
+          page
+        };
+        windows.push({ label:`D_struct_${ci}`, box: clampBoxToBounds(Types.expandBox(translatedBox, basePad, bounds), bounds) });
+      }
+      // ORB fallback: original predicted box runs only if all structural windows miss.
+      windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
+    } else {
+      // No viable structural candidates — standard ORB-first behavior.
+      windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
+      windows.push({ label:'B_widened',   box: clampBoxToBounds(Types.expandBox(predictedBox, Math.round(basePad * widenMult), bounds), bounds) });
+      const globalScan    = pageEntry.globalScan || null;
+      const topCandidates = Array.isArray(globalScan?.candidateRegions) ? globalScan.candidateRegions.slice(0, DEFAULTS.globalScanTopCandidates || 3) : [];
+      for(let i = 0; i < topCandidates.length; i++){
+        const cand = topCandidates[i];
+        if(!cand) continue;
+        const candBox = { x: cand.x, y: cand.y, w: Math.max(predictedBox.w, cand.w || 0), h: Math.max(predictedBox.h, cand.h || 0), page };
+        windows.push({ label:`C_globalScan_${i}`, box: clampBoxToBounds(Types.expandBox(candBox, basePad, bounds), bounds) });
+      }
     }
 
     const ctx = { cv, runtimeCanvas, refNeighborhoodCanvas, refFieldCanvas, ref, page, predictedBox };
@@ -348,6 +394,7 @@
           usedStructural: false,
           structuralAdjustments: [],
           structuralDebug: null,
+          structuralCandidates,
           fallbackUsed: true,
           attempts: attemptsLog,
           reason: 'degraded_fallback_predicted_box'
@@ -415,6 +462,7 @@
       usedStructural,
       structuralAdjustments,
       structuralDebug,
+      structuralCandidates,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
       // legacy keys for backward compatibility
