@@ -10289,35 +10289,45 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
               ? (tessTokens || [])
               : (normalizeTesseractTokensForPage(tessTokens, targetPage) || []);
             const scoped = tokensInBox(normalized, engineResult.boxPx, { minOverlap: 0.2 });
-            let pick = null;
-            let pickScore = -1;
-            const bx = Number(engineResult.boxPx.x || 0);
-            const by = Number(engineResult.boxPx.y || 0);
-            const bw = Math.max(1, Number(engineResult.boxPx.w || 1));
-            const bh = Math.max(1, Number(engineResult.boxPx.h || 1));
-            const centerX = bx + bw / 2;
-            const centerY = by + bh / 2;
-            const maxDist = Math.max(1, Math.sqrt((bw * bw) + (bh * bh)) / 2);
-            for(const tok of scoped){
+            const ordered = scoped.slice().sort((a,b) => {
+              const ay = Number(a.y || 0);
+              const by = Number(b.y || 0);
+              if(Math.abs(ay - by) > 2) return ay - by;
+              return Number(a.x || 0) - Number(b.x || 0);
+            });
+            const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
+            const medianH = heights.length ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)] : 12;
+            const lineTol = Math.max(5, medianH * 0.9);
+            let lineCy = null;
+            let line = [];
+            const lines = [];
+            let confSum = 0;
+            let confCount = 0;
+            for(const tok of ordered){
               const text = String(tok.text || tok.raw || '').trim();
               if(!text) continue;
-              const conf = Number.isFinite(tok.confidence) ? tok.confidence : 0.5;
-              const tx = Number(tok.x || 0) + (Number(tok.w || 0) / 2);
-              const ty = Number(tok.y || 0) + (Number(tok.h || 0) / 2);
-              const dist = Math.sqrt(((tx - centerX) * (tx - centerX)) + ((ty - centerY) * (ty - centerY)));
-              const proximity = Math.max(0, 1 - (dist / maxDist));
-              const weighted = (conf * 0.75) + (proximity * 0.25);
-              if(weighted > pickScore){
-                pick = { tok, text, conf, proximity, weighted };
-                pickScore = weighted;
+              const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
+              if(line.length && lineCy !== null && Math.abs(cy - lineCy) > lineTol){
+                lines.push(line.join(' '));
+                line = [text];
+                lineCy = cy;
+              } else {
+                line.push(text);
+                lineCy = lineCy === null ? cy : ((lineCy * (line.length - 1) + cy) / line.length);
               }
+              const c = Number.isFinite(tok.confidence) ? Number(tok.confidence) : 0.5;
+              confSum += c;
+              confCount += 1;
             }
-            if(pick){
-              const readConf = Math.max(0.2, Math.min(0.85, 0.3 + (pick.conf * 0.5)));
+            if(line.length) lines.push(line.join(' '));
+            const aggregatedText = lines.join(' ').replace(/\s+/g, ' ').trim();
+            if(aggregatedText){
+              const meanConf = confCount > 0 ? (confSum / confCount) : 0.6;
+              const readConf = Math.max(0.3, Math.min(0.9, 0.45 + (meanConf * 0.35)));
               readoutAugmented = {
                 ...engineResult,
-                value: pick.text,
-                raw: pick.text,
+                value: aggregatedText,
+                raw: aggregatedText,
                 confidence: readConf,
                 tokens: scoped,
                 method: 'wfg4-localized-readout-tesseract',
@@ -10330,23 +10340,16 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
                   tokenSourceResolved: 'tesseract-bbox',
                   readout: {
                     ...((engineResult.extractionMeta && engineResult.extractionMeta.readout) || {}),
-                    winnerTokenBBox: pick?.tok ? {
-                      x: Number(pick.tok.x || 0),
-                      y: Number(pick.tok.y || 0),
-                      w: Number(pick.tok.w || 0),
-                      h: Number(pick.tok.h || 0),
-                      page: Number(pick.tok.page || targetPage || 1)
-                    } : null
+                    source: 'localized-full-box-aggregation'
                   }
                 }
               };
               window.EngineLog?.engineLog('wfg4-run', 'readout.localized', {
                 fieldKey: fieldSpec.fieldKey || null,
                 backend: 'tesseract',
-                value: pick.text,
+                value: aggregatedText,
                 tokenCount: scoped.length,
-                weightedScore: Number((pick.weighted || 0).toFixed(3)),
-                proximity: Number((pick.proximity || 0).toFixed(3))
+                meanConf: Number(meanConf.toFixed(3))
               });
             } else {
               // Truly nothing readable inside the localized box — only now
@@ -21455,7 +21458,6 @@ function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
     const meta = entry.extractionMeta || {};
     const localization = meta.localization || {};
     const stages = meta.debugBboxStages || {};
-    const readoutMeta = meta.readout || {};
     fieldDataList.push({
       fieldKey: entry.fieldKey,
       value: entry.value || '',
@@ -21482,7 +21484,6 @@ function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
       projectedBox: stages.projectedBox || null,
       refinedBoxDetail: stages.refinedBox || null,
       finalReadoutBox: stages.finalReadoutBox || null,
-      winningTokenBbox: readoutMeta.winnerTokenBBox || null,
       structuralCandidates: Array.isArray(localization.structuralCandidates) ? localization.structuralCandidates : [],
       structuralMatches: Array.isArray(localization.structuralMatches) ? localization.structuralMatches : [],
       structuralReconstructions: Array.isArray(localization.structuralReconstructions) ? localization.structuralReconstructions : [],
@@ -21529,7 +21530,6 @@ function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
       predictedBox: fd.predictedBox || null,
       projectedBox: fd.projectedBox || null,
       finalReadoutBox: fd.finalReadoutBox || null,
-      winningTokenBbox: fd.winningTokenBbox || null,
       referenceBbox: fd.referenceBbox,
       orbProjectedBbox: fd.orbProjectedBbox,
       refinedBbox: fd.refinedBbox,
@@ -21573,7 +21573,6 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
     projected: 'rgba(250,204,21,0.95)',
     refined: 'rgba(34,197,94,0.95)',
     finalReadout: 'rgba(239,68,68,0.98)',
-    winningToken: 'rgba(168,85,247,0.98)',
     structCandidate: 'rgba(251,191,36,0.55)',
     structAccepted: 'rgba(34,197,94,0.85)',
     structRejected: 'rgba(244,63,94,0.75)',
@@ -21585,8 +21584,7 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
     { key: 'predicted',    boxKey: 'predictedBox',     label: 'PRED',  color: palette.predicted,   dash: [2,4], inset: 2 },
     { key: 'projected',    boxKey: 'projectedBox',     label: 'PROJ',  color: palette.projected,   dash: [4,4], inset: 4 },
     { key: 'refined',      boxKey: 'refinedBbox',      label: 'REFN',  color: palette.refined,     dash: [8,2], inset: 6 },
-    { key: 'finalReadout', boxKey: 'ocrCropBbox',      label: 'READ',  color: palette.finalReadout,dash: [], inset: 0 },
-    { key: 'winningToken', boxKey: 'winningTokenBbox', label: 'WIN',   color: palette.winningToken,dash: [1,2], inset: 10 }
+    { key: 'finalReadout', boxKey: 'ocrCropBbox',      label: 'READ',  color: palette.finalReadout,dash: [], inset: 0 }
   ];
 
   function toCssPoint(page, x, y){
@@ -21604,7 +21602,7 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
     const by = p.y + ins;
     ctx.globalAlpha = fallback ? 0.35 : 1;
     ctx.strokeStyle = spec.color;
-    ctx.lineWidth = (spec.key === 'finalReadout') ? 2.5 : (spec.key === 'winningToken' ? 2.2 : 1.5);
+    ctx.lineWidth = (spec.key === 'finalReadout') ? 2.5 : 1.5;
     ctx.setLineDash(spec.dash || []);
     ctx.strokeRect(bx, by, bw, bh);
     ctx.fillStyle = spec.color;
@@ -21687,7 +21685,7 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
     const anchorBox = fd.referenceBbox || fd.ocrCropBbox || null;
     for(const spec of stageSpecs){
       const box = fd[spec.boxKey] || null;
-      const fallback = !box && (spec.key === 'projected' || spec.key === 'refined' || spec.key === 'winningToken');
+      const fallback = !box && (spec.key === 'projected' || spec.key === 'refined');
       drawBoxWithLabel(box || (fallback ? anchorBox : null), spec, fallback, page);
     }
     ctx.globalAlpha = 1;
@@ -21724,7 +21722,6 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
     ['PROJ', palette.projected],
     ['REFN', palette.refined],
     ['READ', palette.finalReadout],
-    ['WIN', palette.winningToken],
     ['RECON', palette.structRecon]
   ];
   const legendX = 8;
