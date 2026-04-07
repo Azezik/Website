@@ -1305,6 +1305,273 @@
   }
 
   // ---------------------------------------------------------------------------
+  // reconstructFieldFromMatch — Phase 6 field reconstruction + hierarchical
+  // transforms.
+  //
+  // Given a Phase 5 ConstellationMatch, the config-time constellation
+  // (Phase 2), the config field structural identity (Phase 3), the original
+  // config field bbox (page-normalized), and the runtime PageStructure
+  // (Phase 1), reconstruct the runtime field bbox using hierarchical
+  // (page → constellation → field) projection.
+  //
+  // Transform policy:
+  //   • ≥4 correspondences with reasonable spatial spread → affine LS
+  //   • ≥2 correspondences                                → similarity
+  //     (translation + uniform scale, no rotation — most stable for
+  //      axis-aligned form layouts)
+  //   • 1 correspondence                                  → translation only
+  //   • 0 correspondences                                  → normalized prior
+  //     (fallback: apply match.estimatedTranslationN to the config field box)
+  //
+  // After geometric projection, optionally snaps the y-band to the runtime
+  // row corresponding to the config containing-row (when both are present).
+  //
+  // Returns:
+  //   {
+  //     ok, transformModel, correspondencesUsed,
+  //     reconstructedBoxN: { x0, y0, x1, y1 },
+  //     reconstructedBoxPx: { x, y, w, h, page } | null,
+  //     usedRowSnap, debug
+  //   }
+  // ---------------------------------------------------------------------------
+  function reconstructFieldFromMatch(configConstellation, configStructuralIdentity, fieldBboxNormConfig, match, runtimePageStructure, surfaceSize, opts){
+    var o = opts || {};
+    var minAffine    = typeof o.minAffineCorrespondences  === 'number' ? o.minAffineCorrespondences  : 4;
+    var rowSnapEnabled = o.rowSnapEnabled !== false;
+
+    if(!fieldBboxNormConfig || !match){
+      return { ok:false, reason:'bad_input', debug:null };
+    }
+
+    // Index runtime objects by id
+    var rtObjects = (runtimePageStructure && Array.isArray(runtimePageStructure.structuralObjects))
+                  ? runtimePageStructure.structuralObjects : [];
+    var rtById = {};
+    for(var i = 0; i < rtObjects.length; i++){ if(rtObjects[i] && rtObjects[i].id) rtById[rtObjects[i].id] = rtObjects[i]; }
+
+    // Build correspondence point pairs from the match
+    var cfgMembersById = {};
+    var cfgMembers = (configConstellation && Array.isArray(configConstellation.members)) ? configConstellation.members : [];
+    for(var ci = 0; ci < cfgMembers.length; ci++){ cfgMembersById[cfgMembers[ci].objId] = cfgMembers[ci]; }
+
+    var pairs = []; // { cfg:{x,y}, rt:{x,y} }
+    var corrs = Array.isArray(match.memberCorrespondences) ? match.memberCorrespondences : [];
+    for(var k = 0; k < corrs.length; k++){
+      var c = corrs[k];
+      if(!c || !c.runtimeObjId) continue;
+      var cm = cfgMembersById[c.configMemberId];
+      var ro = rtById[c.runtimeObjId];
+      if(!cm || !ro || !cm.geom || !ro.geom) continue;
+      pairs.push({
+        cfg: { x: cm.geom.cxN, y: cm.geom.cyN },
+        rt:  { x: ro.geom.cxN, y: ro.geom.cyN }
+      });
+    }
+
+    // Determine transform
+    var transformModel = 'prior';
+    var apply = null; // function(p) -> p in runtime norm coords
+
+    function applyTranslation(tx, ty){
+      return function(p){ return { x: p.x + tx, y: p.y + ty }; };
+    }
+    function applySimilarity(sx, sy, tx, ty){
+      // axis-aligned similarity (independent x/y scale → similarity-without-
+      // rotation, slightly more permissive than uniform scale; rotation is
+      // intentionally not modeled for axis-aligned form layouts)
+      return function(p){ return { x: sx * p.x + tx, y: sy * p.y + ty }; };
+    }
+    function applyAffine(M){
+      // M = [a,b,tx, c,d,ty]
+      return function(p){
+        return { x: M[0]*p.x + M[1]*p.y + M[2], y: M[3]*p.x + M[4]*p.y + M[5] };
+      };
+    }
+
+    function fitSimilarity(pp){
+      // Independent x/y scale (no rotation): minimize per-axis LS.
+      var n = pp.length;
+      var mxC=0,myC=0,mxR=0,myR=0;
+      for(var i = 0; i < n; i++){ mxC+=pp[i].cfg.x; myC+=pp[i].cfg.y; mxR+=pp[i].rt.x; myR+=pp[i].rt.y; }
+      mxC/=n; myC/=n; mxR/=n; myR/=n;
+      var sxNum=0,sxDen=0,syNum=0,syDen=0;
+      for(var j = 0; j < n; j++){
+        var dxc = pp[j].cfg.x - mxC, dxr = pp[j].rt.x - mxR;
+        var dyc = pp[j].cfg.y - myC, dyr = pp[j].rt.y - myR;
+        sxNum += dxc*dxr; sxDen += dxc*dxc;
+        syNum += dyc*dyr; syDen += dyc*dyc;
+      }
+      var sx = sxDen > 1e-9 ? (sxNum/sxDen) : 1;
+      var sy = syDen > 1e-9 ? (syNum/syDen) : 1;
+      // Clamp to sane range to avoid degenerate fits
+      if(!isFinite(sx) || sx <= 0) sx = 1;
+      if(!isFinite(sy) || sy <= 0) sy = 1;
+      sx = Math.max(0.5, Math.min(2.0, sx));
+      sy = Math.max(0.5, Math.min(2.0, sy));
+      var tx = mxR - sx * mxC;
+      var ty = myR - sy * myC;
+      return { sx:sx, sy:sy, tx:tx, ty:ty };
+    }
+
+    function fitAffine(pp){
+      // Solve [a b tx; c d ty] via 6x6 normal equations on 2N rows.
+      // Build A^T A (6x6) and A^T b (6x1) directly.
+      var ATA = new Array(36); for(var z=0; z<36; z++) ATA[z]=0;
+      var ATb = [0,0,0,0,0,0];
+      for(var i = 0; i < pp.length; i++){
+        var X = pp[i].cfg.x, Y = pp[i].cfg.y;
+        var u = pp[i].rt.x,  v = pp[i].rt.y;
+        // x-row:  [X Y 1 0 0 0]  -> u
+        var rx = [X,Y,1,0,0,0];
+        // y-row:  [0 0 0 X Y 1]  -> v
+        var ry = [0,0,0,X,Y,1];
+        for(var a = 0; a < 6; a++){
+          ATb[a] += rx[a]*u + ry[a]*v;
+          for(var b = 0; b < 6; b++){
+            ATA[a*6+b] += rx[a]*rx[b] + ry[a]*ry[b];
+          }
+        }
+      }
+      // Gaussian elimination 6x6
+      var Aug = new Array(6);
+      for(var r = 0; r < 6; r++){
+        Aug[r] = new Array(7);
+        for(var s = 0; s < 6; s++) Aug[r][s] = ATA[r*6+s];
+        Aug[r][6] = ATb[r];
+      }
+      for(var col = 0; col < 6; col++){
+        var piv = col, max = Math.abs(Aug[col][col]);
+        for(var rr = col+1; rr < 6; rr++){
+          if(Math.abs(Aug[rr][col]) > max){ max = Math.abs(Aug[rr][col]); piv = rr; }
+        }
+        if(max < 1e-9) return null;
+        if(piv !== col){ var tmp = Aug[col]; Aug[col] = Aug[piv]; Aug[piv] = tmp; }
+        for(var rr2 = 0; rr2 < 6; rr2++){
+          if(rr2 === col) continue;
+          var f = Aug[rr2][col] / Aug[col][col];
+          for(var cc = col; cc < 7; cc++) Aug[rr2][cc] -= f * Aug[col][cc];
+        }
+      }
+      var M = [
+        Aug[0][6]/Aug[0][0], Aug[1][6]/Aug[1][1], Aug[2][6]/Aug[2][2],
+        Aug[3][6]/Aug[3][3], Aug[4][6]/Aug[4][4], Aug[5][6]/Aug[5][5]
+      ];
+      // Sanity-clamp scale terms
+      if(!isFinite(M[0]) || !isFinite(M[4])) return null;
+      return M;
+    }
+
+    function spatialSpreadOk(pp){
+      var minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+      for(var i = 0; i < pp.length; i++){
+        if(pp[i].cfg.x < minX) minX = pp[i].cfg.x;
+        if(pp[i].cfg.x > maxX) maxX = pp[i].cfg.x;
+        if(pp[i].cfg.y < minY) minY = pp[i].cfg.y;
+        if(pp[i].cfg.y > maxY) maxY = pp[i].cfg.y;
+      }
+      return (maxX - minX) > 0.05 && (maxY - minY) > 0.05;
+    }
+
+    if(pairs.length >= minAffine && spatialSpreadOk(pairs)){
+      var M = fitAffine(pairs);
+      if(M){ transformModel = 'affine'; apply = applyAffine(M); }
+    }
+    if(!apply && pairs.length >= 2){
+      var sim = fitSimilarity(pairs);
+      transformModel = 'similarity';
+      apply = applySimilarity(sim.sx, sim.sy, sim.tx, sim.ty);
+    }
+    if(!apply && pairs.length === 1){
+      transformModel = 'translation';
+      apply = applyTranslation(pairs[0].rt.x - pairs[0].cfg.x, pairs[0].rt.y - pairs[0].cfg.y);
+    }
+    if(!apply){
+      transformModel = 'prior';
+      var et = match.estimatedTranslationN || { dxN: 0, dyN: 0 };
+      apply = applyTranslation(et.dxN || 0, et.dyN || 0);
+    }
+
+    // Project the four corners of the config field bbox
+    var bx0 = Number(fieldBboxNormConfig.x0 || 0);
+    var by0 = Number(fieldBboxNormConfig.y0 || 0);
+    var bx1 = Number(fieldBboxNormConfig.x1 || 0);
+    var by1 = Number(fieldBboxNormConfig.y1 || 0);
+    var corners = [
+      { x: bx0, y: by0 },
+      { x: bx1, y: by0 },
+      { x: bx1, y: by1 },
+      { x: bx0, y: by1 }
+    ];
+    var projected = corners.map(apply);
+    var px0 = Math.min(projected[0].x, projected[1].x, projected[2].x, projected[3].x);
+    var py0 = Math.min(projected[0].y, projected[1].y, projected[2].y, projected[3].y);
+    var px1 = Math.max(projected[0].x, projected[1].x, projected[2].x, projected[3].x);
+    var py1 = Math.max(projected[0].y, projected[1].y, projected[2].y, projected[3].y);
+
+    // Optional row-snap: if config field has a containing row band and the
+    // Phase 5 match found a runtime correspondence for it, snap the y-band
+    // to that runtime row's mean-y while preserving the field's offset
+    // within the row.
+    var usedRowSnap = false;
+    if(rowSnapEnabled && configStructuralIdentity && configStructuralIdentity.bboxRelRow){
+      var rowRel = configStructuralIdentity.bboxRelRow;
+      var rtRowCorr = null;
+      for(var rc = 0; rc < corrs.length; rc++){
+        if(corrs[rc] && corrs[rc].configMemberId === rowRel.bandId && corrs[rc].runtimeObjId){
+          rtRowCorr = rtById[corrs[rc].runtimeObjId];
+          break;
+        }
+      }
+      if(rtRowCorr && rtRowCorr.geom){
+        var rtRowCy = rtRowCorr.geom.cyN;
+        var fieldH  = py1 - py0;
+        // distFromBandYN was the signed offset from band-y to field center.
+        var newCy = rtRowCy + (rowRel.distFromBandYN || 0);
+        py0 = newCy - fieldH/2;
+        py1 = newCy + fieldH/2;
+        usedRowSnap = true;
+      }
+    }
+
+    // Clamp to [0,1]
+    px0 = Math.max(0, Math.min(1, px0));
+    py0 = Math.max(0, Math.min(1, py0));
+    px1 = Math.max(0, Math.min(1, px1));
+    py1 = Math.max(0, Math.min(1, py1));
+    if(px1 - px0 < 1e-4) px1 = Math.min(1, px0 + 1e-4);
+    if(py1 - py0 < 1e-4) py1 = Math.min(1, py0 + 1e-4);
+
+    var reconstructedBoxN = { x0: px0, y0: py0, x1: px1, y1: py1 };
+    var reconstructedBoxPx = null;
+    if(surfaceSize && surfaceSize.width && surfaceSize.height){
+      reconstructedBoxPx = {
+        x: px0 * surfaceSize.width,
+        y: py0 * surfaceSize.height,
+        w: Math.max(1, (px1 - px0) * surfaceSize.width),
+        h: Math.max(1, (py1 - py0) * surfaceSize.height),
+        page: match.page || 1
+      };
+    }
+
+    return {
+      ok: true,
+      transformModel:      transformModel,
+      correspondencesUsed: pairs.length,
+      reconstructedBoxN:   reconstructedBoxN,
+      reconstructedBoxPx:  reconstructedBoxPx,
+      usedRowSnap:         usedRowSnap,
+      debug: {
+        pairs:              pairs.length,
+        matchRank:          match.rank,
+        matchFinalScore:    match.finalScore,
+        memberCoverage:     match.memberCoverage,
+        relationConsistency:match.relationConsistencyRatio,
+        partial:            match.partial
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // buildConstellation — Phase 2 constellation construction (config time)
   //
   // Given a normalized field bbox and a PageStructure (Phase 1), selects a
@@ -1681,6 +1948,7 @@
     buildConstellation,
     computeFieldStructuralIdentity,
     selectConstellationCandidates,
-    matchConstellationCandidates
+    matchConstellationCandidates,
+    reconstructFieldFromMatch
   };
 });

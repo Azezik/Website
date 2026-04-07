@@ -501,6 +501,131 @@ with structural metadata — no competing model is introduced.
 - [x] ORB still gated as refine-only / last-window fallback.
 - [x] Existing field-level localization contract untouched.
 
+## Phase 6 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `reconstructFieldFromMatch(configConstellation, configStructuralIdentity, fieldBboxNormConfig, match, runtimePageStructure, surfaceSize, opts)` (~220 lines). Pure geometry; no OpenCV calls.
+- Builds correspondence point pairs from `match.memberCorrespondences` by
+  joining each correspondence to its config member (`cfg.cxN/cyN`) and the
+  matched runtime structural object (`rt.cxN/cyN`).
+- Hierarchical transform policy:
+  - **≥4 correspondences with spatial spread > 0.05 in both axes** → affine
+    least-squares fit (6×6 normal equations, in-place Gaussian elimination).
+  - **≥2 correspondences** → axis-aligned similarity (independent x/y scale,
+    no rotation), per-axis least-squares with scale clamped to [0.5, 2.0].
+  - **1 correspondence** → translation only.
+  - **0 correspondences** → fallback to `match.estimatedTranslationN`
+    (normalized prior, same as Phase 4 simple translation).
+- Projects all four corners of the config field bbox through the transform
+  and takes the axis-aligned bounding box of the projected corners.
+- **Row snap (optional, on by default)**: if `configStructuralIdentity.bboxRelRow`
+  exists and the Phase 5 match found a runtime correspondence for that row
+  band, snaps the field y-band to the runtime row's mean-y while preserving
+  `distFromBandYN` (the signed offset from band-y to field center). The
+  field height is preserved.
+- Clamps to [0, 1], enforces a minimum 1e-4 width/height, and emits both
+  normalized (`reconstructedBoxN`) and pixel (`reconstructedBoxPx`) forms
+  using the supplied `surfaceSize`.
+- Returns `{ ok, transformModel, correspondencesUsed, reconstructedBoxN,
+  reconstructedBoxPx, usedRowSnap, debug }`.
+- Exported via the module return object.
+
+**`engines/wfg4/wfg4-localization.js`**
+- After Phase 5, iterates `acceptedStructMatches` and invokes
+  `reconstructFieldFromMatch()` for each, using `ref.bboxNorm` as the
+  config field bbox, `pageEntry.dimensions.working` as `surfaceSize`, and
+  `ref.structuralIdentity` for row-snap. Attaches the result to each match
+  as `match.reconstruction` and pushes a flat copy onto
+  `structReconstructions[]`.
+- Window builder: when an accepted match carries a reconstruction, the
+  primary `D_struct_*` window is built around that reconstructed pixel box
+  (still padded by `basePad`). When no reconstruction is attached, the
+  Phase 4/5 simple-translation behavior is preserved as fallback.
+- Added `STRUCTURAL_RECONSTRUCTED = 'structural_reconstructed'` to the
+  local `BBOX_SRC` table (mirrors any future `Types.BBOX_SOURCE` addition).
+- After ORB attempts, if `attemptsWon` is false but a top reconstruction
+  exists, adopts `topReconstruction.reconstructedBoxPx` as the localized
+  box and sets `usedStructuralReconstruction = true`.
+- Localization gate, status, `bboxSource`, and `reason` paths updated to
+  recognize structural reconstruction as a successful localization (so it
+  flows through the existing field localization contract via
+  `STRUCTURAL_RECONSTRUCTED`). Existing `STRUCTURAL_FALLBACK` and
+  `PREDICTED_FALLBACK` paths are preserved verbatim.
+- New engine-log event `struct.reconstructions` exposes reconstruction
+  count, top transform model, top correspondence count, and top row-snap
+  state.
+- `structuralReconstructions` added to both the degraded-fallback and
+  main success/failure return objects.
+
+### Schema added (`structuralReconstructions[i]`)
+
+```
+{
+  matchRank, transformModel,            // 'affine' | 'similarity' | 'translation' | 'prior'
+  correspondencesUsed,
+  reconstructedBoxN:  { x0, y0, x1, y1 },
+  reconstructedBoxPx: { x, y, w, h, page } | null,
+  usedRowSnap,
+  debug: {
+    pairs, matchRank, matchFinalScore,
+    memberCoverage, relationConsistency, partial
+  }
+}
+```
+
+### Design decisions
+
+- **Similarity model = independent x/y scale, no rotation.** Form layouts
+  are axis-aligned; rotation introduces fragility for small N. Independent
+  per-axis scale absorbs render-scale differences (e.g. wider scans, taller
+  PDF rasterizations) without overfitting. Scale clamped to [0.5, 2.0] to
+  reject degenerate fits from collinear correspondences.
+- **Affine threshold = 4 correspondences + spread > 0.05.** Prevents
+  upgrading to affine on collinear or clustered points where the fit would
+  be unstable. The spatial-spread guard mirrors Phase 2's 8-sector
+  constellation goal: distributed correspondences only.
+- **Row-snap is post-projection, not part of the LS fit.** This keeps the
+  geometric transform unbiased while still correcting "right region, wrong
+  row" — the dominant remaining failure mode. It only fires when the
+  config-time row band has a runtime correspondence in the same Phase 5
+  match, so it cannot snap to an unrelated row.
+- **Prior fallback uses `match.estimatedTranslationN`.** When no member
+  correspondences are present (all-null pairs), the reconstructor degrades
+  to the same translation Phase 4 used, so the resulting box matches the
+  pre-Phase 6 behavior — no regression on degenerate cases.
+- **Reconstructed box is adopted as the localized box only when ORB
+  attempts fail.** Phase 6 deliberately does *not* override successful ORB
+  matches; that demotion is Phase 7's responsibility. ORB still acts as
+  refinement *within* the structural window when it succeeds, and the
+  reconstructed box is still used as the search center.
+- **`STRUCTURAL_RECONSTRUCTED` is a new bbox source, not a reuse of
+  `STRUCTURAL_FALLBACK`.** Downstream consumers can distinguish "snapped
+  via existing structuralRefineBox heuristics" from "projected via Phase 6
+  hierarchical transform" without breaking the existing contract.
+
+### Fixes / deviations
+
+- None. Phase 6 is additive. When Phase 5 produces no accepted matches the
+  pre-Phase 6 path runs unchanged. When Phase 5 produces accepted matches
+  but no reconstruction succeeds (e.g. zero pairs and zero translation),
+  the simple-translation D_struct windows from Phase 4/5 still build.
+
+### Completion criteria met
+
+- [x] Reconstructed bbox produced for each accepted Phase 5 match.
+- [x] Reconstruction passed to downstream readout via the existing field
+      localization contract (`localizedBox`, `finalReadoutBox`,
+      `bboxSource = STRUCTURAL_RECONSTRUCTED` when used).
+- [x] Hierarchical transform: page → constellation correspondences →
+      similarity/affine projection → optional row snap.
+- [x] Partial-match fallback to normalized translation prior.
+- [x] ORB still runs within structural windows; reconstruction adopted as
+      localized box only when ORB fails. Refine demotion remains Phase 7.
+- [x] Existing `STRUCTURAL_FALLBACK` / `PREDICTED_FALLBACK` paths and the
+      Phase 4/5 fallbacks are preserved verbatim.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and
