@@ -10327,7 +10327,17 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
                 extractionMeta: {
                   ...(engineResult.extractionMeta || {}),
                   readoutBackend: 'tesseract-localized',
-                  tokenSourceResolved: 'tesseract-bbox'
+                  tokenSourceResolved: 'tesseract-bbox',
+                  readout: {
+                    ...((engineResult.extractionMeta && engineResult.extractionMeta.readout) || {}),
+                    winnerTokenBBox: pick?.tok ? {
+                      x: Number(pick.tok.x || 0),
+                      y: Number(pick.tok.y || 0),
+                      w: Number(pick.tok.w || 0),
+                      h: Number(pick.tok.h || 0),
+                      page: Number(pick.tok.page || targetPage || 1)
+                    } : null
+                  }
                 }
               };
               window.EngineLog?.engineLog('wfg4-run', 'readout.localized', {
@@ -19832,11 +19842,23 @@ els.wfg4DebugToggle?.addEventListener('change', ()=>{
   if(isConfigMode()){
     state.wfg4.structuralOverlay = enabled;
     console.info('[wfg4-debug] structural overlay', enabled ? 'ON' : 'OFF');
-    drawOverlay();
+    drawOverlayForVisibilityChange();
     return;
   }
   state.wfg4.debugMode = enabled;
   console.info('[wfg4-debug] debug mode', state.wfg4.debugMode ? 'ON' : 'OFF');
+  drawOverlayForVisibilityChange();
+  const pending = state.wfg4?.debugPending;
+  if(enabled && pending?.fieldDataList?.length){
+    try {
+      const { scaleX, scaleY } = getScaleFactors();
+      if(overlayCtx){
+        wfg4DebugPaintOverlays(overlayCtx, pending.fieldDataList, scaleX, scaleY);
+      }
+    } catch(e){
+      console.warn('[wfg4-debug] overlay redraw failed after toggle', e);
+    }
+  }
 });
 els.ocrTraceDownloadBtn?.addEventListener('click', ()=>{
   if(!window.OCRTrace) return;
@@ -21297,6 +21319,7 @@ function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
     const meta = entry.extractionMeta || {};
     const localization = meta.localization || {};
     const stages = meta.debugBboxStages || {};
+    const readoutMeta = meta.readout || {};
     fieldDataList.push({
       fieldKey: entry.fieldKey,
       value: entry.value || '',
@@ -21323,6 +21346,13 @@ function wfg4DebugCollectFieldData(rawStoreEntries, profileFields){
       projectedBox: stages.projectedBox || null,
       refinedBoxDetail: stages.refinedBox || null,
       finalReadoutBox: stages.finalReadoutBox || null,
+      winningTokenBbox: readoutMeta.winnerTokenBBox || null,
+      structuralCandidates: Array.isArray(localization.structuralCandidates) ? localization.structuralCandidates : [],
+      structuralMatches: Array.isArray(localization.structuralMatches) ? localization.structuralMatches : [],
+      structuralReconstructions: Array.isArray(localization.structuralReconstructions) ? localization.structuralReconstructions : [],
+      selectedConstellation: localization.selectedConstellation || null,
+      pageStructureSummary: localization.pageStructureSummary || null,
+      fieldLevelConstellation: localization.fieldLevelConstellation || null,
       userCorrectedBbox: null
     });
   }
@@ -21363,10 +21393,13 @@ function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
       predictedBox: fd.predictedBox || null,
       projectedBox: fd.projectedBox || null,
       finalReadoutBox: fd.finalReadoutBox || null,
+      winningTokenBbox: fd.winningTokenBbox || null,
       referenceBbox: fd.referenceBbox,
       orbProjectedBbox: fd.orbProjectedBbox,
       refinedBbox: fd.refinedBbox,
       ocrCropBbox: fd.ocrCropBbox,
+      selectedConstellation: fd.selectedConstellation || null,
+      pageStructureSummary: fd.pageStructureSummary || null,
       userCorrectedBbox: fd.userCorrectedBbox,
       derivedMetrics: {
         deltaProjectedVsRefined: projectedVsRefined,
@@ -21398,75 +21431,138 @@ function wfg4DebugBuildLogEntry(fieldDataList, file, surface){
 
 function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
   if(!ctx) return;
-  const colors = {
-    reference:   'rgba(59,130,246,0.9)',   // BLUE
-    orbProjected:'rgba(234,179,8,0.9)',    // YELLOW
-    refined:     'rgba(34,197,94,0.9)',    // GREEN
-    ocrCrop:     'rgba(239,68,68,0.95)'   // RED
+  const palette = {
+    reference: 'rgba(59,130,246,0.95)',
+    predicted: 'rgba(14,165,233,0.9)',
+    projected: 'rgba(250,204,21,0.95)',
+    refined: 'rgba(34,197,94,0.95)',
+    finalReadout: 'rgba(239,68,68,0.98)',
+    winningToken: 'rgba(168,85,247,0.98)',
+    structCandidate: 'rgba(251,191,36,0.55)',
+    structAccepted: 'rgba(34,197,94,0.85)',
+    structRejected: 'rgba(244,63,94,0.75)',
+    structRecon: 'rgba(45,212,191,0.92)',
+    structMember: 'rgba(125,211,252,0.75)'
   };
-  const labels = {
-    reference:    'REF',
-    orbProjected: 'ORB',
-    refined:      'REFN',
-    ocrCrop:      'OCR'
-  };
-  const dashes = {
-    reference:    [6, 3],
-    orbProjected: [4, 4],
-    refined:      [8, 2],
-    ocrCrop:      []
-  };
-  // Small inward pixel offsets per stage so overlapping boxes remain
-  // visually distinguishable when ORB/refine fall back to the same region.
-  const insets = { reference: 0, orbProjected: 4, refined: 8, ocrCrop: 0 };
+  const stageSpecs = [
+    { key: 'reference',    boxKey: 'referenceBbox',    label: 'REF',   color: palette.reference,   dash: [6,3], inset: 0 },
+    { key: 'predicted',    boxKey: 'predictedBox',     label: 'PRED',  color: palette.predicted,   dash: [2,4], inset: 2 },
+    { key: 'projected',    boxKey: 'projectedBox',     label: 'PROJ',  color: palette.projected,   dash: [4,4], inset: 4 },
+    { key: 'refined',      boxKey: 'refinedBbox',      label: 'REFN',  color: palette.refined,     dash: [8,2], inset: 6 },
+    { key: 'finalReadout', boxKey: 'ocrCropBbox',      label: 'READ',  color: palette.finalReadout,dash: [], inset: 0 },
+    { key: 'winningToken', boxKey: 'winningTokenBbox', label: 'WIN',   color: palette.winningToken,dash: [1,2], inset: 10 }
+  ];
+
+  function toCssPoint(page, x, y){
+    const offPx = (state.pageOffsets[(page || 1)-1] || 0) / scaleY;
+    return { x: x / scaleX, y: (y / scaleY) + offPx };
+  }
+
+  function drawBoxWithLabel(box, spec, fallback, page){
+    if(!box) return;
+    const ins = (spec.inset || 0) / scaleX;
+    const p = toCssPoint(page || box.page || 1, Number(box.x || 0), Number(box.y || 0));
+    const bw = Math.max(2, (Number(box.w || 0) / scaleX) - ins * 2);
+    const bh = Math.max(2, (Number(box.h || 0) / scaleY) - ins * 2);
+    const bx = p.x + ins;
+    const by = p.y + ins;
+    ctx.globalAlpha = fallback ? 0.35 : 1;
+    ctx.strokeStyle = spec.color;
+    ctx.lineWidth = (spec.key === 'finalReadout') ? 2.5 : (spec.key === 'winningToken' ? 2.2 : 1.5);
+    ctx.setLineDash(spec.dash || []);
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = spec.color;
+    ctx.fillText(spec.label + (fallback ? '(≈)' : ''), bx + 2, by - 3);
+  }
+
+  function drawStructuralLayers(fd, page, anchorBox){
+    const anchor = anchorBox || fd.referenceBbox || fd.ocrCropBbox || null;
+    if(!anchor) return;
+    const acx = Number(anchor.x || 0) + Number(anchor.w || 0) / 2;
+    const acy = Number(anchor.y || 0) + Number(anchor.h || 0) / 2;
+
+    const candidates = Array.isArray(fd.structuralCandidates) ? fd.structuralCandidates : [];
+    for(const cand of candidates){
+      const center = cand?.centerN || null;
+      if(!center) continue;
+      const W = (fd.referenceBbox?.w || 0) + 1;
+      const H = (fd.referenceBbox?.h || 0) + 1;
+      const px = center.xN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.width || 1);
+      const py = center.yN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.height || 1);
+      const p0 = toCssPoint(page, acx, acy);
+      const p1 = toCssPoint(page, px, py);
+      ctx.save();
+      ctx.strokeStyle = cand.viable ? palette.structAccepted : palette.structCandidate;
+      ctx.lineWidth = cand.viable ? 1.6 : 1.1;
+      ctx.setLineDash(cand.viable ? [] : [3,3]);
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+      ctx.fillStyle = cand.viable ? palette.structAccepted : palette.structCandidate;
+      ctx.beginPath();
+      ctx.arc(p1.x, p1.y, cand.viable ? 2.8 : 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      void W; void H;
+    }
+
+    const matches = Array.isArray(fd.structuralMatches) ? fd.structuralMatches : [];
+    for(const m of matches.slice(0, 3)){
+      const center = m?.centerN || null;
+      if(!center) continue;
+      const px = center.xN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.width || 1);
+      const py = center.yN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.height || 1);
+      const p = toCssPoint(page, px, py);
+      ctx.save();
+      ctx.fillStyle = m.accepted ? palette.structAccepted : palette.structRejected;
+      ctx.fillText(`M${m.rank}:${(m.finalScore ?? 0).toFixed(2)}`, p.x + 3, p.y + 10);
+      ctx.restore();
+    }
+
+    const recs = Array.isArray(fd.structuralReconstructions) ? fd.structuralReconstructions : [];
+    for(const rec of recs.slice(0, 2)){
+      const rb = rec?.reconstructedBoxPx || null;
+      if(!rb) continue;
+      drawBoxWithLabel(rb, { key:'structRecon', label:'RECON', color: palette.structRecon, dash:[7,5], inset:12 }, false, page);
+    }
+
+    const mini = fd.fieldLevelConstellation?.members || [];
+    for(const member of mini.slice(0, 8)){
+      const g = member?.geom || null;
+      if(!g) continue;
+      const px = g.cxN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.width || 1);
+      const py = g.cyN * Math.max(1, state.wfg4?.debugPending?.surface?.pages?.[0]?.dimensions?.working?.height || 1);
+      const p = toCssPoint(page, px, py);
+      ctx.save();
+      ctx.fillStyle = palette.structMember;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 
   ctx.save();
   ctx.font = 'bold 10px "IBM Plex Mono", monospace';
 
   for(const fd of fieldDataList){
     const page = fd.referenceBbox?.page || fd.ocrCropBbox?.page || 1;
-    const offPx = (state.pageOffsets[(page||1)-1] || 0) / scaleY;
-
-    // Anchor box used as fallback for null stages and for label placement
     const anchorBox = fd.referenceBbox || fd.ocrCropBbox || null;
-
-    const stages = [
-      { key: 'reference',    box: fd.referenceBbox,    fallback: false },
-      { key: 'orbProjected', box: fd.orbProjectedBbox, fallback: fd.orbProjectedBbox == null },
-      { key: 'refined',      box: fd.refinedBbox,      fallback: fd.refinedBbox == null },
-      { key: 'ocrCrop',      box: fd.ocrCropBbox,      fallback: false }
-    ];
-
-    for(const st of stages){
-      // For null ORB/refine stages, draw a fallback indicator at the anchor
-      // position with reduced opacity so the user can see "no separate bbox"
-      const drawBox = st.box || (st.fallback ? anchorBox : null);
-      if(!drawBox) continue;
-
-      const ins = (insets[st.key] || 0) / scaleX;  // inset in CSS-px
-      const bx = (drawBox.x ?? 0) / scaleX + ins;
-      const by = ((drawBox.y ?? 0) / scaleY) + offPx + ins;
-      const bw = Math.max(2, (drawBox.w ?? 0) / scaleX - ins * 2);
-      const bh = Math.max(2, (drawBox.h ?? 0) / scaleY - ins * 2);
-
-      const alpha = st.fallback ? 0.35 : 1;
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = colors[st.key];
-      ctx.lineWidth = st.key === 'ocrCrop' ? 2.5 : 1.5;
-      ctx.setLineDash(dashes[st.key]);
-      ctx.strokeRect(bx, by, bw, bh);
-
-      // Stage label above the box
-      const labelSuffix = st.fallback ? '(≈)' : '';
-      ctx.fillStyle = colors[st.key];
-      ctx.fillText(labels[st.key] + labelSuffix, bx + 2, by - 3);
+    for(const spec of stageSpecs){
+      const box = fd[spec.boxKey] || null;
+      const fallback = !box && (spec.key === 'projected' || spec.key === 'refined' || spec.key === 'winningToken');
+      drawBoxWithLabel(box || (fallback ? anchorBox : null), spec, fallback, page);
     }
     ctx.globalAlpha = 1;
+    try { drawStructuralLayers(fd, page, anchorBox); }
+    catch(_e){ /* keep overlay rendering resilient */ }
 
     // Metrics label to the right of the anchor box
     if(anchorBox){
-      const lx = (anchorBox.x ?? 0) / scaleX + (anchorBox.w ?? 0) / scaleX + 4;
-      const ly = ((anchorBox.y ?? 0) / scaleY) + offPx + 10;
+      const ap = toCssPoint(page, Number(anchorBox.x || 0), Number(anchorBox.y || 0));
+      const lx = ap.x + (anchorBox.w ?? 0) / scaleX + 4;
+      const ly = ap.y + 10;
       ctx.font = 'bold 10px "IBM Plex Mono", monospace';
       ctx.fillStyle = '#f1f5f9';
       ctx.fillText(`${fd.fieldKey}`, lx, ly);
@@ -21478,7 +21574,37 @@ function wfg4DebugPaintOverlays(ctx, fieldDataList, scaleX, scaleY){
         + `read:${fd.readoutConfidence != null ? fd.readoutConfidence.toFixed(2) : '—'}`,
         lx, ly + 22
       );
+      if(fd.selectedConstellation){
+        ctx.fillText(
+          `struct:score=${Number(fd.selectedConstellation.finalScore || 0).toFixed(2)} cov=${Number(fd.selectedConstellation.memberCoverage || 0).toFixed(2)}`,
+          lx, ly + 32
+        );
+      }
     }
+  }
+  const legend = [
+    ['REF', palette.reference],
+    ['PRED', palette.predicted],
+    ['PROJ', palette.projected],
+    ['REFN', palette.refined],
+    ['READ', palette.finalReadout],
+    ['WIN', palette.winningToken],
+    ['RECON', palette.structRecon]
+  ];
+  const legendX = 8;
+  let legendY = 80;
+  ctx.fillStyle = 'rgba(15,23,42,0.78)';
+  ctx.fillRect(4, 68, 258, 16 + (legend.length * 12));
+  ctx.font = '10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillText('WFG4 Run Debug Layers', legendX, legendY);
+  legendY += 12;
+  for(const [label, color] of legend){
+    ctx.fillStyle = color;
+    ctx.fillText(label, legendX, legendY);
+    ctx.fillStyle = '#cbd5e1';
+    ctx.fillText('= overlay stage', legendX + 42, legendY);
+    legendY += 12;
   }
   ctx.setLineDash([]);
   ctx.globalAlpha = 1;

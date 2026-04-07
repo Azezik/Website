@@ -633,7 +633,14 @@
         scopedTokenCount: winner.scoped.length,
         readout: {
           confidence: readConfidence,
-          source: 'localized-token-read-assist'
+          source: 'localized-token-read-assist',
+          winnerTokenBBox: winner?.token ? {
+            x: Number(winner.token.x || 0),
+            y: Number(winner.token.y || 0),
+            w: Number(winner.token.w || 0),
+            h: Number(winner.token.h || 0),
+            page: Number(winner.token.page || finalBox.page || 1)
+          } : null
         }
       })
     };
