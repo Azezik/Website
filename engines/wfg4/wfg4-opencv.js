@@ -958,6 +958,128 @@
   }
 
   // ---------------------------------------------------------------------------
+  // selectConstellationCandidates — Phase 4 runtime candidate selection
+  //
+  // Given the config-time constellation (Phase 2) and the runtime PageStructure
+  // (Phase 1, already on pageEntry.pageStructure), identifies up to maxK runtime
+  // structural objects that could serve as anchors for the constellation.
+  //
+  // Scoring is coarse and position-led:
+  //   • position score — how close the runtime object's center is to the
+  //     config constellation's coarsePagePosition (linear decay to 0 at 0.30)
+  //   • type bonus    — +0.25 if the object matches the dominant config member type
+  //
+  // Deduplication: candidates whose centers are within 0.08 page-diagonal are
+  // merged (best score wins).
+  //
+  // A position-prior candidate (zero translation, score=0.15, viable=false)
+  // is appended if no structural anchor is found near the config center.
+  // This lets the runtime fall back to "assume same layout" without treating it
+  // as a real structural match.
+  //
+  // Each candidate carries:
+  //   rank, score, viable (score >= viableScoreThresh && anchorObjId != null),
+  //   anchorObjId, anchorType, centerN, estimatedTranslationN
+  //
+  // Returns: Array<candidate> sorted by score desc (empty array on bad input).
+  // ---------------------------------------------------------------------------
+  function selectConstellationCandidates(configConstellation, runtimePageStructure, opts){
+    if(!configConstellation || !runtimePageStructure) return [];
+    var o = opts || {};
+    var maxK            = typeof o.maxCandidates       === 'number' ? o.maxCandidates       : 5;
+    var viableThresh    = typeof o.viableScoreThresh   === 'number' ? o.viableScoreThresh   : 0.20;
+    var dedupRadiusN    = typeof o.dedupRadiusN        === 'number' ? o.dedupRadiusN        : 0.08;
+    var posDecayAt      = typeof o.posDecayAt          === 'number' ? o.posDecayAt          : 0.30;
+
+    var configCenter  = configConstellation.coarsePagePosition || { xN: 0.5, yN: 0.5 };
+    var configMembers = Array.isArray(configConstellation.members) ? configConstellation.members : [];
+
+    // Dominant member type in the config constellation
+    var cfgTypeCounts = { separator: 0, row_band: 0, region: 0 };
+    for(var mi = 0; mi < configMembers.length; mi++){
+      var t = configMembers[mi].type;
+      cfgTypeCounts[t] = (cfgTypeCounts[t] || 0) + 1;
+    }
+    var domType = 'row_band';
+    var domCount = 0;
+    var tkeys = ['separator', 'row_band', 'region'];
+    for(var ti = 0; ti < tkeys.length; ti++){
+      if((cfgTypeCounts[tkeys[ti]] || 0) > domCount){
+        domCount = cfgTypeCounts[tkeys[ti]];
+        domType  = tkeys[ti];
+      }
+    }
+
+    var rtObjects = Array.isArray(runtimePageStructure.structuralObjects) ? runtimePageStructure.structuralObjects : [];
+
+    // Score every runtime structural object
+    var scored = [];
+    for(var oi = 0; oi < rtObjects.length; oi++){
+      var obj = rtObjects[oi];
+      var g = obj.geom;
+      if(!g) continue;
+      var dx = g.cxN - configCenter.xN;
+      var dy = g.cyN - configCenter.yN;
+      var distN = Math.sqrt(dx * dx + dy * dy);
+      var posScore = Math.max(0, 1.0 - distN / Math.max(0.01, posDecayAt));
+      if(posScore < 0.05) continue; // too far to be relevant
+      var typeBonus = (obj.type === domType) ? 0.25 : 0;
+      scored.push({
+        score:                posScore + typeBonus,
+        anchorObjId:          obj.id,
+        anchorType:           obj.type,
+        centerN:              { xN: g.cxN, yN: g.cyN },
+        estimatedTranslationN:{ dxN: g.cxN - configCenter.xN, dyN: g.cyN - configCenter.yN }
+      });
+    }
+    scored.sort(function(a, b){ return b.score - a.score; });
+
+    // Deduplicate: if two candidates are within dedupRadiusN, keep the best
+    var results = [];
+    for(var si = 0; si < scored.length && results.length < maxK; si++){
+      var cand = scored[si];
+      var isDup = false;
+      for(var ri = 0; ri < results.length; ri++){
+        var ex = results[ri];
+        var cdx = cand.centerN.xN - ex.centerN.xN;
+        var cdy = cand.centerN.yN - ex.centerN.yN;
+        if(Math.sqrt(cdx * cdx + cdy * cdy) < dedupRadiusN){ isDup = true; break; }
+      }
+      if(!isDup){
+        results.push({
+          rank:                 results.length,
+          score:                cand.score,
+          viable:               cand.score >= viableThresh,
+          anchorObjId:          cand.anchorObjId,
+          anchorType:           cand.anchorType,
+          centerN:              cand.centerN,
+          estimatedTranslationN:cand.estimatedTranslationN
+        });
+      }
+    }
+
+    // Append a position-prior candidate if no structural anchor is near the config center
+    var priorCovered = results.some(function(r){
+      var pdx = r.centerN.xN - configCenter.xN;
+      var pdy = r.centerN.yN - configCenter.yN;
+      return Math.sqrt(pdx * pdx + pdy * pdy) < 0.05 && r.anchorObjId !== null;
+    });
+    if(!priorCovered && results.length < maxK){
+      results.push({
+        rank:                 results.length,
+        score:                0.15,
+        viable:               false,             // explicitly not a real structural match
+        anchorObjId:          null,
+        anchorType:           'position_prior',
+        centerN:              { xN: configCenter.xN, yN: configCenter.yN },
+        estimatedTranslationN:{ dxN: 0, dyN: 0 }
+      });
+    }
+
+    return results;
+  }
+
+  // ---------------------------------------------------------------------------
   // buildConstellation — Phase 2 constellation construction (config time)
   //
   // Given a normalized field bbox and a PageStructure (Phase 1), selects a
@@ -1332,6 +1454,7 @@
     structuralRefineBox,
     buildPageStructure,
     buildConstellation,
-    computeFieldStructuralIdentity
+    computeFieldStructuralIdentity,
+    selectConstellationCandidates
   };
 });

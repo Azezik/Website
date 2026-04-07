@@ -358,6 +358,45 @@ with structural metadata — no competing model is introduced.
 - [x] Existing pixel bbox and `structuralContext` untouched.
 - [x] Backwards-compatible: loaders that don't know `structuralIdentity` ignore it.
 
+## Phase 4 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `selectConstellationCandidates(configConstellation, runtimePageStructure, opts)` (≈100 lines). Pure geometry, no CV ops.
+- Reads `configConstellation.coarsePagePosition` and dominant member type from `configConstellation.members[].type`.
+- Scores each runtime `structuralObjects[]` entry: `posScore` (linear decay from 1.0 to 0 over 0.30 page-diagonals from config center) + `typeBonus` (+0.25 if matching dominant type).
+- Deduplicates candidates within 0.08 page-diagonal (best score wins).
+- Appends a `position_prior` candidate (`viable: false`, zero translation) if no structural anchor is within 0.05 of the config center.
+- Each candidate carries: `rank`, `score`, `viable` (score ≥ 0.20 && anchorObjId != null), `anchorObjId`, `anchorType`, `centerN`, `estimatedTranslationN`.
+
+**`engines/wfg4/wfg4-localization.js`**
+- In `localizeFieldVisual()`, before the window loop: calls `selectConstellationCandidates()` with the runtime `pageEntry.pageStructure` and `ref.constellation`. Logs `struct.candidates` event (count, viable count, hasViable).
+- **Window ordering with viable structural candidates:**
+  - Up to `min(viableCands, maxAttempts-1)` structural windows (`D_struct_N`) are tried first, built by applying each candidate's `estimatedTranslationN` to the predicted box.
+  - `A_predicted` (ORB on config-time bbox) is appended last as fallback.
+  - ORB fires on the fallback window only if all structural windows fail to match.
+- **Without viable structural candidates:** original behavior is preserved exactly — `A_predicted`, `B_widened`, `C_globalScan_N` in order.
+- `structuralCandidates` added to both the degraded-fallback and the main success/failure return objects for debug visibility.
+
+### Design decisions
+
+- `maxAttempts - 1` cap on structural windows: always reserves 1 slot for the ORB fallback, ensuring the system does not silently exhaust its budget without attempting any ORB recovery.
+- `estimatedTranslationN` applied to predicted box (not constellation center): preserves the field's relative position within the constellation frame; more accurate than centering the window on the anchor object.
+- `globalScan.candidateRegions` (C windows) are kept only in the no-viable-candidates fallback path; they are not needed when structural candidates guide the search.
+
+### Fixes / deviations
+
+- None. Purely additive. All existing localization behavior is preserved exactly when no viable structural candidates are found.
+
+### Completion criteria met
+
+- [x] Runtime `pageEntry.pageStructure` used (Phase 1 result, no extra CV pass).
+- [x] Structural windows are primary when viable candidates exist.
+- [x] ORB fires only as fallback (last window slot, only if structural windows fail).
+- [x] `structuralCandidates` exposed in debug output on all return paths where it is computed.
+- [x] K default = 5, config via `DEFAULTS.globalScanTopCandidates`.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and
