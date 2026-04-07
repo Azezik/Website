@@ -39,6 +39,7 @@
     LOCALIZED_REFINED: 'localized_refined',
     PREDICTED_FALLBACK: 'predicted_fallback',
     STRUCTURAL_FALLBACK: 'structural_fallback',
+    STRUCTURAL_RECONSTRUCTED: 'structural_reconstructed',
     LEGACY_BOX: 'legacy_box'
   });
 
@@ -227,6 +228,9 @@
     const configConstellation = ref?.constellation         || null;
     let structCandidates         = [];
     let hasViableStructCandidates = false;
+    let structMatches            = [];
+    let structMatchDebug         = null;
+    let acceptedStructMatches    = [];
     if(rtPageStructure && configConstellation && CvOps.selectConstellationCandidates){
       try {
         structCandidates = CvOps.selectConstellationCandidates(
@@ -236,29 +240,117 @@
         hasViableStructCandidates = structCandidates.some(c => c.viable && c.anchorObjId !== null);
       } catch(_e){ structCandidates = []; }
     }
+
+    // Phase 5: constellation-level structural matching.
+    // Promotes Phase 4's coarse anchor shortlist to scored, member-correspondence-
+    // bearing matches via a relation-graph scorer that tolerates partial matches
+    // and supports repeated constellations.  Accepted matches drive the search
+    // window order; if no candidate is accepted we fall back to Phase 4's raw
+    // viable list, and if even those are absent we keep the legacy ORB-first path.
+    if(rtPageStructure && configConstellation && structCandidates.length && CvOps.matchConstellationCandidates){
+      try {
+        const matchRes = CvOps.matchConstellationCandidates(
+          configConstellation, rtPageStructure, structCandidates,
+          {
+            acceptThreshold:     DEFAULTS.constellationAcceptThreshold     || 0.35,
+            memberSearchRadiusN: DEFAULTS.constellationMemberSearchRadiusN || 0.08,
+            maxMatches:          DEFAULTS.globalScanTopCandidates          || 5
+          }
+        ) || { matches: [], debug: null };
+        structMatches         = matchRes.matches || [];
+        structMatchDebug      = matchRes.debug   || null;
+        acceptedStructMatches = structMatches.filter(m => m.accepted);
+        if(acceptedStructMatches.length > 0) hasViableStructCandidates = true;
+      } catch(_e){ structMatches = []; structMatchDebug = { error: String(_e?.message || _e) }; }
+    }
+
     _EL?.engineLog('wfg4-run', 'struct.candidates', {
       fieldKey: _fk,
       candidateCount: structCandidates.length,
       viableCount: structCandidates.filter(c => c.viable).length,
       hasViable: hasViableStructCandidates
     });
+    // Phase 6: field reconstruction from matched constellation.
+    // For every accepted Phase 5 match, project the config field bbox into
+    // runtime page-normalized coordinates using a hierarchical transform
+    // (page → constellation → field). The resulting reconstructedBoxPx
+    // becomes the basis for the structural search windows below, replacing
+    // the simple-translation D_struct boxes from Phase 4. ORB still acts
+    // only as a final precision refine within those windows.
+    let structReconstructions = [];
+    if(acceptedStructMatches.length > 0 && CvOps.reconstructFieldFromMatch){
+      const cfgFieldBboxN = ref?.bboxNorm
+        ? { x0: ref.bboxNorm.x0, y0: ref.bboxNorm.y0, x1: ref.bboxNorm.x1, y1: ref.bboxNorm.y1 }
+        : null;
+      const surfaceSize = pageEntry?.dimensions?.working || null;
+      const cfgStructIdent = ref?.structuralIdentity || null;
+      if(cfgFieldBboxN && surfaceSize){
+        for(let mi = 0; mi < acceptedStructMatches.length; mi++){
+          try {
+            const rec = CvOps.reconstructFieldFromMatch(
+              configConstellation, cfgStructIdent, cfgFieldBboxN,
+              acceptedStructMatches[mi], rtPageStructure, surfaceSize,
+              {
+                minAffineCorrespondences: DEFAULTS.reconstructionMinAffineCorrespondences || 4,
+                rowSnapEnabled:           DEFAULTS.reconstructionRowSnapEnabled !== false
+              }
+            );
+            if(rec && rec.ok){
+              acceptedStructMatches[mi].reconstruction = rec;
+              structReconstructions.push({ matchRank: acceptedStructMatches[mi].rank, ...rec });
+            }
+          } catch(_e){ /* best-effort, skip on failure */ }
+        }
+      }
+    }
+
+    _EL?.engineLog('wfg4-run', 'struct.reconstructions', {
+      fieldKey: _fk,
+      reconstructionCount: structReconstructions.length,
+      topModel:            structReconstructions[0] ? structReconstructions[0].transformModel  : null,
+      topPairs:            structReconstructions[0] ? structReconstructions[0].correspondencesUsed : 0,
+      topUsedRowSnap:      structReconstructions[0] ? structReconstructions[0].usedRowSnap     : false
+    });
+
+    _EL?.engineLog('wfg4-run', 'struct.matches', {
+      fieldKey: _fk,
+      matchCount:    structMatches.length,
+      acceptedCount: acceptedStructMatches.length,
+      topScore:      structMatches[0] ? structMatches[0].finalScore : 0,
+      topPartial:    structMatches[0] ? structMatches[0].partial    : null,
+      topCoverage:   structMatches[0] ? structMatches[0].memberCoverage : 0,
+      topRelationConsistency: structMatches[0] ? structMatches[0].relationConsistencyRatio : 0
+    });
 
     const windows = [];
     if(hasViableStructCandidates){
       // Structural windows are primary; reserve at least 1 slot for ORB fallback.
-      const viableCands    = structCandidates.filter(c => c.viable);
-      const maxStructWin   = Math.min(viableCands.length, Math.max(1, maxAttempts - 1));
+      // Prefer Phase 5 accepted matches (sorted by relation-graph finalScore);
+      // fall back to Phase 4 raw viable candidates if Phase 5 produced none.
+      const sourceList = acceptedStructMatches.length > 0
+        ? acceptedStructMatches
+        : structCandidates.filter(c => c.viable);
+      const maxStructWin   = Math.min(sourceList.length, Math.max(1, maxAttempts - 1));
       const W = runtimeCanvas.width, H = runtimeCanvas.height;
       for(let ci = 0; ci < maxStructWin; ci++){
-        const cand   = viableCands[ci];
-        const shiftX = (cand.estimatedTranslationN.dxN || 0) * W;
-        const shiftY = (cand.estimatedTranslationN.dyN || 0) * H;
-        const translatedBox = {
-          x: predictedBox.x + shiftX, y: predictedBox.y + shiftY,
-          w: predictedBox.w,          h: predictedBox.h,
-          page
-        };
-        windows.push({ label:`D_struct_${ci}`, box: clampBoxToBounds(Types.expandBox(translatedBox, basePad, bounds), bounds) });
+        const cand = sourceList[ci];
+        // Phase 6: prefer the reconstructed field box for this match (built
+        // by the hierarchical transform).  Fall back to the simple
+        // translated predicted box only if no reconstruction is attached.
+        let structBox;
+        if(cand.reconstruction && cand.reconstruction.reconstructedBoxPx){
+          const rb = cand.reconstruction.reconstructedBoxPx;
+          structBox = { x: rb.x, y: rb.y, w: rb.w, h: rb.h, page };
+        } else {
+          const shiftX = (cand.estimatedTranslationN.dxN || 0) * W;
+          const shiftY = (cand.estimatedTranslationN.dyN || 0) * H;
+          structBox = {
+            x: predictedBox.x + shiftX, y: predictedBox.y + shiftY,
+            w: predictedBox.w,          h: predictedBox.h,
+            page
+          };
+        }
+        windows.push({ label:`D_struct_${ci}`, box: clampBoxToBounds(Types.expandBox(structBox, basePad, bounds), bounds) });
       }
       // ORB fallback: original predicted box runs only if all structural windows miss.
       windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
@@ -331,6 +423,17 @@
     let usedRefine = !!best?.usedRefine;
     let attemptsWon = !!(best && best.ok && localized);
 
+    // Phase 6: if ORB produced nothing but we have a top structural
+    // reconstruction, adopt the reconstructed box as the localized box.
+    // This wires reconstruction into the existing localization contract
+    // (Phase 7 will fully demote ORB; here it remains a refine-only path).
+    let usedStructuralReconstruction = false;
+    const topReconstruction = structReconstructions.length > 0 ? structReconstructions[0] : null;
+    if(!attemptsWon && topReconstruction && topReconstruction.reconstructedBoxPx){
+      localized = { ...topReconstruction.reconstructedBoxPx, page };
+      usedStructuralReconstruction = true;
+    }
+
     // Structural refinement (only as controlled fallback when geometric localization failed,
     // or as refinement boost when it succeeded).
     let structuralAdjustments = [];
@@ -372,7 +475,7 @@
 
     // Localization status gate.
     const localizationSucceeded = attemptsWon; // geometric consensus achieved
-    if(!localizationSucceeded && !usedStructural){
+    if(!localizationSucceeded && !usedStructural && !usedStructuralReconstruction){
       if(allowDegradedFallback){
         _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.DEGRADED_FALLBACK, reason: 'degraded_fallback_predicted_box', attemptsTried: attemptsLog.length, matchCount, inliers });
         return {
@@ -395,6 +498,9 @@
           structuralAdjustments: [],
           structuralDebug: null,
           structuralCandidates,
+          structuralMatches: structMatches,
+          structuralMatchDebug: structMatchDebug,
+          structuralReconstructions: structReconstructions,
           fallbackUsed: true,
           attempts: attemptsLog,
           reason: 'degraded_fallback_predicted_box'
@@ -427,10 +533,11 @@
     if(localizationSucceeded && usedRefine) bboxSource = BBOX_SRC.LOCALIZED_REFINED;
     else if(localizationSucceeded) bboxSource = BBOX_SRC.LOCALIZED_PROJECTED;
     else if(usedStructural) bboxSource = BBOX_SRC.STRUCTURAL_FALLBACK;
+    else if(usedStructuralReconstruction) bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
     else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
 
     const finalBox = localized || predictedBox;
-    const _finalStatus = (localizationSucceeded || usedStructural) ? STATUS.SUCCESS : STATUS.FAILED;
+    const _finalStatus = (localizationSucceeded || usedStructural || usedStructuralReconstruction) ? STATUS.SUCCESS : STATUS.FAILED;
     _EL?.engineLog('wfg4-run', 'localize.result', {
       fieldKey: _fk,
       status: _finalStatus,
@@ -463,12 +570,20 @@
       structuralAdjustments,
       structuralDebug,
       structuralCandidates,
+      structuralMatches: structMatches,
+      structuralMatchDebug: structMatchDebug,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
       // legacy keys for backward compatibility
       orbProjectedBox,
       postRefineBox,
-      reason: localizationSucceeded ? null : (usedStructural ? 'structural_fallback' : 'insufficient_geometric_consensus')
+      reason: localizationSucceeded
+        ? null
+        : (usedStructural
+            ? 'structural_fallback'
+            : (usedStructuralReconstruction
+                ? 'structural_reconstructed'
+                : 'insufficient_geometric_consensus'))
     };
   }
 

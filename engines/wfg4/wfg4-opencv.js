@@ -1080,6 +1080,498 @@
   }
 
   // ---------------------------------------------------------------------------
+  // matchConstellationCandidates — Phase 5 constellation-level structural matching
+  //
+  // Given the config-time constellation (Phase 2), the runtime PageStructure
+  // (Phase 1), and the shortlisted runtime candidates (Phase 4), produce scored
+  // ConstellationMatch records that:
+  //   • establish member-to-member correspondences via a relation-graph scorer
+  //   • tolerate partial matches (missing members are allowed)
+  //   • support repeated constellations (every candidate above threshold is
+  //     returned, ranked, so downstream Phase 6/7 may emit per-instance output)
+  //
+  // For each candidate the matcher:
+  //   1. Derives an estimated translation (dxN, dyN) from the candidate anchor.
+  //   2. Predicts the runtime position of every config member by applying that
+  //      translation to its config center.
+  //   3. Picks the best runtime structuralObject for each predicted position
+  //      among objects of the same type within `memberSearchRadiusN`.  Falls
+  //      back to any-type match at half score if no same-type object exists.
+  //   4. Scores object↔object relations: for every config relation whose
+  //      endpoints both have correspondences, checks alignment / hOrder /
+  //      vOrder / containment agreement and accumulates a consistency ratio.
+  //   5. Computes a final score blending member coverage and relation
+  //      consistency; partial matches survive but score lower.
+  //
+  // Returns: { matches: [ConstellationMatch], debug } sorted by finalScore desc.
+  // ConstellationMatch:
+  //   {
+  //     rank, candidateRank, anchorObjId, anchorType,
+  //     centerN, estimatedTranslationN,
+  //     memberCorrespondences: [
+  //       { configMemberId, runtimeObjId, runtimeType, distN,
+  //         typeMatch, scoreContribution }
+  //     ],
+  //     matchedMemberCount, totalMemberCount, memberCoverage,
+  //     relationConsistencyRatio, relationsChecked, relationsAgreed,
+  //     partial, finalScore, accepted
+  //   }
+  // ---------------------------------------------------------------------------
+  function matchConstellationCandidates(configConstellation, runtimePageStructure, candidates, opts){
+    if(!configConstellation || !runtimePageStructure || !Array.isArray(candidates)){
+      return { matches: [], debug: { reason: 'bad_input' } };
+    }
+    var o = opts || {};
+    var memberSearchRadiusN = typeof o.memberSearchRadiusN === 'number' ? o.memberSearchRadiusN : 0.08;
+    var acceptThreshold     = typeof o.acceptThreshold     === 'number' ? o.acceptThreshold     : 0.35;
+    var maxMatches          = typeof o.maxMatches          === 'number' ? o.maxMatches          : 5;
+    var alignThreshN        = typeof o.alignThreshN        === 'number' ? o.alignThreshN        : 0.02;
+    var memberWeight        = typeof o.memberWeight        === 'number' ? o.memberWeight        : 0.55;
+    var relationWeight      = typeof o.relationWeight      === 'number' ? o.relationWeight      : 0.45;
+
+    var configMembers   = Array.isArray(configConstellation.members)   ? configConstellation.members   : [];
+    var configRelations = Array.isArray(configConstellation.relations) ? configConstellation.relations : [];
+    var rtObjects       = Array.isArray(runtimePageStructure.structuralObjects) ? runtimePageStructure.structuralObjects : [];
+    var configCenter    = configConstellation.coarsePagePosition || { xN: 0.5, yN: 0.5 };
+
+    if(!configMembers.length || !rtObjects.length){
+      return { matches: [], debug: { reason: 'empty_members_or_runtime_objects' } };
+    }
+
+    function classifyAlignment(adx, ady){
+      var ax = Math.abs(adx), ay = Math.abs(ady);
+      if(ay <= alignThreshN && ax > alignThreshN) return 'horizontal';
+      if(ax <= alignThreshN && ay > alignThreshN) return 'vertical';
+      return 'diagonal';
+    }
+    function classifyHOrder(adx){
+      if(Math.abs(adx) <= alignThreshN) return 'same_h';
+      return adx < 0 ? 'left_of' : 'right_of';
+    }
+    function classifyVOrder(ady){
+      if(Math.abs(ady) <= alignThreshN) return 'same_v';
+      return ady < 0 ? 'above' : 'below';
+    }
+
+    var matches = [];
+
+    for(var ci = 0; ci < candidates.length; ci++){
+      var cand = candidates[ci];
+      if(!cand) continue;
+      var tx = (cand.estimatedTranslationN && cand.estimatedTranslationN.dxN) || 0;
+      var ty = (cand.estimatedTranslationN && cand.estimatedTranslationN.dyN) || 0;
+
+      // Step 1: predict + correspond every config member
+      var memberCorrs = [];
+      var usedRuntimeIds = {};
+      var matchedCount = 0;
+      var memberScoreSum = 0;
+      var memberById = {};
+
+      for(var mi = 0; mi < configMembers.length; mi++){
+        var cm = configMembers[mi];
+        var cmGeom = cm.geom || {};
+        var predX = (cmGeom.cxN || 0) + tx;
+        var predY = (cmGeom.cyN || 0) + ty;
+
+        var bestObj = null, bestDist = Infinity, bestTypeMatch = false;
+        for(var oi = 0; oi < rtObjects.length; oi++){
+          var ro = rtObjects[oi];
+          if(!ro || !ro.geom || usedRuntimeIds[ro.id]) continue;
+          var rdx = (ro.geom.cxN || 0) - predX;
+          var rdy = (ro.geom.cyN || 0) - predY;
+          var rdist = Math.sqrt(rdx * rdx + rdy * rdy);
+          if(rdist > memberSearchRadiusN) continue;
+          var typeMatch = (ro.type === cm.type);
+          // Penalize type mismatch by inflating effective distance.
+          var effDist = typeMatch ? rdist : rdist * 2.0;
+          if(effDist < bestDist){
+            bestDist      = effDist;
+            bestObj       = ro;
+            bestTypeMatch = typeMatch;
+          }
+        }
+
+        if(bestObj){
+          usedRuntimeIds[bestObj.id] = true;
+          var prox = Math.max(0, 1.0 - (bestDist / Math.max(1e-6, memberSearchRadiusN)));
+          var contribution = prox * (bestTypeMatch ? 1.0 : 0.5);
+          matchedCount++;
+          memberScoreSum += contribution;
+          var corr = {
+            configMemberId:    cm.objId,
+            runtimeObjId:      bestObj.id,
+            runtimeType:       bestObj.type,
+            distN:             Number(bestDist.toFixed(4)),
+            typeMatch:         bestTypeMatch,
+            scoreContribution: Number(contribution.toFixed(4))
+          };
+          memberCorrs.push(corr);
+          memberById[cm.objId] = { corr: corr, runtime: bestObj, config: cm };
+        } else {
+          memberCorrs.push({
+            configMemberId:    cm.objId,
+            runtimeObjId:      null,
+            runtimeType:       null,
+            distN:             null,
+            typeMatch:         false,
+            scoreContribution: 0
+          });
+        }
+      }
+
+      var memberCoverage = matchedCount / configMembers.length;
+      var memberAvg      = memberCorrs.length ? (memberScoreSum / configMembers.length) : 0;
+
+      // Step 2: relation consistency
+      var relationsChecked = 0;
+      var relationsAgreed  = 0;
+      for(var ri = 0; ri < configRelations.length; ri++){
+        var rel = configRelations[ri];
+        var fromEntry = memberById[rel.fromId];
+        var toEntry   = memberById[rel.toId];
+        if(!fromEntry || !toEntry) continue;
+        var fromG = fromEntry.runtime.geom;
+        var toG   = toEntry.runtime.geom;
+        if(!fromG || !toG) continue;
+        var rdx2 = (toG.cxN || 0) - (fromG.cxN || 0);
+        var rdy2 = (toG.cyN || 0) - (fromG.cyN || 0);
+        var rtAlign  = classifyAlignment(rdx2, rdy2);
+        var rtHOrder = classifyHOrder(rdx2);
+        var rtVOrder = classifyVOrder(rdy2);
+
+        var ok = 0, total = 0;
+        if(rel.alignment){ total++; if(rel.alignment === rtAlign) ok++; }
+        if(rel.hOrder)   { total++; if(rel.hOrder    === rtHOrder) ok++; }
+        if(rel.vOrder)   { total++; if(rel.vOrder    === rtVOrder) ok++; }
+        if(total > 0){
+          relationsChecked += total;
+          relationsAgreed  += ok;
+        }
+      }
+      var relationConsistencyRatio = relationsChecked > 0 ? (relationsAgreed / relationsChecked) : 0;
+
+      // Step 3: blended final score.  When no relations are checkable (e.g.
+      // single-member matches), fall back to pure member coverage so partial
+      // matches still survive.
+      var finalScore;
+      if(relationsChecked > 0){
+        finalScore = (memberAvg * memberWeight) + (relationConsistencyRatio * relationWeight);
+      } else {
+        finalScore = memberAvg;
+      }
+      // Light bonus from the Phase 4 candidate score so anchor quality survives.
+      var anchorBoost = Math.max(0, Math.min(0.15, (cand.score || 0) * 0.15));
+      finalScore = Math.max(0, Math.min(1, finalScore + anchorBoost));
+
+      matches.push({
+        rank:                     0, // assigned after sort
+        candidateRank:            (typeof cand.rank === 'number') ? cand.rank : ci,
+        anchorObjId:              cand.anchorObjId || null,
+        anchorType:               cand.anchorType  || null,
+        centerN:                  cand.centerN || { xN: configCenter.xN, yN: configCenter.yN },
+        estimatedTranslationN:    { dxN: tx, dyN: ty },
+        memberCorrespondences:    memberCorrs,
+        matchedMemberCount:       matchedCount,
+        totalMemberCount:         configMembers.length,
+        memberCoverage:           Number(memberCoverage.toFixed(4)),
+        relationConsistencyRatio: Number(relationConsistencyRatio.toFixed(4)),
+        relationsChecked:         relationsChecked,
+        relationsAgreed:          relationsAgreed,
+        partial:                  matchedCount < configMembers.length,
+        finalScore:               Number(finalScore.toFixed(4)),
+        accepted:                 finalScore >= acceptThreshold
+      });
+    }
+
+    matches.sort(function(a, b){ return b.finalScore - a.finalScore; });
+    if(matches.length > maxMatches) matches.length = maxMatches;
+    for(var k = 0; k < matches.length; k++) matches[k].rank = k;
+
+    var accepted = matches.filter(function(m){ return m.accepted; });
+
+    return {
+      matches: matches,
+      debug: {
+        candidatesScored: candidates.length,
+        acceptedCount:    accepted.length,
+        acceptThreshold:  acceptThreshold,
+        memberWeight:     memberWeight,
+        relationWeight:   relationWeight,
+        configMemberCount:   configMembers.length,
+        configRelationCount: configRelations.length
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // reconstructFieldFromMatch — Phase 6 field reconstruction + hierarchical
+  // transforms.
+  //
+  // Given a Phase 5 ConstellationMatch, the config-time constellation
+  // (Phase 2), the config field structural identity (Phase 3), the original
+  // config field bbox (page-normalized), and the runtime PageStructure
+  // (Phase 1), reconstruct the runtime field bbox using hierarchical
+  // (page → constellation → field) projection.
+  //
+  // Transform policy:
+  //   • ≥4 correspondences with reasonable spatial spread → affine LS
+  //   • ≥2 correspondences                                → similarity
+  //     (translation + uniform scale, no rotation — most stable for
+  //      axis-aligned form layouts)
+  //   • 1 correspondence                                  → translation only
+  //   • 0 correspondences                                  → normalized prior
+  //     (fallback: apply match.estimatedTranslationN to the config field box)
+  //
+  // After geometric projection, optionally snaps the y-band to the runtime
+  // row corresponding to the config containing-row (when both are present).
+  //
+  // Returns:
+  //   {
+  //     ok, transformModel, correspondencesUsed,
+  //     reconstructedBoxN: { x0, y0, x1, y1 },
+  //     reconstructedBoxPx: { x, y, w, h, page } | null,
+  //     usedRowSnap, debug
+  //   }
+  // ---------------------------------------------------------------------------
+  function reconstructFieldFromMatch(configConstellation, configStructuralIdentity, fieldBboxNormConfig, match, runtimePageStructure, surfaceSize, opts){
+    var o = opts || {};
+    var minAffine    = typeof o.minAffineCorrespondences  === 'number' ? o.minAffineCorrespondences  : 4;
+    var rowSnapEnabled = o.rowSnapEnabled !== false;
+
+    if(!fieldBboxNormConfig || !match){
+      return { ok:false, reason:'bad_input', debug:null };
+    }
+
+    // Index runtime objects by id
+    var rtObjects = (runtimePageStructure && Array.isArray(runtimePageStructure.structuralObjects))
+                  ? runtimePageStructure.structuralObjects : [];
+    var rtById = {};
+    for(var i = 0; i < rtObjects.length; i++){ if(rtObjects[i] && rtObjects[i].id) rtById[rtObjects[i].id] = rtObjects[i]; }
+
+    // Build correspondence point pairs from the match
+    var cfgMembersById = {};
+    var cfgMembers = (configConstellation && Array.isArray(configConstellation.members)) ? configConstellation.members : [];
+    for(var ci = 0; ci < cfgMembers.length; ci++){ cfgMembersById[cfgMembers[ci].objId] = cfgMembers[ci]; }
+
+    var pairs = []; // { cfg:{x,y}, rt:{x,y} }
+    var corrs = Array.isArray(match.memberCorrespondences) ? match.memberCorrespondences : [];
+    for(var k = 0; k < corrs.length; k++){
+      var c = corrs[k];
+      if(!c || !c.runtimeObjId) continue;
+      var cm = cfgMembersById[c.configMemberId];
+      var ro = rtById[c.runtimeObjId];
+      if(!cm || !ro || !cm.geom || !ro.geom) continue;
+      pairs.push({
+        cfg: { x: cm.geom.cxN, y: cm.geom.cyN },
+        rt:  { x: ro.geom.cxN, y: ro.geom.cyN }
+      });
+    }
+
+    // Determine transform
+    var transformModel = 'prior';
+    var apply = null; // function(p) -> p in runtime norm coords
+
+    function applyTranslation(tx, ty){
+      return function(p){ return { x: p.x + tx, y: p.y + ty }; };
+    }
+    function applySimilarity(sx, sy, tx, ty){
+      // axis-aligned similarity (independent x/y scale → similarity-without-
+      // rotation, slightly more permissive than uniform scale; rotation is
+      // intentionally not modeled for axis-aligned form layouts)
+      return function(p){ return { x: sx * p.x + tx, y: sy * p.y + ty }; };
+    }
+    function applyAffine(M){
+      // M = [a,b,tx, c,d,ty]
+      return function(p){
+        return { x: M[0]*p.x + M[1]*p.y + M[2], y: M[3]*p.x + M[4]*p.y + M[5] };
+      };
+    }
+
+    function fitSimilarity(pp){
+      // Independent x/y scale (no rotation): minimize per-axis LS.
+      var n = pp.length;
+      var mxC=0,myC=0,mxR=0,myR=0;
+      for(var i = 0; i < n; i++){ mxC+=pp[i].cfg.x; myC+=pp[i].cfg.y; mxR+=pp[i].rt.x; myR+=pp[i].rt.y; }
+      mxC/=n; myC/=n; mxR/=n; myR/=n;
+      var sxNum=0,sxDen=0,syNum=0,syDen=0;
+      for(var j = 0; j < n; j++){
+        var dxc = pp[j].cfg.x - mxC, dxr = pp[j].rt.x - mxR;
+        var dyc = pp[j].cfg.y - myC, dyr = pp[j].rt.y - myR;
+        sxNum += dxc*dxr; sxDen += dxc*dxc;
+        syNum += dyc*dyr; syDen += dyc*dyc;
+      }
+      var sx = sxDen > 1e-9 ? (sxNum/sxDen) : 1;
+      var sy = syDen > 1e-9 ? (syNum/syDen) : 1;
+      // Clamp to sane range to avoid degenerate fits
+      if(!isFinite(sx) || sx <= 0) sx = 1;
+      if(!isFinite(sy) || sy <= 0) sy = 1;
+      sx = Math.max(0.5, Math.min(2.0, sx));
+      sy = Math.max(0.5, Math.min(2.0, sy));
+      var tx = mxR - sx * mxC;
+      var ty = myR - sy * myC;
+      return { sx:sx, sy:sy, tx:tx, ty:ty };
+    }
+
+    function fitAffine(pp){
+      // Solve [a b tx; c d ty] via 6x6 normal equations on 2N rows.
+      // Build A^T A (6x6) and A^T b (6x1) directly.
+      var ATA = new Array(36); for(var z=0; z<36; z++) ATA[z]=0;
+      var ATb = [0,0,0,0,0,0];
+      for(var i = 0; i < pp.length; i++){
+        var X = pp[i].cfg.x, Y = pp[i].cfg.y;
+        var u = pp[i].rt.x,  v = pp[i].rt.y;
+        // x-row:  [X Y 1 0 0 0]  -> u
+        var rx = [X,Y,1,0,0,0];
+        // y-row:  [0 0 0 X Y 1]  -> v
+        var ry = [0,0,0,X,Y,1];
+        for(var a = 0; a < 6; a++){
+          ATb[a] += rx[a]*u + ry[a]*v;
+          for(var b = 0; b < 6; b++){
+            ATA[a*6+b] += rx[a]*rx[b] + ry[a]*ry[b];
+          }
+        }
+      }
+      // Gaussian elimination 6x6
+      var Aug = new Array(6);
+      for(var r = 0; r < 6; r++){
+        Aug[r] = new Array(7);
+        for(var s = 0; s < 6; s++) Aug[r][s] = ATA[r*6+s];
+        Aug[r][6] = ATb[r];
+      }
+      for(var col = 0; col < 6; col++){
+        var piv = col, max = Math.abs(Aug[col][col]);
+        for(var rr = col+1; rr < 6; rr++){
+          if(Math.abs(Aug[rr][col]) > max){ max = Math.abs(Aug[rr][col]); piv = rr; }
+        }
+        if(max < 1e-9) return null;
+        if(piv !== col){ var tmp = Aug[col]; Aug[col] = Aug[piv]; Aug[piv] = tmp; }
+        for(var rr2 = 0; rr2 < 6; rr2++){
+          if(rr2 === col) continue;
+          var f = Aug[rr2][col] / Aug[col][col];
+          for(var cc = col; cc < 7; cc++) Aug[rr2][cc] -= f * Aug[col][cc];
+        }
+      }
+      var M = [
+        Aug[0][6]/Aug[0][0], Aug[1][6]/Aug[1][1], Aug[2][6]/Aug[2][2],
+        Aug[3][6]/Aug[3][3], Aug[4][6]/Aug[4][4], Aug[5][6]/Aug[5][5]
+      ];
+      // Sanity-clamp scale terms
+      if(!isFinite(M[0]) || !isFinite(M[4])) return null;
+      return M;
+    }
+
+    function spatialSpreadOk(pp){
+      var minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+      for(var i = 0; i < pp.length; i++){
+        if(pp[i].cfg.x < minX) minX = pp[i].cfg.x;
+        if(pp[i].cfg.x > maxX) maxX = pp[i].cfg.x;
+        if(pp[i].cfg.y < minY) minY = pp[i].cfg.y;
+        if(pp[i].cfg.y > maxY) maxY = pp[i].cfg.y;
+      }
+      return (maxX - minX) > 0.05 && (maxY - minY) > 0.05;
+    }
+
+    if(pairs.length >= minAffine && spatialSpreadOk(pairs)){
+      var M = fitAffine(pairs);
+      if(M){ transformModel = 'affine'; apply = applyAffine(M); }
+    }
+    if(!apply && pairs.length >= 2){
+      var sim = fitSimilarity(pairs);
+      transformModel = 'similarity';
+      apply = applySimilarity(sim.sx, sim.sy, sim.tx, sim.ty);
+    }
+    if(!apply && pairs.length === 1){
+      transformModel = 'translation';
+      apply = applyTranslation(pairs[0].rt.x - pairs[0].cfg.x, pairs[0].rt.y - pairs[0].cfg.y);
+    }
+    if(!apply){
+      transformModel = 'prior';
+      var et = match.estimatedTranslationN || { dxN: 0, dyN: 0 };
+      apply = applyTranslation(et.dxN || 0, et.dyN || 0);
+    }
+
+    // Project the four corners of the config field bbox
+    var bx0 = Number(fieldBboxNormConfig.x0 || 0);
+    var by0 = Number(fieldBboxNormConfig.y0 || 0);
+    var bx1 = Number(fieldBboxNormConfig.x1 || 0);
+    var by1 = Number(fieldBboxNormConfig.y1 || 0);
+    var corners = [
+      { x: bx0, y: by0 },
+      { x: bx1, y: by0 },
+      { x: bx1, y: by1 },
+      { x: bx0, y: by1 }
+    ];
+    var projected = corners.map(apply);
+    var px0 = Math.min(projected[0].x, projected[1].x, projected[2].x, projected[3].x);
+    var py0 = Math.min(projected[0].y, projected[1].y, projected[2].y, projected[3].y);
+    var px1 = Math.max(projected[0].x, projected[1].x, projected[2].x, projected[3].x);
+    var py1 = Math.max(projected[0].y, projected[1].y, projected[2].y, projected[3].y);
+
+    // Optional row-snap: if config field has a containing row band and the
+    // Phase 5 match found a runtime correspondence for it, snap the y-band
+    // to that runtime row's mean-y while preserving the field's offset
+    // within the row.
+    var usedRowSnap = false;
+    if(rowSnapEnabled && configStructuralIdentity && configStructuralIdentity.bboxRelRow){
+      var rowRel = configStructuralIdentity.bboxRelRow;
+      var rtRowCorr = null;
+      for(var rc = 0; rc < corrs.length; rc++){
+        if(corrs[rc] && corrs[rc].configMemberId === rowRel.bandId && corrs[rc].runtimeObjId){
+          rtRowCorr = rtById[corrs[rc].runtimeObjId];
+          break;
+        }
+      }
+      if(rtRowCorr && rtRowCorr.geom){
+        var rtRowCy = rtRowCorr.geom.cyN;
+        var fieldH  = py1 - py0;
+        // distFromBandYN was the signed offset from band-y to field center.
+        var newCy = rtRowCy + (rowRel.distFromBandYN || 0);
+        py0 = newCy - fieldH/2;
+        py1 = newCy + fieldH/2;
+        usedRowSnap = true;
+      }
+    }
+
+    // Clamp to [0,1]
+    px0 = Math.max(0, Math.min(1, px0));
+    py0 = Math.max(0, Math.min(1, py0));
+    px1 = Math.max(0, Math.min(1, px1));
+    py1 = Math.max(0, Math.min(1, py1));
+    if(px1 - px0 < 1e-4) px1 = Math.min(1, px0 + 1e-4);
+    if(py1 - py0 < 1e-4) py1 = Math.min(1, py0 + 1e-4);
+
+    var reconstructedBoxN = { x0: px0, y0: py0, x1: px1, y1: py1 };
+    var reconstructedBoxPx = null;
+    if(surfaceSize && surfaceSize.width && surfaceSize.height){
+      reconstructedBoxPx = {
+        x: px0 * surfaceSize.width,
+        y: py0 * surfaceSize.height,
+        w: Math.max(1, (px1 - px0) * surfaceSize.width),
+        h: Math.max(1, (py1 - py0) * surfaceSize.height),
+        page: match.page || 1
+      };
+    }
+
+    return {
+      ok: true,
+      transformModel:      transformModel,
+      correspondencesUsed: pairs.length,
+      reconstructedBoxN:   reconstructedBoxN,
+      reconstructedBoxPx:  reconstructedBoxPx,
+      usedRowSnap:         usedRowSnap,
+      debug: {
+        pairs:              pairs.length,
+        matchRank:          match.rank,
+        matchFinalScore:    match.finalScore,
+        memberCoverage:     match.memberCoverage,
+        relationConsistency:match.relationConsistencyRatio,
+        partial:            match.partial
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // buildConstellation — Phase 2 constellation construction (config time)
   //
   // Given a normalized field bbox and a PageStructure (Phase 1), selects a
@@ -1455,6 +1947,8 @@
     buildPageStructure,
     buildConstellation,
     computeFieldStructuralIdentity,
-    selectConstellationCandidates
+    selectConstellationCandidates,
+    matchConstellationCandidates,
+    reconstructFieldFromMatch
   };
 });

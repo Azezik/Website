@@ -397,6 +397,235 @@ with structural metadata — no competing model is introduced.
 - [x] `structuralCandidates` exposed in debug output on all return paths where it is computed.
 - [x] K default = 5, config via `DEFAULTS.globalScanTopCandidates`.
 
+## Phase 5 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `matchConstellationCandidates(configConstellation, runtimePageStructure, candidates, opts)` (~210 lines). Pure geometry; no OpenCV calls.
+- Promotes Phase 4's coarse anchor shortlist into scored, member-correspondence-
+  bearing matches via a relation-graph scorer.
+- Per candidate:
+  1. Derives `(dxN, dyN)` translation from `cand.estimatedTranslationN`.
+  2. For each config member, predicts the runtime center by applying that
+     translation to the config member center, then chooses the best runtime
+     `structuralObject` of the same type within `memberSearchRadiusN` (default
+     0.08 page-diagonal). Falls back to any-type match at half score if no
+     same-type object exists. Each runtime object is consumed at most once.
+  3. Builds a `memberCorrespondences[]` map and accumulates `matchedCount`
+     and per-member proximity scores; missing members are recorded with
+     `runtimeObjId: null` so partial matches are explicit.
+  4. For every config relation whose endpoints both have correspondences,
+     re-derives `alignment / hOrder / vOrder` from the runtime pair and
+     compares with the config relation. `relationsAgreed / relationsChecked`
+     yields `relationConsistencyRatio`.
+  5. `finalScore = memberAvg * memberWeight + relationConsistencyRatio *
+     relationWeight + anchorBoost`. When no relations are checkable (single
+     member matches), it falls back to pure member coverage so partial
+     matches still survive. `anchorBoost` is a small additive lift from the
+     Phase 4 candidate score (capped at 0.15).
+- Default weights: `memberWeight=0.55`, `relationWeight=0.45`,
+  `acceptThreshold=0.35`, `alignThreshN=0.02`, `maxMatches=5`.
+- Returns `{ matches: [ConstellationMatch], debug }` sorted by `finalScore`
+  desc; the result preserves *every* candidate (not just the best one) so
+  Phase 6/7 can opt into repeated-match emission via search policy.
+- Each `ConstellationMatch` carries `rank, candidateRank, anchorObjId,
+  anchorType, centerN, estimatedTranslationN, memberCorrespondences,
+  matchedMemberCount, totalMemberCount, memberCoverage,
+  relationConsistencyRatio, relationsChecked, relationsAgreed, partial,
+  finalScore, accepted`.
+- Exported via the module return object.
+
+**`engines/wfg4/wfg4-localization.js`**
+- After the existing Phase 4 `selectConstellationCandidates()` call, invokes
+  `matchConstellationCandidates()` with the runtime `pageEntry.pageStructure`,
+  the config `constellation`, and the Phase 4 shortlist.
+- Stores `structMatches`, `structMatchDebug`, and `acceptedStructMatches`.
+- Promotes `hasViableStructCandidates = true` whenever Phase 5 produces at
+  least one accepted match (so a non-viable Phase 4 anchor can still be
+  rescued by relation-graph evidence).
+- Window builder now prefers Phase 5 accepted matches as the source for the
+  primary `D_struct_*` windows; if Phase 5 accepted nothing, it falls back
+  to Phase 4 raw viable candidates (preserving Phase 4 behavior). ORB on the
+  predicted box remains the last reserved fallback window.
+- New engine-log event `struct.matches` exposes match count, accepted count,
+  top score, top partial flag, top coverage, and top relation-consistency
+  ratio for diagnostics.
+- `structuralMatches` and `structuralMatchDebug` added to both the
+  degraded-fallback and main success/failure return objects.
+
+### Design decisions
+
+- Member-search radius `0.08` page-diagonal: tight enough that candidates
+  near the wrong region don't false-match members from elsewhere on the
+  page, loose enough to absorb realistic scale/render drift between config
+  and runtime layouts.
+- Type-mismatch penalty (effective distance ×2 instead of hard reject):
+  preserves matchability when row-band/separator classification flips
+  between config and runtime, while still preferring exact-type pairs.
+- `memberWeight=0.55 / relationWeight=0.45`: relation consistency is the
+  signal that distinguishes "found the right structural pattern" from
+  "found a similar set of objects in the wrong arrangement", but coverage
+  must dominate slightly so single-member-rich constellations are still
+  rankable when relation count is low.
+- Anchor boost capped at 0.15: lets the Phase 4 anchor quality act as a
+  tiebreaker without overpowering the relation-graph evidence.
+- Relation-less fallback to pure member coverage: necessary because
+  constellations with only 1–2 matched members yield zero checkable
+  relations, and partial-match support is mandatory per the plan.
+- Repeated-constellation support: every candidate above `acceptThreshold`
+  is returned and ranked. Phase 6/7 will decide whether to consume only the
+  top match or emit one reconstruction per accepted match based on search
+  policy. Phase 5 itself does not commit to single-vs-multi output.
+- Defaults exposed via `DEFAULTS.constellationAcceptThreshold` and
+  `DEFAULTS.constellationMemberSearchRadiusN` so they can be tuned without
+  touching the matcher.
+
+### Fixes / deviations
+
+- None. Phase 5 is additive. The Phase 4 fallback path is preserved exactly:
+  if Phase 5 produces no accepted matches, the runtime falls back to the
+  Phase 4 viable list, and if there are no viable Phase 4 candidates either,
+  the legacy ORB-first window order runs untouched. ORB remains a
+  refine-only / last-resort fallback as required.
+
+### Completion criteria met
+
+- [x] Matcher emits scored selections with member-correspondence map.
+- [x] Partial matches accepted (missing members recorded explicitly,
+      relation-less fallback to coverage-only scoring).
+- [x] Repeated constellations supported (all accepted matches returned,
+      ranked, ready for Phase 6/7 multi-instance policy).
+- [x] Debug surface (`struct.matches` log + `structuralMatches` /
+      `structuralMatchDebug` on returns) shows score breakdown.
+- [x] ORB still gated as refine-only / last-window fallback.
+- [x] Existing field-level localization contract untouched.
+
+## Phase 6 — Implementation record (2026-04-07)
+
+### What was done
+
+**`engines/wfg4/wfg4-opencv.js`**
+- Added `reconstructFieldFromMatch(configConstellation, configStructuralIdentity, fieldBboxNormConfig, match, runtimePageStructure, surfaceSize, opts)` (~220 lines). Pure geometry; no OpenCV calls.
+- Builds correspondence point pairs from `match.memberCorrespondences` by
+  joining each correspondence to its config member (`cfg.cxN/cyN`) and the
+  matched runtime structural object (`rt.cxN/cyN`).
+- Hierarchical transform policy:
+  - **≥4 correspondences with spatial spread > 0.05 in both axes** → affine
+    least-squares fit (6×6 normal equations, in-place Gaussian elimination).
+  - **≥2 correspondences** → axis-aligned similarity (independent x/y scale,
+    no rotation), per-axis least-squares with scale clamped to [0.5, 2.0].
+  - **1 correspondence** → translation only.
+  - **0 correspondences** → fallback to `match.estimatedTranslationN`
+    (normalized prior, same as Phase 4 simple translation).
+- Projects all four corners of the config field bbox through the transform
+  and takes the axis-aligned bounding box of the projected corners.
+- **Row snap (optional, on by default)**: if `configStructuralIdentity.bboxRelRow`
+  exists and the Phase 5 match found a runtime correspondence for that row
+  band, snaps the field y-band to the runtime row's mean-y while preserving
+  `distFromBandYN` (the signed offset from band-y to field center). The
+  field height is preserved.
+- Clamps to [0, 1], enforces a minimum 1e-4 width/height, and emits both
+  normalized (`reconstructedBoxN`) and pixel (`reconstructedBoxPx`) forms
+  using the supplied `surfaceSize`.
+- Returns `{ ok, transformModel, correspondencesUsed, reconstructedBoxN,
+  reconstructedBoxPx, usedRowSnap, debug }`.
+- Exported via the module return object.
+
+**`engines/wfg4/wfg4-localization.js`**
+- After Phase 5, iterates `acceptedStructMatches` and invokes
+  `reconstructFieldFromMatch()` for each, using `ref.bboxNorm` as the
+  config field bbox, `pageEntry.dimensions.working` as `surfaceSize`, and
+  `ref.structuralIdentity` for row-snap. Attaches the result to each match
+  as `match.reconstruction` and pushes a flat copy onto
+  `structReconstructions[]`.
+- Window builder: when an accepted match carries a reconstruction, the
+  primary `D_struct_*` window is built around that reconstructed pixel box
+  (still padded by `basePad`). When no reconstruction is attached, the
+  Phase 4/5 simple-translation behavior is preserved as fallback.
+- Added `STRUCTURAL_RECONSTRUCTED = 'structural_reconstructed'` to the
+  local `BBOX_SRC` table (mirrors any future `Types.BBOX_SOURCE` addition).
+- After ORB attempts, if `attemptsWon` is false but a top reconstruction
+  exists, adopts `topReconstruction.reconstructedBoxPx` as the localized
+  box and sets `usedStructuralReconstruction = true`.
+- Localization gate, status, `bboxSource`, and `reason` paths updated to
+  recognize structural reconstruction as a successful localization (so it
+  flows through the existing field localization contract via
+  `STRUCTURAL_RECONSTRUCTED`). Existing `STRUCTURAL_FALLBACK` and
+  `PREDICTED_FALLBACK` paths are preserved verbatim.
+- New engine-log event `struct.reconstructions` exposes reconstruction
+  count, top transform model, top correspondence count, and top row-snap
+  state.
+- `structuralReconstructions` added to both the degraded-fallback and
+  main success/failure return objects.
+
+### Schema added (`structuralReconstructions[i]`)
+
+```
+{
+  matchRank, transformModel,            // 'affine' | 'similarity' | 'translation' | 'prior'
+  correspondencesUsed,
+  reconstructedBoxN:  { x0, y0, x1, y1 },
+  reconstructedBoxPx: { x, y, w, h, page } | null,
+  usedRowSnap,
+  debug: {
+    pairs, matchRank, matchFinalScore,
+    memberCoverage, relationConsistency, partial
+  }
+}
+```
+
+### Design decisions
+
+- **Similarity model = independent x/y scale, no rotation.** Form layouts
+  are axis-aligned; rotation introduces fragility for small N. Independent
+  per-axis scale absorbs render-scale differences (e.g. wider scans, taller
+  PDF rasterizations) without overfitting. Scale clamped to [0.5, 2.0] to
+  reject degenerate fits from collinear correspondences.
+- **Affine threshold = 4 correspondences + spread > 0.05.** Prevents
+  upgrading to affine on collinear or clustered points where the fit would
+  be unstable. The spatial-spread guard mirrors Phase 2's 8-sector
+  constellation goal: distributed correspondences only.
+- **Row-snap is post-projection, not part of the LS fit.** This keeps the
+  geometric transform unbiased while still correcting "right region, wrong
+  row" — the dominant remaining failure mode. It only fires when the
+  config-time row band has a runtime correspondence in the same Phase 5
+  match, so it cannot snap to an unrelated row.
+- **Prior fallback uses `match.estimatedTranslationN`.** When no member
+  correspondences are present (all-null pairs), the reconstructor degrades
+  to the same translation Phase 4 used, so the resulting box matches the
+  pre-Phase 6 behavior — no regression on degenerate cases.
+- **Reconstructed box is adopted as the localized box only when ORB
+  attempts fail.** Phase 6 deliberately does *not* override successful ORB
+  matches; that demotion is Phase 7's responsibility. ORB still acts as
+  refinement *within* the structural window when it succeeds, and the
+  reconstructed box is still used as the search center.
+- **`STRUCTURAL_RECONSTRUCTED` is a new bbox source, not a reuse of
+  `STRUCTURAL_FALLBACK`.** Downstream consumers can distinguish "snapped
+  via existing structuralRefineBox heuristics" from "projected via Phase 6
+  hierarchical transform" without breaking the existing contract.
+
+### Fixes / deviations
+
+- None. Phase 6 is additive. When Phase 5 produces no accepted matches the
+  pre-Phase 6 path runs unchanged. When Phase 5 produces accepted matches
+  but no reconstruction succeeds (e.g. zero pairs and zero translation),
+  the simple-translation D_struct windows from Phase 4/5 still build.
+
+### Completion criteria met
+
+- [x] Reconstructed bbox produced for each accepted Phase 5 match.
+- [x] Reconstruction passed to downstream readout via the existing field
+      localization contract (`localizedBox`, `finalReadoutBox`,
+      `bboxSource = STRUCTURAL_RECONSTRUCTED` when used).
+- [x] Hierarchical transform: page → constellation correspondences →
+      similarity/affine projection → optional row snap.
+- [x] Partial-match fallback to normalized translation prior.
+- [x] ORB still runs within structural windows; reconstruction adopted as
+      localized box only when ORB fails. Refine demotion remains Phase 7.
+- [x] Existing `STRUCTURAL_FALLBACK` / `PREDICTED_FALLBACK` paths and the
+      Phase 4/5 fallbacks are preserved verbatim.
+
 ## Issues / blockers / fixes
 
 - None encountered during planning. Spec is internally consistent and
