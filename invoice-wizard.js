@@ -12735,8 +12735,8 @@ function cleanupDoc(){
   if(state.wfg4){
     state.wfg4.configSurface = null;
     state.wfg4.runSurface = null;
+    state.wfg4.pageCanvases = {};
   }
-  state.wfg4RenderedPages = null;
   clearDocumentSurfaces();
   overlayCtx.clearRect(0,0,els.overlayCanvas.width, els.overlayCanvas.height);
   updateWfg4DebugWatermark();
@@ -12848,6 +12848,8 @@ async function prepareRunDocument(file){
   const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
   state.pdf = await loadingTask.promise;
   const scale = BASE_PDF_SCALE;
+  // Reset the unified WFG4 raster cache for the new document.
+  clearWfg4PageRasterCache();
   let totalH = 0;
   for(let i=1; i<=state.pdf.numPages; i++){
     const page = await state.pdf.getPage(i);
@@ -12867,21 +12869,11 @@ async function prepareRunDocument(file){
     state.tokensByPage[i] = mergedTokens;
     await buildKeywordIndexForPage(i, mergedTokens, vp);
     if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
-    // WFG4: els.pdfCanvas is not rendered in run mode, so capture each page into
-    // a temp canvas now while we have the pdf.js page object available.
-    // captureWfg4SurfaceForMode will use these instead of the blank pdfCanvas.
+    // WFG4: populate the unified per-page raster cache from the pdf.js page.
+    // This is the *same* rendering path that renderAllPages() uses in config
+    // mode, so downstream WFG4 stages see identical pixels across modes.
     if(getConfiguredEngineType() === ENGINE_KIND.WFG4){
-      const pageW = Math.max(1, Math.round(vp.width));
-      const pageH = Math.max(1, Math.round(vp.height));
-      const tmp = document.createElement('canvas');
-      tmp.width = pageW;
-      tmp.height = pageH;
-      const tctx = tmp.getContext('2d');
-      if(tctx){
-        try { await page.render({ canvasContext: tctx, viewport: vp }).promise; } catch(_e){}
-      }
-      state.wfg4RenderedPages = state.wfg4RenderedPages || {};
-      state.wfg4RenderedPages[i] = tmp;
+      await cacheWfg4PdfPageCanvas(i, page, vp);
     }
     totalH += vp.height;
   }
@@ -12931,6 +12923,9 @@ async function renderAllPages(){
   const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
   state.pageViewports = [];
   state.pageOffsets = [];
+  // Reset the unified WFG4 raster cache for the new document load so we never
+  // serve a canvas from a previous file.
+  clearWfg4PageRasterCache();
 
   let maxW = 0, totalH = 0;
   const pageCanvases = [];
@@ -12950,6 +12945,10 @@ async function renderAllPages(){
     state.pageRenderReady[i-1] = false;
     await renderTask.promise;
     state.pageRenderReady[i-1] = true;
+    // Populate unified WFG4 raster cache. This is the same per-page canvas
+    // that pre-composite drives els.pdfCanvas below, so the bits that WFG4
+    // reads in config mode now match what run mode renders from pdf.js.
+    ensureWfg4StateBucket().pageCanvases[i] = tmp;
     pageCanvases.push({ canvas: tmp, page, vp });
     totalH += vp.height;
   }
@@ -13898,6 +13897,64 @@ const tokenProvider = (!isSkinV2 && window.LegacyTokenProviderAdapter?.createLeg
         getTokenSourceInfo: getTokenSourceInfoForPage
       };
 
+// ---------------------------------------------------------------------------
+// WFG4 per-page raster provider (single source of truth)
+//
+// Both config and run modes must feed WFG4's downstream pipeline
+// (prepareDocumentSurface → normalizePage → pageStructure → PageAlignment →
+// localization) the *exact same* pixels for a given PDF page. Before this
+// provider, config mode sliced els.pdfCanvas using state.pageOffsets and run
+// mode used state.wfg4RenderedPages — a non-symmetric raster source that
+// produced different pageStructure and non-identity PageAlignment on identical
+// input.
+//
+// The provider caches one HTMLCanvasElement per PDF page under
+// state.wfg4.pageCanvases, keyed by 1-based page number. Each canvas is
+// rendered directly from the pdf.js Page object at BASE_PDF_SCALE with the
+// exact page viewport — identical in both modes. captureWfg4SurfaceForMode
+// reads *only* from this cache for PDFs in both config and run.
+// ---------------------------------------------------------------------------
+function ensureWfg4StateBucket(){
+  state.wfg4 = state.wfg4 || { configSurface: null, runSurface: null };
+  if(!state.wfg4.pageCanvases) state.wfg4.pageCanvases = {};
+  return state.wfg4;
+}
+
+async function renderPdfPageToOffscreenCanvas(page, vp){
+  const w = Math.max(1, Math.round(vp?.width || vp?.w || 1));
+  const h = Math.max(1, Math.round(vp?.height || vp?.h || 1));
+  const tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  const ctx = tmp.getContext('2d');
+  if(ctx && page && vp){
+    try {
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    } catch(err){
+      console.warn('[wfg4] page.render failed for page', vp?.pageNumber || '?', err);
+    }
+  }
+  return tmp;
+}
+
+async function cacheWfg4PdfPageCanvas(pageNumber, page, vp){
+  const bucket = ensureWfg4StateBucket();
+  const existing = bucket.pageCanvases[pageNumber];
+  if(existing && existing.width > 0 && existing.height > 0) return existing;
+  const canvas = await renderPdfPageToOffscreenCanvas(page, vp);
+  bucket.pageCanvases[pageNumber] = canvas;
+  return canvas;
+}
+
+function getWfg4CachedPageCanvas(pageNumber){
+  const canvas = state.wfg4?.pageCanvases?.[pageNumber];
+  return (canvas && canvas.width > 0 && canvas.height > 0) ? canvas : null;
+}
+
+function clearWfg4PageRasterCache(){
+  if(state.wfg4) state.wfg4.pageCanvases = {};
+}
+
 function captureWfg4SurfaceForMode(mode){
   if(!window.WFG4Engine?.prepareDocumentSurface) return null;
   const vp = state.pageViewports?.[(state.pageNum || 1) - 1] || state.viewport || null;
@@ -13917,28 +13974,32 @@ function captureWfg4SurfaceForMode(mode){
       pages.push({ pageIndex: 0, pageNumber: 1, width: imgW, height: imgH, canvas: tmp });
     }
   } else if(Array.isArray(state.pageViewports) && state.pageViewports.length){
-    const src = els.pdfCanvas;
     for(let i=0; i<state.pageViewports.length; i++){
       const pageVp = state.pageViewports[i] || {};
-      const pageW = Math.max(1, Math.round(pageVp.width || pageVp.w || 1));
-      const pageH = Math.max(1, Math.round(pageVp.height || pageVp.h || 1));
-      const tmp = document.createElement('canvas');
-      tmp.width = pageW;
-      tmp.height = pageH;
-      const tctx = tmp.getContext('2d');
-      if(tctx){
-        // In run mode, els.pdfCanvas is blank (not rendered for speed). Use the
-        // pre-rendered page canvas captured during prepareRunDocument if available.
-        const preRendered = state.wfg4RenderedPages && state.wfg4RenderedPages[i + 1];
-        if(preRendered){
-          try { tctx.drawImage(preRendered, 0, 0, pageW, pageH); } catch(_err){}
-        } else if(src){
-          // Config mode: pdfCanvas is rendered; copy the relevant vertical slice.
-          const offY = Math.max(0, Math.round(state.pageOffsets?.[i] || 0));
-          try { tctx.drawImage(src, 0, offY, pageW, pageH, 0, 0, pageW, pageH); } catch(_err){}
-        }
+      const fallbackW = Math.max(1, Math.round(pageVp.width || pageVp.w || 1));
+      const fallbackH = Math.max(1, Math.round(pageVp.height || pageVp.h || 1));
+      // Unified raster source: both config and run read the per-page canvas
+      // from state.wfg4.pageCanvases. The cache is populated synchronously
+      // (awaited) by renderAllPages (config) and prepareRunDocument (run) BEFORE
+      // syncWfg4SurfaceContext fires, so it is guaranteed to be available here.
+      // We pass the cached HTMLCanvasElement *directly* into the WFG4 page
+      // descriptor so downstream normalizePage → toCanvasFromSource consumes
+      // the exact same bits in both modes, with zero intermediate copies.
+      const cached = getWfg4CachedPageCanvas(i + 1);
+      if(!cached){
+        // Should not happen in normal flow; log so regressions surface loudly
+        // rather than silently diverging between modes.
+        console.warn('[wfg4] raster cache miss for page', i + 1, 'mode=', mode);
+        pages.push({ pageIndex: i, pageNumber: i + 1, width: fallbackW, height: fallbackH, canvas: null });
+        continue;
       }
-      pages.push({ pageIndex: i, pageNumber: i + 1, width: pageW, height: pageH, canvas: tmp });
+      pages.push({
+        pageIndex: i,
+        pageNumber: i + 1,
+        width: cached.width || fallbackW,
+        height: cached.height || fallbackH,
+        canvas: cached
+      });
     }
   }
   const payload = {
