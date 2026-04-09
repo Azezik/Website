@@ -74,7 +74,15 @@
       // Phase 1: carry the pre-computed page-level PageStructure.
       // This is computed once in normalizePage() (wfg4-engine.js) and stored
       // on pageEntry so that both config and runtime share one code path.
-      pageStructure: pageEntry?.pageStructure || null
+      pageStructure: pageEntry?.pageStructure || null,
+      // PageAlignment v1 reference summary captured from config-time
+      // pageStructure. Runtime reuses this to estimate a page-level
+      // translation+scale prior before per-field localization.
+      pageAlignmentRef: (
+        pageEntry?.pageStructure && CvOps.buildPageAlignmentReference
+          ? CvOps.buildPageAlignmentReference(pageEntry.pageStructure, {})
+          : null
+      )
     };
 
     const cvReadyInfo = CvOps.ensureCvReady
