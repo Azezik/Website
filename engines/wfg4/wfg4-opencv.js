@@ -630,6 +630,230 @@
   }
 
   // ---------------------------------------------------------------------------
+  // PageAlignment v1 helpers (translation + scale only)
+  //
+  // buildPageAlignmentReference(pageStructure):
+  //   Produces a compact, deterministic summary of page-wide structural anchors
+  //   from a config document page.
+  //
+  // estimatePageAlignmentV1(configRef, runtimePageStructure, opts):
+  //   Estimates a normalized translation+scale transform:
+  //     x' = sx * x + txN
+  //     y' = sy * y + tyN
+  //   where x/y and txN/tyN live in normalized [0,1] page coordinates.
+  // ---------------------------------------------------------------------------
+
+  function _safeArr(v){ return Array.isArray(v) ? v : []; }
+
+  function _quantile(sortedArr, q){
+    if(!sortedArr.length) return 0;
+    const qq = Math.max(0, Math.min(1, Number(q || 0)));
+    const idx = (sortedArr.length - 1) * qq;
+    const lo = Math.floor(idx);
+    const hi = Math.min(sortedArr.length - 1, lo + 1);
+    const t = idx - lo;
+    return sortedArr[lo] * (1 - t) + sortedArr[hi] * t;
+  }
+
+  function _median(arr){
+    if(!arr.length) return 0;
+    const s = arr.slice().sort(function(a,b){ return a - b; });
+    return _quantile(s, 0.5);
+  }
+
+  function _spreadQ(arr){
+    if(arr.length < 2) return 0;
+    const s = arr.slice().sort(function(a,b){ return a - b; });
+    return Math.max(1e-6, _quantile(s, 0.9) - _quantile(s, 0.1));
+  }
+
+  function _clamp(v, lo, hi){
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function _pickTopRegions(regions, maxK){
+    const arr = _safeArr(regions)
+      .slice()
+      .sort(function(a,b){ return Number(b.areaN || 0) - Number(a.areaN || 0); })
+      .slice(0, Math.max(1, Number(maxK || 8)));
+    return arr.map(function(r){
+      const xN = Number(r.xN || 0);
+      const yN = Number(r.yN || 0);
+      const wN = Number(r.wN || 0);
+      const hN = Number(r.hN || 0);
+      return {
+        cxN: xN + (wN / 2),
+        cyN: yN + (hN / 2),
+        wN: wN,
+        hN: hN,
+        areaN: Number(r.areaN || (wN * hN) || 0)
+      };
+    });
+  }
+
+  function _pickBands(rowBands, isSeparatorOnly, maxK){
+    const arr = _safeArr(rowBands)
+      .filter(function(rb){ return !isSeparatorOnly || !!rb.isSeparator; })
+      .slice()
+      .sort(function(a,b){
+        // More spanning bands first, then by y
+        const sa = Number(a.spanN || 0), sb = Number(b.spanN || 0);
+        if(Math.abs(sb - sa) > 1e-6) return sb - sa;
+        return Number(a.yN || 0) - Number(b.yN || 0);
+      })
+      .slice(0, Math.max(1, Number(maxK || 12)));
+    return arr.map(function(rb){
+      return {
+        yN: Number(rb.yN || 0),
+        x1N: Number(rb.x1N || 0),
+        x2N: Number(rb.x2N || 0),
+        spanN: Number(rb.spanN || 0)
+      };
+    });
+  }
+
+  function _coarseCenter(ref){
+    const regs = _safeArr(ref && ref.topRegions);
+    if(!regs.length){
+      return { xN: 0.5, yN: 0.5 };
+    }
+    let sw = 0, sx = 0, sy = 0;
+    for(let i = 0; i < regs.length; i++){
+      const w = Math.max(1e-6, Number(regs[i].areaN || 0));
+      sw += w;
+      sx += Number(regs[i].cxN || 0.5) * w;
+      sy += Number(regs[i].cyN || 0.5) * w;
+    }
+    if(sw <= 1e-9) return { xN: 0.5, yN: 0.5 };
+    return { xN: sx / sw, yN: sy / sw };
+  }
+
+  function buildPageAlignmentReference(pageStructure, opts){
+    if(!pageStructure) return null;
+    const o = opts || {};
+    const regions = _safeArr(pageStructure.regions);
+    const rowBands = _safeArr(pageStructure.rowBands);
+    const topRegions = _pickTopRegions(regions, o.maxRegions || 8);
+    const separators = _pickBands(rowBands, true, o.maxSeparators || 12);
+    const allBands = _pickBands(rowBands, false, o.maxBands || 16);
+    const center = _coarseCenter({ topRegions });
+    return {
+      schema: 'wfg4/page-alignment-ref/v1',
+      regionCount: regions.length,
+      rowBandCount: rowBands.length,
+      topRegions: topRegions,
+      separators: separators,
+      rowBands: allBands,
+      coarseCenter: center
+    };
+  }
+
+  function _extractScaleAndShift(cfgVals, rtVals, cfgCenter, rtCenter, minScale, maxScale){
+    const cfg = _safeArr(cfgVals).map(Number).filter(isFinite);
+    const rt  = _safeArr(rtVals).map(Number).filter(isFinite);
+    const cCenter = Number(cfgCenter || 0.5);
+    const rCenter = Number(rtCenter  || 0.5);
+    if(!cfg.length || !rt.length){
+      return { s: 1, t: rCenter - cCenter, pairs: 0, spreadCfg: 0, spreadRt: 0 };
+    }
+    const cfgSpread = _spreadQ(cfg);
+    const rtSpread  = _spreadQ(rt);
+    let s = 1;
+    if(cfgSpread > 1e-6 && rtSpread > 1e-6){
+      s = _clamp(rtSpread / cfgSpread, minScale, maxScale);
+    }
+    const tSamples = [];
+    const cfgMed = _median(cfg);
+    const rtMed  = _median(rt);
+    tSamples.push(rtMed - (s * cfgMed));
+    const pairN = Math.min(cfg.length, rt.length, 12);
+    if(pairN >= 2){
+      const cSorted = cfg.slice().sort(function(a,b){ return a - b; });
+      const rSorted = rt.slice().sort(function(a,b){ return a - b; });
+      for(let i = 0; i < pairN; i++){
+        const ci = _quantile(cSorted, i / Math.max(1, pairN - 1));
+        const ri = _quantile(rSorted, i / Math.max(1, pairN - 1));
+        tSamples.push(ri - (s * ci));
+      }
+    }
+    let t = _median(tSamples);
+    // keep transformed center near runtime center (soft prior)
+    t = (t * 0.7) + ((rCenter - (s * cCenter)) * 0.3);
+    return { s: s, t: t, pairs: pairN, spreadCfg: cfgSpread, spreadRt: rtSpread };
+  }
+
+  function estimatePageAlignmentV1(configRef, runtimePageStructure, opts){
+    if(!configRef || !runtimePageStructure){
+      return {
+        ok: false,
+        model: 'translation_scale_v1',
+        transformN: { sx: 1, sy: 1, txN: 0, tyN: 0 },
+        confidence: 0.05,
+        reason: 'missing_config_or_runtime_structure'
+      };
+    }
+    const o = opts || {};
+    const minScale = typeof o.minScale === 'number' ? o.minScale : 0.75;
+    const maxScale = typeof o.maxScale === 'number' ? o.maxScale : 1.35;
+    const rtRef = buildPageAlignmentReference(runtimePageStructure, o) || null;
+    if(!rtRef){
+      return {
+        ok: false,
+        model: 'translation_scale_v1',
+        transformN: { sx: 1, sy: 1, txN: 0, tyN: 0 },
+        confidence: 0.05,
+        reason: 'runtime_reference_unavailable'
+      };
+    }
+
+    const cfgX = _safeArr(configRef.topRegions).map(function(r){ return Number(r.cxN || 0.5); });
+    const rtX  = _safeArr(rtRef.topRegions).map(function(r){ return Number(r.cxN || 0.5); });
+    const cfgY = _safeArr(configRef.separators).length
+      ? _safeArr(configRef.separators).map(function(r){ return Number(r.yN || 0.5); })
+      : _safeArr(configRef.rowBands).map(function(r){ return Number(r.yN || 0.5); });
+    const rtY = _safeArr(rtRef.separators).length
+      ? _safeArr(rtRef.separators).map(function(r){ return Number(r.yN || 0.5); })
+      : _safeArr(rtRef.rowBands).map(function(r){ return Number(r.yN || 0.5); });
+
+    const cfgCenter = configRef.coarseCenter || _coarseCenter(configRef);
+    const rtCenter  = rtRef.coarseCenter || _coarseCenter(rtRef);
+
+    const fx = _extractScaleAndShift(cfgX, rtX, cfgCenter.xN, rtCenter.xN, minScale, maxScale);
+    const fy = _extractScaleAndShift(cfgY, rtY, cfgCenter.yN, rtCenter.yN, minScale, maxScale);
+
+    // Clamp shifts so transformed boxes stay realistically near page.
+    const txN = _clamp(fx.t, -0.40, 0.40);
+    const tyN = _clamp(fy.t, -0.40, 0.40);
+    const sx  = _clamp(fx.s, minScale, maxScale);
+    const sy  = _clamp(fy.s, minScale, maxScale);
+
+    const anchorCount = Math.min(12, Math.max(0, fx.pairs) + Math.max(0, fy.pairs));
+    const spreadScore = _clamp(((fx.spreadCfg + fy.spreadCfg + fx.spreadRt + fy.spreadRt) / 4) / 0.20, 0, 1);
+    const centerResidual = Math.sqrt(
+      Math.pow((sx * Number(cfgCenter.xN || 0.5) + txN) - Number(rtCenter.xN || 0.5), 2) +
+      Math.pow((sy * Number(cfgCenter.yN || 0.5) + tyN) - Number(rtCenter.yN || 0.5), 2)
+    );
+    const centerScore = _clamp(1 - (centerResidual / 0.20), 0, 1);
+    const anchorScore = _clamp(anchorCount / 10, 0, 1);
+    const confidence = _clamp((anchorScore * 0.5) + (spreadScore * 0.25) + (centerScore * 0.25), 0.05, 0.98);
+
+    return {
+      ok: true,
+      model: 'translation_scale_v1',
+      transformN: { sx: sx, sy: sy, txN: txN, tyN: tyN },
+      confidence: confidence,
+      anchorsUsed: {
+        xCount: fx.pairs,
+        yCount: fy.pairs,
+        separatorModeY: _safeArr(configRef.separators).length > 0 && _safeArr(rtRef.separators).length > 0
+      },
+      configCenterN: { xN: Number(cfgCenter.xN || 0.5), yN: Number(cfgCenter.yN || 0.5) },
+      runtimeCenterN:{ xN: Number(rtCenter.xN  || 0.5), yN: Number(rtCenter.yN  || 0.5) },
+      source: 'pageStructure_v1'
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // computeFieldStructuralIdentity — Phase 3 field-level structural identity
   //
   // Given the field bbox (normalized), the Phase 1 PageStructure, and the
@@ -1945,6 +2169,8 @@
     computeAnchorOffsets,
     structuralRefineBox,
     buildPageStructure,
+    buildPageAlignmentReference,
+    estimatePageAlignmentV1,
     buildConstellation,
     computeFieldStructuralIdentity,
     selectConstellationCandidates,

@@ -483,6 +483,35 @@
     }));
   }
 
+  function resolvePageAlignmentV1(payload = {}){
+    const fieldSpec = payload.fieldSpec || {};
+    const ref = fieldSpec.wfg4Config || payload.wfg4Config || null;
+    const surface = payload.wfg4Surface || null;
+    const page = Number(fieldSpec.page || ref?.page || 1) || 1;
+    const pageEntry = Array.isArray(surface?.pages) ? surface.pages[Math.max(0, page - 1)] : null;
+    if(!ref || !surface || !pageEntry) return null;
+    const cfgRef = ref.pageAlignmentRef || null;
+    const rtPs = pageEntry.pageStructure || null;
+    if(!cfgRef || !rtPs || !CvOps.estimatePageAlignmentV1) return null;
+
+    // Cache once per (surface,page,config-center) tuple so all fields on the
+    // same run page can inherit one page-level alignment prior.
+    surface._pageAlignmentCache = surface._pageAlignmentCache || {};
+    const cache = surface._pageAlignmentCache;
+    const cCenter = cfgRef.coarseCenter || { xN: 0.5, yN: 0.5 };
+    const cacheKey = [
+      page,
+      Number(cCenter.xN || 0.5).toFixed(4),
+      Number(cCenter.yN || 0.5).toFixed(4),
+      Number(cfgRef.regionCount || 0),
+      Number(cfgRef.rowBandCount || 0)
+    ].join('|');
+    if(cache[cacheKey]) return cache[cacheKey];
+    const align = CvOps.estimatePageAlignmentV1(cfgRef, rtPs, {});
+    cache[cacheKey] = align || null;
+    return cache[cacheKey];
+  }
+
   async function extractScalar(payload = {}){
     const fieldSpec = payload.fieldSpec || {};
     const boxPx = payload.boxPx || null;
@@ -518,6 +547,13 @@
     // "wrong-target text" on scanned PDFs and images, and as multi-click /
     // delayed confirm because of async surface/packet readiness races).
     const configModeAuthoritative = _configAuth;
+    const pageAlignment = configModeAuthoritative
+      ? null
+      : resolvePageAlignmentV1({
+          ...payload,
+          fieldSpec,
+          wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null
+        });
     const localized = configModeAuthoritative
       ? {
           ok: true,
@@ -535,6 +571,7 @@
             ...payload,
             wfg4Config: fieldSpec.wfg4Config || payload.wfg4Config || null,
             boxPx: boxPx || null,
+            pageAlignment,
             allowDegradedFallback
           })
         : { ok:false, status: LOCALIZATION_STATUS.FAILED, localizedBox: null, localizationConfidence: 0.1, reason: 'localization_module_missing', attempts: [] });
@@ -555,6 +592,8 @@
       status: localizationStatus,
       bboxSource: bboxSource || null,
       fallbackUsed: fallbackUsed,
+      pageAlignmentModel: pageAlignment?.model || null,
+      pageAlignmentConfidence: Number(pageAlignment?.confidence || 0),
       attemptsTried: Array.isArray(localized.attempts) ? localized.attempts.length : 0,
       matchCount: localized.matchCount || 0,
       inliers: localized.inliers || 0,

@@ -33,6 +33,29 @@
     return points.map(p => ({ x: p.x + offset.x, y: p.y + offset.y }));
   }
 
+  function applyPageAlignmentToBox(box, alignment, pageEntry){
+    if(!box || !alignment?.transformN || !pageEntry?.dimensions?.working) return box || null;
+    const W = Math.max(1, Number(pageEntry.dimensions.working.width || 1));
+    const H = Math.max(1, Number(pageEntry.dimensions.working.height || 1));
+    const t = alignment.transformN || {};
+    const sx = Number.isFinite(t.sx) ? Number(t.sx) : 1;
+    const sy = Number.isFinite(t.sy) ? Number(t.sy) : 1;
+    const txN = Number.isFinite(t.txN) ? Number(t.txN) : 0;
+    const tyN = Number.isFinite(t.tyN) ? Number(t.tyN) : 0;
+    const xN = Number(box.x || 0) / W;
+    const yN = Number(box.y || 0) / H;
+    const wN = Math.max(1 / W, Number(box.w || 1) / W);
+    const hN = Math.max(1 / H, Number(box.h || 1) / H);
+    const out = {
+      x: ((sx * xN) + txN) * W,
+      y: ((sy * yN) + tyN) * H,
+      w: Math.max(1, (sx * wN) * W),
+      h: Math.max(1, (sy * hN) * H),
+      page: box.page || 1
+    };
+    return Types.expandBox ? Types.expandBox(out, 0, { width: W, height: H }) : out;
+  }
+
   const STATUS = (Types.LOCALIZATION_STATUS || { SUCCESS:'success', FAILED:'failed', DEGRADED_FALLBACK:'degraded_fallback' });
   const BBOX_SRC = (Types.BBOX_SOURCE || {
     LOCALIZED_PROJECTED: 'localized_projected',
@@ -252,7 +275,9 @@
     const surface = payload.wfg4Surface || null;
     const page = fieldSpec.page || ref?.page || 1;
     const pageEntry = getPageEntry(surface, page);
-    const predictedBox = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
+    const predictedBoxBase = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
+    const pageAlignment = payload.pageAlignment || null;
+    const predictedBox = applyPageAlignmentToBox(predictedBoxBase, pageAlignment, pageEntry) || predictedBoxBase || null;
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? DEFAULTS.allowDegradedFallback);
 
     const _EL = root.EngineLog || null;
@@ -386,6 +411,8 @@
     });
     _EL?.engineLog('wfg4-run', 'scale.baseline', {
       fieldKey: _fk,
+      pageAlignmentModel: pageAlignment?.model || null,
+      pageAlignmentConfidence: Number(pageAlignment?.confidence || 0),
       predictedW: Math.round(predictedBox.w || 0),
       predictedH: Math.round(predictedBox.h || 0),
       minSideRatio: Number(DEFAULTS.localizationMinSideRatio || 0.45),
@@ -755,6 +782,7 @@
       structuralMatches: structMatches,
       structuralMatchDebug: structMatchDebug,
       structuralReconstructions: structReconstructions,
+      pageAlignment,
       instances,
       selectedConstellation,
       pageStructureSummary,
