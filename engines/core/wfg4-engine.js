@@ -526,9 +526,10 @@
     // and wrong-target extraction on any surface where working ≠ viewport.
     // Keep tokens in viewport space when the box is viewport-space.
     const _configAuth = !!payload.configMode && !!boxPx;
+    const tokensAlreadyCanonical = !!payload.tokensCanonical;
     const allTokens = _configAuth
       ? rawTokens
-      : mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null);
+      : (tokensAlreadyCanonical ? rawTokens : mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null));
     const _EL = root.EngineLog || null;
     const _fk = fieldSpec.fieldKey || '';
     const _surfReady = !!(payload.wfg4Surface && Array.isArray(payload.wfg4Surface.pages) && payload.wfg4Surface.pages.length > 0);
