@@ -1352,6 +1352,16 @@
     var alignThreshN        = typeof o.alignThreshN        === 'number' ? o.alignThreshN        : 0.02;
     var memberWeight        = typeof o.memberWeight        === 'number' ? o.memberWeight        : 0.55;
     var relationWeight      = typeof o.relationWeight      === 'number' ? o.relationWeight      : 0.45;
+    // BBOX-exactness: minimum member coverage to accept a match.
+    // Prevents acceptance of partial matches with only 1-2 out of 5+ members.
+    var minMemberCoverageForAccept = typeof o.minMemberCoverageForAccept === 'number' ? o.minMemberCoverageForAccept : 0.50;
+    // BBOX-exactness: inter-member distance tolerance ratio (runtime/config).
+    var interDistMinRatio = typeof o.interDistMinRatio === 'number' ? o.interDistMinRatio : 0.65;
+    var interDistMaxRatio = typeof o.interDistMaxRatio === 'number' ? o.interDistMaxRatio : 1.50;
+    // BBOX-exactness: weight for inter-member distance consistency in final score.
+    var distConsistencyWeight = typeof o.distConsistencyWeight === 'number' ? o.distConsistencyWeight : 0.20;
+    // BBOX-derived geometry from config (for anchor→bbox vector consistency).
+    var bboxGeometry = o.bboxGeometry || null;
 
     var configMembers   = Array.isArray(configConstellation.members)   ? configConstellation.members   : [];
     var configRelations = Array.isArray(configConstellation.relations) ? configConstellation.relations : [];
@@ -1475,18 +1485,118 @@
       }
       var relationConsistencyRatio = relationsChecked > 0 ? (relationsAgreed / relationsChecked) : 0;
 
-      // Step 3: blended final score.  When no relations are checkable (e.g.
-      // single-member matches), fall back to pure member coverage so partial
-      // matches still survive.
+      // Step 2b (BBOX-exactness): inter-member distance consistency.
+      // For every pair of matched members, check that the distance between
+      // them in runtime preserves the config distance within tolerance.
+      // This is the "mutual anchor verification" requirement: anchors must
+      // be matched together, not independently.
+      var distChecked = 0, distAgreed = 0;
+      var matchedEntries = [];
+      for(var dci = 0; dci < memberCorrs.length; dci++){
+        if(memberCorrs[dci].runtimeObjId){
+          var _cid = memberCorrs[dci].configMemberId;
+          var _ent = memberById[_cid];
+          if(_ent) matchedEntries.push(_ent);
+        }
+      }
+      for(var dei = 0; dei < matchedEntries.length; dei++){
+        for(var dej = dei + 1; dej < matchedEntries.length; dej++){
+          var cfgA = matchedEntries[dei].config.geom;
+          var cfgB = matchedEntries[dej].config.geom;
+          var rtA  = matchedEntries[dei].runtime.geom;
+          var rtB  = matchedEntries[dej].runtime.geom;
+          if(!cfgA || !cfgB || !rtA || !rtB) continue;
+          var cfgDx = (cfgA.cxN||0) - (cfgB.cxN||0);
+          var cfgDy = (cfgA.cyN||0) - (cfgB.cyN||0);
+          var cfgDistPair = Math.sqrt(cfgDx*cfgDx + cfgDy*cfgDy);
+          var rtDxP  = (rtA.cxN||0) - (rtB.cxN||0);
+          var rtDyP  = (rtA.cyN||0) - (rtB.cyN||0);
+          var rtDistPair = Math.sqrt(rtDxP*rtDxP + rtDyP*rtDyP);
+          distChecked++;
+          if(cfgDistPair > 1e-6){
+            var dRatio = rtDistPair / cfgDistPair;
+            if(dRatio >= interDistMinRatio && dRatio <= interDistMaxRatio) distAgreed++;
+          } else {
+            // Both nearly coincident — agree if runtime is also close
+            if(rtDistPair < 0.03) distAgreed++;
+          }
+        }
+      }
+      var distConsistencyRatio = distChecked > 0 ? (distAgreed / distChecked) : 0;
+
+      // Step 2c (BBOX-exactness): anchor→bbox vector consistency.
+      // For each matched member, check that the implied bbox center (using
+      // the config anchor→bbox vector) is consistent across all members.
+      // Large variance means the matched anchors don't agree on where the
+      // bbox should be — a strong signal of a wrong structural match.
+      var anchorBboxConsistency = 1.0;
+      if(bboxGeometry && Array.isArray(bboxGeometry.anchorBboxVectors) && matchedEntries.length >= 2){
+        var impliedCenters = [];
+        var vecByObjId = {};
+        for(var avi = 0; avi < bboxGeometry.anchorBboxVectors.length; avi++){
+          vecByObjId[bboxGeometry.anchorBboxVectors[avi].objId] = bboxGeometry.anchorBboxVectors[avi];
+        }
+        for(var mei = 0; mei < matchedEntries.length; mei++){
+          var _mCfgId = matchedEntries[mei].config.objId;
+          var _mRtG   = matchedEntries[mei].runtime.geom;
+          var _vec    = vecByObjId[_mCfgId];
+          if(!_vec || !_mRtG) continue;
+          impliedCenters.push({
+            x: (_mRtG.cxN||0) + _vec.dxN,
+            y: (_mRtG.cyN||0) + _vec.dyN
+          });
+        }
+        if(impliedCenters.length >= 2){
+          // Compute variance of implied centers
+          var icMx = 0, icMy = 0;
+          for(var ici = 0; ici < impliedCenters.length; ici++){
+            icMx += impliedCenters[ici].x; icMy += impliedCenters[ici].y;
+          }
+          icMx /= impliedCenters.length; icMy /= impliedCenters.length;
+          var icVar = 0;
+          for(var icj = 0; icj < impliedCenters.length; icj++){
+            var icDx = impliedCenters[icj].x - icMx;
+            var icDy = impliedCenters[icj].y - icMy;
+            icVar += icDx*icDx + icDy*icDy;
+          }
+          icVar /= impliedCenters.length;
+          // Convert variance to a 0..1 consistency score.
+          // Low variance (~0) → high consistency (1.0)
+          // Variance > 0.003 (~5.5% page diagonal) → consistency → 0
+          var icStd = Math.sqrt(icVar);
+          anchorBboxConsistency = Math.max(0, Math.min(1, 1.0 - icStd / 0.06));
+        }
+      }
+
+      // Step 3: blended final score.  Incorporates:
+      //   - member proximity/coverage (memberWeight)
+      //   - relation consistency (relationWeight, reduced to make room for distance check)
+      //   - inter-member distance consistency (distConsistencyWeight)
+      //   - anchor→bbox vector consistency (penalty when anchors disagree on bbox position)
+      // When no relations are checkable (e.g. single-member matches), fall back
+      // to pure member coverage so partial matches still survive.
+      var effectiveRelationWeight = Math.max(0, relationWeight - distConsistencyWeight);
       var finalScore;
       if(relationsChecked > 0){
-        finalScore = (memberAvg * memberWeight) + (relationConsistencyRatio * relationWeight);
+        finalScore = (memberAvg * memberWeight)
+                   + (relationConsistencyRatio * effectiveRelationWeight)
+                   + (distConsistencyRatio * distConsistencyWeight);
       } else {
-        finalScore = memberAvg;
+        finalScore = memberAvg * (1 - distConsistencyWeight) + distConsistencyRatio * distConsistencyWeight;
+      }
+      // Penalize when anchor→bbox vectors disagree (wrong structural neighborhood)
+      if(anchorBboxConsistency < 0.80){
+        finalScore *= (0.5 + 0.5 * anchorBboxConsistency);
       }
       // Light bonus from the Phase 4 candidate score so anchor quality survives.
       var anchorBoost = Math.max(0, Math.min(0.15, (cand.score || 0) * 0.15));
       finalScore = Math.max(0, Math.min(1, finalScore + anchorBoost));
+
+      // BBOX-exactness: hard gate on minimum member coverage.
+      // A match with fewer than minMemberCoverageForAccept of members matched
+      // cannot be accepted regardless of score, preventing partial matches
+      // from driving reconstruction.
+      var coverageGateOk = memberCoverage >= minMemberCoverageForAccept;
 
       matches.push({
         rank:                     0, // assigned after sort
@@ -1502,9 +1612,13 @@
         relationConsistencyRatio: Number(relationConsistencyRatio.toFixed(4)),
         relationsChecked:         relationsChecked,
         relationsAgreed:          relationsAgreed,
+        distConsistencyRatio:     Number(distConsistencyRatio.toFixed(4)),
+        distChecked:              distChecked,
+        distAgreed:               distAgreed,
+        anchorBboxConsistency:    Number(anchorBboxConsistency.toFixed(4)),
         partial:                  matchedCount < configMembers.length,
         finalScore:               Number(finalScore.toFixed(4)),
-        accepted:                 finalScore >= acceptThreshold
+        accepted:                 finalScore >= acceptThreshold && coverageGateOk
       });
     }
 
@@ -1562,6 +1676,12 @@
     var o = opts || {};
     var minAffine    = typeof o.minAffineCorrespondences  === 'number' ? o.minAffineCorrespondences  : 4;
     var rowSnapEnabled = o.rowSnapEnabled !== false;
+    // BBOX-exactness: geometric constraint gates for reconstruction.
+    var bboxGeometry = o.bboxGeometry || null;
+    // Max allowed translation of the reconstructed center from expected position (normalized).
+    var maxTranslationDriftN = typeof o.maxTranslationDriftN === 'number' ? o.maxTranslationDriftN : 0.12;
+    // Max allowed scale change from config bbox size (ratio).
+    var maxScaleDeviation = typeof o.maxScaleDeviation === 'number' ? o.maxScaleDeviation : 0.60;
 
     if(!fieldBboxNormConfig || !match){
       return { ok:false, reason:'bad_input', debug:null };
@@ -1765,6 +1885,118 @@
     if(px1 - px0 < 1e-4) px1 = Math.min(1, px0 + 1e-4);
     if(py1 - py0 < 1e-4) py1 = Math.min(1, py0 + 1e-4);
 
+    // --- BBOX-exactness: geometric constraint gates ---
+    // These gates use the config-derived bboxGeometry to verify that the
+    // reconstruction preserves the structural relationships encoded by the
+    // user-drawn BBOX.  Violations indicate the reconstruction has drifted
+    // to a wrong (but structurally plausible) region.
+    var reconWN = px1 - px0;
+    var reconHN = py1 - py0;
+    var reconCxN = px0 + reconWN / 2;
+    var reconCyN = py0 + reconHN / 2;
+    var cfgBboxWN = Number(fieldBboxNormConfig.x1 || 0) - Number(fieldBboxNormConfig.x0 || 0);
+    var cfgBboxHN = Number(fieldBboxNormConfig.y1 || 0) - Number(fieldBboxNormConfig.y0 || 0);
+    var cfgBboxCxN = Number(fieldBboxNormConfig.x0 || 0) + cfgBboxWN / 2;
+    var cfgBboxCyN = Number(fieldBboxNormConfig.y0 || 0) + cfgBboxHN / 2;
+
+    var geometryViolations = [];
+    var reconstructionConfidence = 1.0;
+
+    // Gate 1: Translation drift — reconstructed center should not drift
+    // excessively from the config BBOX center (after accounting for page
+    // alignment). The expected position is the config center; large drift
+    // means the match placed the bbox in a geometrically inconsistent region.
+    var translationDriftN = Math.sqrt(
+      (reconCxN - cfgBboxCxN) * (reconCxN - cfgBboxCxN) +
+      (reconCyN - cfgBboxCyN) * (reconCyN - cfgBboxCyN)
+    );
+    if(translationDriftN > maxTranslationDriftN){
+      geometryViolations.push('translation_drift');
+      // Proportional penalty: gentle degradation rather than hard reject
+      var driftExcess = (translationDriftN - maxTranslationDriftN) / maxTranslationDriftN;
+      reconstructionConfidence *= Math.max(0.2, 1.0 - driftExcess);
+    }
+
+    // Gate 2: Scale deviation — reconstructed bbox size should preserve
+    // the config bbox footprint.  Large size changes indicate the
+    // reconstruction captured adjacent text or a different structural region.
+    if(cfgBboxWN > 1e-6 && cfgBboxHN > 1e-6){
+      var wRatio = reconWN / cfgBboxWN;
+      var hRatio = reconHN / cfgBboxHN;
+      var scaleOk = wRatio >= (1 - maxScaleDeviation) && wRatio <= (1 + maxScaleDeviation) &&
+                    hRatio >= (1 - maxScaleDeviation) && hRatio <= (1 + maxScaleDeviation);
+      if(!scaleOk){
+        geometryViolations.push('scale_deviation');
+        var worstRatio = Math.max(
+          Math.abs(wRatio - 1) / maxScaleDeviation,
+          Math.abs(hRatio - 1) / maxScaleDeviation
+        );
+        reconstructionConfidence *= Math.max(0.2, 1.0 / worstRatio);
+      }
+    }
+
+    // Gate 3: Page-edge distance consistency — the reconstructed bbox
+    // should preserve approximate page-edge relationships.  If the config
+    // bbox was in the top-left quadrant but reconstruction puts it in the
+    // bottom-right, something is deeply wrong.
+    if(bboxGeometry && bboxGeometry.pageEdgeDistances){
+      var ped = bboxGeometry.pageEdgeDistances;
+      var reconLeftN   = px0;
+      var reconRightN  = 1 - px1;
+      var reconTopN    = py0;
+      var reconBottomN = 1 - py1;
+      // Check quadrant consistency: if config bbox was closer to left than
+      // right, reconstruction should preserve that relationship (and vice
+      // versa for top/bottom).
+      var hFlipped = (ped.leftN < ped.rightN) !== (reconLeftN < reconRightN);
+      var vFlipped = (ped.topN < ped.bottomN) !== (reconTopN < reconBottomN);
+      if(hFlipped){
+        geometryViolations.push('h_quadrant_flip');
+        reconstructionConfidence *= 0.4;
+      }
+      if(vFlipped){
+        geometryViolations.push('v_quadrant_flip');
+        reconstructionConfidence *= 0.4;
+      }
+    }
+
+    // If reconstruction confidence is critically low, constrain the output
+    // by clamping toward the config bbox center.  This prevents Phase 7
+    // from locking in a geometrically inconsistent reconstruction.
+    if(reconstructionConfidence < 0.5 && bboxGeometry){
+      // Blend toward config position: weight by how badly the constraints
+      // are violated. At confidence=0.2, blend 60% toward config center.
+      var blendToConfig = Math.max(0, Math.min(0.6, 1.0 - reconstructionConfidence));
+      var blendedCxN = reconCxN * (1 - blendToConfig) + cfgBboxCxN * blendToConfig;
+      var blendedCyN = reconCyN * (1 - blendToConfig) + cfgBboxCyN * blendToConfig;
+      // Preserve reconstructed size (scale is usually more reliable than position).
+      px0 = Math.max(0, Math.min(1, blendedCxN - reconWN / 2));
+      py0 = Math.max(0, Math.min(1, blendedCyN - reconHN / 2));
+      px1 = Math.max(0, Math.min(1, blendedCxN + reconWN / 2));
+      py1 = Math.max(0, Math.min(1, blendedCyN + reconHN / 2));
+      if(px1 - px0 < 1e-4) px1 = Math.min(1, px0 + 1e-4);
+      if(py1 - py0 < 1e-4) py1 = Math.min(1, py0 + 1e-4);
+    }
+
+    // Gate 4 (hard): Prevent bbox footprint inflation.
+    // Clamp reconstructed size to at most (1 + maxScaleDeviation) of config
+    // size. This directly prevents the "bbox footprint grows and captures
+    // adjacent text" failure mode.
+    if(cfgBboxWN > 1e-6 && cfgBboxHN > 1e-6){
+      var maxReconWN = cfgBboxWN * (1 + maxScaleDeviation);
+      var maxReconHN = cfgBboxHN * (1 + maxScaleDeviation);
+      var curReconWN = px1 - px0;
+      var curReconHN = py1 - py0;
+      if(curReconWN > maxReconWN){
+        var excessW = curReconWN - maxReconWN;
+        px0 += excessW / 2; px1 -= excessW / 2;
+      }
+      if(curReconHN > maxReconHN){
+        var excessH = curReconHN - maxReconHN;
+        py0 += excessH / 2; py1 -= excessH / 2;
+      }
+    }
+
     var reconstructedBoxN = { x0: px0, y0: py0, x1: px1, y1: py1 };
     var reconstructedBoxPx = null;
     if(surfaceSize && surfaceSize.width && surfaceSize.height){
@@ -1779,18 +2011,24 @@
 
     return {
       ok: true,
-      transformModel:      transformModel,
-      correspondencesUsed: pairs.length,
-      reconstructedBoxN:   reconstructedBoxN,
-      reconstructedBoxPx:  reconstructedBoxPx,
-      usedRowSnap:         usedRowSnap,
+      transformModel:             transformModel,
+      correspondencesUsed:        pairs.length,
+      reconstructedBoxN:          reconstructedBoxN,
+      reconstructedBoxPx:         reconstructedBoxPx,
+      usedRowSnap:                usedRowSnap,
+      reconstructionConfidence:   Number(reconstructionConfidence.toFixed(4)),
+      geometryViolations:         geometryViolations,
+      translationDriftN:          Number(translationDriftN.toFixed(4)),
       debug: {
         pairs:              pairs.length,
         matchRank:          match.rank,
         matchFinalScore:    match.finalScore,
         memberCoverage:     match.memberCoverage,
         relationConsistency:match.relationConsistencyRatio,
-        partial:            match.partial
+        partial:            match.partial,
+        geometryViolations: geometryViolations,
+        reconstructionConfidence: Number(reconstructionConfidence.toFixed(4)),
+        translationDriftN:  Number(translationDriftN.toFixed(4))
       }
     };
   }
