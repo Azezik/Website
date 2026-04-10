@@ -303,6 +303,74 @@
         packet.structuralIdentity = null;
       }
 
+      // --- bboxGeometry: BBOX-derived geometric facts (source of truth) ---
+      // These are exact geometric relationships derived from the user-drawn
+      // BBOX at config time.  They are persisted here and enforced during
+      // Phase 5 (anchor matching), Phase 6 (reconstruction), and Phase 7
+      // (lock-in gating) at run time.
+      try {
+        const _bn = packet.bboxNorm;
+        const _bwN = (_bn.x1 - _bn.x0);
+        const _bhN = (_bn.y1 - _bn.y0);
+        const _bcxN = _bn.x0 + _bwN / 2;
+        const _bcyN = _bn.y0 + _bhN / 2;
+        const _constMembers = (packet.constellation && Array.isArray(packet.constellation.members))
+          ? packet.constellation.members : [];
+
+        // Anchor→bbox vectors: exact vector from each constellation member center to bbox center
+        const _anchorBboxVectors = [];
+        for(let _avi = 0; _avi < _constMembers.length; _avi++){
+          const _am = _constMembers[_avi];
+          if(!_am.geom) continue;
+          _anchorBboxVectors.push({
+            objId: _am.objId,
+            dxN:   _bcxN - (_am.geom.cxN || 0),
+            dyN:   _bcyN - (_am.geom.cyN || 0)
+          });
+        }
+
+        // Inter-anchor distances: exact distance between every pair of constellation members
+        const _interAnchorDistances = [];
+        for(let _iai = 0; _iai < _constMembers.length; _iai++){
+          for(let _iaj = _iai + 1; _iaj < _constMembers.length; _iaj++){
+            const _ma = _constMembers[_iai];
+            const _mb = _constMembers[_iaj];
+            if(!_ma.geom || !_mb.geom) continue;
+            const _iadx = (_ma.geom.cxN || 0) - (_mb.geom.cxN || 0);
+            const _iady = (_ma.geom.cyN || 0) - (_mb.geom.cyN || 0);
+            _interAnchorDistances.push({
+              fromId: _ma.objId,
+              toId:   _mb.objId,
+              distN:  Math.sqrt(_iadx * _iadx + _iady * _iady),
+              dxN:    _iadx,
+              dyN:    _iady
+            });
+          }
+        }
+
+        packet.bboxGeometry = {
+          schema: 'wfg4/bbox-geometry/v1',
+          // Exact normalized bbox dimensions
+          wN:  _bwN,
+          hN:  _bhN,
+          cxN: _bcxN,
+          cyN: _bcyN,
+          // Distances from bbox edges to page edges (normalized)
+          pageEdgeDistances: {
+            leftN:   _bn.x0,
+            rightN:  1 - _bn.x1,
+            topN:    _bn.y0,
+            bottomN: 1 - _bn.y1
+          },
+          // Anchor→bbox vectors
+          anchorBboxVectors: _anchorBboxVectors,
+          // Inter-anchor distances for mutual verification
+          interAnchorDistances: _interAnchorDistances
+        };
+      } catch(_bgErr){
+        packet.bboxGeometry = null;
+      }
+
       packet.visualReference.captureStatus = 'ok';
     } catch(err){
       packet.visualReference.captureStatus = 'feature_capture_failed';

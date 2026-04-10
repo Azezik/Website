@@ -335,6 +335,7 @@
     // and supports repeated constellations.  Accepted matches drive the search
     // window order; if no candidate is accepted we fall back to Phase 4's raw
     // viable list, and if even those are absent we keep the legacy ORB-first path.
+    const cfgBboxGeometry = ref?.bboxGeometry || null;
     if(rtPageStructure && configConstellation && structCandidates.length && CvOps.matchConstellationCandidates){
       try {
         const matchRes = CvOps.matchConstellationCandidates(
@@ -342,7 +343,8 @@
           {
             acceptThreshold:     DEFAULTS.constellationAcceptThreshold     || 0.35,
             memberSearchRadiusN: DEFAULTS.constellationMemberSearchRadiusN || 0.08,
-            maxMatches:          DEFAULTS.globalScanTopCandidates          || 5
+            maxMatches:          DEFAULTS.globalScanTopCandidates          || 5,
+            bboxGeometry:        cfgBboxGeometry
           }
         ) || { matches: [], debug: null };
         structMatches         = matchRes.matches || [];
@@ -380,7 +382,8 @@
               acceptedStructMatches[mi], rtPageStructure, surfaceSize,
               {
                 minAffineCorrespondences: DEFAULTS.reconstructionMinAffineCorrespondences || 4,
-                rowSnapEnabled:           DEFAULTS.reconstructionRowSnapEnabled !== false
+                rowSnapEnabled:           DEFAULTS.reconstructionRowSnapEnabled !== false,
+                bboxGeometry:             cfgBboxGeometry
               }
             );
             if(rec && rec.ok){
@@ -556,9 +559,14 @@
     let usedRefine = !!best?.usedRefine;
     let attemptsWon = !!(best && best.ok && localized);
 
-    // Phase 7: refine-only mode.
-    // The reconstructed box is the authoritative localized box.  ORB output
-    // is accepted only as a small precision correction within
+    // Phase 7: refine-only mode (with BBOX-exactness authority gating).
+    // The reconstructed box is the authoritative localized box ONLY when
+    // the Phase 6 reconstruction passes geometric constraint gates
+    // (reconstructionConfidence).  When constraints are violated, the
+    // reconstruction's authority is reduced — it may be blended with or
+    // replaced by the predicted box.
+    //
+    // ORB output is accepted only as a small precision correction within
     // `refineMaxDriftPx` of the reconstructed center.  Anything beyond
     // that bound is discarded — ORB cannot relocate the field.
     let usedStructuralReconstruction = false;
@@ -566,15 +574,57 @@
     let postRefineBox2 = null; // Phase 7 final refined box (vs Phase 6 internal postRefineBox)
     let refineDriftPx = 0;
     let refineWithinBound = false;
+    let reconstructionAuthorityReduced = false;
     const topReconstruction = structReconstructions.length > 0 ? structReconstructions[0] : null;
+    // BBOX-exactness: read reconstruction confidence from Phase 6.
+    // Values below 0.5 indicate geometry constraint violations; below 0.3
+    // means the reconstruction is likely in the wrong structural region.
+    const topReconConfidence = (topReconstruction && typeof topReconstruction.reconstructionConfidence === 'number')
+      ? topReconstruction.reconstructionConfidence : 1.0;
+    // Also read the Phase 5 match quality for this reconstruction's source match.
+    const topMatchQuality = (acceptedStructMatches.length > 0)
+      ? (acceptedStructMatches[0].finalScore || 0) : 0;
+    const topMatchCoverage = (acceptedStructMatches.length > 0)
+      ? (acceptedStructMatches[0].memberCoverage || 0) : 0;
+    const topAnchorBboxConsistency = (acceptedStructMatches.length > 0)
+      ? (acceptedStructMatches[0].anchorBboxConsistency ?? 1.0) : 1.0;
+
     if(refineOnlyMode && topReconstruction && topReconstruction.reconstructedBoxPx){
       const reconBox = { ...topReconstruction.reconstructedBoxPx, page };
       preRefineBox = { ...reconBox };
-      // Default: reconstruction wins.
-      localized = reconBox;
-      usedStructuralReconstruction = true;
-      // Optional precision correction from ORB.
-      if(attemptsWon && best && best.localized){
+
+      // BBOX-exactness: authority gating.
+      // When reconstruction confidence is low (geometry constraints violated)
+      // AND match quality is weak, reduce reconstruction authority by falling
+      // back to predicted box instead of blindly locking in.
+      const reconIsWeak = topReconConfidence < 0.50;
+      const matchIsWeak = topMatchQuality < 0.55 || topMatchCoverage < 0.55;
+      const anchorDisagreement = topAnchorBboxConsistency < 0.70;
+
+      if(reconIsWeak && (matchIsWeak || anchorDisagreement)){
+        // Reconstruction failed geometric validation and the match that
+        // produced it is also weak. Fall back to predicted box rather
+        // than locking in a wrong reconstruction.
+        localized = predictedBox ? { ...predictedBox } : reconBox;
+        reconstructionAuthorityReduced = true;
+        usedStructuralReconstruction = false;
+        _EL?.engineLog('wfg4-run', 'phase7.authority_reduced', {
+          fieldKey: _fk,
+          reconConfidence: topReconConfidence,
+          matchScore: topMatchQuality,
+          matchCoverage: topMatchCoverage,
+          anchorBboxConsistency: topAnchorBboxConsistency,
+          geometryViolations: topReconstruction.geometryViolations || [],
+          action: 'fallback_to_predicted'
+        });
+      } else {
+        // Reconstruction passes authority gate — use it as primary.
+        localized = reconBox;
+        usedStructuralReconstruction = true;
+      }
+
+      // Optional precision correction from ORB (only if reconstruction was accepted).
+      if(usedStructuralReconstruction && attemptsWon && best && best.localized){
         const rcx = reconBox.x + reconBox.w / 2;
         const rcy = reconBox.y + reconBox.h / 2;
         const ocx = best.localized.x + best.localized.w / 2;
@@ -590,9 +640,14 @@
         }
       }
     } else if(!attemptsWon && topReconstruction && topReconstruction.reconstructedBoxPx){
-      // No refine-only mode (defensive): keep the Phase 6 adoption path.
-      localized = { ...topReconstruction.reconstructedBoxPx, page };
-      usedStructuralReconstruction = true;
+      // No refine-only mode (defensive): keep the Phase 6 adoption path,
+      // but only if reconstruction confidence is adequate.
+      if(topReconConfidence >= 0.40){
+        localized = { ...topReconstruction.reconstructedBoxPx, page };
+        usedStructuralReconstruction = true;
+      } else {
+        reconstructionAuthorityReduced = true;
+      }
     }
 
     // Structural refinement (only as controlled fallback when geometric localization failed,
@@ -697,7 +752,30 @@
     else if(usedStructuralReconstruction) bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
     else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
 
-    const finalBox = enforceReadoutFloor(localized || predictedBox, predictedBox, bounds);
+    let finalBox = enforceReadoutFloor(localized || predictedBox, predictedBox, bounds);
+
+    // BBOX-exactness: footprint drift prevention.
+    // After readout floor enforcement, cap the final bbox size to prevent
+    // it from inflating beyond the config footprint.  This directly
+    // addresses the "bbox footprint grows and captures adjacent text" failure.
+    if(finalBox && predictedBox && cfgBboxGeometry){
+      const maxFootprintGrowth = 1.60; // allow up to 60% growth for scale adaptation
+      const maxW = predictedBox.w * maxFootprintGrowth;
+      const maxH = predictedBox.h * maxFootprintGrowth;
+      if(finalBox.w > maxW || finalBox.h > maxH){
+        const fcx = finalBox.x + finalBox.w / 2;
+        const fcy = finalBox.y + finalBox.h / 2;
+        const cappedW = Math.min(finalBox.w, maxW);
+        const cappedH = Math.min(finalBox.h, maxH);
+        finalBox = clampBoxToBounds({
+          x: fcx - cappedW / 2,
+          y: fcy - cappedH / 2,
+          w: cappedW,
+          h: cappedH,
+          page: finalBox.page || 1
+        }, bounds);
+      }
+    }
 
     // Phase 7: per-instance output for repeated constellations.
     // When policy = 'multi', emit one instance per accepted reconstruction
@@ -725,10 +803,15 @@
       finalScore:               acceptedStructMatches[0].finalScore,
       memberCoverage:           acceptedStructMatches[0].memberCoverage,
       relationConsistencyRatio: acceptedStructMatches[0].relationConsistencyRatio,
+      distConsistencyRatio:     acceptedStructMatches[0].distConsistencyRatio,
+      anchorBboxConsistency:    acceptedStructMatches[0].anchorBboxConsistency,
       partial:                  acceptedStructMatches[0].partial,
       transformModel:           structReconstructions[0].transformModel,
       correspondencesUsed:      structReconstructions[0].correspondencesUsed,
-      usedRowSnap:              structReconstructions[0].usedRowSnap
+      usedRowSnap:              structReconstructions[0].usedRowSnap,
+      reconstructionConfidence: structReconstructions[0].reconstructionConfidence,
+      geometryViolations:       structReconstructions[0].geometryViolations,
+      translationDriftN:        structReconstructions[0].translationDriftN
     } : null;
     const pageStructureSummary = rtPageStructure ? {
       regionCount:          (rtPageStructure.regions          || []).length,
@@ -741,6 +824,11 @@
       fieldKey: _fk,
       refineOnlyMode,
       usedStructuralReconstruction,
+      reconstructionAuthorityReduced,
+      topReconConfidence: Number(topReconConfidence.toFixed(4)),
+      topMatchQuality: Number(topMatchQuality.toFixed(4)),
+      topMatchCoverage: Number(topMatchCoverage.toFixed(4)),
+      topAnchorBboxConsistency: Number(topAnchorBboxConsistency.toFixed(4)),
       refineWithinBound,
       refineDriftPx: Number(refineDriftPx.toFixed(2)),
       refineMaxDriftPx,
@@ -792,6 +880,8 @@
       refineDriftPx,
       refineWithinBound,
       refineOnlyMode,
+      reconstructionAuthorityReduced,
+      topReconConfidence,
       repeatedConstellationPolicy: repeatedPolicy,
       fallbackUsed: !localizationSucceeded && usedStructural,
       attempts: attemptsLog,
