@@ -10221,6 +10221,17 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         }
       }
       const _isConfigModeNow = isConfigMode();
+      const canonicalViewport = (fieldEngineType === ENGINE_KIND.WFG4)
+        ? (getWfg4CanonicalViewport(fieldSpec.page || state.pageNum || 1, _isConfigModeNow ? 'config' : 'run') || viewportPx || null)
+        : (viewportPx || null);
+      const canonicalTokens = (fieldEngineType === ENGINE_KIND.WFG4)
+        ? projectTokensToWfg4Canonical(
+            Array.isArray(tokens) ? tokens : [],
+            fieldSpec.page || state.pageNum || 1,
+            _isConfigModeNow ? 'config' : 'run',
+            viewportPx || null
+          )
+        : (Array.isArray(tokens) ? tokens : []);
       if(!captureFrame && pinnedWfg4Box && fieldSpec.bbox){
         const fallbackViewportBox = applyTransform(toPx(viewportPx, {
           x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page
@@ -10243,12 +10254,13 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       }
       const enginePayload = {
         fieldSpec,
-        tokens: Array.isArray(tokens) ? tokens : [],
+        tokens: canonicalTokens,
         boxPx: resolvedBox,
-        viewport: viewportPx,
+        viewport: canonicalViewport,
         profile: state.profile,
         geometryId: state.activeGeometryId || currentGeometryId(),
         wfg4Surface,
+        tokensCanonical: fieldEngineType === ENGINE_KIND.WFG4,
         // P1 fix (scanned-PDF / image config bug): in config mode, the user's
         // literal bbox is the source of truth. Tell the engine NOT to run
         // runtime structural re-localization (which can shift the readout box
@@ -13859,6 +13871,45 @@ async function ensureTesseractTokensForPage(pageNum, canvasEl=null){
 
 function getPageViewport(pageNum){
   return state.pageViewports?.[(pageNum || 1) - 1] || null;
+}
+
+function getWfg4CanonicalViewport(pageNum, modeHint = null){
+  const page = Math.max(1, Number(pageNum) || 1);
+  const mode = modeHint || (isRunMode() ? 'run' : 'config');
+  const surface = state.wfg4?.[mode === 'run' ? 'runSurface' : 'configSurface'] || null;
+  const pageEntry = surface?.pages?.[page - 1] || null;
+  const working = pageEntry?.dimensions?.working || null;
+  const width = Number(working?.width || 0);
+  const height = Number(working?.height || 0);
+  if(width > 0 && height > 0){
+    return { width, height, w: width, h: height, scale: 1, pageNumber: page };
+  }
+  return null;
+}
+
+function projectTokensToWfg4Canonical(tokens = [], pageNum, modeHint = null, viewportHint = null){
+  if(!Array.isArray(tokens) || !tokens.length) return [];
+  const page = Math.max(1, Number(pageNum) || 1);
+  const canonicalVp = getWfg4CanonicalViewport(page, modeHint);
+  if(!canonicalVp) return tokens.slice();
+  const sourceVp = viewportHint || state.pageViewports?.[page - 1] || state.viewport || canonicalVp;
+  const srcW = Math.max(1, Number(sourceVp.width ?? sourceVp.w ?? canonicalVp.width));
+  const srcH = Math.max(1, Number(sourceVp.height ?? sourceVp.h ?? canonicalVp.height));
+  const dstW = Math.max(1, Number(canonicalVp.width || canonicalVp.w || srcW));
+  const dstH = Math.max(1, Number(canonicalVp.height || canonicalVp.h || srcH));
+  const sx = dstW / srcW;
+  const sy = dstH / srcH;
+  if(Math.abs(sx - 1) < 0.0001 && Math.abs(sy - 1) < 0.0001){
+    return tokens.map(t => ({ ...t, page: t?.page || page }));
+  }
+  return tokens.map(tok => ({
+    ...tok,
+    x: Number(tok?.x || 0) * sx,
+    y: Number(tok?.y || 0) * sy,
+    w: Number(tok?.w || 0) * sx,
+    h: Number(tok?.h || 0) * sy,
+    page: tok?.page || page
+  }));
 }
 
 function getTokenSourceInfoForPage(pageNum){
@@ -19695,6 +19746,7 @@ async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'aut
   const wantTesseract = enginePref === 'tesseract' || enginePref === 'tesseract-bbox';
   const wantPdf = enginePref === 'pdfjs';
   const modeLabel = mode || (isRunMode() ? 'run' : (isConfigMode() ? 'config' : 'unknown'));
+  const canonicalVp = getWfg4CanonicalViewport(page, modeLabel);
 
   const buildResult = (tokens, engineUsed, tokenSource, resolverReason, fallbackFrom = null) => ({
     page,
@@ -19710,35 +19762,47 @@ async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'aut
   if(wantTesseract){
     const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
     const normalized = normalizeTesseractTokensForPage(tessTokens, page);
-    return buildResult(normalized, 'tesseract', 'tesseract-bbox', 'preferred_tesseract');
+    const canonical = projectTokensToWfg4Canonical(normalized, page, modeLabel, canonicalVp || null);
+    return buildResult(canonical, 'tesseract', 'tesseract-bbox', 'preferred_tesseract');
   }
 
   if(wantPdf){
-    const pdfTokens = await ensureTokensForPage(page);
+    const pdfTokensRaw = await ensureTokensForPage(page);
+    const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
     const sourceInfo = getTokenSourceInfoForPage(page);
     const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
     const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
-    const reason = tokenSource === 'acroform' ? 'preferred_pdfjs_with_acroform_overlay' : 'preferred_pdfjs';
+    const reason = tokenSource === 'acroform' ? 'preferred_pdf_fallback_with_acroform_overlay' : 'preferred_pdf_fallback';
     return buildResult(pdfTokens, engineUsed, tokenSource, reason);
   }
 
-  const pdfTokens = await ensureTokensForPage(page);
+  // WFG4 canonical rule: source-agnostic OCR tokens are primary. PDF text is
+  // fallback-only and must not become authoritative merely because the source
+  // document is a PDF.
+  const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
+  const normalized = normalizeTesseractTokensForPage(tessTokens, page);
+  const canonicalTess = projectTokensToWfg4Canonical(normalized, page, modeLabel, canonicalVp || null);
+  if(Array.isArray(canonicalTess) && canonicalTess.length){
+    return buildResult(canonicalTess, 'tesseract', 'tesseract-bbox', 'canonical_ocr_primary');
+  }
+
+  const pdfTokensRaw = await ensureTokensForPage(page);
+  const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
   const sourceInfo = getTokenSourceInfoForPage(page);
   if(Array.isArray(pdfTokens) && pdfTokens.length){
     const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
     const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
-    const reason = tokenSource === 'acroform' ? 'acroform_tokens_available' : 'pdf_tokens_available';
-    return buildResult(pdfTokens, engineUsed, tokenSource, reason);
+    const reason = tokenSource === 'acroform' ? 'acroform_tokens_fallback' : 'pdf_tokens_fallback';
+    return buildResult(pdfTokens, engineUsed, tokenSource, reason, 'tesseract-bbox');
   }
 
   if(sourceInfo.acroTokenCount > 0){
-    const acroTokens = Array.isArray(state.acroTokensByPage?.[page]) ? state.acroTokensByPage[page] : [];
-    return buildResult(acroTokens, 'acroform', 'acroform', 'acroform_tokens_available_without_pdf_text', 'pdfjs');
+    const acroRaw = Array.isArray(state.acroTokensByPage?.[page]) ? state.acroTokensByPage[page] : [];
+    const acroTokens = projectTokensToWfg4Canonical(acroRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
+    return buildResult(acroTokens, 'acroform', 'acroform', 'acroform_tokens_fallback_without_pdf_text', 'tesseract-bbox');
   }
 
-  const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
-  const normalized = normalizeTesseractTokensForPage(tessTokens, page);
-  return buildResult(normalized, 'tesseract', 'tesseract-bbox', 'pdf_empty_tokens_fallback', 'pdfjs');
+  return buildResult([], 'none', 'none', 'no_tokens_available', null);
 }
 
 function isRenderableFindTextBox(box){
@@ -20250,7 +20314,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
         _normBoxPre = normalizeBox(_ubw, captureFrame.working.width, captureFrame.working.height);
         _rawBoxPre = { x: _ubw.x, y: _ubw.y, w: _ubw.w, h: _ubw.h, canvasW: captureFrame.working.width, canvasH: captureFrame.working.height };
       } else {
-        _vpPre = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        _vpPre = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
         const _vpW = (_vpPre.width ?? _vpPre.w) || 1;
         const _vpH = (_vpPre.height ?? _vpPre.h) || 1;
         _normBoxPre = normalizeBox(state.snappedPx, _vpW, _vpH);
@@ -20323,7 +20387,7 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
 
-  const vp = state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+  const vp = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
   const canvasW = (vp.width ?? vp.w) || 1;
   const canvasH = (vp.height ?? vp.h) || 1;
   const normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
@@ -21297,18 +21361,21 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
             ? clamp(placement.pageNumber, 1, state.numPages || 1)
             : clamp(Number.isFinite(spec.page) ? spec.page : (state.pageNum || 1), 1, state.numPages || 1);
           state.pageNum = targetPage;
-          state.viewport = state.pageViewports[targetPage-1] || state.viewport;
-          let tokens = state.tokensByPage[targetPage] || [];
-          if(!tokens.length){
-            const tokenResolution = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'auto', mode: 'run' });
-            tokens = tokenResolution.tokens || [];
-            if(!state.currentTokenSourceByPage) state.currentTokenSourceByPage = {};
-            state.currentTokenSourceByPage[targetPage] = tokenResolution.tokenSource || null;
-            if(Array.isArray(state.keywordIndexByPage?.[targetPage])) state.keywordIndexByPage[targetPage] = null;
-          }
-          const targetViewport = state.pageViewports[targetPage-1] || state.viewport || { width:1, height:1 };
+          const targetViewport = getWfg4CanonicalViewport(targetPage, 'run')
+            || state.pageViewports[targetPage-1]
+            || state.viewport
+            || { width:1, height:1 };
+          state.viewport = targetViewport;
+          // Canonical authority cut: WFG4 run mode always resolves through the
+          // canonical token resolver. Do not read state.tokensByPage directly as
+          // an authoritative stream (that path is PDF-text-biased by construction).
+          const tokenResolution = await resolveExtractionTokensForField({ pageNum: targetPage, preferredEngine: 'auto', mode: 'run' });
+          let tokens = tokenResolution.tokens || [];
           if(!state.currentTokenSourceByPage) state.currentTokenSourceByPage = {};
-          if(!state.currentTokenSourceByPage[targetPage]) state.currentTokenSourceByPage[targetPage] = (state.tokensByPage[targetPage]?.length ? 'pdfjs' : null);
+          state.currentTokenSourceByPage[targetPage] = tokenResolution.tokenSource || null;
+          if(Array.isArray(state.keywordIndexByPage?.[targetPage])) state.keywordIndexByPage[targetPage] = null;
+          if(!state.currentTokenSourceByPage) state.currentTokenSourceByPage = {};
+          if(!state.currentTokenSourceByPage[targetPage]) state.currentTokenSourceByPage[targetPage] = 'tesseract-bbox';
           const configMask = placement?.configMask || normalizeConfigMask(spec);
           const bboxArr = placement?.bbox || spec.bbox;
           const keywordRelations = spec.keywordRelations ? clonePlain(spec.keywordRelations) : null;
