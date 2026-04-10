@@ -12,15 +12,6 @@
 (function(global){
   'use strict';
 
-  function pickVp(state, idx){
-    const vp = state?.pageViewports?.[idx] || state?.viewport || null;
-    if(!vp) return null;
-    const w = Number(vp.width ?? vp.w);
-    const h = Number(vp.height ?? vp.h);
-    if(!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
-    return { width: Math.round(w), height: Math.round(h) };
-  }
-
   function invariantsReport({ pageNum, state }){
     const idx = Math.max(0, (Number(pageNum) || 1) - 1);
     const surface = state?.wfg4?.configSurface || null;
@@ -44,9 +35,8 @@
     const working = pageEntry.dimensions.working;
     const workingW = Math.max(1, Math.round(working.width));
     const workingH = Math.max(1, Math.round(working.height));
-    const vp = pickVp(state, idx) || { width: workingW, height: workingH };
-    const displayW = vp.width;
-    const displayH = vp.height;
+    const displayW = workingW;
+    const displayH = workingH;
     const sX = workingW / displayW;
     const sY = workingH / displayH;
 
@@ -74,11 +64,7 @@
 
     const frame = {
       pageNum: userBoxDisplay.page,
-      sourceType: state?.isImage
-        ? 'image'
-        : ((Array.isArray(state?.tokensByPage?.[userBoxDisplay.page]) && state.tokensByPage[userBoxDisplay.page].length)
-            ? 'pdf-text-layer'
-            : 'pdf-scanned-or-empty'),
+      sourceType: state?.isImage ? 'image-visual-intake' : 'pdf-raster-visual-intake',
       generation: Number(pageEntry.generation || 0),
       display: Object.freeze({ width: displayW, height: displayH }),
       working: Object.freeze({ width: workingW, height: workingH }),

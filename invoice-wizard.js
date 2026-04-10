@@ -13878,9 +13878,9 @@ function getWfg4CanonicalViewport(pageNum, modeHint = null){
   const mode = modeHint || (isRunMode() ? 'run' : 'config');
   const surface = state.wfg4?.[mode === 'run' ? 'runSurface' : 'configSurface'] || null;
   const pageEntry = surface?.pages?.[page - 1] || null;
-  const working = pageEntry?.dimensions?.working || null;
-  const width = Number(working?.width || 0);
-  const height = Number(working?.height || 0);
+  const visual = pageEntry?.dimensions?.working || pageEntry?.dimensions?.original || null;
+  const width = Number(visual?.width || 0);
+  const height = Number(visual?.height || 0);
   if(width > 0 && height > 0){
     return { width, height, w: width, h: height, scale: 1, pageNumber: page };
   }
@@ -13891,17 +13891,11 @@ function projectTokensToWfg4Canonical(tokens = [], pageNum, modeHint = null, vie
   if(!Array.isArray(tokens) || !tokens.length) return [];
   const page = Math.max(1, Number(pageNum) || 1);
   const canonicalVp = getWfg4CanonicalViewport(page, modeHint);
-  if(!canonicalVp) return tokens.slice();
-  const sourceVp = viewportHint || state.pageViewports?.[page - 1] || state.viewport || canonicalVp;
-  const srcW = Math.max(1, Number(sourceVp.width ?? sourceVp.w ?? canonicalVp.width));
-  const srcH = Math.max(1, Number(sourceVp.height ?? sourceVp.h ?? canonicalVp.height));
-  const dstW = Math.max(1, Number(canonicalVp.width || canonicalVp.w || srcW));
-  const dstH = Math.max(1, Number(canonicalVp.height || canonicalVp.h || srcH));
-  const sx = dstW / srcW;
-  const sy = dstH / srcH;
-  if(Math.abs(sx - 1) < 0.0001 && Math.abs(sy - 1) < 0.0001){
-    return tokens.map(t => ({ ...t, page: t?.page || page }));
-  }
+  if(!canonicalVp) return tokens.map(t => ({ ...t, page: t?.page || page }));
+  const srcW = Math.max(1, Number(viewportHint?.width ?? viewportHint?.w ?? canonicalVp.width));
+  const srcH = Math.max(1, Number(viewportHint?.height ?? viewportHint?.h ?? canonicalVp.height));
+  const sx = canonicalVp.width / srcW;
+  const sy = canonicalVp.height / srcH;
   return tokens.map(tok => ({
     ...tok,
     x: Number(tok?.x || 0) * sx,
@@ -14006,62 +14000,60 @@ function clearWfg4PageRasterCache(){
   if(state.wfg4) state.wfg4.pageCanvases = {};
 }
 
-function captureWfg4SurfaceForMode(mode){
-  if(!window.WFG4Engine?.prepareDocumentSurface) return null;
-  const vp = state.pageViewports?.[(state.pageNum || 1) - 1] || state.viewport || null;
+function cloneCanvasVisualSurface(inputCanvas, width, height){
+  if(!inputCanvas) return null;
+  const w = Math.max(1, Math.round(width || inputCanvas.width || 1));
+  const h = Math.max(1, Math.round(height || inputCanvas.height || 1));
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  if(ctx){
+    try { ctx.drawImage(inputCanvas, 0, 0, w, h); } catch(_err){}
+  }
+  return out;
+}
+
+function buildWfg4VisualIntakePages(){
   const pages = [];
   if(state.isImage){
     const imgNode = els.imgCanvas;
-    const imgW = Math.max(1, Math.round(imgNode?.width || state.viewport?.w || state.viewport?.width || 1));
-    const imgH = Math.max(1, Math.round(imgNode?.height || state.viewport?.h || state.viewport?.height || 1));
+    const width = Math.max(1, Math.round(imgNode?.width || 1));
+    const height = Math.max(1, Math.round(imgNode?.height || 1));
     if(imgNode){
-      const tmp = document.createElement('canvas');
-      tmp.width = imgW;
-      tmp.height = imgH;
-      const tctx = tmp.getContext('2d');
-      if(tctx){
-        try { tctx.drawImage(imgNode, 0, 0, imgW, imgH); } catch(_err){}
-      }
-      pages.push({ pageIndex: 0, pageNumber: 1, width: imgW, height: imgH, canvas: tmp });
+      const canvas = cloneCanvasVisualSurface(imgNode, width, height);
+      pages.push({ pageIndex: 0, pageNumber: 1, width, height, canvas });
     }
-  } else if(Array.isArray(state.pageViewports) && state.pageViewports.length){
-    for(let i=0; i<state.pageViewports.length; i++){
-      const pageVp = state.pageViewports[i] || {};
-      const fallbackW = Math.max(1, Math.round(pageVp.width || pageVp.w || 1));
-      const fallbackH = Math.max(1, Math.round(pageVp.height || pageVp.h || 1));
-      // Unified raster source: both config and run read the per-page canvas
-      // from state.wfg4.pageCanvases. The cache is populated synchronously
-      // (awaited) by renderAllPages (config) and prepareRunDocument (run) BEFORE
-      // syncWfg4SurfaceContext fires, so it is guaranteed to be available here.
-      // We pass the cached HTMLCanvasElement *directly* into the WFG4 page
-      // descriptor so downstream normalizePage → toCanvasFromSource consumes
-      // the exact same bits in both modes, with zero intermediate copies.
-      const cached = getWfg4CachedPageCanvas(i + 1);
-      if(!cached){
-        // Should not happen in normal flow; log so regressions surface loudly
-        // rather than silently diverging between modes.
-        console.warn('[wfg4] raster cache miss for page', i + 1, 'mode=', mode);
-        pages.push({ pageIndex: i, pageNumber: i + 1, width: fallbackW, height: fallbackH, canvas: null });
-        continue;
-      }
-      pages.push({
-        pageIndex: i,
-        pageNumber: i + 1,
-        width: cached.width || fallbackW,
-        height: cached.height || fallbackH,
-        canvas: cached
-      });
-    }
+    return pages;
   }
+  const bucket = ensureWfg4StateBucket();
+  const cached = bucket.pageCanvases || {};
+  const pageCount = Math.max(1, Number(state.numPages || Object.keys(cached).length || 1));
+  for(let i = 1; i <= pageCount; i++){
+    const src = cached[i] || null;
+    const width = Math.max(1, Math.round(src?.width || 1));
+    const height = Math.max(1, Math.round(src?.height || 1));
+    const canvas = src ? cloneCanvasVisualSurface(src, width, height) : null;
+    pages.push({ pageIndex: i - 1, pageNumber: i, width, height, canvas });
+  }
+  return pages;
+}
+
+function captureWfg4SurfaceForMode(mode){
+  if(!window.WFG4Engine?.prepareDocumentSurface) return null;
+  const pages = buildWfg4VisualIntakePages();
+  const activePage = Math.max(1, Math.min(pages.length || 1, Number(state.pageNum) || 1));
+  const active = pages[activePage - 1] || pages[0] || { width: 1, height: 1 };
+  const vp = { width: active.width, height: active.height, w: active.width, h: active.height, scale: 1, pageNumber: activePage };
   const payload = {
     mode,
     fileName: state.currentFileName || '',
-    mimeType: state.isImage ? 'image/*' : 'application/pdf',
+    mimeType: state.isImage ? 'image/*' : 'application/pdf-rasterized',
     isImage: !!state.isImage,
     geometryId: state.activeGeometryId || currentGeometryId() || null,
     wizardId: currentWizardId() || null,
-    pageCount: Number.isFinite(state.numPages) ? state.numPages : 0,
-    activePage: Number.isFinite(state.pageNum) ? state.pageNum : 1,
+    pageCount: pages.length,
+    activePage,
     viewport: vp,
     pages
   };
@@ -19744,7 +19736,6 @@ async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'aut
   const page = Math.max(1, Number(pageNum) || 1);
   const enginePref = String(preferredEngine || 'auto').toLowerCase();
   const wantTesseract = enginePref === 'tesseract' || enginePref === 'tesseract-bbox';
-  const wantPdf = enginePref === 'pdfjs';
   const modeLabel = mode || (isRunMode() ? 'run' : (isConfigMode() ? 'config' : 'unknown'));
   const canonicalVp = getWfg4CanonicalViewport(page, modeLabel);
 
@@ -19766,39 +19757,38 @@ async function resolveExtractionTokensForField({ pageNum, preferredEngine = 'aut
     return buildResult(canonical, 'tesseract', 'tesseract-bbox', 'preferred_tesseract');
   }
 
-  if(wantPdf){
+  if(enginePref === 'pdfjs'){
     const pdfTokensRaw = await ensureTokensForPage(page);
-    const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
+    const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, canonicalVp || null);
     const sourceInfo = getTokenSourceInfoForPage(page);
     const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
     const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
-    const reason = tokenSource === 'acroform' ? 'preferred_pdf_fallback_with_acroform_overlay' : 'preferred_pdf_fallback';
+    const reason = tokenSource === 'acroform' ? 'explicit_pdf_request_non_authoritative' : 'explicit_pdf_request_non_authoritative';
     return buildResult(pdfTokens, engineUsed, tokenSource, reason);
   }
 
-  // WFG4 canonical rule: source-agnostic OCR tokens are primary. PDF text is
-  // fallback-only and must not become authoritative merely because the source
-  // document is a PDF.
+  // Visual-first rule: OCR on the visual surface is always authoritative.
+  // PDF text layer never defines primary token geometry.
   const tessTokens = await ensureTesseractTokensForPageWithBBox(page);
   const normalized = normalizeTesseractTokensForPage(tessTokens, page);
   const canonicalTess = projectTokensToWfg4Canonical(normalized, page, modeLabel, canonicalVp || null);
   if(Array.isArray(canonicalTess) && canonicalTess.length){
-    return buildResult(canonicalTess, 'tesseract', 'tesseract-bbox', 'canonical_ocr_primary');
+    return buildResult(canonicalTess, 'tesseract', 'tesseract-bbox', 'visual_surface_ocr_primary');
   }
 
   const pdfTokensRaw = await ensureTokensForPage(page);
-  const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
+  const pdfTokens = projectTokensToWfg4Canonical(pdfTokensRaw, page, modeLabel, canonicalVp || null);
   const sourceInfo = getTokenSourceInfoForPage(page);
   if(Array.isArray(pdfTokens) && pdfTokens.length){
     const tokenSource = sourceInfo.acroTokenCount > 0 && sourceInfo.pdfTokenCount === 0 ? 'acroform' : 'pdfjs';
     const engineUsed = tokenSource === 'acroform' ? 'acroform' : 'pdfjs';
-    const reason = tokenSource === 'acroform' ? 'acroform_tokens_fallback' : 'pdf_tokens_fallback';
+    const reason = tokenSource === 'acroform' ? 'acroform_tokens_visual_fallback' : 'pdf_tokens_visual_fallback';
     return buildResult(pdfTokens, engineUsed, tokenSource, reason, 'tesseract-bbox');
   }
 
   if(sourceInfo.acroTokenCount > 0){
     const acroRaw = Array.isArray(state.acroTokensByPage?.[page]) ? state.acroTokensByPage[page] : [];
-    const acroTokens = projectTokensToWfg4Canonical(acroRaw, page, modeLabel, state.pageViewports?.[page - 1] || null);
+    const acroTokens = projectTokensToWfg4Canonical(acroRaw, page, modeLabel, canonicalVp || null);
     return buildResult(acroTokens, 'acroform', 'acroform', 'acroform_tokens_fallback_without_pdf_text', 'tesseract-bbox');
   }
 
