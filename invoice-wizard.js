@@ -12694,6 +12694,119 @@ async function debugCompareFlattenOutputs(originalBuffer, flattenedBuffer){
   }
 }
 
+function loadImageElementFromArrayBuffer(arrayBuffer){
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([arrayBuffer]);
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => resolve({ img, url });
+    img.onerror = (err) => {
+      try { URL.revokeObjectURL(url); } catch(_){}
+      reject(err);
+    };
+    img.src = url;
+  });
+}
+
+async function rasterizeFileToUnifiedImagePages(file, arrayBuffer){
+  const isImageInput = /^image\//.test(file?.type || '');
+  if(isImageInput){
+    const loaded = await loadImageElementFromArrayBuffer(arrayBuffer);
+    const img = loaded.img;
+    const scale = Math.min(1, 980 / Math.max(1, img.naturalWidth || 1));
+    const width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+    const height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if(ctx) ctx.drawImage(img, 0, 0, width, height);
+    return {
+      unifiedType: 'wfg4/unified-image-pages/v1',
+      pages: [{ pageNumber: 1, pageIndex: 0, width, height, canvas }],
+      imageBlobUrl: loaded.url
+    };
+  }
+
+  await preloadAcroFormTokensFromBuffer(arrayBuffer);
+  const pdfBuffer = await flattenAcroFormAppearances(arrayBuffer);
+  await debugCompareFlattenOutputs(arrayBuffer, pdfBuffer);
+  const loadingTask = pdfjsLibRef.getDocument({ data: pdfBuffer });
+  const pdfDoc = await loadingTask.promise;
+  const pages = [];
+  const scale = BASE_PDF_SCALE;
+  for(let i = 1; i <= pdfDoc.numPages; i++){
+    const page = await pdfDoc.getPage(i);
+    const vp = page.getViewport({ scale });
+    const canvas = await renderPdfPageToOffscreenCanvas(page, vp);
+    pages.push({
+      pageNumber: i,
+      pageIndex: i - 1,
+      width: Math.max(1, Math.round(canvas.width || vp.width || 1)),
+      height: Math.max(1, Math.round(canvas.height || vp.height || 1)),
+      canvas
+    });
+  }
+  try { await loadingTask.destroy(); } catch(_){}
+  return {
+    unifiedType: 'wfg4/unified-image-pages/v1',
+    pages,
+    imageBlobUrl: null
+  };
+}
+
+function applyUnifiedPagesToViewerState(unified){
+  const pages = Array.isArray(unified?.pages) ? unified.pages : [];
+  state.pdf = null;
+  state.pageViewports = [];
+  state.pageOffsets = [];
+  state.pageRenderPromises = [];
+  state.pageRenderReady = [];
+  state.numPages = pages.length;
+  state.pageNum = 1;
+  let totalH = 0;
+  let maxW = 0;
+  clearWfg4PageRasterCache();
+  for(let i = 0; i < pages.length; i++){
+    const p = pages[i];
+    const w = Math.max(1, Math.round(p?.width || p?.canvas?.width || 1));
+    const h = Math.max(1, Math.round(p?.height || p?.canvas?.height || 1));
+    state.pageViewports[i] = { width: w, height: h, w, h, scale: 1, pageNumber: i + 1 };
+    state.pageOffsets[i] = totalH;
+    state.pageRenderPromises[i] = Promise.resolve();
+    state.pageRenderReady[i] = true;
+    totalH += h;
+    maxW = Math.max(maxW, w);
+    ensureWfg4StateBucket().pageCanvases[i + 1] = p?.canvas || null;
+  }
+  state.viewport = state.pageViewports[0] || { w: 0, h: 0, scale: 1 };
+
+  els.imgCanvas.style.display = 'none';
+  els.pdfCanvas.style.display = 'block';
+  const cssScale = PDF_CSS_SCALE || 1;
+  const cssW = Math.max(1, maxW) * cssScale;
+  const cssH = Math.max(1, totalH) * cssScale;
+  els.pdfCanvas.width = Math.max(1, maxW);
+  els.pdfCanvas.height = Math.max(1, totalH);
+  els.pdfCanvas.style.width = cssW + 'px';
+  els.pdfCanvas.style.height = cssH + 'px';
+  const ctx = els.pdfCanvas.getContext('2d', { willReadFrequently: true });
+  if(ctx){
+    ctx.clearRect(0, 0, els.pdfCanvas.width, els.pdfCanvas.height);
+    let y = 0;
+    for(let i = 0; i < pages.length; i++){
+      const c = pages[i]?.canvas || null;
+      if(c) ctx.drawImage(c, 0, y);
+      y += Math.max(1, Number(pages[i]?.height || c?.height || 1));
+    }
+  }
+  sizeOverlayTo(cssW, cssH);
+  syncOverlay();
+  state.overlayPinned = isOverlayPinned();
+  updatePageIndicator();
+  if(els.pageControls) els.pageControls.style.display = 'none';
+}
+
 // ===== Open file (image or PDF), robust across browsers =====
 async function openFile(file){
   if (!(file instanceof Blob)) {
@@ -12719,9 +12832,28 @@ async function openFile(file){
   state.currentTokenSourceByPage = {};
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
-  const isImage = /^image\//.test(file.type || '');
   const wfg4Selected = getConfiguredEngineType() === ENGINE_KIND.WFG4;
+  const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
+
+  if(wfg4Selected){
+    try {
+      const unified = await rasterizeFileToUnifiedImagePages(file, arrayBuffer);
+      replacePendingBlobUrl(unified?.imageBlobUrl || null);
+      state.isImage = false;
+      applyUnifiedPagesToViewerState(unified);
+      await syncWfg4SurfaceContext('config');
+      drawOverlay();
+      return;
+    } catch(err){
+      console.error('Failed to load unified WFG4 surface:', err);
+      state.pdf = null;
+      clearDocumentSurfaces();
+      if(els.pageControls) els.pageControls.style.display = 'none';
+      if(!state.graphLearning?.active && !state.objectLearning?.active) alert('Failed to load file. Please try another file.');
+      throw err;
+    }
+  }
 
   if (isImage) {
     els.imgCanvas.style.display = 'block';
@@ -12914,9 +13046,24 @@ async function prepareRunDocument(file){
   state.lastSnapshotManifestId = '';
   state.snapshotDirty = state.snapshotMode;
 
-  const isImage = /^image\//.test(file.type || '');
   const wfg4Selected = getConfiguredEngineType() === ENGINE_KIND.WFG4;
+  const isImage = /^image\//.test(file.type || '');
   state.isImage = isImage;
+  if(wfg4Selected){
+    try {
+      const unified = await rasterizeFileToUnifiedImagePages(file, arrayBuffer);
+      replacePendingBlobUrl(unified?.imageBlobUrl || null);
+      state.isImage = false;
+      applyUnifiedPagesToViewerState(unified);
+      await syncWfg4SurfaceContext('run');
+      return { type: 'image-surface' };
+    } catch(err){
+      console.error('Unified WFG4 load failed in run mode', err);
+      alert('Could not load file for extraction.');
+      return null;
+    }
+  }
+
   if(isImage){
     try {
       const imgMeta = await loadRunImageFromBuffer(arrayBuffer);
