@@ -21579,6 +21579,8 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
     const runtimeEngineType = isRunMode()
       ? (getProfileEngineType(activeProfile) || getConfiguredEngineType())
       : getProfileEngineType(activeProfile || state.profile);
+    const runtimeEngineKind = normalizeEngineType(runtimeEngineType);
+    const runtimeIsWfg4 = runtimeEngineKind === ENGINE_KIND.WFG4;
     const runExtractionEngine = getRuntimeExtractionEngine(runtimeEngineType);
     if(!runExtractionEngine?.orchestrate){
       throw new Error('EngineExtraction.orchestrate is unavailable');
@@ -21600,6 +21602,28 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
       runContext,
       ensureDocumentLoaded: async () => prepareRunDocument(file),
       prepareTokens: async () => {
+        if(runtimeIsWfg4){
+          const surfacePages = Array.isArray(state.wfg4?.runSurface?.pages) ? state.wfg4.runSurface.pages : [];
+          const pageCount = surfacePages.length || state.numPages || 0;
+          const tokenStats = {
+            totalTokens: 0,
+            pageCount,
+            perPage: Array.from({ length: pageCount }, (_, idx) => ({ page: idx + 1, tokens: 0 })),
+            source: 'wfg4-visual-only'
+          };
+          if(!state.numPages && pageCount){
+            state.numPages = pageCount;
+          }
+          if(isRunMode()){
+            mirrorDebugLog(`[run-mode] WFG4 visual-only pipeline active; token prep skipped across ${pageCount} page(s)`);
+          }
+          traceEvent(runSpanKey,'tokens:rank',{
+            stageLabel:'Tokens bypassed',
+            counts:{ tokens: 0, pages: pageCount },
+            notes:'WFG4 run mode bypasses token preparation and keyword indexing'
+          });
+          return tokenStats;
+        }
         const tokenStats = summarizeTokenCache();
         if(!state.numPages && tokenStats.pageCount){
           state.numPages = tokenStats.pageCount;
@@ -21658,6 +21682,16 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         return { wizardId, geometryId, profile: activeProfile };
       },
       extractAreaRows: async ({ profile: profileForRun }) => {
+        if(runtimeIsWfg4){
+          state.currentAreaRows = [];
+          logDocStage('areas', 'skipped', { reason: 'wfg4_visual_only_pipeline' });
+          traceEvent(runSpanKey,'columns:merge',{
+            stageLabel:'Area rows skipped',
+            counts:{ areas: 0 },
+            notes:'WFG4 run mode bypasses token/keyword area-row extraction'
+          });
+          return;
+        }
         logDocStage('areas', 'start');
         await extractAreaRows(profileForRun);
         docStageState.areaRowCount = Array.isArray(state.currentAreaRows) ? state.currentAreaRows.length : 0;
@@ -21842,6 +21876,11 @@ async function runModeExtractFileWithProfile(file, profile, runContext = {}){
         return { hasExtractedContent: true, reason: null, extractedEntriesForGate, extractedScalarKeys, areaRowCountForGate, chartableProbe };
       },
       extractLineItems: async ({ profile: profileForRun }) => {
+        if(runtimeIsWfg4){
+          state.currentLineItems = [];
+          logDocStage('line-items', 'skipped', { reason: 'wfg4_visual_only_pipeline' });
+          return [];
+        }
         logDocStage('line-items', 'start');
         const lineItems = await extractLineItems(profileForRun);
         logDocStage('line-items', 'done', { lineItems: lineItems.length });
