@@ -21,38 +21,68 @@
     if(!pageEntry) reasons.push('page_entry_missing');
     const working = pageEntry?.dimensions?.working || null;
     if(!working || !(working.width > 0) || !(working.height > 0)) reasons.push('working_dims_missing');
+    const original = pageEntry?.dimensions?.original || null;
+    if(!original || !(original.width > 0) || !(original.height > 0)) reasons.push('original_dims_missing');
     if(!pageEntry?.artifacts?.displayDataUrl) reasons.push('display_data_url_missing');
     if(!pageEntry?.pageStructure) reasons.push('page_structure_missing');
     return { pageEntry, reasons };
   }
 
+  function clampBoxToBounds(box, W, H){
+    const bx = Math.max(0, Math.min(W, Number(box?.x) || 0));
+    const by = Math.max(0, Math.min(H, Number(box?.y) || 0));
+    const bw = Math.max(0, Math.min(W - bx, Number(box?.w) || 0));
+    const bh = Math.max(0, Math.min(H - by, Number(box?.h) || 0));
+    return { x: bx, y: by, w: bw, h: bh };
+  }
+
   function buildCaptureFrame({ pageNum, userBoxDisplayPx, state }){
     const idx = Math.max(0, (Number(pageNum) || 1) - 1);
     const { pageEntry, reasons } = invariantsReport({ pageNum, state });
-    if(!pageEntry || !pageEntry.dimensions?.working || !pageEntry.artifacts?.displayDataUrl){
+    if(!pageEntry
+        || !pageEntry.dimensions?.working
+        || !pageEntry.dimensions?.original
+        || !pageEntry.artifacts?.displayDataUrl){
       return { ok: false, reasons, frame: null };
     }
+    // `working` = canonical working pixel space (after maxWorkingEdge clamp).
+    // `original` = the native display canvas pixel space the user actually
+    // dragged on (pdfCanvas / imgCanvas). These can differ whenever a page's
+    // longest edge exceeds MAX_WORKING_EDGE (e.g. high-DPR PDFs, large scans).
+    // Prior to this fix the frame collapsed display == working, which silently
+    // corrupted every normBox / crop produced from a retina or large-image
+    // surface — user dragged in display px, frame divided by working dims.
+    // We now carry both spaces explicitly and expose a real display→working
+    // scale factor so one geometry authority can serve both.
     const working = pageEntry.dimensions.working;
+    const original = pageEntry.dimensions.original;
     const workingW = Math.max(1, Math.round(working.width));
     const workingH = Math.max(1, Math.round(working.height));
-    const displayW = workingW;
-    const displayH = workingH;
+    const displayW = Math.max(1, Math.round(original.width));
+    const displayH = Math.max(1, Math.round(original.height));
     const sX = workingW / displayW;
     const sY = workingH / displayH;
 
-    const ubd = userBoxDisplayPx || {};
+    const ubdRaw = userBoxDisplayPx || {};
+    const ubdClamped = clampBoxToBounds(ubdRaw, displayW, displayH);
     const userBoxDisplay = Object.freeze({
-      x: Number(ubd.x) || 0,
-      y: Number(ubd.y) || 0,
-      w: Number(ubd.w) || 0,
-      h: Number(ubd.h) || 0,
+      x: ubdClamped.x,
+      y: ubdClamped.y,
+      w: ubdClamped.w,
+      h: ubdClamped.h,
       page: Number(pageNum) || 1
     });
-    const userBoxWorking = Object.freeze({
+    const ubwClamped = clampBoxToBounds({
       x: userBoxDisplay.x * sX,
       y: userBoxDisplay.y * sY,
       w: userBoxDisplay.w * sX,
-      h: userBoxDisplay.h * sY,
+      h: userBoxDisplay.h * sY
+    }, workingW, workingH);
+    const userBoxWorking = Object.freeze({
+      x: ubwClamped.x,
+      y: ubwClamped.y,
+      w: ubwClamped.w,
+      h: ubwClamped.h,
       page: userBoxDisplay.page
     });
     const userBoxNorm = Object.freeze({
@@ -121,16 +151,23 @@
       cropWorkingImage(boxInWorking){
         const src = frame.getOffscreenCanonicalCanvas();
         if(!src || typeof document === 'undefined') return null;
+        // Floor the origin and ceil the opposite edge so we never lose a
+        // sub-pixel sliver of the region the user drew. Clamp both edges to
+        // the working surface bounds so boxes dragged past the edge of the
+        // document (including the common "finish outside canvas" case) still
+        // produce a valid crop instead of an empty or negative rect.
         const b = boxInWorking || userBoxWorking;
-        const x = Math.max(0, Math.min(workingW, Math.round(b.x)));
-        const y = Math.max(0, Math.min(workingH, Math.round(b.y)));
-        const w = Math.max(1, Math.min(workingW - x, Math.round(b.w)));
-        const h = Math.max(1, Math.min(workingH - y, Math.round(b.h)));
+        const x0 = Math.max(0, Math.min(workingW, Math.floor(Number(b.x) || 0)));
+        const y0 = Math.max(0, Math.min(workingH, Math.floor(Number(b.y) || 0)));
+        const x1 = Math.max(0, Math.min(workingW, Math.ceil((Number(b.x) || 0) + (Number(b.w) || 0))));
+        const y1 = Math.max(0, Math.min(workingH, Math.ceil((Number(b.y) || 0) + (Number(b.h) || 0))));
+        const w = Math.max(1, x1 - x0);
+        const h = Math.max(1, y1 - y0);
         const out = document.createElement('canvas');
         out.width = w;
         out.height = h;
         const ctx = out.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(src, x, y, w, h, 0, 0, w, h);
+        ctx.drawImage(src, x0, y0, w, h, 0, 0, w, h);
         return out;
       }
     };
