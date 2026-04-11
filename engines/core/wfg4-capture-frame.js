@@ -58,8 +58,20 @@
     const original = pageEntry.dimensions.original;
     const workingW = Math.max(1, Math.round(working.width));
     const workingH = Math.max(1, Math.round(working.height));
-    const displayW = Math.max(1, Math.round(original.width));
-    const displayH = Math.max(1, Math.round(original.height));
+    // Critical forensic fix:
+    // userBoxDisplayPx is drawn on the *currently rendered viewer surface*.
+    // In WFG4 config canonical mode, viewer pages are rendered in working
+    // dimensions (state.pageViewports), not original PDF raster dims.
+    // Using original dims here scales the user's box down a second time on
+    // PDFs where original != working, which shifts crops upward/left.
+    const canonicalDisplayActive = !!state?.wfg4?.configDisplayActive;
+    const displayVp = Array.isArray(state?.pageViewports) ? state.pageViewports[idx] : null;
+    const displayW = canonicalDisplayActive
+      ? Math.max(1, Math.round(Number(displayVp?.width ?? displayVp?.w ?? workingW) || workingW))
+      : Math.max(1, Math.round(original.width));
+    const displayH = canonicalDisplayActive
+      ? Math.max(1, Math.round(Number(displayVp?.height ?? displayVp?.h ?? workingH) || workingH))
+      : Math.max(1, Math.round(original.height));
     const sX = workingW / displayW;
     const sY = workingH / displayH;
 

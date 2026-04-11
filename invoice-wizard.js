@@ -10099,44 +10099,158 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
   return { cleaned, patchedText: null };
 }
 
-  /**
-   * P1 CaptureFrame: run Tesseract directly against a crop from the frame's
-   * offscreen canonical canvas, returning tokens already expressed in the
-   * frame's working pixel space (i.e. in the same space as
-   * captureFrame.userBoxWorkingPx). No coordScale fudging required — the
-   * source pixels and the query box live in the exact same space.
-   */
-  async function ocrBoxFromCaptureFrame(captureFrame, boxInWorking){
-    if(!captureFrame || !boxInWorking) return [];
-    if(!window.TesseractRef && !window.Tesseract) return [];
-    const TesseractLib = window.TesseractRef || window.Tesseract;
-    const crop = captureFrame.cropWorkingImage(boxInWorking);
-    if(!crop) return [];
-    const offsetX = Math.max(0, Math.round(boxInWorking.x));
-    const offsetY = Math.max(0, Math.round(boxInWorking.y));
+  function aggregateOcrWords(words = []){
+    const ordered = words.slice().sort((a, b) => {
+      const ay = Number(a?.bbox?.y0 ?? a?.bbox?.y ?? 0);
+      const by = Number(b?.bbox?.y0 ?? b?.bbox?.y ?? 0);
+      if(Math.abs(ay - by) > 2) return ay - by;
+      const ax = Number(a?.bbox?.x0 ?? a?.bbox?.x ?? 0);
+      const bx = Number(b?.bbox?.x0 ?? b?.bbox?.x ?? 0);
+      return ax - bx;
+    });
+    const lines = [];
+    let current = [];
+    let currentY = null;
+    let confSum = 0;
+    let confCount = 0;
+    for(const w of ordered){
+      const text = String(w?.text || '').trim();
+      if(!text) continue;
+      const bbox = getTesseractWordBBox(w);
+      const cy = Number(bbox.y || 0) + (Number(bbox.h || 0) * 0.5);
+      const tol = Math.max(4, Number(bbox.h || 12) * 0.8);
+      if(current.length && currentY !== null && Math.abs(cy - currentY) > tol){
+        lines.push(current.join(' '));
+        current = [text];
+        currentY = cy;
+      } else {
+        current.push(text);
+        currentY = currentY === null ? cy : ((currentY * (current.length - 1) + cy) / current.length);
+      }
+      confSum += Number(w?.confidence || 0);
+      confCount += 1;
+    }
+    if(current.length) lines.push(current.join(' '));
+    return {
+      text: lines.join(' ').replace(/\s+/g, ' ').trim(),
+      meanConfidence: confCount > 0 ? (confSum / confCount) / 100 : 0
+    };
+  }
+
+  function cropCanvasByBox(sourceCanvas, boxPx){
+    if(!sourceCanvas || !boxPx) return null;
+    const sx = Math.max(0, Math.floor(Number(boxPx.x || 0)));
+    const sy = Math.max(0, Math.floor(Number(boxPx.y || 0)));
+    const sw = Math.max(1, Math.ceil(Number(boxPx.w || 1)));
+    const sh = Math.max(1, Math.ceil(Number(boxPx.h || 1)));
+    if(typeof document === 'undefined') return null;
+    const out = document.createElement('canvas');
+    out.width = sw;
+    out.height = sh;
+    const ctx = out.getContext('2d');
+    if(!ctx) return null;
+    ctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    return out;
+  }
+
+  function dumpWfg4CropDebugArtifact({ sourceKind = 'unknown', cropCanvas = null, boxPx = null, captureFrame = null, wfg4Surface = null, page = 1, sourceCanvas = null, sourceLabel = '' } = {}){
     try {
-      const { data } = await TesseractLib.recognize(crop, 'eng', { tessedit_pageseg_mode: 6, oem: 1 });
-      return (data?.words || []).map(w => {
-        const rawText = String(w.text || '').trim();
-        if(!rawText) return null;
-        const { text: corrected, corrections } = applyOcrCorrections(rawText);
-        const bbox = getTesseractWordBBox(w);
-        return {
-          raw: rawText,
-          corrected,
-          text: corrected,
-          correctionsApplied: corrections,
-          confidence: (w.confidence || 0) / 100,
-          x: (bbox.x || 0) + offsetX,
-          y: (bbox.y || 0) + offsetY,
-          w: bbox.w || 0,
-          h: bbox.h || 0,
-          page: captureFrame.pageNum
-        };
-      }).filter(Boolean);
+      const payload = {
+        sourceKind,
+        page,
+        boxPx: boxPx ? {
+          x: Number(boxPx.x || 0),
+          y: Number(boxPx.y || 0),
+          w: Number(boxPx.w || 0),
+          h: Number(boxPx.h || 0),
+          page: Number(boxPx.page || page || 1)
+        } : null,
+        displayBox: state.snappedPx ? {
+          x: Number(state.snappedPx.x || 0),
+          y: Number(state.snappedPx.y || 0),
+          w: Number(state.snappedPx.w || 0),
+          h: Number(state.snappedPx.h || 0),
+          page: Number(state.snappedPx.page || page || 1)
+        } : null,
+        captureFrame: captureFrame ? {
+          display: captureFrame.display,
+          working: captureFrame.working,
+          scale: captureFrame.scale,
+          userBoxDisplayPx: captureFrame.userBoxDisplayPx,
+          userBoxWorkingPx: captureFrame.userBoxWorkingPx
+        } : null,
+        sourceCanvas: sourceCanvas ? {
+          width: Number(sourceCanvas.width || 0),
+          height: Number(sourceCanvas.height || 0),
+          label: sourceLabel
+        } : null,
+        cropCanvas: cropCanvas ? {
+          width: Number(cropCanvas.width || 0),
+          height: Number(cropCanvas.height || 0)
+        } : null,
+        wfg4PageDims: wfg4Surface?.pages?.[Math.max(0, page - 1)]?.dimensions || null
+      };
+      console.log('[wfg4-crop-debug]', payload);
+      const fs = window.fs || (window.require && window.require('fs'));
+      if(!fs || !cropCanvas?.toDataURL) return;
+      const dir = 'debug/wfg4-crops';
+      fs.mkdirSync(dir, { recursive: true });
+      const base = sourceKind === 'pdf' ? 'crop_image_from_pdf' : (sourceKind === 'image' ? 'crop_image_from_image' : 'crop_image_from_unknown');
+      const dataUrl = cropCanvas.toDataURL('image/png');
+      const b64 = String(dataUrl).split(',')[1] || '';
+      if(b64 && typeof Buffer !== 'undefined'){
+        fs.writeFileSync(`${dir}/${base}.png`, Buffer.from(b64, 'base64'));
+      }
+      fs.writeFileSync(`${dir}/${base}.json`, JSON.stringify(payload, null, 2));
     } catch(err){
-      console.warn('[wfg4] ocrBoxFromCaptureFrame failed', err);
-      return [];
+      console.warn('[wfg4-crop-debug] artifact write failed', err);
+    }
+  }
+
+  async function ocrWfg4CropReadout({ captureFrame = null, wfg4Surface = null, boxPx = null, page = 1 } = {}){
+    const tesseract = window.TesseractRef || window.Tesseract;
+    if(!tesseract || !boxPx) return { text: '', confidence: 0, method: 'wfg4-ocr-missing' };
+    let cropCanvas = null;
+    let sourceCanvas = null;
+    let sourceLabel = '';
+    if(captureFrame && captureFrame.pageNum === page && captureFrame.getOffscreenCanonicalCanvas){
+      sourceCanvas = captureFrame.getOffscreenCanonicalCanvas();
+      sourceLabel = 'captureFrame.offscreenCanonical';
+      cropCanvas = captureFrame.cropWorkingImage(boxPx);
+    } else {
+      const pageEntry = wfg4Surface?.pages?.[Math.max(0, page - 1)] || null;
+      const displayDataUrl = pageEntry?.artifacts?.displayDataUrl || null;
+      if(displayDataUrl){
+        const pageCanvas = await dataUrlToCanvas(displayDataUrl);
+        if(pageCanvas){
+          sourceCanvas = pageCanvas;
+          sourceLabel = 'wfg4Surface.page.artifacts.displayDataUrl';
+          cropCanvas = cropCanvasByBox(pageCanvas, boxPx);
+        }
+      }
+    }
+    dumpWfg4CropDebugArtifact({
+      sourceKind: state.isImage ? 'image' : 'pdf',
+      cropCanvas,
+      boxPx,
+      captureFrame,
+      wfg4Surface,
+      page,
+      sourceCanvas,
+      sourceLabel
+    });
+    if(!cropCanvas) return { text: '', confidence: 0, method: 'wfg4-ocr-crop-missing' };
+    try {
+      const { data } = await tesseract.recognize(cropCanvas, 'eng', { tessedit_pageseg_mode: 6, oem: 1 });
+      const aggregated = aggregateOcrWords(Array.isArray(data?.words) ? data.words : []);
+      return {
+        text: aggregated.text,
+        confidence: aggregated.meanConfidence,
+        method: 'wfg4-crop-ocr-exact'
+      };
+    } catch(err){
+      console.warn('[wfg4] ocrWfg4CropReadout failed', err);
+      return { text: '', confidence: 0, method: 'wfg4-ocr-failed' };
     }
   }
 
@@ -10208,7 +10322,9 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       : null;
     let resolvedBox = captureFrame
       ? captureFrame.userBoxWorkingPx
-      : (pinnedWfg4Box || fallbackWorkingBox || state.snappedPx || null);
+      : (fieldEngineType === ENGINE_KIND.WFG4
+        ? (pinnedWfg4Box || fallbackWorkingBox || null)
+        : (state.snappedPx || null));
     if(!resolvedBox && fieldSpec.bbox){
       const viewportDims = getViewportDimensions(viewportPx);
       const rawBox = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
@@ -10231,12 +10347,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         ? (getWfg4CanonicalViewport(fieldSpec.page || state.pageNum || 1, _isConfigModeNow ? 'config' : 'run') || viewportPx || null)
         : (viewportPx || null);
       const canonicalTokens = (fieldEngineType === ENGINE_KIND.WFG4)
-        ? projectTokensToWfg4Canonical(
-            Array.isArray(tokens) ? tokens : [],
-            fieldSpec.page || state.pageNum || 1,
-            _isConfigModeNow ? 'config' : 'run',
-            viewportPx || null
-          )
+        ? []
         : (Array.isArray(tokens) ? tokens : []);
       if(!captureFrame && pinnedWfg4Box && fieldSpec.bbox){
         const fallbackViewportBox = applyTransform(toPx(viewportPx, {
@@ -10290,83 +10401,43 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         // truth; the readout backend just needs to be tried on that bbox.
         // This is the source-agnostic OCR readout pass, used for both PDFs
         // and images.
-        if(engineResult?.needsLocalizedReadout && engineResult?.boxPx){
+        if(fieldEngineType === ENGINE_KIND.WFG4 && engineResult?.boxPx){
           try {
             const targetPage = Math.max(1, Number(engineResult.boxPx.page || fieldSpec.page || state.pageNum || 1) || 1);
-            // P1 CaptureFrame path: when we have a frame, OCR is run directly
-            // against the frame's crop of the offscreen canonical canvas. Both
-            // the crop and engineResult.boxPx live in working pixel space, so
-            // there is no scale translation to get wrong.
-            let tessTokens;
-            if(captureFrame && captureFrame.pageNum === targetPage && captureFrame.getOffscreenCanonicalCanvas()){
-              tessTokens = await ocrBoxFromCaptureFrame(captureFrame, engineResult.boxPx);
-            } else {
-              tessTokens = await ensureTesseractTokensForPageWithBBox(targetPage);
-            }
-            const normalized = (captureFrame && captureFrame.pageNum === targetPage && captureFrame.getOffscreenCanonicalCanvas())
-              ? (tessTokens || [])
-              : (normalizeTesseractTokensForPage(tessTokens, targetPage) || []);
-            const scoped = tokensInBox(normalized, engineResult.boxPx, { minOverlap: 0.2 });
-            const ordered = scoped.slice().sort((a,b) => {
-              const ay = Number(a.y || 0);
-              const by = Number(b.y || 0);
-              if(Math.abs(ay - by) > 2) return ay - by;
-              return Number(a.x || 0) - Number(b.x || 0);
+            const readout = await ocrWfg4CropReadout({
+              captureFrame,
+              wfg4Surface,
+              boxPx: engineResult.boxPx,
+              page: targetPage
             });
-            const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
-            const medianH = heights.length ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)] : 12;
-            const lineTol = Math.max(5, medianH * 0.9);
-            let lineCy = null;
-            let line = [];
-            const lines = [];
-            let confSum = 0;
-            let confCount = 0;
-            for(const tok of ordered){
-              const text = String(tok.text || tok.raw || '').trim();
-              if(!text) continue;
-              const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
-              if(line.length && lineCy !== null && Math.abs(cy - lineCy) > lineTol){
-                lines.push(line.join(' '));
-                line = [text];
-                lineCy = cy;
-              } else {
-                line.push(text);
-                lineCy = lineCy === null ? cy : ((lineCy * (line.length - 1) + cy) / line.length);
-              }
-              const c = Number.isFinite(tok.confidence) ? Number(tok.confidence) : 0.5;
-              confSum += c;
-              confCount += 1;
-            }
-            if(line.length) lines.push(line.join(' '));
-            const aggregatedText = lines.join(' ').replace(/\s+/g, ' ').trim();
+            const aggregatedText = String(readout?.text || '').trim();
             if(aggregatedText){
-              const meanConf = confCount > 0 ? (confSum / confCount) : 0.6;
+              const meanConf = Number.isFinite(readout?.confidence) ? readout.confidence : 0.6;
               const readConf = Math.max(0.3, Math.min(0.9, 0.45 + (meanConf * 0.35)));
               readoutAugmented = {
                 ...engineResult,
                 value: aggregatedText,
                 raw: aggregatedText,
                 confidence: readConf,
-                tokens: scoped,
-                method: 'wfg4-localized-readout-tesseract',
-                tokenSource: 'tesseract-bbox',
+                tokens: [],
+                method: readout.method || 'wfg4-crop-ocr-exact',
+                tokenSource: null,
                 needsReview: false,
                 lowConfidence: false,
                 extractionMeta: {
                   ...(engineResult.extractionMeta || {}),
-                  readoutBackend: 'tesseract-localized',
-                  tokenSourceResolved: 'tesseract-bbox',
+                  readoutBackend: 'wfg4-crop-ocr',
+                  tokenSourceResolved: null,
                   readout: {
                     ...((engineResult.extractionMeta && engineResult.extractionMeta.readout) || {}),
-                    source: 'localized-full-box-aggregation'
+                    source: 'localized-exact-crop-ocr'
                   }
                 }
               };
               window.EngineLog?.engineLog('wfg4-run', 'readout.localized', {
                 fieldKey: fieldSpec.fieldKey || null,
-                backend: 'tesseract',
+                backend: 'wfg4-crop-ocr',
                 value: aggregatedText,
-                tokenCount: scoped.length,
                 meanConf: Number(meanConf.toFixed(3))
               });
             } else {
@@ -10381,7 +10452,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
                 confidence: 0.08,
                 extractionMeta: {
                   ...(engineResult.extractionMeta || {}),
-                  readoutBackend: 'tesseract-localized',
+                  readoutBackend: 'wfg4-crop-ocr',
                   readoutResult: 'empty'
                 }
               };
@@ -12649,6 +12720,7 @@ async function openFile(file){
   state.acroTokensByPage = {};
   state.pdfTextTokenCountByPage = {};
   const isImage = /^image\//.test(file.type || '');
+  const wfg4Selected = getConfiguredEngineType() === ENGINE_KIND.WFG4;
   state.isImage = isImage;
 
   if (isImage) {
@@ -12660,6 +12732,11 @@ async function openFile(file){
     state.pageNum = 1; state.numPages = 1;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
+    if(wfg4Selected){
+      await syncWfg4SurfaceContext('config');
+      drawOverlay();
+      return;
+    }
     try {
       const tokens = await ensureTokensForPage(1);
       await buildKeywordIndexForPage(1, tokens);
@@ -12678,7 +12755,6 @@ async function openFile(file){
     if(!state.graphLearning?.active && !state.objectLearning?.active){
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
-      syncWfg4SurfaceContext('config');
       drawOverlay();
     }
     return;
@@ -12701,13 +12777,17 @@ async function openFile(file){
     els.viewer.scrollTop = 0;
     updatePageIndicator();
     if(els.pageControls) els.pageControls.style.display = 'none';
+    if(wfg4Selected){
+      await syncWfg4SurfaceContext('config');
+      drawOverlay();
+      return;
+    }
     // Skip profile-dependent operations for Graph/Object Learning (WFG2) — they do
     // not require a wizard/profile and only need the rendered surface.
     if(!state.graphLearning?.active && !state.objectLearning?.active){
       await ensureTokensForPage(1);
       if(!(state.profile?.globals||[]).length) captureGlobalLandmarks();
       else await calibrateIfNeeded();
-      syncWfg4SurfaceContext('config');
       drawOverlay();
     } else {
       try { await ensureTokensForPage(1); } catch(_){ /* best-effort for graph learning */ }
@@ -12835,6 +12915,7 @@ async function prepareRunDocument(file){
   state.snapshotDirty = state.snapshotMode;
 
   const isImage = /^image\//.test(file.type || '');
+  const wfg4Selected = getConfiguredEngineType() === ENGINE_KIND.WFG4;
   state.isImage = isImage;
   if(isImage){
     try {
@@ -12847,6 +12928,10 @@ async function prepareRunDocument(file){
       await renderImage(blobUrl);
       state.pageNum = 1; state.numPages = 1;
       if(els.pageControls) els.pageControls.style.display = 'none';
+      if(wfg4Selected){
+        await syncWfg4SurfaceContext('run');
+        return { type:'image' };
+      }
       const tokens = await ensureTokensForPage(1, null, state.pageViewports[0], els.imgCanvas);
       await buildKeywordIndexForPage(1, tokens, state.pageViewports[0]);
       // Keep URL alive while imgCanvas is active; cleanupDoc handles revocation.
@@ -12877,20 +12962,22 @@ async function prepareRunDocument(file){
     vp.pageNumber = i;
     state.pageViewports[i-1] = vp;
     state.pageOffsets[i-1] = totalH;
-    const rawTokens = await readTokensForPage(page, vp);
-    // pdf.js text items may be non-extensible in some browsers; clone before annotating
-    const tokens = rawTokens.map(t => ({ ...t, page: i }));
-    if(!state.pdfTextTokenCountByPage) state.pdfTextTokenCountByPage = {};
-    state.pdfTextTokenCountByPage[i] = tokens.length;
-    const acroTokens = await readAcroFormTokensForPage(i, page, vp);
-    const mergedTokens = mergePdfAndAcroTokens(tokens, acroTokens);
-    state.tokensByPage[i] = mergedTokens;
-    await buildKeywordIndexForPage(i, mergedTokens, vp);
-    if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
+    if(!wfg4Selected){
+      const rawTokens = await readTokensForPage(page, vp);
+      // pdf.js text items may be non-extensible in some browsers; clone before annotating
+      const tokens = rawTokens.map(t => ({ ...t, page: i }));
+      if(!state.pdfTextTokenCountByPage) state.pdfTextTokenCountByPage = {};
+      state.pdfTextTokenCountByPage[i] = tokens.length;
+      const acroTokens = await readAcroFormTokensForPage(i, page, vp);
+      const mergedTokens = mergePdfAndAcroTokens(tokens, acroTokens);
+      state.tokensByPage[i] = mergedTokens;
+      await buildKeywordIndexForPage(i, mergedTokens, vp);
+      if(isRunMode()) mirrorDebugLog(`[run-mode] tokens generated for page ${i}/${state.pdf.numPages}`);
+    }
     // WFG4: populate the unified per-page raster cache from the pdf.js page.
     // This is the *same* rendering path that renderAllPages() uses in config
     // mode, so downstream WFG4 stages see identical pixels across modes.
-    if(getConfiguredEngineType() === ENGINE_KIND.WFG4){
+    if(wfg4Selected){
       await cacheWfg4PdfPageCanvas(i, page, vp);
     }
     totalH += vp.height;
@@ -12900,7 +12987,9 @@ async function prepareRunDocument(file){
   state.numPages = state.pdf.numPages;
   state.viewport = state.pageViewports[0] || { w:0, h:0, scale };
   state.overlayPinned = false;
-  await syncWfg4SurfaceContext('run');
+  if(wfg4Selected){
+    await syncWfg4SurfaceContext('run');
+  }
   return { type:'pdf' };
 }
 
@@ -20355,10 +20444,16 @@ els.confirmBtn?.addEventListener('click', async ()=>{
         const _workingDimsPre = _pageEntryPre?.dimensions?.working || null;
         const _originalDimsPre = _pageEntryPre?.dimensions?.original || null;
         const _wFallbackVp = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        const _displayVp = state.pageViewports?.[state.pageNum - 1] || _wFallbackVp;
+        const _canonicalDisplayActive = !!state.wfg4?.configDisplayActive;
         const _workW = Math.max(1, Number(_workingDimsPre?.width ?? _wFallbackVp.width ?? _wFallbackVp.w) || 1);
         const _workH = Math.max(1, Number(_workingDimsPre?.height ?? _wFallbackVp.height ?? _wFallbackVp.h) || 1);
-        const _dispW = Math.max(1, Number(_originalDimsPre?.width ?? _wFallbackVp.width ?? _wFallbackVp.w) || 1);
-        const _dispH = Math.max(1, Number(_originalDimsPre?.height ?? _wFallbackVp.height ?? _wFallbackVp.h) || 1);
+        const _dispW = _canonicalDisplayActive
+          ? Math.max(1, Number(_displayVp?.width ?? _displayVp?.w ?? _workW) || 1)
+          : Math.max(1, Number(_originalDimsPre?.width ?? _wFallbackVp.width ?? _wFallbackVp.w) || 1);
+        const _dispH = _canonicalDisplayActive
+          ? Math.max(1, Number(_displayVp?.height ?? _displayVp?.h ?? _workH) || 1)
+          : Math.max(1, Number(_originalDimsPre?.height ?? _wFallbackVp.height ?? _wFallbackVp.h) || 1);
         const _sX = _workW / _dispW;
         const _sY = _workH / _dispH;
         const _sRaw = state.snappedPx || { x:0, y:0, w:0, h:0 };
@@ -20377,6 +20472,18 @@ els.confirmBtn?.addEventListener('click', async ()=>{
         _rawBoxPre = { x: _wx, y: _wy, w: _ww, h: _wh, canvasW: _workW, canvasH: _workH };
         _normBoxPre = { x0n: _wx / _workW, y0n: _wy / _workH, wN: _ww / _workW, hN: _wh / _workH };
       }
+      console.log('[wfg4-box-debug]', {
+        sourceKind: state.isImage ? 'image' : 'pdf',
+        page: state.pageNum,
+        displayBoxPx: state.snappedPx || null,
+        workingBoxPx: _rawBoxPre || null,
+        normalizedBox: _normBoxPre || null,
+        captureFrame: captureFrame ? {
+          display: captureFrame.display,
+          working: captureFrame.working,
+          scale: captureFrame.scale
+        } : null
+      });
       _prelimEngineOwnedConfig = await EngineRegistry.registerFieldConfig(ENGINE_KIND.WFG4, {
         step,
         normBox: _normBoxPre,

@@ -25,112 +25,6 @@
     return String(text || '').replace(/\s+/g, ' ').replace(/[#:]+$/g, '').trim();
   }
 
-  function expandBox(box, pad){
-    return {
-      x: (box?.x || 0) - pad,
-      y: (box?.y || 0) - pad,
-      w: Math.max(1, (box?.w || 1) + (pad * 2)),
-      h: Math.max(1, (box?.h || 1) + (pad * 2)),
-      page: box?.page
-    };
-  }
-
-  function tokensInBox(tokens, box, minOverlap = 0.25){
-    if(!Array.isArray(tokens) || !box) return [];
-    return tokens.filter(tok => {
-      const x0 = tok.x || 0;
-      const y0 = tok.y || 0;
-      const x1 = x0 + (tok.w || 0);
-      const y1 = y0 + (tok.h || 0);
-      const ox = Math.max(0, Math.min(box.x + box.w, x1) - Math.max(box.x, x0));
-      const oy = Math.max(0, Math.min(box.y + box.h, y1) - Math.max(box.y, y0));
-      const overlap = ox * oy;
-      const area = Math.max(1, (tok.w || 0) * (tok.h || 0));
-      return overlap / area >= minOverlap;
-    });
-  }
-
-  function uniqueTokens(tokens){
-    const seen = new Set();
-    const out = [];
-    for(const tok of (Array.isArray(tokens) ? tokens : [])){
-      if(!tok) continue;
-      const text = String(tok.text || tok.raw || '').trim();
-      if(!text) continue;
-      const key = [
-        text,
-        Math.round(Number(tok.x || 0)),
-        Math.round(Number(tok.y || 0)),
-        Math.round(Number(tok.w || 0)),
-        Math.round(Number(tok.h || 0)),
-        Number(tok.page || 0)
-      ].join('|');
-      if(seen.has(key)) continue;
-      seen.add(key);
-      out.push(tok);
-    }
-    return out;
-  }
-
-  function sortTokensReadingOrder(tokens){
-    const ordered = uniqueTokens(tokens).slice().sort((a, b) => {
-      const ay = Number(a.y || 0);
-      const by = Number(b.y || 0);
-      if(Math.abs(ay - by) > 2) return ay - by;
-      return Number(a.x || 0) - Number(b.x || 0);
-    });
-    if(!ordered.length) return [];
-    const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
-    const medianH = heights.length
-      ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)]
-      : 12;
-    const bandTol = Math.max(3, medianH * 0.6);
-    const rows = [];
-    for(const tok of ordered){
-      const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
-      let row = rows.find(r => Math.abs(cy - r.cy) <= bandTol);
-      if(!row){
-        row = { cy, toks: [] };
-        rows.push(row);
-      }
-      row.toks.push(tok);
-      row.cy = (row.cy * (row.toks.length - 1) + cy) / row.toks.length;
-    }
-    rows.sort((a,b)=> a.cy - b.cy);
-    for(const r of rows){
-      r.toks.sort((a,b)=> Number(a.x || 0) - Number(b.x || 0));
-    }
-    return rows.flatMap(r => r.toks);
-  }
-
-  function aggregateTokenText(tokens){
-    const ordered = sortTokensReadingOrder(tokens);
-    if(!ordered.length) return '';
-    const heights = ordered.map(t => Math.max(1, Number(t.h || 1))).filter(Number.isFinite);
-    const medianH = heights.length
-      ? heights.slice().sort((a,b)=>a-b)[Math.floor(heights.length / 2)]
-      : 12;
-    const newLineTol = Math.max(5, medianH * 0.9);
-    const lines = [];
-    let line = [];
-    let lineCy = null;
-    for(const tok of ordered){
-      const text = String(tok.text || tok.raw || '').trim();
-      if(!text) continue;
-      const cy = Number(tok.y || 0) + (Number(tok.h || 0) * 0.5);
-      if(line.length && lineCy !== null && Math.abs(cy - lineCy) > newLineTol){
-        lines.push(line.join(' '));
-        line = [text];
-        lineCy = cy;
-      } else {
-        line.push(text);
-        lineCy = lineCy === null ? cy : ((lineCy * (line.length - 1) + cy) / line.length);
-      }
-    }
-    if(line.length) lines.push(line.join(' '));
-    return cleanText(lines.join(' ').replace(/\s+/g, ' '));
-  }
-
   function toCanvasFromSource(source){
     if(!source) return null;
     if(typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement){
@@ -466,23 +360,6 @@
     };
   }
 
-  function mapTokensToCanonical(tokens, boxPx, wfg4Surface){
-    if(!Array.isArray(tokens) || !boxPx || !wfg4Surface?.pages) return tokens || [];
-    const pageIdx = Math.max(0, (boxPx.page || 1) - 1);
-    const page = wfg4Surface.pages[pageIdx];
-    if(!page?.scale) return tokens;
-    const sx = Number(page.scale.workingFromOriginalX || 1);
-    const sy = Number(page.scale.workingFromOriginalY || 1);
-    if(Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001) return tokens;
-    return tokens.map(tok => ({
-      ...tok,
-      x: Number(tok.x || 0) * sx,
-      y: Number(tok.y || 0) * sy,
-      w: Number(tok.w || 0) * sx,
-      h: Number(tok.h || 0) * sy
-    }));
-  }
-
   function resolvePageAlignmentV1(payload = {}){
     const fieldSpec = payload.fieldSpec || {};
     const ref = fieldSpec.wfg4Config || payload.wfg4Config || null;
@@ -515,21 +392,7 @@
   async function extractScalar(payload = {}){
     const fieldSpec = payload.fieldSpec || {};
     const boxPx = payload.boxPx || null;
-    const rawTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
-    // P0 coordinate-space unification: `mapTokensToCanonical` promotes tokens
-    // from viewport into working-surface space via workingFromOriginalX/Y. In
-    // run mode that is correct (Phase 6 produces a working-space reconstructed
-    // box, so tokens must match). In config-mode-authoritative, however, the
-    // box is the user's literal bbox in viewport space, so promoting tokens
-    // while leaving the box in viewport space is a space mismatch that causes
-    // token scoping to fail, `needsLocalizedReadout` to fire unconditionally,
-    // and wrong-target extraction on any surface where working ≠ viewport.
-    // Keep tokens in viewport space when the box is viewport-space.
     const _configAuth = !!payload.configMode && !!boxPx;
-    const tokensAlreadyCanonical = !!payload.tokensCanonical;
-    const allTokens = _configAuth
-      ? rawTokens
-      : (tokensAlreadyCanonical ? rawTokens : mapTokensToCanonical(rawTokens, boxPx, payload.wfg4Surface || null));
     const _EL = root.EngineLog || null;
     const _fk = fieldSpec.fieldKey || '';
     const _surfReady = !!(payload.wfg4Surface && Array.isArray(payload.wfg4Surface.pages) && payload.wfg4Surface.pages.length > 0);
@@ -538,7 +401,7 @@
       page: fieldSpec.page || null,
       hasWfg4Config: !!(fieldSpec.wfg4Config || payload.wfg4Config),
       surfaceReady: _surfReady,
-      tokenCount: rawTokens.length
+      tokenCount: 0
     });
 
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? fieldSpec.allowDegradedFallback ?? (Types.DEFAULTS && Types.DEFAULTS.allowDegradedFallback));
@@ -581,7 +444,7 @@
         fieldKey: _fk,
         boxPx: { x: boxPx.x, y: boxPx.y, w: boxPx.w, h: boxPx.h, page: boxPx.page },
         surfaceReady: _surfReady,
-        tokenCount: rawTokens.length
+        tokenCount: 0
       });
     }
 
@@ -667,78 +530,34 @@
       };
     }
 
-    const pads = [0, 4, 8];
-    let readout = null;
-    for(const pad of pads){
-      const scoped = tokensInBox(allTokens, pad ? expandBox(finalBox, pad) : finalBox, 0.2);
-      const aggregated = aggregateTokenText(scoped);
-      if(aggregated){
-        readout = { text: aggregated, pad, scoped };
-        if(pad === 0) break;
-      }
-    }
-
-    if(!readout){
-      // Localization is authoritative: the field location is real. Token
-      // scoping failure here means the current readout backend (PDF text
-      // layer tokens or pre-fetched OCR tokens) did not cover the localized
-      // region. The pipeline should attempt a localized readout on finalBox
-      // using an image/OCR backend regardless of source type. We hand that
-      // responsibility to the caller via `needsLocalizedReadout`.
-      _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsLocalizedReadout', reason: 'no_token_in_localized_scope', bboxSource });
-      _EL?.engineLog('wfg4-run', 'field.result', { fieldKey: _fk, engineUsed: 'wfg4', localizationStatus, bboxSource, fallbackUsed, value: '', needsReview: false, method: 'wfg4-localized-needs-readout' });
-      return {
-        value: '',
-        raw: '',
-        confidence: 0,
-        boxPx: finalBox,
-        tokens: [],
-        method: 'wfg4-localized-needs-readout',
-        engine: 'wfg4',
-        lowConfidence: false,
-        needsReview: false,
-        needsLocalizedReadout: true,
-        tokenSource: tokenSourceResolved,
-        extractionMeta: buildMeta({ reason: 'no_token_in_localized_scope_pending_readout' })
-      };
-    }
-
-    const value = cleanText(readout.text || '');
-    const densityBoost = Math.min(0.2, Math.max(0, (readout.scoped.length - 1) * 0.02));
-    const readConfidence = Math.max(
-      0.25,
-      Math.min(0.9, 0.55 + (Number(localized.localizationConfidence || 0) * 0.25) + densityBoost)
-    );
-    const _method = readout.pad ? 'wfg4-localized-micro-expansion' : 'wfg4-localized-in-box';
-    _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'pass', bboxSource });
+    // WFG4 hard cut: no token/text-layer readout in engine. Engine authority is
+    // localization only; caller must OCR exact finalBox pixels on the canonical
+    // visual surface.
+    _EL?.engineLog('wfg4-run', 'gate.decision', { fieldKey: _fk, gate: 'needsLocalizedReadout', reason: 'ocr_crop_only_pipeline', bboxSource });
     _EL?.engineLog('wfg4-run', 'field.result', {
       fieldKey: _fk,
       engineUsed: 'wfg4',
       localizationStatus,
       bboxSource,
       fallbackUsed,
-      value: value,
+      value: '',
       needsReview: false,
-      method: _method,
+      method: 'wfg4-localized-ocr-required',
       tokenSource: tokenSourceResolved,
-      confidence: readConfidence
+      confidence: 0
     });
     return {
-      value,
-      raw: value,
-      confidence: readConfidence,
+      value: '',
+      raw: '',
+      confidence: 0,
       boxPx: finalBox,
-      tokens: readout.scoped,
-      method: _method,
+      tokens: [],
+      method: 'wfg4-localized-ocr-required',
       engine: 'wfg4',
+      needsLocalizedReadout: true,
       tokenSource: tokenSourceResolved,
       extractionMeta: buildMeta({
-        usedPad: readout.pad,
-        scopedTokenCount: readout.scoped.length,
-        readout: {
-          confidence: readConfidence,
-          source: 'localized-full-box-aggregation'
-        }
+        reason: 'ocr_crop_only_pipeline_pending_readout'
       })
     };
   }
