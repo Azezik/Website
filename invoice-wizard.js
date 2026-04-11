@@ -808,8 +808,16 @@ function resolveFieldEngineType(fieldSpec){
     // Prefer the stored per-field engine type (set at config time and carried in fieldSpec).
     // Fall back to the current dropdown only when the field has no explicit engine type
     // stored (e.g. legacy wizards created before per-field engineType was introduced).
-    const fieldEngine = normalizeEngineType(fieldSpec?.engineType || '');
-    const effectiveEngine = (fieldEngine !== ENGINE_KIND.LEGACY) ? fieldEngine : configuredEngine;
+    const rawFieldEngine = String(fieldSpec?.engineType || '').toLowerCase();
+    const fieldEngine = normalizeEngineType(rawFieldEngine);
+    if(rawFieldEngine === ENGINE_KIND.LEGACY){
+      return ENGINE_KIND.LEGACY;
+    }
+    const profileEngine = getProfileEngineType(state.profile);
+    const fallbackEngine = profileEngine !== ENGINE_KIND.LEGACY
+      ? profileEngine
+      : configuredEngine;
+    const effectiveEngine = (fieldEngine !== ENGINE_KIND.LEGACY) ? fieldEngine : fallbackEngine;
     if(
       effectiveEngine === ENGINE_KIND.WROKIT_VISION
       || effectiveEngine === ENGINE_KIND.AI_ALGO
