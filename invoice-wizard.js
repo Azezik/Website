@@ -17005,9 +17005,21 @@ els.overlayCanvas.addEventListener('pointermove', e => {
   if (!drawing) return;
   e.preventDefault();
   const rect = els.overlayCanvas.getBoundingClientRect();
-  const curCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  // Clamp the drag end to the overlay rect so a user releasing the pointer
+  // outside the canvas produces a valid in-bounds box instead of a box with
+  // negative coordinates or a width/height that overshoots the surface.
+  const rawCurCss = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const curCss = {
+    x: Math.max(0, Math.min(rect.width, rawCurCss.x)),
+    y: Math.max(0, Math.min(rect.height, rawCurCss.y))
+  };
   const { scaleX, scaleY } = getScaleFactors();
-  const curPx = { x: curCss.x*scaleX, y: curCss.y*scaleY };
+  const ovPxW = els.overlayCanvas.width || (rect.width * scaleX) || 1;
+  const ovPxH = els.overlayCanvas.height || (rect.height * scaleY) || 1;
+  const curPx = {
+    x: Math.max(0, Math.min(ovPxW, curCss.x*scaleX)),
+    y: Math.max(0, Math.min(ovPxH, curCss.y*scaleY))
+  };
   const page = pageFromYPx(start.y);
   const offPx = state.pageOffsets[page - 1] || 0;
   const offCss = offPx/scaleY;
@@ -20285,30 +20297,52 @@ els.confirmBtn?.addEventListener('click', async ()=>{
       }
     }
     try {
-      // P0 coordinate-space unification: prefer the working-surface dimensions
-      // for normBox computation so downstream `resolveCanonicalBox`
-      // (wfg4-registration.js) recovers the same pixel rectangle the user
-      // drew, even when the viewport and the aspect-preserving working
-      // surface have slightly different dimensions. Falls back to viewport
-      // dims when the working surface is not yet populated.
-      // P1 CaptureFrame: unify normBox + rawBox against the frame's working
-      // space. When the frame is available (invariants met) everything is
-      // expressed in working pixels — the one true space. When it is not, we
-      // fall back to viewport dims exactly like the P0 patch did.
+      // Coordinate-space unification. The user drags on the display canvas
+      // (pdfCanvas / imgCanvas), whose native pixel dimensions correspond to
+      // `pageEntry.dimensions.original`. WFG4's working space can be smaller
+      // (buildWorkingSize caps the longest edge at MAX_WORKING_EDGE=1600), so
+      // display and working differ on high-DPR PDFs and large images.
+      // CaptureFrame is the single authority that owns this scale factor and
+      // publishes the user's box in both spaces. We now always route through
+      // it when it is available — no more normalizing a display-space box
+      // against working dims. When the frame is unavailable we reconstruct
+      // the same mapping from the config surface so the save is still
+      // internally consistent.
       let _normBoxPre;
       let _rawBoxPre;
       let _vpPre;
       if(captureFrame){
         _vpPre = { width: captureFrame.working.width, height: captureFrame.working.height };
         const _ubw = captureFrame.userBoxWorkingPx;
-        _normBoxPre = normalizeBox(_ubw, captureFrame.working.width, captureFrame.working.height);
+        const _un = captureFrame.userBoxNorm;
+        _normBoxPre = { x0n: _un.x0n, y0n: _un.y0n, wN: _un.wN, hN: _un.hN };
         _rawBoxPre = { x: _ubw.x, y: _ubw.y, w: _ubw.w, h: _ubw.h, canvasW: captureFrame.working.width, canvasH: captureFrame.working.height };
       } else {
-        _vpPre = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-        const _vpW = (_vpPre.width ?? _vpPre.w) || 1;
-        const _vpH = (_vpPre.height ?? _vpPre.h) || 1;
-        _normBoxPre = normalizeBox(state.snappedPx, _vpW, _vpH);
-        _rawBoxPre = { x: state.snappedPx.x, y: state.snappedPx.y, w: state.snappedPx.w, h: state.snappedPx.h, canvasW: _vpW, canvasH: _vpH };
+        const _pageEntryPre = state.wfg4?.configSurface?.pages?.[state.pageNum - 1] || null;
+        const _workingDimsPre = _pageEntryPre?.dimensions?.working || null;
+        const _originalDimsPre = _pageEntryPre?.dimensions?.original || null;
+        const _wFallbackVp = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+        const _workW = Math.max(1, Number(_workingDimsPre?.width ?? _wFallbackVp.width ?? _wFallbackVp.w) || 1);
+        const _workH = Math.max(1, Number(_workingDimsPre?.height ?? _wFallbackVp.height ?? _wFallbackVp.h) || 1);
+        const _dispW = Math.max(1, Number(_originalDimsPre?.width ?? _wFallbackVp.width ?? _wFallbackVp.w) || 1);
+        const _dispH = Math.max(1, Number(_originalDimsPre?.height ?? _wFallbackVp.height ?? _wFallbackVp.h) || 1);
+        const _sX = _workW / _dispW;
+        const _sY = _workH / _dispH;
+        const _sRaw = state.snappedPx || { x:0, y:0, w:0, h:0 };
+        // Clamp display-space box to the display canvas, then scale to
+        // working and clamp again so out-of-bounds drags can still produce a
+        // valid stored rect. See wfg4-capture-frame.js clampBoxToBounds.
+        const _dx = Math.max(0, Math.min(_dispW, Number(_sRaw.x) || 0));
+        const _dy = Math.max(0, Math.min(_dispH, Number(_sRaw.y) || 0));
+        const _dw = Math.max(0, Math.min(_dispW - _dx, Number(_sRaw.w) || 0));
+        const _dh = Math.max(0, Math.min(_dispH - _dy, Number(_sRaw.h) || 0));
+        const _wx = Math.max(0, Math.min(_workW, _dx * _sX));
+        const _wy = Math.max(0, Math.min(_workH, _dy * _sY));
+        const _ww = Math.max(0, Math.min(_workW - _wx, _dw * _sX));
+        const _wh = Math.max(0, Math.min(_workH - _wy, _dh * _sY));
+        _vpPre = { width: _workW, height: _workH };
+        _rawBoxPre = { x: _wx, y: _wy, w: _ww, h: _wh, canvasW: _workW, canvasH: _workH };
+        _normBoxPre = { x0n: _wx / _workW, y0n: _wy / _workH, wN: _ww / _workW, hN: _wh / _workH };
       }
       _prelimEngineOwnedConfig = await EngineRegistry.registerFieldConfig(ENGINE_KIND.WFG4, {
         step,
@@ -20369,18 +20403,41 @@ els.confirmBtn?.addEventListener('click', async ()=>{
     fieldTokens = res.tokens || [];
   }
 
-  const storedBoxPx = (isConfigMode() && step.type === 'static' && state.selectionPx)
+  // CaptureFrame wins when it is available: it already holds the user's box
+  // converted into the canonical working pixel space and clamped to the
+  // surface bounds. Prior code took state.selectionPx (display space) and
+  // normalized it against working dims, which produced off-by-scale normBox
+  // values on any surface where display != working. The LEGACY engine path
+  // below still uses display-space storedBoxPx for its tokens/landmark math
+  // — that is handled by the `legacyStoredBoxPx` alias so nothing downstream
+  // silently switches coordinate spaces.
+  const legacyStoredBoxPx = (isConfigMode() && step.type === 'static' && state.selectionPx)
     ? (state.selectionPx || boxPx)
     : boxPx;
+  let storedBoxPx;
+  let vp;
+  let canvasW;
+  let canvasH;
+  let normBox;
+  if(captureFrame){
+    const _ubw = captureFrame.userBoxWorkingPx;
+    const _un = captureFrame.userBoxNorm;
+    storedBoxPx = { x: _ubw.x, y: _ubw.y, w: _ubw.w, h: _ubw.h, page: _ubw.page };
+    vp = { width: captureFrame.working.width, height: captureFrame.working.height };
+    canvasW = captureFrame.working.width;
+    canvasH = captureFrame.working.height;
+    normBox = { x0n: _un.x0n, y0n: _un.y0n, wN: _un.wN, hN: _un.hN };
+  } else {
+    storedBoxPx = legacyStoredBoxPx;
+    vp = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
+    canvasW = (vp.width ?? vp.w) || 1;
+    canvasH = (vp.height ?? vp.h) || 1;
+    normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
+  }
   if(!isAreaStep && els.ocrToggle?.checked){
     try { await auditCropSelfTest(step.fieldKey || step.prompt || 'question', storedBoxPx || boxPx); }
     catch(err){ console.error('auditCropSelfTest failed', err); }
   }
-
-  const vp = getWfg4CanonicalViewport(state.pageNum, 'config') || state.pageViewports[state.pageNum-1] || state.viewport || {width:1,height:1};
-  const canvasW = (vp.width ?? vp.w) || 1;
-  const canvasH = (vp.height ?? vp.h) || 1;
-  const normBox = normalizeBox(storedBoxPx, canvasW, canvasH);
   // P1 fix instrumentation: log every surface/coord-space involved at
   // confirm-time so any future surface/geometry mismatch is immediately
   // visible. Single source of truth for config crop = storedBoxPx in the
