@@ -610,6 +610,8 @@ const els = {
   showRingToggles: document.querySelectorAll('.show-ring-toggle'),
   showMatchToggles: document.querySelectorAll('.show-match-toggle'),
   showOcrBoxesToggle: document.getElementById('show-ocr-boxes-toggle'),
+  configDebugOverlayToggle: document.getElementById('config-debug-overlay-toggle'),
+  configDebugOverlayWrap: document.getElementById('config-debug-overlay-wrap'),
   showFeatureGraphToggle: document.getElementById('show-feature-graph-toggle'),
   showTextGraphToggle: document.getElementById('show-text-graph-toggle'),
   wrokitVisionFeatureGraphLayerPanel: document.getElementById('wrokitvision-feature-graph-layers'),
@@ -1938,6 +1940,8 @@ let state = {
   selectedRunId: '',
   lastSnapshotManifestId: '',
   snapshotPanels: { activePage: null },
+  configDebugOverlayEnabled: false,
+  configDebugOverlayPrevFlags: null,
   overlayPinned: false,
   overlayMetrics: null,
   isExtracting: false,
@@ -5491,6 +5495,18 @@ function isTextGraphEnabled(){
 }
 
 function getOverlayFlags(){
+  const persistedConfigOverlayOnly = !!state.configDebugOverlayEnabled && isConfigMode();
+  if(persistedConfigOverlayOnly){
+    return {
+      boxes: true,
+      rings: false,
+      matches: false,
+      ocr: false,
+      featureGraph: false,
+      textGraph: false,
+      featureGraphLayers: getFeatureGraphLayerFlags()
+    };
+  }
   const ringsOn = Array.from(els.showRingToggles||[]).some(t=>t.checked);
   const matchesOn = Array.from(els.showMatchToggles||[]).some(t=>t.checked);
   const visionOn = getConfiguredEngineType() === ENGINE_KIND.WROKIT_VISION || !!state.learningActive;
@@ -5523,6 +5539,69 @@ function syncFeatureGraphLayerVisibilityUI(){
     if(!toggle) return;
     toggle.disabled = !featureGraphOn;
   });
+}
+
+function setToggleChecked(toggle, checked){
+  if(!toggle) return;
+  toggle.checked = !!checked;
+}
+
+function snapshotConfigOverlayToggleState(){
+  return {
+    boxes: !!els.showBoxesToggle?.checked,
+    ocr: !!els.showOcrBoxesToggle?.checked,
+    featureGraph: !!els.showFeatureGraphToggle?.checked,
+    textGraph: !!els.showTextGraphToggle?.checked,
+    rings: Array.from(els.showRingToggles || []).map((node) => !!node.checked),
+    matches: Array.from(els.showMatchToggles || []).map((node) => !!node.checked),
+    wfg4StructuralOverlay: !!state.wfg4?.structuralOverlay
+  };
+}
+
+function restoreConfigOverlayToggleState(snapshot){
+  if(!snapshot) return;
+  setToggleChecked(els.showBoxesToggle, snapshot.boxes);
+  setToggleChecked(els.showOcrBoxesToggle, snapshot.ocr);
+  setToggleChecked(els.showFeatureGraphToggle, snapshot.featureGraph);
+  setToggleChecked(els.showTextGraphToggle, snapshot.textGraph);
+  (els.showRingToggles || []).forEach((node, idx) => setToggleChecked(node, snapshot.rings?.[idx]));
+  (els.showMatchToggles || []).forEach((node, idx) => setToggleChecked(node, snapshot.matches?.[idx]));
+  if(state.wfg4){
+    state.wfg4.structuralOverlay = !!snapshot.wfg4StructuralOverlay;
+  }
+  syncFeatureGraphLayerVisibilityUI();
+}
+
+function applyConfigDebugOverlayToggle(enabled){
+  const nextEnabled = !!enabled;
+  if(nextEnabled === !!state.configDebugOverlayEnabled){
+    if(els.configDebugOverlayToggle){
+      els.configDebugOverlayToggle.checked = nextEnabled;
+    }
+    return;
+  }
+  state.configDebugOverlayEnabled = nextEnabled;
+  if(els.configDebugOverlayToggle){
+    els.configDebugOverlayToggle.checked = nextEnabled;
+  }
+  if(nextEnabled){
+    state.configDebugOverlayPrevFlags = snapshotConfigOverlayToggleState();
+    setToggleChecked(els.showBoxesToggle, true);
+    setToggleChecked(els.showOcrBoxesToggle, false);
+    (els.showRingToggles || []).forEach((node) => setToggleChecked(node, false));
+    (els.showMatchToggles || []).forEach((node) => setToggleChecked(node, false));
+    setToggleChecked(els.showFeatureGraphToggle, false);
+    setToggleChecked(els.showTextGraphToggle, false);
+    if(state.wfg4){
+      state.wfg4.structuralOverlay = true;
+    }
+    syncFeatureGraphLayerVisibilityUI();
+  } else {
+    restoreConfigOverlayToggleState(state.configDebugOverlayPrevFlags);
+    state.configDebugOverlayPrevFlags = null;
+  }
+  markSnapshotsDirty();
+  drawOverlayForVisibilityChange();
 }
 
 function overlayFlagsEqual(a,b){
@@ -20402,6 +20481,9 @@ els.showBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); draw
 els.showRingToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showMatchToggles.forEach(t => t.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); }));
 els.showOcrBoxesToggle?.addEventListener('change', ()=>{ markSnapshotsDirty(); drawOverlay(); });
+els.configDebugOverlayToggle?.addEventListener('change', ()=>{
+  applyConfigDebugOverlayToggle(!!els.configDebugOverlayToggle.checked);
+});
 els.showFeatureGraphToggle?.addEventListener('change', ()=>{
   syncFeatureGraphLayerVisibilityUI();
   markSnapshotsDirty();
