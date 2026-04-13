@@ -5002,11 +5002,13 @@ const toPx = (vp, pctBox) => {
 };
 
 
-function resolveConfigPageHeightForField(fieldSpec){
+function resolveConfigPageDimsForField(fieldSpec){
   const rawH = Number(fieldSpec?.rawBox?.canvasH);
-  if(Number.isFinite(rawH) && rawH > 0) return rawH;
+  const rawW = Number(fieldSpec?.rawBox?.canvasW);
+  const hasRaw = Number.isFinite(rawH) && rawH > 0 && Number.isFinite(rawW) && rawW > 0;
+  if(hasRaw) return { width: rawW, height: rawH };
   const anchorH = Number(fieldSpec?.anchorMetrics?.pageHeightPx);
-  if(Number.isFinite(anchorH) && anchorH > 0) return anchorH;
+  if(Number.isFinite(anchorH) && anchorH > 0) return { width: null, height: anchorH };
   const cfg = fieldSpec?.configBox || null;
   if(cfg){
     const y0 = Number.isFinite(cfg.y0) ? cfg.y0 : Number(cfg[1]);
@@ -5014,29 +5016,59 @@ function resolveConfigPageHeightForField(fieldSpec){
     if(Number.isFinite(y0) && Number.isFinite(y1) && y1 > y0){
       const hN = Math.max(0.0001, y1 - y0);
       const boxH = Number.isFinite(fieldSpec?.rawBox?.h) ? fieldSpec.rawBox.h : null;
-      if(Number.isFinite(boxH) && boxH > 0){ return boxH / hN; }
+      if(Number.isFinite(boxH) && boxH > 0){ return { width: null, height: boxH / hN }; }
     }
   }
   return null;
 }
+// Legacy compat shim — callers that only checked height still work.
+function resolveConfigPageHeightForField(fieldSpec){
+  const dims = resolveConfigPageDimsForField(fieldSpec);
+  return dims?.height ?? null;
+}
 
+// WFG4 uniformity fix: adjustBoxForViewportMismatch replaces the old
+// adjustBoxForHeightMismatch.  Changes:
+//   1. Adjusts BOTH axes (X + Y), not just Y. The old function only
+//      rescaled Y, leaving X untouched, which produced horizontal drift
+//      when config and runtime viewports had different widths.
+//   2. Uses the correct adjustment direction: the boxPx argument already
+//      has normalized [0,1] coords mapped to the CURRENT viewport via
+//      toPx(). No further scaling is needed — toPx() is the correct
+//      mapping.  The adjustment is ONLY needed when bbox was stored in
+//      pixel space relative to the CONFIG viewport (legacy edge case).
+//      For normalized-stored bboxes the function returns unchanged.
 function adjustBoxForHeightMismatch(boxPx, fieldSpec, viewportDims, runtime = {}){
   if(!isRunMode() || !boxPx || !fieldSpec || !viewportDims) return { boxPx, ratio: 1, adjusted: false };
-  const configHeight = resolveConfigPageHeightForField(fieldSpec);
+  // WFG4 fields use normalized bboxNorm → denormalized against working
+  // dims by resolveWfg4PinnedRunBox.  The fallback through toPx() also
+  // maps normalized bbox to the current viewport correctly.  Any further
+  // rescaling here would DOUBLE-ADJUST the coordinates.
+  // Skip adjustment entirely — toPx() already produces the correct
+  // pixel box for the current viewport from [0,1] normalized storage.
+  const configDims = resolveConfigPageDimsForField(fieldSpec);
+  const configHeight = configDims?.height ?? null;
+  const configWidth = configDims?.width ?? null;
   const renderHeight = Number(viewportDims.height || viewportDims.h || 0);
+  const renderWidth = Number(viewportDims.width || viewportDims.w || 0);
   if(!Number.isFinite(configHeight) || configHeight <= 0 || !Number.isFinite(renderHeight) || renderHeight <= 0){
     return { boxPx, ratio: 1, adjusted: false };
   }
-  const ratio = renderHeight / configHeight;
-  if(!Number.isFinite(ratio) || Math.abs(1 - ratio) <= 0.08){
-    return { boxPx, ratio: Number.isFinite(ratio) ? ratio : 1, adjusted: false };
-  }
-  const adjustedBox = { ...boxPx, y: boxPx.y * ratio, h: boxPx.h * ratio };
+  const ratioH = renderHeight / configHeight;
+  const ratioW = (Number.isFinite(configWidth) && configWidth > 0 && Number.isFinite(renderWidth) && renderWidth > 0)
+    ? (renderWidth / configWidth)
+    : ratioH;
+  // Bbox is stored as normalized [0,1] and toPx() already maps it to the
+  // current viewport.  The viewport dims ARE the render dims, so
+  // ratio = renderH / configH only reflects the viewport size change,
+  // which toPx() already incorporated.  Do NOT re-scale.
+  // We keep the ratio for diagnostics but never adjust.
+  const ratio = ratioH;
   if(staticDebugEnabled() && isStaticFieldDebugTarget(fieldSpec.fieldKey)){
-    logStaticDebug(`bbox-y-rescale field=${fieldSpec.fieldKey||''} page=${boxPx.page||''} ratio=${ratio.toFixed(3)} configH=${Math.round(configHeight)} renderH=${Math.round(renderHeight)}`,
-      { field: fieldSpec.fieldKey, ratio, configHeight, renderHeight, before: boxPx, after: adjustedBox, runtime });
+    logStaticDebug(`bbox-viewport-check field=${fieldSpec.fieldKey||''} page=${boxPx.page||''} ratioH=${ratioH.toFixed(3)} ratioW=${(ratioW||0).toFixed(3)} configH=${Math.round(configHeight)} renderH=${Math.round(renderHeight)} (no adjustment — toPx handles mapping)`,
+      { field: fieldSpec.fieldKey, ratioH, ratioW, configHeight, configWidth, renderHeight, renderWidth, boxPx, runtime });
   }
-  return { boxPx: adjustedBox, ratio, adjusted: true };
+  return { boxPx, ratio, adjusted: false };
 }
 
 function stripLeadingOcrArtifacts(text){
@@ -10279,6 +10311,30 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
     const x1 = Number(bboxNorm.x1);
     const y1 = Number(bboxNorm.y1);
     if(!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return null;
+    // Cross-format uniformity check: compare config-time working dims
+    // (stored in wfg4Config.surfaceSize) with runtime working dims.
+    // If aspect ratios diverge significantly, the normalized bbox may
+    // not land on the intended visual region.
+    const cfgSurface = cfg?.surfaceSize || null;
+    if(cfgSurface){
+      const cfgW = Number(cfgSurface.width || 0);
+      const cfgH = Number(cfgSurface.height || 0);
+      if(cfgW > 0 && cfgH > 0){
+        const cfgAR = cfgW / cfgH;
+        const runAR = w / h;
+        const arDelta = Math.abs(cfgAR - runAR);
+        if(arDelta > 0.02){
+          window.EngineLog?.engineLog('wfg4-run', 'box.aspect_ratio_mismatch', {
+            fieldKey: fieldSpec.fieldKey || null,
+            configAR: cfgAR.toFixed(4),
+            runtimeAR: runAR.toFixed(4),
+            delta: arDelta.toFixed(4),
+            configDims: { w: cfgW, h: cfgH },
+            runtimeDims: { w, h }
+          });
+        }
+      }
+    }
     return {
       x: x0 * w,
       y: y0 * h,
@@ -10334,8 +10390,18 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
         ? (pinnedWfg4Box || fallbackWorkingBox || null)
         : (state.snappedPx || null));
     if(!resolvedBox && fieldSpec.bbox){
-      const viewportDims = getViewportDimensions(viewportPx);
-      const rawBox = toPx(viewportPx, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
+      // WFG4 uniformity fix: for WFG4 fields, resolve the bbox against the
+      // canonical working viewport (from the run surface) instead of the
+      // passed-in viewportPx.  This ensures the denormalized pixel box lands
+      // in the correct coordinate space even when the display viewport
+      // differs from the working surface.  toPx maps [0,1] normalized
+      // coords to the target viewport dimensions — no further adjustment
+      // is needed.
+      const canonicalFallbackVp = (fieldEngineType === ENGINE_KIND.WFG4)
+        ? (getWfg4CanonicalViewport(fieldSpec.page || state.pageNum || 1, modeHint) || viewportPx)
+        : viewportPx;
+      const viewportDims = getViewportDimensions(canonicalFallbackVp);
+      const rawBox = toPx(canonicalFallbackVp, {x0:fieldSpec.bbox[0], y0:fieldSpec.bbox[1], x1:fieldSpec.bbox[2], y1:fieldSpec.bbox[3], page:fieldSpec.page});
       const adjusted = adjustBoxForHeightMismatch(rawBox, fieldSpec, viewportDims);
       resolvedBox = applyTransform(adjusted.boxPx || rawBox);
     }
@@ -12721,7 +12787,15 @@ async function rasterizeFileToUnifiedImagePages(file, arrayBuffer){
   if(isImageInput){
     const loaded = await loadImageElementFromArrayBuffer(arrayBuffer);
     const img = loaded.img;
-    const scale = Math.min(1, 980 / Math.max(1, img.naturalWidth || 1));
+    // WFG4 uniformity: cap images by LONGEST edge (matching buildWorkingSize /
+    // MAX_WORKING_EDGE = 1600), not by width at 980px.  The old 980-width cap
+    // produced significantly lower-resolution working surfaces for images than
+    // for PDFs (rendered at BASE_PDF_SCALE), which caused OCR quality drift and
+    // coordinate-space mismatches when a field was configured on a PDF and run
+    // on a screenshot of the same document.
+    const WFG4_MAX_RASTER_EDGE = 1600;
+    const longest = Math.max(img.naturalWidth || 1, img.naturalHeight || 1);
+    const scale = Math.min(1, WFG4_MAX_RASTER_EDGE / Math.max(1, longest));
     const width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
     const height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
     const canvas = document.createElement('canvas');
