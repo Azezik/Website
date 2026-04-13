@@ -16464,6 +16464,9 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     w: Number(working.width || 0),
     h: Number(working.height || 0)
   };
+  const persistedPageStructure = packet.pageStructure || null;
+  const persistedPageAlignRef = packet.pageAlignmentRef || null;
+  const persistedConstellation = packet.constellation || null;
 
   // In config mode users can redraw the active bbox before pressing Confirm.
   // step.wfg4Config / profile.wfg4Config still points to the last confirmed
@@ -16502,10 +16505,99 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     ctx.strokeRect((box.x || 0) / scaleX, ((box.y || 0) / scaleY) + offY, Math.max(1, (box.w || 1) / scaleX), Math.max(1, (box.h || 1) / scaleY));
     ctx.restore();
   };
+  const normalizeToPageBox = (geom) => {
+    if(!geom) return null;
+    if(Number.isFinite(geom.xN) && Number.isFinite(geom.yN) && Number.isFinite(geom.wN) && Number.isFinite(geom.hN)){
+      return {
+        x: Number(geom.xN) * pageFrame.w,
+        y: Number(geom.yN) * pageFrame.h,
+        w: Number(geom.wN) * pageFrame.w,
+        h: Number(geom.hN) * pageFrame.h
+      };
+    }
+    if(Number.isFinite(geom.xPx) && Number.isFinite(geom.yPx) && Number.isFinite(geom.wPx) && Number.isFinite(geom.hPx)){
+      return {
+        x: Number(geom.xPx),
+        y: Number(geom.yPx),
+        w: Number(geom.wPx),
+        h: Number(geom.hPx)
+      };
+    }
+    return null;
+  };
+  const drawRowBandLine = (band, color) => {
+    if(!band) return;
+    const hasNorm = Number.isFinite(band.x1N) && Number.isFinite(band.x2N) && Number.isFinite(band.yN);
+    const hasPx = Number.isFinite(band.x1Px) && Number.isFinite(band.x2Px) && Number.isFinite(band.yPx);
+    if(!hasNorm && !hasPx) return;
+    const x1 = hasNorm ? Number(band.x1N) * pageFrame.w : Number(band.x1Px);
+    const x2 = hasNorm ? Number(band.x2N) * pageFrame.w : Number(band.x2Px);
+    const y = hasNorm ? Number(band.yN) * pageFrame.h : Number(band.yPx);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x1 / scaleX, (y / scaleY) + offY);
+    ctx.lineTo(x2 / scaleX, (y / scaleY) + offY);
+    ctx.stroke();
+    ctx.restore();
+  };
 
   ctx.save();
   ctx.font = '10px "IBM Plex Mono", monospace';
   drawRect(pageFrame, 'rgba(148,163,184,0.85)', 1, [3, 3]);           // page bounds (for scale sanity)
+  if(!stalePacket && persistedPageStructure){
+    const regions = Array.isArray(persistedPageStructure.regions) ? persistedPageStructure.regions : [];
+    const rowBands = Array.isArray(persistedPageStructure.rowBands) ? persistedPageStructure.rowBands : [];
+    for(const region of regions){
+      const regionBox = normalizeToPageBox(region);
+      if(!regionBox) continue;
+      drawRect(regionBox, 'rgba(147,197,253,0.55)', 1, [2, 4]); // persisted page-level regions
+    }
+    for(const band of rowBands){
+      const color = band?.isSeparator ? 'rgba(244,114,182,0.60)' : 'rgba(125,211,252,0.45)';
+      drawRowBandLine(band, color); // persisted page-level row/separator bands
+    }
+  }
+  if(!stalePacket && persistedPageAlignRef?.coarseCenter){
+    const cx = Number(persistedPageAlignRef.coarseCenter.xN || 0.5) * pageFrame.w;
+    const cy = Number(persistedPageAlignRef.coarseCenter.yN || 0.5) * pageFrame.h;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(251,191,36,0.70)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath();
+    ctx.moveTo((cx - 14) / scaleX, (cy / scaleY) + offY);
+    ctx.lineTo((cx + 14) / scaleX, (cy / scaleY) + offY);
+    ctx.moveTo(cx / scaleX, ((cy - 14) / scaleY) + offY);
+    ctx.lineTo(cx / scaleX, ((cy + 14) / scaleY) + offY);
+    ctx.stroke();
+    ctx.restore();
+  }
+  if(!stalePacket && fieldBox && persistedConstellation?.members?.length){
+    const fieldCenterX = ((fieldBox.x || 0) + (fieldBox.w || 0) * 0.5) / scaleX;
+    const fieldCenterY = (((fieldBox.y || 0) + (fieldBox.h || 0) * 0.5) / scaleY) + offY;
+    for(const member of persistedConstellation.members){
+      const geom = member?.geom || null;
+      if(!geom || !Number.isFinite(geom.cxN) || !Number.isFinite(geom.cyN)) continue;
+      const mx = (Number(geom.cxN) * pageFrame.w) / scaleX;
+      const my = ((Number(geom.cyN) * pageFrame.h) / scaleY) + offY;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(251,191,36,0.45)';
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(fieldCenterX, fieldCenterY);
+      ctx.lineTo(mx, my);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(251,191,36,0.85)';
+      ctx.beginPath();
+      ctx.arc(mx, my, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
   if(stalePacket && liveBox){
     drawRect(liveBox, 'rgba(251,191,36,0.95)', 2.2, []);               // live user box
   }
@@ -16577,7 +16669,7 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   const legendX = 8;
   const legendY = 14;
   ctx.fillStyle = 'rgba(15,23,42,0.82)';
-  ctx.fillRect(4, 4, 320, 62);
+  ctx.fillRect(4, 4, 380, 74);
   ctx.fillStyle = '#f8fafc';
   ctx.fillText('WFG4 Structural Debug Overlay', legendX, legendY);
   ctx.fillStyle = '#fda4af';
@@ -16588,11 +16680,13 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   ctx.fillText('green lines=H/V edges, lime=container', legendX, legendY + 24);
   ctx.fillStyle = '#fbbf24';
   ctx.fillText('yellow=field bbox, dashed rays=anchor offsets', legendX, legendY + 36);
+  ctx.fillStyle = '#bfdbfe';
+  ctx.fillText('blue=page regions, pink/cyan=page row bands, amber cross=page anchor', legendX, legendY + 48);
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}`, legendX, legendY + 50);
+  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}`, legendX, legendY + 60);
   if(stalePacket){
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 62);
+    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 72);
   }
   ctx.restore();
 }
