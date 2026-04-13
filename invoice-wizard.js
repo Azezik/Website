@@ -10261,7 +10261,7 @@ async function applyAnyFieldVerifier(cleaned, { fieldKey, boxPx, pageNum, pageCa
       const pageEntry = wfg4Surface?.pages?.[Math.max(0, page - 1)] || null;
       const displayDataUrl = pageEntry?.artifacts?.displayDataUrl || null;
       if(displayDataUrl){
-        const pageCanvas = await dataUrlToCanvas(displayDataUrl);
+        const pageCanvas = await window.WFG4OpenCv?.dataUrlToCanvas(displayDataUrl);
         if(pageCanvas){
           sourceCanvas = pageCanvas;
           sourceLabel = 'wfg4Surface.page.artifacts.displayDataUrl';
