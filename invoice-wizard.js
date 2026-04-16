@@ -16477,6 +16477,8 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   const persistedPageStructure = packet.pageStructure || null;
   const persistedPageAlignRef = packet.pageAlignmentRef || null;
   const persistedConstellation = packet.constellation || null;
+  const persistedMainSurface = packet.mainSurface || persistedPageAlignRef?.mainSurface || persistedPageStructure?.mainSurface || null;
+  const persistedRegionTopology = packet.regionTopology || null;
 
   // In config mode users can redraw the active bbox before pressing Confirm.
   // step.wfg4Config / profile.wfg4Config still points to the last confirmed
@@ -16514,6 +16516,30 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     ctx.setLineDash(dash);
     ctx.strokeRect((box.x || 0) / scaleX, ((box.y || 0) / scaleY) + offY, Math.max(1, (box.w || 1) / scaleX), Math.max(1, (box.h || 1) / scaleY));
     ctx.restore();
+  };
+  const drawNormRect = (normBox, color, lineWidth = 1.2, dash = []) => {
+    if(!normBox) return;
+    if(!Number.isFinite(normBox.xN) || !Number.isFinite(normBox.yN) || !Number.isFinite(normBox.wN) || !Number.isFinite(normBox.hN)) return;
+    drawRect({
+      x: Number(normBox.xN) * pageFrame.w,
+      y: Number(normBox.yN) * pageFrame.h,
+      w: Number(normBox.wN) * pageFrame.w,
+      h: Number(normBox.hN) * pageFrame.h
+    }, color, lineWidth, dash);
+  };
+  const drawMainSurface = (mainSurface, color = 'rgba(14,165,233,0.95)', lineWidth = 2.2) => {
+    if(!mainSurface || !mainSurface.ok) return;
+    const x0N = Number(mainSurface.x0N);
+    const y0N = Number(mainSurface.y0N);
+    const x1N = Number(mainSurface.x1N);
+    const y1N = Number(mainSurface.y1N);
+    if(!Number.isFinite(x0N) || !Number.isFinite(y0N) || !Number.isFinite(x1N) || !Number.isFinite(y1N)) return;
+    drawRect({
+      x: x0N * pageFrame.w,
+      y: y0N * pageFrame.h,
+      w: Math.max(1, (x1N - x0N) * pageFrame.w),
+      h: Math.max(1, (y1N - y0N) * pageFrame.h)
+    }, color, lineWidth, [8, 3]);
   };
   const normalizeToPageBox = (geom) => {
     if(!geom) return null;
@@ -16557,6 +16583,9 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   ctx.save();
   ctx.font = '10px "IBM Plex Mono", monospace';
   drawRect(pageFrame, 'rgba(148,163,184,0.85)', 1, [3, 3]);           // page bounds (for scale sanity)
+  if(!stalePacket){
+    drawMainSurface(persistedMainSurface, 'rgba(14,165,233,0.95)', 2.2); // authoritative perimeter / main surface
+  }
   if(!stalePacket && persistedPageStructure){
     const regions = Array.isArray(persistedPageStructure.regions) ? persistedPageStructure.regions : [];
     const rowBands = Array.isArray(persistedPageStructure.rowBands) ? persistedPageStructure.rowBands : [];
@@ -16568,6 +16597,31 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     for(const band of rowBands){
       const color = band?.isSeparator ? 'rgba(244,114,182,0.60)' : 'rgba(125,211,252,0.45)';
       drawRowBandLine(band, color); // persisted page-level row/separator bands
+    }
+  }
+  if(!stalePacket && persistedPageAlignRef){
+    const topRegions = Array.isArray(persistedPageAlignRef.topRegions) ? persistedPageAlignRef.topRegions : [];
+    const separators = Array.isArray(persistedPageAlignRef.separators) ? persistedPageAlignRef.separators : [];
+    for(const tr of topRegions){
+      drawNormRect({
+        xN: Number(tr.cxN || 0) - (Number(tr.wN || 0) / 2),
+        yN: Number(tr.cyN || 0) - (Number(tr.hN || 0) / 2),
+        wN: Number(tr.wN || 0),
+        hN: Number(tr.hN || 0)
+      }, 'rgba(251,191,36,0.52)', 1, [6, 3]); // alignment-ref structural anchors (regions)
+    }
+    for(const sep of separators){
+      drawRowBandLine(sep, 'rgba(244,114,182,0.82)'); // alignment-ref separator anchors
+    }
+  }
+  if(!stalePacket && persistedRegionTopology){
+    const containing = Array.isArray(persistedRegionTopology.containing) ? persistedRegionTopology.containing : [];
+    const touching = Array.isArray(persistedRegionTopology.touching) ? persistedRegionTopology.touching : [];
+    for(const region of touching){
+      drawNormRect(region, 'rgba(99,102,241,0.45)', 1, [4, 5]);      // touching host regions
+    }
+    for(const region of containing){
+      drawNormRect(region, 'rgba(34,197,94,0.90)', 1.5, []);          // containing host regions (authoritative)
     }
   }
   if(!stalePacket && persistedPageAlignRef?.coarseCenter){
@@ -16613,10 +16667,12 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   }
 
   if(!stalePacket){
-    drawRect(capture, 'rgba(248,113,113,0.85)', 1.3, [7, 4]);     // structural capture
-    drawRect(neighborhood, 'rgba(56,189,248,0.9)', 1.2, [4, 4]);   // ORB neighborhood patch
-    drawRect(container, 'rgba(132,204,22,0.9)', 1.5, []);          // enclosing container
     drawRect(fieldBox, 'rgba(251,191,36,0.95)', 2.0, []);          // configured field box
+    // Keep local structural capture rendered for diagnostics, but with
+    // intentionally muted styling so it is not confused with authority.
+    drawRect(capture, 'rgba(248,113,113,0.32)', 1.0, [7, 4]);      // local crop used during capture (non-authoritative)
+    drawRect(neighborhood, 'rgba(56,189,248,0.28)', 1.0, [4, 4]);  // ORB neighborhood patch (legacy/local)
+    drawRect(container, 'rgba(132,204,22,0.35)', 1.0, [2, 2]);     // local enclosing container (diagnostic)
   }
 
   const hLines = Array.isArray(lines.horizontal) ? lines.horizontal : [];
@@ -16679,24 +16735,26 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   const legendX = 8;
   const legendY = 14;
   ctx.fillStyle = 'rgba(15,23,42,0.82)';
-  ctx.fillRect(4, 4, 380, 74);
+  ctx.fillRect(4, 4, 520, 98);
   ctx.fillStyle = '#f8fafc';
   ctx.fillText('WFG4 Structural Debug Overlay', legendX, legendY);
-  ctx.fillStyle = '#fda4af';
-  ctx.fillText('red=detection region', legendX, legendY + 12);
   ctx.fillStyle = '#67e8f9';
-  ctx.fillText('cyan=neighborhood patch', legendX + 130, legendY + 12);
-  ctx.fillStyle = '#a3e635';
-  ctx.fillText('green lines=H/V edges, lime=container', legendX, legendY + 24);
+  ctx.fillText('cyan dashed=main surface/perimeter (authoritative transform anchor)', legendX, legendY + 12);
+  ctx.fillStyle = '#93c5fd';
+  ctx.fillText('blue=persisted page regions + row bands', legendX, legendY + 24);
+  ctx.fillStyle = '#22c55e';
+  ctx.fillText('green=regionTopology.containing, indigo dashed=regionTopology.touching', legendX, legendY + 36);
+  ctx.fillStyle = '#f472b6';
+  ctx.fillText('pink=alignment separator anchors, amber dashed=alignment top regions', legendX, legendY + 48);
   ctx.fillStyle = '#fbbf24';
-  ctx.fillText('yellow=field bbox, dashed rays=anchor offsets', legendX, legendY + 36);
-  ctx.fillStyle = '#bfdbfe';
-  ctx.fillText('blue=page regions, pink/cyan=page row bands, amber cross=page anchor', legendX, legendY + 48);
+  ctx.fillText('yellow=field bbox, dashed rays=local anchor offsets (diagnostic only)', legendX, legendY + 60);
+  ctx.fillStyle = '#fda4af';
+  ctx.fillText('faint red/cyan/lime=legacy local capture context (not authority chain)', legendX, legendY + 72);
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}`, legendX, legendY + 60);
+  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}  alignRef:${persistedPageAlignRef?.schema || 'n/a'}  topology:${persistedRegionTopology?.schema || 'n/a'}`, legendX, legendY + 84);
   if(stalePacket){
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 72);
+    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 96);
   }
   ctx.restore();
 }
