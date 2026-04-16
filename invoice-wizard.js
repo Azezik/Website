@@ -16432,14 +16432,17 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   if(!ctx || !isWfg4StructuralOverlayActive()) return;
   const packet = getCurrentWfg4ConfigDebugPacket();
   if(!packet) return;
-  const structural = packet.structuralContext || {};
+  const liveBoxForPreview = getWfg4LiveSelectionBoxForPage(Number(packet?.bbox?.page || packet?.page || state.pageNum || 1));
+  const previewPacket = buildWfg4LivePreviewPacket(packet, liveBoxForPreview);
+  const packetForOverlay = previewPacket || packet;
+  const structural = packetForOverlay.structuralContext || {};
   const lines = structural.lines || {};
   const capture = structural.captureRegion || null;
-  const fieldBox = packet.bbox || null;
-  const neighborhood = packet.visualReference?.patches?.neighborhood?.box || null;
+  const fieldBox = packetForOverlay.bbox || null;
+  const neighborhood = packetForOverlay.visualReference?.patches?.neighborhood?.box || null;
   const container = structural.container || null;
   const anchors = structural.anchors || {};
-  const page = Number(fieldBox?.page || packet.page || state.pageNum || 1);
+  const page = Number(fieldBox?.page || packetForOverlay.page || state.pageNum || 1);
 
   // P1 CaptureFrame: the overlay no longer reads from getScaleFactors()
   // (which queries the live DOM's getBoundingClientRect and is a third,
@@ -16474,11 +16477,11 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     w: Number(working.width || 0),
     h: Number(working.height || 0)
   };
-  const persistedPageStructure = packet.pageStructure || null;
-  const persistedPageAlignRef = packet.pageAlignmentRef || null;
-  const persistedConstellation = packet.constellation || null;
-  const persistedMainSurface = packet.mainSurface || persistedPageAlignRef?.mainSurface || persistedPageStructure?.mainSurface || null;
-  const persistedRegionTopology = packet.regionTopology || null;
+  const persistedPageStructure = packetForOverlay.pageStructure || null;
+  const persistedPageAlignRef = packetForOverlay.pageAlignmentRef || null;
+  const persistedConstellation = packetForOverlay.constellation || null;
+  const persistedMainSurface = packetForOverlay.mainSurface || persistedPageAlignRef?.mainSurface || persistedPageStructure?.mainSurface || null;
+  const persistedRegionTopology = packetForOverlay.regionTopology || null;
 
   // In config mode users can redraw the active bbox before pressing Confirm.
   // step.wfg4Config / profile.wfg4Config still points to the last confirmed
@@ -16579,6 +16582,28 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     ctx.stroke();
     ctx.restore();
   };
+  const drawTextTag = (text, xCss, yCss, color = '#e2e8f0', bg = 'rgba(2,6,23,0.72)') => {
+    const label = String(text || '').trim();
+    if(!label) return;
+    ctx.save();
+    ctx.font = '10px "IBM Plex Mono", monospace';
+    const m = ctx.measureText(label);
+    const w = Math.ceil(m.width) + 6;
+    const h = 12;
+    const x = Math.max(2, xCss + 2);
+    const y = Math.max(2 + h, yCss - 2);
+    ctx.fillStyle = bg;
+    ctx.fillRect(x, y - h, w, h);
+    ctx.fillStyle = color;
+    ctx.fillText(label, x + 3, y - 3);
+    ctx.restore();
+  };
+  const drawRectLabel = (box, text, color) => {
+    if(!box || !text) return;
+    const xCss = (Number(box.x || 0) / scaleX);
+    const yCss = ((Number(box.y || 0) / scaleY) + offY);
+    drawTextTag(text, xCss, yCss, color || '#e2e8f0');
+  };
 
   ctx.save();
   ctx.font = '10px "IBM Plex Mono", monospace';
@@ -16592,11 +16617,31 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     for(const region of regions){
       const regionBox = normalizeToPageBox(region);
       if(!regionBox) continue;
-      drawRect(regionBox, 'rgba(147,197,253,0.55)', 1, [2, 4]); // persisted page-level regions
+      drawRect(regionBox, 'rgba(147,197,253,0.76)', 1.4, [2, 4]); // persisted page-level regions
+      if(region.id){
+        drawRectLabel(regionBox, `region:${region.id}`, '#bfdbfe');
+      }
     }
     for(const band of rowBands){
       const color = band?.isSeparator ? 'rgba(244,114,182,0.60)' : 'rgba(125,211,252,0.45)';
       drawRowBandLine(band, color); // persisted page-level row/separator bands
+      if(band?.id && Number.isFinite(band?.x1N) && Number.isFinite(band?.yN)){
+        drawTextTag(
+          `${band.id}${band?.isSeparator ? ':sep' : ':row'}`,
+          (Number(band.x1N) * pageFrame.w) / scaleX,
+          ((Number(band.yN) * pageFrame.h) / scaleY) + offY,
+          band?.isSeparator ? '#f9a8d4' : '#bae6fd'
+        );
+      }
+    }
+    const structuralObjects = Array.isArray(persistedPageStructure.structuralObjects) ? persistedPageStructure.structuralObjects : [];
+    for(const obj of structuralObjects.slice(0, 24)){
+      const geom = normalizeToPageBox(obj?.geom || null);
+      if(!geom) continue;
+      drawRect(geom, 'rgba(192,132,252,0.33)', 1, [3, 4]);
+      if(obj?.id || obj?.type){
+        drawRectLabel(geom, `${obj.type || 'obj'}:${obj.id || '?'}`, '#ddd6fe');
+      }
     }
   }
   if(!stalePacket && persistedPageAlignRef){
@@ -16618,10 +16663,26 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
     const containing = Array.isArray(persistedRegionTopology.containing) ? persistedRegionTopology.containing : [];
     const touching = Array.isArray(persistedRegionTopology.touching) ? persistedRegionTopology.touching : [];
     for(const region of touching){
-      drawNormRect(region, 'rgba(99,102,241,0.45)', 1, [4, 5]);      // touching host regions
+      drawNormRect(region, 'rgba(99,102,241,0.62)', 1.2, [4, 5]);      // touching host regions
+      if(region?.regionId){
+        drawRectLabel({
+          x: Number(region.xN || 0) * pageFrame.w,
+          y: Number(region.yN || 0) * pageFrame.h,
+          w: Number(region.wN || 0) * pageFrame.w,
+          h: Number(region.hN || 0) * pageFrame.h
+        }, `touch:${region.regionId}`, '#c7d2fe');
+      }
     }
     for(const region of containing){
-      drawNormRect(region, 'rgba(34,197,94,0.90)', 1.5, []);          // containing host regions (authoritative)
+      drawNormRect(region, 'rgba(34,197,94,0.95)', 1.8, []);          // containing host regions (authoritative)
+      if(region?.regionId){
+        drawRectLabel({
+          x: Number(region.xN || 0) * pageFrame.w,
+          y: Number(region.yN || 0) * pageFrame.h,
+          w: Number(region.wN || 0) * pageFrame.w,
+          h: Number(region.hN || 0) * pageFrame.h
+        }, `in:${region.regionId}`, '#86efac');
+      }
     }
   }
   if(!stalePacket && persistedPageAlignRef?.coarseCenter){
@@ -16734,8 +16795,15 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
 
   const legendX = 8;
   const legendY = 14;
+  const availability = [
+    `mainSurface:${persistedMainSurface?.ok ? 'yes' : 'no'}`,
+    `pageStructure:${persistedPageStructure ? 'yes' : 'no'}`,
+    `regions:${Array.isArray(persistedPageStructure?.regions) ? persistedPageStructure.regions.length : 0}`,
+    `topology:${persistedRegionTopology ? 'yes' : 'no'}`,
+    `alignRef:${persistedPageAlignRef ? 'yes' : 'no'}`
+  ].join('  ');
   ctx.fillStyle = 'rgba(15,23,42,0.82)';
-  ctx.fillRect(4, 4, 520, 98);
+  ctx.fillRect(4, 4, 760, 126);
   ctx.fillStyle = '#f8fafc';
   ctx.fillText('WFG4 Structural Debug Overlay', legendX, legendY);
   ctx.fillStyle = '#67e8f9';
@@ -16751,10 +16819,14 @@ function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
   ctx.fillStyle = '#fda4af';
   ctx.fillText('faint red/cyan/lime=legacy local capture context (not authority chain)', legendX, legendY + 72);
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillText(`field:${packet.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}  alignRef:${persistedPageAlignRef?.schema || 'n/a'}  topology:${persistedRegionTopology?.schema || 'n/a'}`, legendX, legendY + 84);
+  ctx.fillText(`field:${packetForOverlay.fieldKey || 'n/a'}  structural:${structural.captureStatus || 'n/a'}  alignRef:${persistedPageAlignRef?.schema || 'n/a'}  topology:${persistedRegionTopology?.schema || 'n/a'}`, legendX, legendY + 84);
+  ctx.fillStyle = '#fef08a';
+  ctx.fillText(availability, legendX, legendY + 96);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.fillText(`preview:${packetForOverlay.previewFromLiveSelection ? 'live-selection' : 'persisted'}  page:${page}`, legendX, legendY + 108);
   if(stalePacket){
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 96);
+    ctx.fillText('stale packet: press Confirm to recapture around current bbox', legendX, legendY + 120);
   }
   ctx.restore();
 }
