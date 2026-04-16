@@ -16403,19 +16403,29 @@ function getCurrentWfg4ConfigDebugPacket(){
   if(!isWfg4StructuralOverlayActive()) return null;
   const step = state.steps?.[state.stepIdx] || null;
   const direct = step?.wfg4Config || null;
-  if(direct){
-    const page = Number(direct?.page || direct?.bbox?.page || state.pageNum || 1);
-    const liveBox = getWfg4LiveSelectionBoxForPage(page);
-    return liveBox ? buildWfg4LivePreviewPacket(direct, liveBox) : direct;
-  }
+  if(direct) return direct;
   const fieldKey = step?.fieldKey || null;
-  if(!fieldKey) return null;
-  const profileField = (state.profile?.fields || []).find(f => f && f.fieldKey === fieldKey);
-  const basePacket = profileField?.wfg4Config || null;
-  if(!basePacket) return null;
-  const page = Number(basePacket?.page || basePacket?.bbox?.page || state.pageNum || 1);
-  const liveBox = getWfg4LiveSelectionBoxForPage(page);
-  return liveBox ? buildWfg4LivePreviewPacket(basePacket, liveBox) : basePacket;
+  if(fieldKey){
+    const profileField = (state.profile?.fields || []).find(f => f && f.fieldKey === fieldKey);
+    const basePacket = profileField?.wfg4Config || null;
+    if(basePacket) return basePacket;
+  }
+
+  // Config debug overlay should remain truthful to persisted geometry even when
+  // the active step has no packet yet (e.g., first load or navigating to an
+  // unconfirmed field). Fall back to any persisted packet on the current page,
+  // then any persisted packet in the profile/steps.
+  const persisted = [];
+  for(const s of (state.steps || [])){
+    if(s?.wfg4Config) persisted.push(s.wfg4Config);
+  }
+  for(const f of (state.profile?.fields || [])){
+    if(f?.wfg4Config) persisted.push(f.wfg4Config);
+  }
+  if(!persisted.length) return null;
+  const currentPage = Number(state.pageNum || 1);
+  const pageMatch = persisted.find((pkt) => Number(pkt?.page || pkt?.bbox?.page || 1) === currentPage);
+  return pageMatch || persisted[0] || null;
 }
 
 function paintWfg4StructuralOverlay(ctx /*, legacyScaleX, legacyScaleY */){
@@ -17756,6 +17766,10 @@ els.viewer.addEventListener('scroll', ()=>{
     state.pageNum = p;
     if(state.pageViewports[p-1]) state.viewport = state.pageViewports[p-1];
     updatePageIndicator();
+    // Keep config debug overlays in sync with viewport/page changes.
+    // Without this redraw, overlay selection may stay bound to the previous
+    // page until another interaction event (draw/toggle) forces repaint.
+    drawOverlay({ skipGraphMapFetch: true });
   }
 });
 function drawOverlay(options = {}){
