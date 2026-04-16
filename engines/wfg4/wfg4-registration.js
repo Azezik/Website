@@ -75,14 +75,19 @@
       // This is computed once in normalizePage() (wfg4-engine.js) and stored
       // on pageEntry so that both config and runtime share one code path.
       pageStructure: pageEntry?.pageStructure || null,
-      // PageAlignment v1 reference summary captured from config-time
-      // pageStructure. Runtime reuses this to estimate a page-level
-      // translation+scale prior before per-field localization.
+      // PageAlignment v2 reference summary captured from config-time
+      // pageStructure. Runtime uses this as the authoritative structural
+      // reference for the unified transform lock (main-surface perimeter
+      // first, region graph second, no ORB search fallback).
       pageAlignmentRef: (
         pageEntry?.pageStructure && CvOps.buildPageAlignmentReference
           ? CvOps.buildPageAlignmentReference(pageEntry.pageStructure, {})
           : null
-      )
+      ),
+      // First-class content perimeter (main-surface). Carried here so the
+      // structural transform lock can solve without needing to re-derive
+      // the envelope from the runtime page structure alone.
+      mainSurface: pageEntry?.pageStructure?.mainSurface || null
     };
 
     const cvReadyInfo = CvOps.ensureCvReady
@@ -369,6 +374,90 @@
         };
       } catch(_bgErr){
         packet.bboxGeometry = null;
+      }
+
+      // --- Full region topology (complete host regions, not radius crops) ---
+      // The structural capture above records lines/containers inside an
+      // expanded bbox crop.  That preserves local detail but throws away the
+      // topology of the regions the field actually belongs to.  The unified
+      // structural authority needs whole-region geometry so the runtime
+      // transform lock can verify that the projected bbox lands inside the
+      // same host region topology captured here.
+      try {
+        const _ps3 = pageEntry?.pageStructure || null;
+        if(_ps3){
+          const _bn2 = packet.bboxNorm;
+          const _bcxN2 = (Number(_bn2.x0 || 0) + Number(_bn2.x1 || 0)) / 2;
+          const _bcyN2 = (Number(_bn2.y0 || 0) + Number(_bn2.y1 || 0)) / 2;
+          const _regions = Array.isArray(_ps3.regions) ? _ps3.regions : [];
+          const _containing = [];
+          const _touching = [];
+          for(let _ri = 0; _ri < _regions.length; _ri++){
+            const _r = _regions[_ri];
+            const _rx0 = _r.xN, _ry0 = _r.yN;
+            const _rx1 = _r.xN + _r.wN, _ry1 = _r.yN + _r.hN;
+            const _bfx0 = Number(_bn2.x0 || 0);
+            const _bfy0 = Number(_bn2.y0 || 0);
+            const _bfx1 = Number(_bn2.x1 || 0);
+            const _bfy1 = Number(_bn2.y1 || 0);
+            // overlap in normalized coords
+            const _ox0 = Math.max(_rx0, _bfx0);
+            const _oy0 = Math.max(_ry0, _bfy0);
+            const _ox1 = Math.min(_rx1, _bfx1);
+            const _oy1 = Math.min(_ry1, _bfy1);
+            const _overlapN = Math.max(0, _ox1 - _ox0) * Math.max(0, _oy1 - _oy0);
+            const _bboxAreaN = Math.max(1e-9, (_bfx1 - _bfx0) * (_bfy1 - _bfy0));
+            const _overlapFrac = _overlapN / _bboxAreaN;
+            // Containing = region covers ≥70% of the bbox
+            if(_overlapFrac >= 0.70){
+              _containing.push({
+                regionId: _r.id,
+                xN: _r.xN, yN: _r.yN, wN: _r.wN, hN: _r.hN,
+                areaN: _r.areaN,
+                overlapFrac: _overlapFrac,
+                // Relative pose of the bbox inside this region (0..1)
+                relativePose: {
+                  cxRatio: _r.wN > 1e-6 ? (_bcxN2 - _r.xN) / _r.wN : 0.5,
+                  cyRatio: _r.hN > 1e-6 ? (_bcyN2 - _r.yN) / _r.hN : 0.5,
+                  wRatio:  _r.wN > 1e-6 ? (_bfx1 - _bfx0) / _r.wN : 1,
+                  hRatio:  _r.hN > 1e-6 ? (_bfy1 - _bfy0) / _r.hN : 1
+                }
+              });
+            } else if(_overlapN > 0){
+              _touching.push({
+                regionId: _r.id,
+                xN: _r.xN, yN: _r.yN, wN: _r.wN, hN: _r.hN,
+                areaN: _r.areaN,
+                overlapFrac: _overlapFrac
+              });
+            }
+          }
+          // Sort containing by smallest area first (tightest enclosing region).
+          _containing.sort((a, b) => (a.areaN || 0) - (b.areaN || 0));
+
+          // Field pose inside the main-surface envelope.
+          const _ms = _ps3.mainSurface || null;
+          let _poseInMainSurface = null;
+          if(_ms && _ms.ok && _ms.wN > 1e-6 && _ms.hN > 1e-6){
+            _poseInMainSurface = {
+              cxRatio: (_bcxN2 - _ms.x0N) / _ms.wN,
+              cyRatio: (_bcyN2 - _ms.y0N) / _ms.hN,
+              wRatio:  (Number(_bn2.x1 || 0) - Number(_bn2.x0 || 0)) / _ms.wN,
+              hRatio:  (Number(_bn2.y1 || 0) - Number(_bn2.y0 || 0)) / _ms.hN
+            };
+          }
+
+          packet.regionTopology = {
+            schema: 'wfg4/region-topology/v1',
+            containing: _containing,
+            touching: _touching,
+            poseInMainSurface: _poseInMainSurface
+          };
+        } else {
+          packet.regionTopology = null;
+        }
+      } catch(_rtErr){
+        packet.regionTopology = null;
       }
 
       packet.visualReference.captureStatus = 'ok';

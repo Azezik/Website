@@ -58,6 +58,9 @@
     LOCALIZED_REFINED: 'localized_refined',
     PREDICTED_FALLBACK: 'predicted_fallback',
     STRUCTURAL_FALLBACK: 'structural_fallback',
+    STRUCTURAL_RECONSTRUCTED: 'structural_reconstructed',
+    STRUCTURAL_LOCK_PROJECTED: 'structural_lock_projected',
+    LITERAL_USER_BOX: 'literal_user_box',
     LEGACY_BOX: 'legacy_box'
   };
 

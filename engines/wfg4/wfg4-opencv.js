@@ -620,12 +620,81 @@
       });
     }
 
+    // --- Main surface / content perimeter (first-class structural anchor) ---
+    // Unified-authority model: a single axis-aligned envelope of significant
+    // structural objects. Runtime lock aligns to this envelope's four edges
+    // before any per-field logic runs, matching the "Photoshop transform"
+    // expectation (align the canvas, then everything inside follows).
+    var mainSurface = computeMainSurface(regions, rowBands, W, H);
+
     return {
-      schema: 'wfg4/page-structure/v1',
+      schema: 'wfg4/page-structure/v2',
       surfaceSize: { width: W, height: H },
       regions: regions,
       rowBands: rowBands,
-      structuralObjects: structuralObjects
+      structuralObjects: structuralObjects,
+      mainSurface: mainSurface
+    };
+  }
+
+  // computeMainSurface — axis-aligned content envelope in normalized coords.
+  // Built from the union of significant regions and spanning row bands so
+  // that the envelope follows actual content, not raw canvas edges. When
+  // too little structure is detected the envelope degrades gracefully to
+  // the full page so downstream code can still operate.
+  function computeMainSurface(regions, rowBands, W, H){
+    var big = [];
+    var regs = Array.isArray(regions) ? regions : [];
+    var rbs  = Array.isArray(rowBands) ? rowBands : [];
+    for(var i = 0; i < regs.length; i++){
+      var r = regs[i];
+      // Require at least ~1% of the page to count as a structural contributor
+      if((r.areaN || 0) >= 0.01){
+        big.push({ x0: r.xN, y0: r.yN, x1: r.xN + r.wN, y1: r.yN + r.hN, w: r.areaN || 0.01 });
+      }
+    }
+    for(var j = 0; j < rbs.length; j++){
+      var rb = rbs[j];
+      // Spanning bands (>= 25% of width) are envelope contributors
+      if((rb.spanN || 0) >= 0.25){
+        big.push({ x0: rb.x1N, y0: rb.y1N, x1: rb.x2N, y1: rb.y2N, w: rb.spanN || 0.25 });
+      }
+    }
+    if(!big.length){
+      return {
+        schema: 'wfg4/main-surface/v1',
+        ok: false,
+        reason: 'no_significant_structure',
+        x0N: 0, y0N: 0, x1N: 1, y1N: 1,
+        wN: 1, hN: 1, cxN: 0.5, cyN: 0.5,
+        contributorCount: 0,
+        coverageN: 0
+      };
+    }
+    // Trim 5% outliers from each side using weighted quantiles so a single
+    // rogue container does not warp the envelope.
+    var xs = big.map(function(b){ return b.x0; }).sort(function(a,b){ return a-b; });
+    var xe = big.map(function(b){ return b.x1; }).sort(function(a,b){ return a-b; });
+    var ys = big.map(function(b){ return b.y0; }).sort(function(a,b){ return a-b; });
+    var ye = big.map(function(b){ return b.y1; }).sort(function(a,b){ return a-b; });
+    var qLo = 0.05, qHi = 0.95;
+    var x0N = _clamp(_quantile(xs, qLo), 0, 1);
+    var y0N = _clamp(_quantile(ys, qLo), 0, 1);
+    var x1N = _clamp(_quantile(xe, qHi), 0, 1);
+    var y1N = _clamp(_quantile(ye, qHi), 0, 1);
+    if(x1N - x0N < 0.05){ x0N = Math.max(0, x0N - 0.025); x1N = Math.min(1, x1N + 0.025); }
+    if(y1N - y0N < 0.05){ y0N = Math.max(0, y0N - 0.025); y1N = Math.min(1, y1N + 0.025); }
+    var wN = Math.max(1e-4, x1N - x0N);
+    var hN = Math.max(1e-4, y1N - y0N);
+    return {
+      schema: 'wfg4/main-surface/v1',
+      ok: true,
+      x0N: x0N, y0N: y0N, x1N: x1N, y1N: y1N,
+      wN: wN, hN: hN,
+      cxN: x0N + wN / 2,
+      cyN: y0N + hN / 2,
+      contributorCount: big.length,
+      coverageN: wN * hN
     };
   }
 
@@ -737,14 +806,21 @@
     const separators = _pickBands(rowBands, true, o.maxSeparators || 12);
     const allBands = _pickBands(rowBands, false, o.maxBands || 16);
     const center = _coarseCenter({ topRegions });
+    // First-class main-surface envelope (content perimeter).
+    // Primary anchor for the structural transform lock at runtime.
+    const mainSurface = pageStructure.mainSurface
+      || computeMainSurface(regions, rowBands,
+          (pageStructure.surfaceSize && pageStructure.surfaceSize.width) || 1,
+          (pageStructure.surfaceSize && pageStructure.surfaceSize.height) || 1);
     return {
-      schema: 'wfg4/page-alignment-ref/v1',
+      schema: 'wfg4/page-alignment-ref/v2',
       regionCount: regions.length,
       rowBandCount: rowBands.length,
       topRegions: topRegions,
       separators: separators,
       rowBands: allBands,
-      coarseCenter: center
+      coarseCenter: center,
+      mainSurface: mainSurface
     };
   }
 
@@ -850,6 +926,226 @@
       configCenterN: { xN: Number(cfgCenter.xN || 0.5), yN: Number(cfgCenter.yN || 0.5) },
       runtimeCenterN:{ xN: Number(rtCenter.xN  || 0.5), yN: Number(rtCenter.yN  || 0.5) },
       source: 'pageStructure_v1'
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // solveStructuralTransformLock — unified structural authority.
+  //
+  // Produces a single deterministic page-wide transform (sx, sy, txN, tyN) by
+  // staged structural alignment:
+  //   Stage 1: align the content perimeter (main-surface) corners.  This is
+  //            the authoritative "Photoshop transform" — once the content
+  //            envelope is locked between config and runtime, every bbox
+  //            within it follows the same global transform.
+  //   Stage 2: verify/refine against the region graph (topRegions + spanning
+  //            separators).  Acts as a residual check on Stage 1; if Stage 2
+  //            strongly disagrees with Stage 1, the lock's confidence drops.
+  //
+  // Output is the ONE transform used by run-time field localization.  When
+  // structure is insufficient to solve the lock, the solver reports failure
+  // rather than silently degrading — callers should not substitute an ORB /
+  // template / global-scan fallback; structural absence is a hard stop.
+  // ---------------------------------------------------------------------------
+  function solveStructuralTransformLock(configRef, runtimePageStructure, opts){
+    const o = opts || {};
+    const minScale = typeof o.minScale === 'number' ? o.minScale : 0.60;
+    const maxScale = typeof o.maxScale === 'number' ? o.maxScale : 1.60;
+    const maxShiftN = typeof o.maxShiftN === 'number' ? o.maxShiftN : 0.45;
+    if(!configRef || !runtimePageStructure){
+      return {
+        ok: false,
+        model: 'structural_lock_v1',
+        transformN: { sx: 1, sy: 1, txN: 0, tyN: 0 },
+        confidence: 0.05,
+        stages: { perimeter: null, regionGraph: null },
+        reason: 'missing_config_or_runtime_structure'
+      };
+    }
+    const rtRef = buildPageAlignmentReference(runtimePageStructure, o);
+    if(!rtRef){
+      return {
+        ok: false,
+        model: 'structural_lock_v1',
+        transformN: { sx: 1, sy: 1, txN: 0, tyN: 0 },
+        confidence: 0.05,
+        stages: { perimeter: null, regionGraph: null },
+        reason: 'runtime_reference_unavailable'
+      };
+    }
+
+    const cfgMS = configRef.mainSurface || null;
+    const rtMS  = rtRef.mainSurface     || null;
+    let perimeterStage = null;
+    let perimeterTransform = null;
+
+    // Stage 1 — main-surface (content perimeter) alignment
+    if(cfgMS && rtMS && cfgMS.ok && rtMS.ok && cfgMS.wN > 1e-4 && cfgMS.hN > 1e-4){
+      const sxRaw = rtMS.wN / cfgMS.wN;
+      const syRaw = rtMS.hN / cfgMS.hN;
+      const sx = _clamp(sxRaw, minScale, maxScale);
+      const sy = _clamp(syRaw, minScale, maxScale);
+      const txN = _clamp(rtMS.x0N - sx * cfgMS.x0N, -maxShiftN, maxShiftN);
+      const tyN = _clamp(rtMS.y0N - sy * cfgMS.y0N, -maxShiftN, maxShiftN);
+      // Residuals: how well all 4 corners align under this transform.
+      const corners = [
+        { c: { x: cfgMS.x0N, y: cfgMS.y0N }, r: { x: rtMS.x0N, y: rtMS.y0N } },
+        { c: { x: cfgMS.x1N, y: cfgMS.y0N }, r: { x: rtMS.x1N, y: rtMS.y0N } },
+        { c: { x: cfgMS.x1N, y: cfgMS.y1N }, r: { x: rtMS.x1N, y: rtMS.y1N } },
+        { c: { x: cfgMS.x0N, y: cfgMS.y1N }, r: { x: rtMS.x0N, y: rtMS.y1N } }
+      ];
+      let residualSum = 0;
+      for(let i = 0; i < corners.length; i++){
+        const px = sx * corners[i].c.x + txN;
+        const py = sy * corners[i].c.y + tyN;
+        const dx = px - corners[i].r.x;
+        const dy = py - corners[i].r.y;
+        residualSum += Math.sqrt(dx * dx + dy * dy);
+      }
+      const meanResidualN = residualSum / corners.length;
+      // Scale-plausibility: large mismatches between raw and clamped scale
+      // indicate the content envelope differs too severely for a simple
+      // axis-aligned transform to capture.
+      const scalePlausibility = _clamp(
+        1 - (Math.abs(sxRaw - sx) + Math.abs(syRaw - sy)) / 1.0,
+        0, 1
+      );
+      // Coverage: the fraction of page area under the main surface.  Very
+      // small coverage means weak structural evidence.
+      const coverage = _clamp(Math.min(cfgMS.coverageN || 0, rtMS.coverageN || 0) / 0.25, 0, 1);
+      const residualScore = _clamp(1 - (meanResidualN / 0.05), 0, 1);
+      perimeterTransform = { sx: sx, sy: sy, txN: txN, tyN: tyN };
+      perimeterStage = {
+        ok: true,
+        transformN: perimeterTransform,
+        meanResidualN: Number(meanResidualN.toFixed(5)),
+        scalePlausibility: Number(scalePlausibility.toFixed(4)),
+        coverage: Number(coverage.toFixed(4)),
+        rawScale: { sx: sxRaw, sy: syRaw },
+        confidence: _clamp(residualScore * 0.5 + scalePlausibility * 0.3 + coverage * 0.2, 0.05, 0.98),
+        contributorCount: Math.min(
+          cfgMS.contributorCount || 0,
+          rtMS.contributorCount  || 0
+        )
+      };
+    } else {
+      perimeterStage = {
+        ok: false,
+        reason: 'main_surface_unavailable_or_invalid'
+      };
+    }
+
+    // Stage 2 — region-graph verification (existing translation_scale_v1).
+    const regionGraph = estimatePageAlignmentV1(configRef, runtimePageStructure, o) || null;
+    const regionGraphStage = regionGraph ? {
+      ok: !!regionGraph.ok,
+      transformN: regionGraph.transformN,
+      confidence: regionGraph.confidence,
+      anchorsUsed: regionGraph.anchorsUsed || null
+    } : { ok: false, reason: 'region_graph_unavailable' };
+
+    // Combine the two stages. Main-surface lock wins when its residuals are
+    // tight AND its scale is plausible; otherwise the region graph carries the
+    // transform (still fully structural).  When both succeed but disagree
+    // significantly, confidence drops so downstream gating can catch it.
+    let chosen = null;
+    let source = 'none';
+    let agreement = 1.0;
+    if(perimeterStage.ok && regionGraphStage.ok){
+      const pt = perimeterStage.transformN;
+      const rt = regionGraphStage.transformN;
+      const disagreement =
+        Math.abs(pt.sx - rt.sx) +
+        Math.abs(pt.sy - rt.sy) +
+        Math.abs(pt.txN - rt.txN) +
+        Math.abs(pt.tyN - rt.tyN);
+      agreement = _clamp(1 - (disagreement / 0.80), 0, 1);
+      // Main-surface is authoritative unless its residuals are poor AND the
+      // region-graph scored higher.
+      const perimeterPasses = perimeterStage.meanResidualN <= 0.035 && perimeterStage.scalePlausibility >= 0.80;
+      if(perimeterPasses){
+        chosen = pt;
+        source = 'perimeter';
+      } else if((regionGraphStage.confidence || 0) > (perimeterStage.confidence || 0)){
+        chosen = rt;
+        source = 'region_graph';
+      } else {
+        chosen = pt;
+        source = 'perimeter';
+      }
+    } else if(perimeterStage.ok){
+      chosen = perimeterStage.transformN;
+      source = 'perimeter';
+    } else if(regionGraphStage.ok){
+      chosen = regionGraphStage.transformN;
+      source = 'region_graph';
+    }
+
+    if(!chosen){
+      return {
+        ok: false,
+        model: 'structural_lock_v1',
+        transformN: { sx: 1, sy: 1, txN: 0, tyN: 0 },
+        confidence: 0.05,
+        stages: { perimeter: perimeterStage, regionGraph: regionGraphStage },
+        agreement: 0,
+        source: 'none',
+        reason: 'structural_lock_unsolvable'
+      };
+    }
+
+    // Final confidence combines whichever stage drove the transform with
+    // cross-stage agreement.  This is the single number downstream gating
+    // should key off.
+    const primary = source === 'perimeter'
+      ? (perimeterStage.confidence || 0.2)
+      : (regionGraphStage.confidence || 0.2);
+    const confidence = _clamp(primary * 0.7 + agreement * 0.3, 0.05, 0.98);
+
+    return {
+      ok: true,
+      model: 'structural_lock_v1',
+      transformN: chosen,
+      confidence: Number(confidence.toFixed(4)),
+      stages: { perimeter: perimeterStage, regionGraph: regionGraphStage },
+      agreement: Number(agreement.toFixed(4)),
+      source: source,
+      configMainSurface: cfgMS,
+      runtimeMainSurface: rtMS
+    };
+  }
+
+  // projectBoxWithLock — apply the locked structural transform to a bbox.
+  // Inputs are normalized bbox coords and the pixel surface size to project
+  // back into.  Single entry point so the whole pipeline uses one transform
+  // semantics instead of ad-hoc per-caller applications.
+  function projectBoxWithLock(boxNorm, transformLock, surfaceSize){
+    if(!boxNorm || !transformLock || !transformLock.transformN || !surfaceSize) return null;
+    const t = transformLock.transformN;
+    const W = Math.max(1, Number(surfaceSize.width || 1));
+    const H = Math.max(1, Number(surfaceSize.height || 1));
+    const sx = Number.isFinite(t.sx) ? Number(t.sx) : 1;
+    const sy = Number.isFinite(t.sy) ? Number(t.sy) : 1;
+    const tx = Number.isFinite(t.txN) ? Number(t.txN) : 0;
+    const ty = Number.isFinite(t.tyN) ? Number(t.tyN) : 0;
+    const x0 = Number(boxNorm.x0 || 0);
+    const y0 = Number(boxNorm.y0 || 0);
+    const x1 = Number(boxNorm.x1 || 0);
+    const y1 = Number(boxNorm.y1 || 0);
+    const nx0 = _clamp(sx * x0 + tx, 0, 1);
+    const ny0 = _clamp(sy * y0 + ty, 0, 1);
+    const nx1 = _clamp(sx * x1 + tx, 0, 1);
+    const ny1 = _clamp(sy * y1 + ty, 0, 1);
+    const px0 = Math.min(nx0, nx1) * W;
+    const py0 = Math.min(ny0, ny1) * H;
+    const px1 = Math.max(nx0, nx1) * W;
+    const py1 = Math.max(ny0, ny1) * H;
+    return {
+      x: px0,
+      y: py0,
+      w: Math.max(1, px1 - px0),
+      h: Math.max(1, py1 - py0),
+      page: Number(boxNorm.page || 1)
     };
   }
 
@@ -2407,8 +2703,11 @@
     computeAnchorOffsets,
     structuralRefineBox,
     buildPageStructure,
+    computeMainSurface,
     buildPageAlignmentReference,
     estimatePageAlignmentV1,
+    solveStructuralTransformLock,
+    projectBoxWithLock,
     buildConstellation,
     computeFieldStructuralIdentity,
     selectConstellationCandidates,

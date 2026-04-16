@@ -56,6 +56,42 @@
     return Types.expandBox ? Types.expandBox(out, 0, { width: W, height: H }) : out;
   }
 
+  // Unified structural authority: resolve the page-wide structural transform
+  // lock from the config reference and the runtime page structure.  This is
+  // THE single transform used to project the field bbox into runtime coords.
+  // Callers that receive ok:false must NOT substitute an ORB / template /
+  // global-scan fallback — structural absence is the designed failure mode.
+  function resolveStructuralLock(ref, pageEntry){
+    if(!ref || !pageEntry || !CvOps.solveStructuralTransformLock) return null;
+    const cfgRef = ref.pageAlignmentRef || null;
+    const rtPs   = pageEntry.pageStructure || null;
+    if(!cfgRef || !rtPs) return null;
+    return CvOps.solveStructuralTransformLock(cfgRef, rtPs, {}) || null;
+  }
+
+  // Project the config field bbox through the locked transform into runtime
+  // pixel coordinates.  Uses the normalized bbox stored on the reference so
+  // the projection is scale-clean and does not re-scale an already-projected
+  // pixel box.
+  function projectFieldWithLock(ref, transformLock, pageEntry){
+    if(!ref || !transformLock || !pageEntry) return null;
+    const working = pageEntry.dimensions?.working || null;
+    if(!working || !CvOps.projectBoxWithLock) return null;
+    const bn = ref.bboxNorm;
+    if(!bn) return null;
+    const boxNorm = {
+      x0: Number(bn.x0 || 0),
+      y0: Number(bn.y0 || 0),
+      x1: Number(bn.x1 || 0),
+      y1: Number(bn.y1 || 0),
+      page: ref.page || 1
+    };
+    return CvOps.projectBoxWithLock(boxNorm, transformLock, {
+      width: working.width,
+      height: working.height
+    });
+  }
+
   const STATUS = (Types.LOCALIZATION_STATUS || { SUCCESS:'success', FAILED:'failed', DEGRADED_FALLBACK:'degraded_fallback' });
   const BBOX_SRC = (Types.BBOX_SOURCE || {
     LOCALIZED_PROJECTED: 'localized_projected',
@@ -276,8 +312,19 @@
     const page = fieldSpec.page || ref?.page || 1;
     const pageEntry = getPageEntry(surface, page);
     const predictedBoxBase = resolvePredictedBox(ref, pageEntry) || payload.boxPx || null;
+    // Unified structural authority: resolve the page-wide transform lock
+    // first. The projected bbox becomes the predicted box. If the lock is
+    // unsolvable, fall back to the legacy translation_scale_v1 prior only
+    // when that was explicitly handed to us — we do not silently drop into
+    // ORB search behaviour.
+    const structuralLock = resolveStructuralLock(ref, pageEntry);
+    const lockedPredictedBox = (structuralLock && structuralLock.ok)
+      ? projectFieldWithLock(ref, structuralLock, pageEntry)
+      : null;
     const pageAlignment = payload.pageAlignment || null;
-    const predictedBox = applyPageAlignmentToBox(predictedBoxBase, pageAlignment, pageEntry) || predictedBoxBase || null;
+    const legacyAligned = applyPageAlignmentToBox(predictedBoxBase, pageAlignment, pageEntry);
+    const predictedBox = lockedPredictedBox || legacyAligned || predictedBoxBase || null;
+    const structuralLockUsed = !!(structuralLock && structuralLock.ok && lockedPredictedBox);
     const allowDegradedFallback = !!(payload.allowDegradedFallback ?? DEFAULTS.allowDegradedFallback);
 
     const _EL = root.EngineLog || null;
@@ -306,6 +353,17 @@
     const widenMult = DEFAULTS.widenedSearchWindowMultiplier || 2.0;
     const maxAttempts = DEFAULTS.maxLocalizationAttemptsPerField || 4;
     const maxMs = DEFAULTS.maxLocalizationMsPerField || 2500;
+
+    _EL?.engineLog('wfg4-run', 'struct.lock', {
+      fieldKey: _fk,
+      lockOk: !!(structuralLock && structuralLock.ok),
+      source: structuralLock?.source || null,
+      confidence: Number((structuralLock?.confidence || 0).toFixed(4)),
+      agreement: Number((structuralLock?.agreement || 0).toFixed(4)),
+      perimeterOk: !!structuralLock?.stages?.perimeter?.ok,
+      regionGraphOk: !!structuralLock?.stages?.regionGraph?.ok,
+      usedForPrediction: structuralLockUsed
+    });
 
     // Phase 4: structural candidate selection.
     // Runs before the window loop. Viable structural candidates (anchored to a
@@ -442,6 +500,24 @@
       Math.round(Math.max(predictedBox.w, predictedBox.h) * (DEFAULTS.structuralRefineMaxDriftRatio || 0.10))
     );
 
+    // Unified structural authority window construction.
+    //
+    // Locked ordering (single authority chain, no ORB-first search):
+    //   1. Phase-6 structural reconstructions (field-level) — if we have any
+    //      accepted reconstruction, ORB/template runs only as a tight
+    //      drift-bounded refine around it.
+    //   2. Structural-lock projection — when the lock is solved, the
+    //      lock-projected box is the authoritative predicted box; ORB runs
+    //      only as a small precision refine around it.
+    //   3. Legacy translation_scale_v1 prior (when passed explicitly) — the
+    //      projected box becomes the single refine window.
+    //   4. Only when none of the above yielded a structural prediction (i.e.
+    //      no structural lock AND no legacy alignment prior) do we permit the
+    //      legacy multi-window ORB search.  This branch exists solely for
+    //      backward compatibility with packets captured before the unified
+    //      transform lock existed, and degrades gracefully by failing rather
+    //      than silently locking onto whatever ORB happens to find.
+    const allowUnstructuredOrbSearch = !structuralLockUsed && !pageAlignment;
     const windows = [];
     if(refineOnlyMode){
       // One tight refine window per accepted reconstruction (single = 1).
@@ -459,50 +535,83 @@
           reconstructedBoxPx: rb
         });
       }
-    } else if(hasViableStructCandidates){
-      // Structural windows are primary; reserve at least 1 slot for ORB fallback.
-      // Prefer Phase 5 accepted matches (sorted by relation-graph finalScore);
-      // fall back to Phase 4 raw viable candidates if Phase 5 produced none.
-      const sourceList = acceptedStructMatches.length > 0
-        ? acceptedStructMatches
-        : structCandidates.filter(c => c.viable);
-      const maxStructWin   = Math.min(sourceList.length, Math.max(1, maxAttempts - 1));
-      const W = runtimeCanvas.width, H = runtimeCanvas.height;
-      for(let ci = 0; ci < maxStructWin; ci++){
-        const cand = sourceList[ci];
-        // Phase 6: prefer the reconstructed field box for this match (built
-        // by the hierarchical transform).  Fall back to the simple
-        // translated predicted box only if no reconstruction is attached.
-        let structBox;
-        if(cand.reconstruction && cand.reconstruction.reconstructedBoxPx){
-          const rb = cand.reconstruction.reconstructedBoxPx;
-          structBox = { x: rb.x, y: rb.y, w: rb.w, h: rb.h, page };
-        } else {
-          const shiftX = (cand.estimatedTranslationN.dxN || 0) * W;
-          const shiftY = (cand.estimatedTranslationN.dyN || 0) * H;
-          structBox = {
-            x: predictedBox.x + shiftX, y: predictedBox.y + shiftY,
-            w: predictedBox.w,          h: predictedBox.h,
+    } else if(structuralLockUsed){
+      // Structural transform lock succeeded: the lock-projected predictedBox
+      // is the authoritative position.  ORB runs ONLY as a tight refine
+      // around it.  No ORB-first predicted/widened/global-scan windows.
+      windows.push({
+        label: 'L_locked_projection',
+        box: clampBoxToBounds(Types.expandBox(predictedBox, refinePadPx, bounds), bounds),
+        lockProjected: true
+      });
+      if(hasViableStructCandidates && acceptedStructMatches.length){
+        // When constellation matches exist without a reconstruction yet,
+        // allow one secondary refine window around the top match's position
+        // for constellations that appear multiple times on the page.
+        const topCand = acceptedStructMatches[0];
+        if(topCand && topCand.centerN){
+          const W = runtimeCanvas.width, H = runtimeCanvas.height;
+          const shiftX = (topCand.estimatedTranslationN?.dxN || 0) * W;
+          const shiftY = (topCand.estimatedTranslationN?.dyN || 0) * H;
+          const candBox = {
+            x: predictedBox.x + shiftX,
+            y: predictedBox.y + shiftY,
+            w: predictedBox.w,
+            h: predictedBox.h,
             page
           };
+          windows.push({
+            label: 'L_constellation_0',
+            box: clampBoxToBounds(Types.expandBox(candBox, refinePadPx, bounds), bounds),
+            lockProjected: true
+          });
         }
-        windows.push({ label:`D_struct_${ci}`, box: clampBoxToBounds(Types.expandBox(structBox, basePad, bounds), bounds) });
       }
-      // ORB fallback: original predicted box runs only if all structural windows miss.
-      windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
+    } else if(!allowUnstructuredOrbSearch){
+      // Legacy translation_scale_v1 prior supplied: single tight refine
+      // around the aligned prediction.  Still structural authority, just
+      // via the older prior model.
+      windows.push({
+        label: 'L_alignment_v1_projection',
+        box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds),
+        lockProjected: false
+      });
     } else {
-      // No viable structural candidates — standard ORB-first behavior.
+      // Backward-compatibility only: no structural lock, no pageAlignment
+      // prior, no viable constellation candidates.  Packets predating the
+      // transform-lock work reach this branch; new captures should never
+      // hit it.  This is the one place ORB search still runs, and it is
+      // bounded (A_predicted only) so we fail fast instead of sweeping the
+      // page.
       windows.push({ label:'A_predicted', box: clampBoxToBounds(Types.expandBox(predictedBox, basePad, bounds), bounds) });
-      windows.push({ label:'B_widened',   box: clampBoxToBounds(Types.expandBox(predictedBox, Math.round(basePad * widenMult), bounds), bounds) });
-      const globalScan    = pageEntry.globalScan || null;
-      const topCandidates = Array.isArray(globalScan?.candidateRegions) ? globalScan.candidateRegions.slice(0, DEFAULTS.globalScanTopCandidates || 3) : [];
-      for(let i = 0; i < topCandidates.length; i++){
-        const cand = topCandidates[i];
-        if(!cand) continue;
-        const candBox = { x: cand.x, y: cand.y, w: Math.max(predictedBox.w, cand.w || 0), h: Math.max(predictedBox.h, cand.h || 0), page };
-        windows.push({ label:`C_globalScan_${i}`, box: clampBoxToBounds(Types.expandBox(candBox, basePad, bounds), bounds) });
+      if(hasViableStructCandidates){
+        const sourceList = acceptedStructMatches.length > 0
+          ? acceptedStructMatches
+          : structCandidates.filter(c => c.viable);
+        const maxStructWin = Math.min(sourceList.length, Math.max(1, maxAttempts - 1));
+        const W = runtimeCanvas.width, H = runtimeCanvas.height;
+        for(let ci = 0; ci < maxStructWin; ci++){
+          const cand = sourceList[ci];
+          let structBox;
+          if(cand.reconstruction && cand.reconstruction.reconstructedBoxPx){
+            const rb = cand.reconstruction.reconstructedBoxPx;
+            structBox = { x: rb.x, y: rb.y, w: rb.w, h: rb.h, page };
+          } else {
+            const shiftX = (cand.estimatedTranslationN?.dxN || 0) * W;
+            const shiftY = (cand.estimatedTranslationN?.dyN || 0) * H;
+            structBox = {
+              x: predictedBox.x + shiftX, y: predictedBox.y + shiftY,
+              w: predictedBox.w,          h: predictedBox.h,
+              page
+            };
+          }
+          windows.push({ label:`D_struct_${ci}`, box: clampBoxToBounds(Types.expandBox(structBox, basePad, bounds), bounds) });
+        }
       }
     }
+    // widenMult retained for backward-compat diagnostics; no longer used to
+    // construct B_widened / C_globalScan fallback windows.
+    void widenMult;
 
     const ctx = { cv, runtimeCanvas, refNeighborhoodCanvas, refFieldCanvas, ref, page, predictedBox };
     const attemptsLog = [];
@@ -648,6 +757,16 @@
       } else {
         reconstructionAuthorityReduced = true;
       }
+    } else if(!attemptsWon && structuralLockUsed && lockedPredictedBox){
+      // Unified structural authority: when the transform lock solved, the
+      // lock-projected box IS the field location.  ORB refine is optional
+      // precision correction — if it fails, we still trust the lock rather
+      // than inventing a different position via search.  This is the
+      // "find through structure, not search" contract.
+      const lockConfidenceOk = (structuralLock.confidence || 0) >= 0.35;
+      if(lockConfidenceOk){
+        localized = { ...lockedPredictedBox };
+      }
     }
 
     // Structural refinement (only as controlled fallback when geometric localization failed,
@@ -690,7 +809,12 @@
     }
 
     // Localization status gate.
-    const localizationSucceeded = attemptsWon; // geometric consensus achieved
+    // Unified authority: the locked structural transform is authoritative on
+    // its own. If the lock solved and produced a projection that survived
+    // the Phase 7 gates above, that is a successful localization — ORB
+    // geometric consensus is not required.
+    const structuralLockAuthoritative = !!(structuralLockUsed && localized);
+    const localizationSucceeded = attemptsWon || structuralLockAuthoritative;
     if(!localizationSucceeded && !usedStructural && !usedStructuralReconstruction){
       if(allowDegradedFallback){
         _EL?.engineLog('wfg4-run', 'localize.result', { fieldKey: _fk, status: STATUS.DEGRADED_FALLBACK, reason: 'degraded_fallback_predicted_box', attemptsTried: attemptsLog.length, matchCount, inliers });
@@ -717,6 +841,9 @@
           structuralMatches: structMatches,
           structuralMatchDebug: structMatchDebug,
           structuralReconstructions: structReconstructions,
+          structuralLock,
+          structuralLockUsed,
+          lockedPredictedBox,
           fallbackUsed: true,
           attempts: attemptsLog,
           reason: 'degraded_fallback_predicted_box'
@@ -741,16 +868,38 @@
     const refineBoost = usedRefine ? Math.max(0, Math.min(1, refineScore)) * 0.30 : 0;
     const fieldVerifiedBoost = best?.fieldVerified ? 0.10 : 0;
     const structuralBoost = usedStructural ? 0.1 : 0;
-    const baseConfidence = (orbScore * 0.30) + (inlierScore * 0.30) + refineBoost + fieldVerifiedBoost + structuralBoost;
+    // Unified structural authority: when the page-wide transform lock solved
+    // with high confidence, that IS the localization — its solver quality is
+    // the dominant confidence signal, not ORB match counts.
+    const lockConfidence = Number(structuralLock?.confidence || 0);
+    const lockBoost = (structuralLockAuthoritative && lockConfidence > 0)
+      ? Math.max(0.20, Math.min(0.70, lockConfidence * 0.70))
+      : 0;
+    const baseConfidence = Math.max(
+      (orbScore * 0.30) + (inlierScore * 0.30) + refineBoost + fieldVerifiedBoost + structuralBoost,
+      lockBoost + refineBoost + fieldVerifiedBoost + structuralBoost
+    );
     const localizationConfidence = Math.max(0.05, Math.min(0.98, baseConfidence));
 
-    // bboxSource
+    // bboxSource — reflects the authority chain that produced the final box.
     let bboxSource;
-    if(localizationSucceeded && usedRefine) bboxSource = BBOX_SRC.LOCALIZED_REFINED;
-    else if(localizationSucceeded) bboxSource = BBOX_SRC.LOCALIZED_PROJECTED;
-    else if(usedStructural) bboxSource = BBOX_SRC.STRUCTURAL_FALLBACK;
-    else if(usedStructuralReconstruction) bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
-    else bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
+    if(localizationSucceeded && usedStructuralReconstruction){
+      bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
+    } else if(localizationSucceeded && usedRefine){
+      bboxSource = BBOX_SRC.LOCALIZED_REFINED;
+    } else if(localizationSucceeded && structuralLockAuthoritative && !attemptsWon){
+      // Lock solved, ORB refine did not override — the lock projection IS
+      // the result.  Distinct from LOCALIZED_PROJECTED (ORB-projected).
+      bboxSource = BBOX_SRC.STRUCTURAL_LOCK_PROJECTED;
+    } else if(localizationSucceeded){
+      bboxSource = BBOX_SRC.LOCALIZED_PROJECTED;
+    } else if(usedStructural){
+      bboxSource = BBOX_SRC.STRUCTURAL_FALLBACK;
+    } else if(usedStructuralReconstruction){
+      bboxSource = BBOX_SRC.STRUCTURAL_RECONSTRUCTED;
+    } else {
+      bboxSource = BBOX_SRC.PREDICTED_FALLBACK;
+    }
 
     let finalBox = enforceReadoutFloor(localized || predictedBox, predictedBox, bounds);
 
@@ -871,6 +1020,9 @@
       structuralMatchDebug: structMatchDebug,
       structuralReconstructions: structReconstructions,
       pageAlignment,
+      structuralLock,
+      structuralLockUsed,
+      lockedPredictedBox,
       instances,
       selectedConstellation,
       pageStructureSummary,
